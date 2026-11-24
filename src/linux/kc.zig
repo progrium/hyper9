@@ -25,6 +25,7 @@ const real = struct {
     extern fn h9_linux_ppid() c_ulong;
     extern fn h9_linux_getcwd(buf: [*]u8, n: c_int) c_int;
     extern fn h9_linux_fchdir(fd: c_int) c_int;
+    extern fn h9_linux_chroot(path: [*:0]const u8) c_int;
     extern fn h9_linux_setgen(f: Gen) void;
     extern fn h9_poll(fds: [*]PollFd, n: c_int, ms: c_int, gen: ?*c_uint, once: c_int) c_int;
     extern fn h9_fdready(fd: c_int, events: c_int) c_int;
@@ -115,6 +116,9 @@ const stub = struct {
         return -1;
     }
     fn h9_linux_fchdir(_: c_int) c_int {
+        return -1;
+    }
+    fn h9_linux_chroot(_: [*:0]const u8) c_int {
         return -1;
     }
     fn h9_linux_setgen(_: Gen) void {}
@@ -574,4 +578,9 @@ pub fn getcwd(buf: []u8) Error![]u8 {
 
 pub fn fchdir(fd: i32) Error!void {
     _ = try check(c.h9_linux_fchdir(fd));
+}
+
+/// Makes path the calling process's Linux root (design/linux-chroot.md).
+pub fn chroot(path: [*:0]const u8) Error!void {
+    _ = try check(c.h9_linux_chroot(path));
 }

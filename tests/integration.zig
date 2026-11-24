@@ -6965,6 +6965,98 @@ test "/proc/self/fd/N of a deleted file still opens [linux-symlinks]" {
     try symlinkFixture(&le, "deleted", false);
 }
 
+// chroot (design/linux-chroot.md), with tests/fixtures/linux/chroot.c,
+// which runs each case in a child that chroots and prints "ok NAME".
+
+/// Runs the chroot fixture's case `name` with its trees in the machine's
+/// /tmp, and then in the root's overlay.
+fn chrootCase(le: *const LinuxEnv, name: []const u8) !void {
+    var want_buf: [64]u8 = undefined;
+    const want = try std.fmt.bufPrint(&want_buf, "ok {s}\n", .{name});
+    try netCase(le, &.{ "/mnt/term/cwd/chroot", name }, want);
+    try netCase(le, &.{ "env", "DIR=/usr/lib", "/mnt/term/cwd/chroot", name }, want);
+}
+
+test "chroot narrows absolute paths to the new root [linux-chroot]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try chrootCase(&le, "narrow");
+}
+
+test ".. at a chroot's root stays there [linux-chroot]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try chrootCase(&le, "dotdot");
+}
+
+test "an absolute link in a chroot resolves from its root [linux-chroot]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try chrootCase(&le, "link");
+}
+
+test "the working directory keeps working across a chroot, named from the new root under it [linux-chroot]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try chrootCase(&le, "cwd");
+    try chrootCase(&le, "outside");
+}
+
+test "fork and exec keep the chroot [linux-chroot]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try chrootCase(&le, "fork");
+    try chrootCase(&le, "exec");
+}
+
+test "an fd from before a chroot leads back out to the Linux view's top [linux-chroot]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try chrootCase(&le, "escape");
+}
+
+test "chroot to the Linux view's top changes nothing [linux-chroot]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try chrootCase(&le, "top");
+}
+
+test "chroot of a file or a missing path fails as on Linux [linux-chroot]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try chrootCase(&le, "errors");
+}
+
+test "mount, umount2, pivot_root, and unshare stay refused [linux-chroot]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try chrootCase(&le, "refused");
+}
+
+test "a socket leaves a chroot as it was [linux-chroot]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try chrootCase(&le, "socket");
+}
+
+test "busybox chroot runs a dynamic program in a staging tree [linux-chroot]" {
+    // busybox and ld-musl copied into a host directory: exec finds the
+    // interpreter, and sh its applets, in the chroot. Links in a host
+    // tree are EPERM on Windows hosts.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    const script =
+        \\mkdir -p r/bin r/lib r/etc; cp /bin/busybox r/bin/; cp /lib/ld-musl-* r/lib/
+        \\for a in sh ls cat pwd; do ln -s busybox r/bin/$a; done; echo staged > r/etc/motd
+        \\chroot r /bin/sh -c 'ls /; cat /etc/motd; cd ../..; pwd; cat /etc/os-release 2>/dev/null || echo none'
+    ;
+    try linkCase(&le, &s, &.{}, script, "bin\netc\nlib\nstaged\n/\nnone\n");
+}
+
 // Named pipes (design/linux-fifo.md), with tests/fixtures/linux/fifo.c.
 
 /// Runs the fifo fixture's case `name` in the machine's /tmp, and then in

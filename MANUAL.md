@@ -2094,6 +2094,15 @@ h9 process that open the same host FIFO share it, but a program outside h9
 opening it doesn't reach h9's pipe. A 9front program sees a FIFO as an
 empty file it can list, read, and remove. Other device nodes can't be made.
 
+**chroot.** A Linux program's `chroot` works, as long as it narrows: the
+directory becomes the program's `/`, for it and the programs it runs, so
+apk's install scripts, `apk --root`, and build tools that chroot into a
+staging tree run as on Linux. `/proc` and `/dev` are there only if the
+tree has them, as in a fresh chroot on Linux. A chroot can't reach past
+the Linux view; the way out through an fd opened before it ends at the
+Linux view's `/`. `mount`, `pivot_root`, and `unshare` still fail with
+`EPERM`; use `--dir` and `--bind` to arrange the tree before the run.
+
 **Users and the environment.** A Linux program starts as uid 0, and `stat`
 shows every file as owned by it. That grants nothing: access is still the
 namespace's and the sandbox's, as in a rootless container. The `set*id`
