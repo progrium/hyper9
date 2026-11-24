@@ -647,7 +647,10 @@ test "a link through a directory, a .. in a link, or a chain of links can't reac
 
     // dl itself is walked to as the link, not its target: its stat is
     // the link's own, so the outside directory's length doesn't show.
-    // Give that directory entries enough to tell the two apart.
+    // Give that directory entries enough to tell the two apart. On
+    // Windows, devfs-win32 hides a link whose target is outside every
+    // bound tree altogether, so there's no stat to show.
+    if (builtin.os.tag == .windows) return;
     for (0..200) |i| {
         var nb: [64]u8 = undefined;
         try other.tmp.dir.writeFile(io, .{ .sub_path = try std.fmt.bufPrint(&nb, "d/padding-name-to-grow-the-directory-{d}", .{i}), .data = "" });
@@ -8722,8 +8725,17 @@ test "ns prints an up instance as bind -u [upper-layers]" {
     });
     defer r.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    // The host path as ns writes it, which on Windows has / for each \
+    // and a leading / (#U/C:/...).
+    var hp: [std.Io.Dir.max_path_bytes + 1]u8 = undefined;
+    const host = if (builtin.os.tag == .windows) blk: {
+        hp[0] = '/';
+        @memcpy(hp[1..][0..s.path.len], s.path);
+        std.mem.replaceScalar(u8, hp[1..][0..s.path.len], '\\', '/');
+        break :blk hp[0 .. s.path.len + 1];
+    } else s.path;
     var want: [std.Io.Dir.max_path_bytes + 32]u8 = undefined;
-    try expectIn(r.out, try std.fmt.bufPrint(&want, "bind -u '#U{s}/up' /n/x", .{s.path}));
+    try expectIn(r.out, try std.fmt.bufPrint(&want, "bind -u '#U{s}/up' /n/x", .{host}));
 }
 
 test "links and FIFOs are made in the layer [upper-layers]" {
