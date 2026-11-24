@@ -712,6 +712,19 @@ static void many_fds(void) {
 	printf("ok many_fds\n");
 }
 
+/* 600 files open at once in a host tree, each a host fd of h9's: past
+ * macOS's soft limit of 256, which h9 raises at start, and inside the
+ * 1024 RLIMIT_NOFILE a Linux program is told it has. */
+static void host_fds(void) {
+	int fds[600], n = 0;
+	while (n < 600 && (fds[n] = open("/mnt/term/cwd/files", O_RDONLY | O_CLOEXEC)) >= 0) n++;
+	int err = errno;
+	for (int i = 0; i < n; i++) close(fds[i]);
+	errno = err;
+	CHECK("host_fds", n == 600);
+	printf("ok host_fds\n");
+}
+
 /* PR_SET_NAME with a name longer than Linux's 15 bytes keeps the first
  * 15, as Wine names its threads. */
 static void prctl_name(void) {
@@ -1017,6 +1030,7 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "proc_fd_dir")) proc_fd_dir();
 		if (all || !strcmp(n, "seek_long_name")) seek_long_name();
 		if (all || !strcmp(n, "mremap_span")) mremap_span();
+		if (all || !strcmp(n, "host_fds")) host_fds();
 		if (!strcmp(n, "dirfd_copyup")) dirfd_copyup();
 		if (all || !strcmp(n, "proc_exe")) proc_exe();
 		if (all || !strcmp(n, "cpuid_avx")) cpuid_avx();

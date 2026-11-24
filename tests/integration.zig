@@ -7467,6 +7467,12 @@ test "root can become another user and its groups, and can't come back [linux-pe
     try netCase(&le, &.{ "/mnt/term/cwd/files", "creds" }, "ok creds\n");
 }
 
+test "600 files open at once in a host tree, past macOS's soft fd limit [linux-personality]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "host_fds" }, "ok host_fds\n");
+}
+
 test "a process past 100 fds gets no Plan 9 warning on its stderr [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
