@@ -44,7 +44,8 @@ for p in "${pkgs[@]}"; do
 	tags=()
 	# Without GOROOT/lib in the guest, time loads its zones from the binary.
 	[ "$p" = time ] && tags=(-tags timetzdata)
-	go test -c "${tags[@]}" -o "$out/$p.test" "$p"
+	# ${tags[@]+...}: macOS's bash 3.2 calls an empty array unbound under set -u.
+	go test -c ${tags[@]+"${tags[@]}"} -o "$out/$p.test" "$p"
 	args=(-test.v -test.short -test.timeout 25m)
 	skip=$(skips "$p")
 	[ -n "$skip" ] && args+=(-test.skip "$skip")
