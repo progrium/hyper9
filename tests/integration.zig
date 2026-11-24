@@ -2128,8 +2128,10 @@ test "kill and ps work in an interactive rc (demo) [baseline]" {
         try t.expect(prompt, slow(10_000));
         try t.send("sleep 1000 &" ++ enter);
         try t.expect(prompt, slow(10_000));
-        // ps names each process by its program, so only sleep's line matches.
-        try t.send("ps | grep -c sle^ep" ++ enter);
+        // ps names each process by its program, so only sleep's line
+        // matches. rc prompts again as soon as it has forked, before the
+        // child has exec'd sleep, so wait for that first.
+        try t.send("while(! ps | grep -s sle^ep) sleep 0.1; ps | grep -c sle^ep" ++ enter);
         try t.expect("\n1", slow(10_000));
         try t.expect(prompt, slow(10_000));
         try t.send("kill sleep | rc" ++ enter);
