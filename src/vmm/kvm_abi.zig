@@ -52,12 +52,25 @@ pub const SET_XSAVE = iow(0xa5, Xsave);
 pub const GET_ONE_REG = iow(0xab, OneReg);
 pub const SET_ONE_REG = iow(0xac, OneReg);
 pub const ARM_VCPU_INIT = iow(0xae, VcpuInit);
+pub const SET_DEVICE_ATTR = iow(0xe1, DeviceAttr);
+
+/// struct kvm_device_attr.
+pub const DeviceAttr = extern struct {
+    flags: u32 = 0,
+    group: u32,
+    attr: u64,
+    addr: u64,
+};
+/// The x86 vCPU attribute group and attribute of the TSC offset.
+pub const VCPU_TSC_CTRL = 0;
+pub const VCPU_TSC_OFFSET = 0;
 
 // Capabilities, for CHECK_EXTENSION.
 pub const CAP_USER_MEMORY = 3;
 pub const CAP_NR_VCPUS = 9;
 pub const CAP_MAX_VCPUS = 66;
 pub const CAP_MAX_VCPU_ID = 128;
+pub const CAP_VCPU_ATTRIBUTES = 127;
 pub const CAP_IMMEDIATE_EXIT = 136;
 pub const CAP_ARM_VM_IPA_SIZE = 165;
 

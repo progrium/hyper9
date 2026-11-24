@@ -460,6 +460,18 @@ pub const Backend = union(Kind) {
             else => 0,
         };
     }
+    /// Whether a guest's `rdtsc` reads the host's own time stamp count,
+    /// so h9 reads the same count the guest does (linux/vclock.zig): the
+    /// native backend's, which runs guest code on the host CPU, and KVM's
+    /// on x86, which zeroes each vCPU's TSC offset. The emulators' count
+    /// instructions.
+    pub fn hostTsc(b: Backend) bool {
+        return switch (b) {
+            .native => have_native,
+            .kvm => |p| if (comptime have_kvm and builtin.cpu.arch == .x86_64) p.host_tsc else false,
+            else => false,
+        };
+    }
     pub fn maxVcpus(b: Backend) Error!u32 {
         return switch (b) {
             inline else => |p| p.maxVcpus(),

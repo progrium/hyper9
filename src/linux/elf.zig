@@ -1,7 +1,7 @@
 //! The ELF loader for the Linux personality (design/epoch-0/linux-personality.md,
 //! "The ELF loader"): static and dynamic ELF64 executables of the
 //! machine's architecture, or ELF32 ones for i386 (design/epoch-0/linux-i386.md),
-//! the Linux initial stack and auxv, and a minimal vDSO on arm64.
+//! the Linux initial stack and auxv, and the vDSO's ELF image.
 //!
 //! `check` validates an image, and the interpreter's, before exec tears
 //! down anything, so a failed execve returns to its caller.
@@ -458,28 +458,47 @@ pub fn buildStack(m: *mm.Mm, argv: []const []const u8, envp: []const []const u8,
     return base + sp_off;
 }
 
-/// The vDSO image: one page holding a minimal ELF shared object whose
-/// only symbol is `__kernel_rt_sigreturn` (arm64), the return address of
+/// The arm64 vDSO image: one page holding a minimal ELF shared object
+/// whose only symbol is `__kernel_rt_sigreturn`, the return address of
 /// signal handlers installed without SA_RESTORER. It exports no clock, so
 /// libc and Go make real syscalls for time.
-pub const vdso_sigreturn_off: u64 = 0x300;
+pub const vdso_sigreturn_off = 0x300;
 
 pub fn vdsoImage() [page]u8 {
+    // mov x8, #139 (rt_sigreturn); svc #0
+    const code = [_]u8{ 0x68, 0x11, 0x80, 0xd2, 0x01, 0x00, 0x00, 0xd4 };
+    return vdsoBuild(EM_AARCH64, "LINUX_2.6.39", &.{
+        .{ .name = "__kernel_rt_sigreturn", .off = vdso_sigreturn_off, .size = 8 },
+    }, vdso_sigreturn_off, &code);
+}
+
+pub const VdsoSym = struct { name: []const u8, off: u64, size: u64 };
+
+/// A vDSO image: one page holding a minimal ELF shared object, `syms` its
+/// functions, all of version `version`, in `code`, which goes at
+/// `code_off`. Its tables go below `code_off`.
+pub fn vdsoBuild(machine: u16, comptime version: []const u8, comptime syms: []const VdsoSym, code_off: usize, code: []const u8) [page]u8 {
     var b: [page]u8 = @splat(0);
-    const hash_off = 0xc0;
-    const versym_off = 0xd8;
-    const sym_off = 0xe0;
-    const verdef_off = 0x110;
-    const str_off = 0x150;
-    const dyn_off = 0x190;
-    const strtab = "\x00__kernel_rt_sigreturn\x00LINUX_2.6.39\x00linux-vdso.so.1\x00";
-    const name_ver = 23;
-    const name_base = 36;
+    const nsym = syms.len + 1; // symbol 0 is null
+    const strtab = comptime blk: {
+        var t: []const u8 = "\x00";
+        for (syms) |s| t = t ++ s.name ++ "\x00";
+        break :blk t ++ version ++ "\x00linux-vdso.so.1\x00";
+    };
+    const name_ver = strtab.len - version.len - 1 - "linux-vdso.so.1".len - 1;
+    const name_base = strtab.len - "linux-vdso.so.1".len - 1;
     const ndyn = 9;
+    const hash_off = @sizeOf(Ehdr) + 2 * @sizeOf(Phdr);
+    const versym_off = std.mem.alignForward(usize, hash_off + 4 * (3 + nsym), 8);
+    const sym_off = std.mem.alignForward(usize, versym_off + 2 * nsym, 8);
+    const verdef_off = sym_off + 24 * nsym;
+    const str_off = verdef_off + 2 * 28;
+    const dyn_off = std.mem.alignForward(usize, str_off + strtab.len, 8);
+    std.debug.assert(dyn_off + ndyn * 16 <= code_off and code_off + code.len <= page);
     var eh: Ehdr = .{
         .ident = .{ 0x7f, 'E', 'L', 'F', 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
         .type = ET_DYN,
-        .machine = EM_AARCH64,
+        .machine = machine,
         .version = 1,
         .entry = 0,
         .phoff = @sizeOf(Ehdr),
@@ -498,20 +517,33 @@ pub fn vdsoImage() [page]u8 {
         .{ .type = PT_DYNAMIC, .flags = 4, .offset = dyn_off, .vaddr = dyn_off, .paddr = dyn_off, .filesz = ndyn * 16, .memsz = ndyn * 16, .@"align" = 8 },
     };
     @memcpy(b[@sizeOf(Ehdr)..][0 .. 2 * @sizeOf(Phdr)], std.mem.sliceAsBytes(&phs));
-    // DT_HASH: nbucket 1, nchain 2, bucket[0] = 1, chain = {0, 0}.
-    for ([_]u32{ 1, 2, 1, 0, 0 }, 0..) |v, i| std.mem.writeInt(u32, b[hash_off + 4 * i ..][0..4], v, .little);
+    // DT_HASH: one bucket holding the last symbol, each symbol's chain
+    // the one before it, down to 0.
+    const w32 = struct {
+        fn f(buf: []u8, at: usize, v: u32) void {
+            std.mem.writeInt(u32, buf[at..][0..4], v, .little);
+        }
+    }.f;
+    w32(&b, hash_off, 1);
+    w32(&b, hash_off + 4, nsym);
+    w32(&b, hash_off + 8, nsym - 1);
+    for (0..nsym) |i| w32(&b, hash_off + 12 + 4 * i, if (i == 0) 0 else @intCast(i - 1));
     // Elf64_Sym: name u32, info u8, other u8, shndx u16, value u64, size u64.
-    const sym = sym_off + 24; // symbol 0 is null
-    std.mem.writeInt(u32, b[sym..][0..4], 1, .little);
-    b[sym + 4] = 0x12; // STB_GLOBAL, STT_FUNC
-    std.mem.writeInt(u16, b[sym + 6 ..][0..2], 1, .little);
-    std.mem.writeInt(u64, b[sym + 8 ..][0..8], vdso_sigreturn_off, .little);
-    std.mem.writeInt(u64, b[sym + 16 ..][0..8], 8, .little);
+    var name_at: u32 = 1;
+    inline for (syms, 1..) |s, i| {
+        const sym = sym_off + 24 * i;
+        w32(&b, sym, name_at);
+        name_at += s.name.len + 1;
+        b[sym + 4] = 0x12; // STB_GLOBAL, STT_FUNC
+        std.mem.writeInt(u16, b[sym + 6 ..][0..2], 1, .little);
+        std.mem.writeInt(u64, b[sym + 8 ..][0..8], s.off, .little);
+        std.mem.writeInt(u64, b[sym + 16 ..][0..8], s.size, .little);
+        // Symbol versions, as Linux's vDSO has them: Go's lookup expects
+        // a version definition (and faults without one). Each symbol is
+        // `version`, index 2; index 1 is the object's base.
+        std.mem.writeInt(u16, b[versym_off + 2 * i ..][0..2], 2, .little);
+    }
     @memcpy(b[str_off..][0..strtab.len], strtab);
-    // Symbol versions, as Linux's vDSO has them: Go's lookup expects a
-    // version definition (and faults without one). Symbol 1 is
-    // LINUX_2.6.39, version index 2; index 1 is the object's base.
-    std.mem.writeInt(u16, b[versym_off + 2 ..][0..2], 2, .little);
     // Elf64_Verdef: version, flags, ndx, cnt u16; hash, aux, next u32;
     // then its Elf64_Verdaux: name, next u32.
     for ([_]struct { flags: u16, ndx: u16, name: u32, next: u32 }{
@@ -523,10 +555,10 @@ pub fn vdsoImage() [page]u8 {
         std.mem.writeInt(u16, b[o + 2 ..][0..2], d.flags, .little);
         std.mem.writeInt(u16, b[o + 4 ..][0..2], d.ndx, .little);
         std.mem.writeInt(u16, b[o + 6 ..][0..2], 1, .little);
-        std.mem.writeInt(u32, b[o + 8 ..][0..4], elfHash(std.mem.sliceTo(strtab[d.name..], 0)), .little);
-        std.mem.writeInt(u32, b[o + 12 ..][0..4], 20, .little);
-        std.mem.writeInt(u32, b[o + 16 ..][0..4], d.next, .little);
-        std.mem.writeInt(u32, b[o + 20 ..][0..4], d.name, .little);
+        w32(&b, o + 8, elfHash(std.mem.sliceTo(strtab[d.name..], 0)));
+        w32(&b, o + 12, 20);
+        w32(&b, o + 16, d.next);
+        w32(&b, o + 20, d.name);
     }
     const DT_HASH = 4;
     const DT_STRTAB = 5;
@@ -544,9 +576,7 @@ pub fn vdsoImage() [page]u8 {
         std.mem.writeInt(u64, b[dyn_off + 16 * i ..][0..8], d[0], .little);
         std.mem.writeInt(u64, b[dyn_off + 16 * i + 8 ..][0..8], d[1], .little);
     }
-    // mov x8, #139 (rt_sigreturn); svc #0
-    std.mem.writeInt(u32, b[vdso_sigreturn_off..][0..4], 0xd2801168, .little);
-    std.mem.writeInt(u32, b[vdso_sigreturn_off + 4 ..][0..4], 0xd4000001, .little);
+    @memcpy(b[code_off..][0..code.len], code);
     return b;
 }
 

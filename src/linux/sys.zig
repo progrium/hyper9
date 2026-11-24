@@ -12,6 +12,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const vmm = @import("../vmm.zig");
 const kern = @import("../kern.zig");
+const vclock = @import("vclock.zig");
 const mm = @import("mm.zig");
 const nr = @import("nr.zig");
 const kc = @import("kc.zig");
@@ -783,6 +784,9 @@ pub fn lookup(arch: vmm.Arch, number: u64) ?Sys {
 }
 
 pub fn dispatch(p: *Process, u: *const vmm.Ureg) Outcome {
+    // Programs that read the clock through the vDSO may make no clock
+    // calls, so any call keeps its line fitted.
+    vclock.tick();
     var c = Call.of(u);
     p.restart = null;
     var s = lookup(p.arch, c.nr) orelse {
@@ -1207,7 +1211,7 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const vmm.Ureg) Err!Outcome {
         },
         .gettimeofday => {
             if (c.a[0] != 0) {
-                const ns: u64 = @intCast(kern.wallNs());
+                const ns: u64 = @intCast(vclock.wallNs());
                 const w = p.longSize();
                 try p.writePtr(c.a[0], ns / std.time.ns_per_s);
                 try p.writePtr(c.a[0] + w, ns % std.time.ns_per_s / 1000);
@@ -1215,7 +1219,7 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const vmm.Ureg) Err!Outcome {
             return ret(0);
         },
         .time => {
-            const t: u64 = @intCast(@divTrunc(kern.wallNs(), std.time.ns_per_s));
+            const t: u64 = @intCast(@divTrunc(vclock.wallNs(), std.time.ns_per_s));
             if (c.a[0] != 0) try p.writePtr(c.a[0], t);
             return ret(@intCast(t));
         },
@@ -4492,8 +4496,8 @@ fn sigtimedwait(p: *Process, set_va: u64, info_va: u64, ts_va: u64) Err!i64 {
 
 fn clockNs(id: u32) ?i64 {
     return switch (id) {
-        0, 5, 8, 11 => kern.wallNs(), // REALTIME, REALTIME_COARSE, REALTIME_ALARM, TAI
-        1, 4, 6, 7, 9 => kern.monoNs(), // MONOTONIC, _RAW, _COARSE, BOOTTIME, BOOTTIME_ALARM
+        0, 5, 8, 11 => vclock.wallNs(), // REALTIME, REALTIME_COARSE, REALTIME_ALARM, TAI
+        1, 4, 6, 7, 9 => vclock.monoNs(), // MONOTONIC, _RAW, _COARSE, BOOTTIME, BOOTTIME_ALARM
         2, 3 => 0, // PROCESS_CPUTIME_ID, THREAD_CPUTIME_ID: no per-process CPU accounting yet
         else => null,
     };
@@ -4647,7 +4651,7 @@ fn futex(p: *Process, uaddr_in: u64, op: u32, val: u32, timeout: u64, uaddr2_in:
             if (timeout != 0) {
                 var ns = try readTimespec(p, timeout);
                 // WAIT_BITSET's is absolute, on the clock the flag names.
-                if (cmd == FUTEX_WAIT_BITSET) ns -= if (op & FUTEX_CLOCK_REALTIME != 0) kern.wallNs() else kern.monoNs();
+                if (cmd == FUTEX_WAIT_BITSET) ns -= if (op & FUTEX_CLOCK_REALTIME != 0) vclock.wallNs() else vclock.monoNs();
                 if (ns <= 0) return if (@atomicLoad(u32, word, .seq_cst) != val) -E.AGAIN else -E.TIMEDOUT;
                 ms = @divTrunc(ns + std.time.ns_per_ms - 1, std.time.ns_per_ms);
             }
