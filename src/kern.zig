@@ -196,6 +196,9 @@ const c_stub = struct {
     fn sysdup(_: c_int, _: c_int) c_int {
         return -1;
     }
+    fn h9_dupfrom(_: c_int, _: c_int, _: c_int) c_int {
+        return -1;
+    }
     fn sysstat(_: [*:0]const u8, _: [*]u8, _: c_int) c_int {
         return -1;
     }
@@ -338,6 +341,7 @@ const c_real = struct {
     extern var h9_wantchld: ?*const fn (?*anyopaque) callconv(.c) c_int;
     extern var h9_procsegment: ?*const fn (?*anyopaque, [*]u8, c_int) callconv(.c) c_int;
     extern fn sysdup(fd0: c_int, fd1: c_int) c_int;
+    extern fn h9_dupfrom(fd0: c_int, min: c_int, cexec: c_int) c_int;
     extern fn sysstat(name: [*:0]const u8, buf: [*]u8, n: c_int) c_int;
     extern fn sysfstat(fd: c_int, buf: [*]u8, n: c_int) c_int;
     extern fn sysremove(name: [*:0]const u8) c_int;
@@ -1121,6 +1125,12 @@ pub fn chdir(name: [*:0]const u8) Error!void {
 
 pub fn dup(fd0: u31, fd1: i32) Error!u31 {
     return check(c.sysdup(fd0, fd1));
+}
+
+/// fd0 dup'ed onto the lowest free fd at or above `min`, close-on-exec
+/// if `cexec`, in one step (Linux's F_DUPFD and F_DUPFD_CLOEXEC).
+pub fn dupFrom(fd0: u31, min: u31, cexec: bool) Error!u31 {
+    return check(c.h9_dupfrom(fd0, min, @intFromBool(cexec)));
 }
 
 /// Returns the length of the stat message written to `buf`, or, if `buf`

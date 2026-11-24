@@ -1983,6 +1983,7 @@ fn rwOne(p: *Process, fd: i32, buf: u64, len_in: u64, off: i64, comptime dir: Di
     // interrupt (design/epoch-0/linux-net.md): ask first, for the devices
     // that can block. A file is always ready.
     var is_pipe = false;
+    var pipe_nb = false;
     var is_pty = false;
     if (off == -1) if (kc.fdInfo(fd) catch null) |info| {
         // A socket from a mounted /net is read through the kernel's
@@ -2027,8 +2028,12 @@ fn rwOne(p: *Process, fd: i32, buf: u64, len_in: u64, off: i64, comptime dir: Di
                     if (n == 0) return 0;
                 }
             } else if (flagsOf(p, fd).nonblock) {
-                const r = kc.fdReady(fd, want) orelse return -E.BADF;
-                if (r & (want | kc.POLLHUP | kc.POLLERR) == 0) return -E.AGAIN;
+                // A pipe's read takes what's there in one step below: asking
+                // first and then reading races another reader (#276).
+                if (is_pipe and dir == .read) pipe_nb = true else {
+                    const r = kc.fdReady(fd, want) orelse return -E.BADF;
+                    if (r & (want | kc.POLLHUP | kc.POLLERR) == 0) return -E.AGAIN;
+                }
             } else if (info.dc == 'I' and !info.dir and info.qpath & 0xf == ip_qdata) {
                 const w = waitReady(fd, want);
                 if (w < 0) return w;
@@ -2061,6 +2066,11 @@ fn rwOne(p: *Process, fd: i32, buf: u64, len_in: u64, off: i64, comptime dir: Di
         defer p.mm.unpin(&pn);
         const s = pn.s;
         if (dir == .write and (is_pipe or is_pty)) return pipeWrite(p, fd, s);
+        if (dir == .read and pipe_nb) {
+            const r = pipeReadNow(p, fd, s);
+            if (r > 0) p.mm.as.hostWrote(s[0..@intCast(r)]);
+            return r;
+        }
         var n = switch (dir) {
             .read => kern.pread(@intCast(fd), s, off),
             .write => kern.pwrite(@intCast(fd), s, off),
@@ -2080,6 +2090,11 @@ fn rwOne(p: *Process, fd: i32, buf: u64, len_in: u64, off: i64, comptime dir: Di
     defer p.gpa.free(tmp);
     switch (dir) {
         .read => {
+            if (pipe_nb) {
+                const r = pipeReadNow(p, fd, tmp);
+                if (r > 0) p.mm.copy(buf, tmp[0..@intCast(r)], true) catch return -E.FAULT;
+                return r;
+            }
             var n = kern.pread(@intCast(fd), tmp, off) catch return kerr();
             if (n == 0 and pty_master) return -E.IO;
             if (is_pipe) n = pipeMore(p, fd, tmp, n);
@@ -2235,14 +2250,28 @@ fn cachedRead(p: *Process, fd: i32, key: locks.Key, buf: u64, len: u64, off: u64
 fn pipeMore(p: *Process, fd: i32, buf: []u8, n_in: usize) usize {
     var n = n_in;
     if (n > 0 and n < buf.len) if (unixOf(p, fd)) |u| if (u.stype != SOCK_STREAM) return n;
+    // Taken without waiting: another thread reading the same pipe can
+    // empty it between a check and a read, which then waits (#276).
     while (n > 0 and n < buf.len) {
-        const r = kc.fdReady(fd, kc.POLLIN) orelse break;
-        if (r & kc.POLLIN == 0 or r & kc.POLLHUP != 0) break;
-        const m = kern.pread(@intCast(fd), buf[n..], -1) catch break;
+        const m = switch (kc.pipeTryRead(fd, buf[n..]) catch break) {
+            .n => |m| m,
+            .again, .not_pipe => break,
+        };
         if (m == 0) break;
         n += m;
     }
     return n;
+}
+
+/// An O_NONBLOCK read of pipe end fd into `buf`: what's there now, with
+/// more gathered as `pipeMore` does, 0 at end of file, or -EAGAIN.
+fn pipeReadNow(p: *Process, fd: i32, buf: []u8) i64 {
+    const n = switch (kc.pipeTryRead(fd, buf) catch return kerr()) {
+        .n => |m| m,
+        .again => return -E.AGAIN,
+        .not_pipe => kern.pread(@intCast(fd), buf, -1) catch return kerr(),
+    };
+    return @intCast(pipeMore(p, fd, buf, n));
 }
 
 fn rwv(p: *Process, fd: i32, iov: u64, cnt: u64, off_in: i64, comptime dir: Dir) Err!i64 {
@@ -2373,10 +2402,12 @@ fn fcntl(p: *Process, fd: i32, cmd: i32, arg: u64) Err!i64 {
     switch (cmd) {
         F_DUPFD, F_DUPFD_CLOEXEC => {
             _ = kc.fdInfo(fd) catch return -E.BADF;
-            var n: i32 = @intCast(@min(arg & 0xffffffff, 1 << 20));
-            while (kc.fdInfo(n)) |_| n += 1 else |_| {}
-            const r = kern.dup(@intCast(fd), n) catch return kerr();
-            kc.setCloexec(r, cmd == F_DUPFD_CLOEXEC) catch {};
+            if (arg & 0xffffffff >= 1 << 20) return -E.INVAL;
+            // Found and taken in one step: probing for a free fd and then
+            // dup'ing onto it replaced whatever another thread opened
+            // there first, an epoll or eventfd tokio was building a runtime
+            // with, or a pipe, which then lost its O_NONBLOCK (#276).
+            const r = kern.dupFrom(@intCast(fd), @intCast(arg & 0xffffffff), cmd == F_DUPFD_CLOEXEC) catch return kerr();
             copyFlags(p, fd, r);
             return r;
         },

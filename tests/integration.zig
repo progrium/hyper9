@@ -7613,6 +7613,18 @@ test "an edge-triggered eventfd that stays readable wakes epoll_wait in another 
     try netCase(&le, &.{ "/mnt/term/cwd/net", "eventfd_waker" }, "ok eventfd_waker\n");
 }
 
+test "F_DUPFD in several threads takes a free fd without replacing one another thread just opened [linux-net]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/net", "dupfd_threads" }, "ok dupfd_threads\n");
+}
+
+test "threads draining dups of one nonblocking pipe get EAGAIN, not a read that waits [linux-net]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/net", "pipe_drain" }, "ok pipe_drain\n");
+}
+
 test "named and abstract Unix sockets: bind, listen, epoll, accept, connect, and refused once closed [linux-net]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
