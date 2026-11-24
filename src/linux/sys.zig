@@ -3383,6 +3383,12 @@ fn ioctl(p: *Process, fd: i32, req: u32, arg: u64) Err!i64 {
         },
         FIONREAD => {
             _ = kc.fdInfo(fd) catch return -E.BADF;
+            if (sockOf(p, fd) != null) {
+                const n = kc.sockNread(fd);
+                if (n < 0) return n;
+                try p.writeU32(arg, @intCast(@min(n, std.math.maxInt(u32))));
+                return 0;
+            }
             try p.writeU32(arg, kc.ptyQueued(fd, .read) orelse 0);
             return 0;
         },

@@ -61,6 +61,12 @@ int	h9so_ready(int fd, int events);
 /* The socket's pending error (SO_ERROR), as a Linux errno, and clears it. */
 int	h9so_soerror(int fd);
 /*
+ * Bytes a recv on fd would take now (FIONREAD): a UDP socket's next
+ * datagram's length, a TCP socket's queued bytes; 0 if none or the host
+ * can't say.
+ */
+long	h9so_nread(int fd);
+/*
  * recvfrom and sendto with Linux's MSG_PEEK and MSG_DONTWAIT; -errno
  * (Linux's) on failure. Addresses are devip's: 16 bytes, v4 mapped. A
  * nil raddr receives without the source, or sends to the peer.

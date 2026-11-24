@@ -299,6 +299,19 @@ h9so_soerror(int fd)
 	return h9so_linuxerrno(e);
 }
 
+long
+h9so_nread(int fd)
+{
+	u_long n;
+
+	if(fd < 0)
+		return 0;
+	n = 0;
+	if(ioctlsocket(fd, FIONREAD, &n) != 0)
+		return 0;
+	return n;
+}
+
 static void
 fromss(struct sockaddr_storage *ss, unsigned char *raddr, unsigned short *rport)
 {

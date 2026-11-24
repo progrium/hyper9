@@ -7864,6 +7864,12 @@ test "sendmmsg and recvmmsg batch datagrams, and UDP_SEGMENT and UDP_GRO are ref
     try netCase(&le, &.{ "--net=enable", "/mnt/term/cwd/net", "udp_mmsg" }, "ok udp_mmsg\n");
 }
 
+test "FIONREAD on a UDP socket is the next datagram's length, as glibc's resolver sizes its second answer by [linux-net]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "--net=enable", "/mnt/term/cwd/net", "udp_fionread" }, "ok udp_fionread\n");
+}
+
 test "two sendtos to one peer from a socket bound to port 0, under --net outbound, as musl's resolver does [linux-net]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);

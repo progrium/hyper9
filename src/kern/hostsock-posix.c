@@ -13,6 +13,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <unistd.h>
+#include <sys/ioctl.h>
 
 #include "u.h"
 #include "lib.h"
@@ -295,6 +296,32 @@ h9so_soerror(int fd)
 	if(getsockopt(fd, SOL_SOCKET, SO_ERROR, &e, &len) < 0)
 		return h9so_linuxerrno(errno);
 	return h9so_linuxerrno(e);
+}
+
+long
+h9so_nread(int fd)
+{
+	int n;
+
+	if(fd < 0)
+		return 0;
+	n = 0;
+#ifdef SO_NREAD
+	/*
+	 * macOS: FIONREAD counts every datagram queued, and their
+	 * addresses; SO_NREAD is the next datagram's length, as Linux's
+	 * FIONREAD is, and a stream's queued bytes.
+	 */
+	{
+		socklen_t len = sizeof n;
+		if(getsockopt(fd, SOL_SOCKET, SO_NREAD, &n, &len) == 0)
+			return n;
+		n = 0;
+	}
+#endif
+	if(ioctl(fd, FIONREAD, &n) < 0)
+		return 0;
+	return n;
 }
 
 static void

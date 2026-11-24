@@ -22,6 +22,7 @@
 #include <linux/rtnetlink.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <sys/ioctl.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -665,6 +666,55 @@ static void udp_mmsg(void) {
 	printf("ok udp_mmsg\n");
 }
 
+/* glibc's resolver: a connected, non-blocking socket sends the A and
+ * AAAA queries in one sendmmsg, and sizes the buffer for each answer
+ * with FIONREAD, which is the next datagram's length. Told 0, it
+ * receives the second into no buffer and fails the lookup. */
+static void udp_fionread(void) {
+	int r = socket(AF_INET, SOCK_DGRAM, 0);
+	struct sockaddr_in a = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+	CHECK("udp_fionread", r >= 0 && bind(r, (void *)&a, sizeof a) == 0);
+	socklen_t n = sizeof a;
+	CHECK("udp_fionread", getsockname(r, (void *)&a, &n) == 0);
+	int s = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+	CHECK("udp_fionread", s >= 0 && connect(s, (void *)&a, sizeof a) == 0);
+	int q = -1;
+	CHECK("udp_fionread", ioctl(s, FIONREAD, &q) == 0 && q == 0);
+	char q1[] = "query A", q2[] = "query AAAA";
+	struct iovec iov[2] = {{q1, strlen(q1)}, {q2, strlen(q2)}};
+	struct mmsghdr m[2];
+	memset(m, 0, sizeof m);
+	for (int i = 0; i < 2; i++)
+		m[i].msg_hdr = (struct msghdr){.msg_iov = &iov[i], .msg_iovlen = 1};
+	CHECK("udp_fionread", sendmmsg(s, m, 2, MSG_NOSIGNAL) == 2);
+	char b[64];
+	struct sockaddr_in from;
+	for (int i = 0; i < 2; i++) {
+		socklen_t fl = sizeof from;
+		CHECK("udp_fionread", recvfrom(r, b, sizeof b, 0, (void *)&from, &fl) == (ssize_t)iov[i].iov_len);
+	}
+	/* Answers of three sizes, the last for a zero-length recv. */
+	CHECK("udp_fionread", sendto(r, "answer one", 10, 0, (void *)&from, sizeof from) == 10);
+	CHECK("udp_fionread", sendto(r, "answer number two", 17, 0, (void *)&from, sizeof from) == 17);
+	CHECK("udp_fionread", sendto(r, "three", 5, 0, (void *)&from, sizeof from) == 5);
+	struct pollfd pf = {s, POLLIN, 0};
+	CHECK("udp_fionread", poll(&pf, 1, 2000) == 1 && (pf.revents & POLLIN));
+	usleep(100000);
+	CHECK("udp_fionread", ioctl(s, FIONREAD, &q) == 0 && q == 10);
+	CHECK("udp_fionread", recv(s, b, sizeof b, 0) == 10 && memcmp(b, "answer one", 10) == 0);
+	CHECK("udp_fionread", ioctl(s, FIONREAD, &q) == 0 && q == 17);
+	CHECK("udp_fionread", recv(s, b, sizeof b, 0) == 17 && memcmp(b, "answer number two", 17) == 0);
+	/* A zero-length recv takes the datagram and returns 0, as Linux's. */
+	CHECK("udp_fionread", ioctl(s, FIONREAD, &q) == 0 && q == 5);
+	CHECK("udp_fionread", recvfrom(s, NULL, 0, 0, NULL, NULL) == 0);
+	CHECK("udp_fionread", ioctl(s, FIONREAD, &q) == 0 && q == 0);
+	errno = 0;
+	CHECK("udp_fionread", recv(s, b, sizeof b, 0) < 0 && errno == EAGAIN);
+	close(s);
+	close(r);
+	printf("ok udp_fionread\n");
+}
+
 /* musl's resolver: bind to any address and port 0, then two sendtos to
  * the same server (the A and AAAA queries). Under --net outbound the
  * bind can't announce, so the first sendto connects the socket and the
@@ -962,6 +1012,7 @@ int main(int argc, char **argv) {
 		if (!strcmp(n, "dual_bind") || !strcmp(n, "net")) dual_bind();
 		if (!strcmp(n, "udp") || !strcmp(n, "net")) udp();
 		if (!strcmp(n, "udp_mmsg") || !strcmp(n, "net")) udp_mmsg();
+		if (!strcmp(n, "udp_fionread") || !strcmp(n, "net")) udp_fionread();
 		if (!strcmp(n, "many") || !strcmp(n, "net")) many();
 		if (!strcmp(n, "disabled")) disabled();
 		if (!strcmp(n, "ifaddrs")) ifaddrs();
