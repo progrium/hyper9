@@ -8796,6 +8796,22 @@ test "a working directory from below sees a directory made again over it as opaq
     try expectFile(&s, "up/etc/apk/new", "x\n");
 }
 
+test "a directory fd from below still names the directory once the layer has it [upper-layers]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.createDirPath(std.testing.io, "up");
+    var p: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+    // apk update opens /var/cache/apk, then creates and renames its
+    // indexes through that fd: the first create makes the directory in
+    // the layer, and the fd has to go on naming it.
+    try netCase(&le, &.{ "--dir", try std.fmt.bufPrint(&p, "{s}/up:#L:up", .{s.path}), "/mnt/term/cwd/files", "dirfd_copyup" }, "ok dirfd_copyup\n");
+    try std.testing.expect(s.exists("up/etc/apk"));
+    try std.testing.expect(!s.exists("up/etc/apk/x"));
+}
+
 test "names looked up again after a change in the layer see the change [upper-layers]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);

@@ -879,6 +879,26 @@ static void proc_fd_dir(void) {
 	printf("ok proc_fd_dir\n");
 }
 
+/* A directory fd opened while the directory is only below an up layer
+ * (design/upper-layers.md) still names it once a create through it has
+ * made the directory in the layer, as apk's cache fd does: renameat and
+ * fstatat from it work, and the directory keeps its inode, as on
+ * overlayfs. Run by name, with /etc/apk below a layer. */
+static void dirfd_copyup(void) {
+	struct stat a, b;
+	int d = open("/etc/apk", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	CHECK("dirfd_copyup", d >= 0 && fstat(d, &a) == 0);
+	int f = openat(d, ".new.x", O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+	CHECK("dirfd_copyup", f >= 0 && write(f, "x", 1) == 1 && close(f) == 0);
+	CHECK("dirfd_copyup", renameat(d, ".new.x", d, "x") == 0);
+	CHECK("dirfd_copyup", fstatat(d, "x", &b, 0) == 0 && b.st_size == 1);
+	CHECK("dirfd_copyup", fstatat(d, ".new.x", &b, 0) < 0 && errno == ENOENT);
+	CHECK("dirfd_copyup", stat("/etc/apk", &b) == 0 && b.st_ino == a.st_ino);
+	CHECK("dirfd_copyup", fstat(d, &b) == 0 && b.st_ino == a.st_ino);
+	CHECK("dirfd_copyup", unlinkat(d, "x", 0) == 0 && close(d) == 0);
+	printf("ok dirfd_copyup\n");
+}
+
 /* lseek(SEEK_END) on a file whose name is too long for the first stat
  * buffer the kernel tries: rustup resumes a download of its
  * <64-hex-char hash>.partial that way. */
@@ -953,6 +973,7 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "proc_fd_dir")) proc_fd_dir();
 		if (all || !strcmp(n, "seek_long_name")) seek_long_name();
 		if (all || !strcmp(n, "mremap_span")) mremap_span();
+		if (!strcmp(n, "dirfd_copyup")) dirfd_copyup();
 	}
 	return failed;
 }
