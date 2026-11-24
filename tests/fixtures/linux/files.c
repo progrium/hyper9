@@ -899,6 +899,23 @@ static void dirfd_copyup(void) {
 	printf("ok dirfd_copyup\n");
 }
 
+/* /proc/self/exe opens and stats as the program's file, as on Linux:
+ * rustup-init.sh reads its first bytes to tell 64-bit from 32-bit. */
+static void proc_exe(void) {
+	char b[5], target[256];
+	struct stat a, t;
+	int fd = open("/proc/self/exe", O_RDONLY | O_CLOEXEC);
+	CHECK("proc_exe", fd >= 0 && read(fd, b, 5) == 5 && close(fd) == 0);
+	CHECK("proc_exe", memcmp(b, "\177ELF", 4) == 0 && (b[4] == 1 || b[4] == 2));
+	ssize_t n = readlink("/proc/self/exe", target, sizeof target - 1);
+	CHECK("proc_exe", n > 0);
+	target[n] = 0;
+	CHECK("proc_exe", stat("/proc/self/exe", &a) == 0 && stat(target, &t) == 0);
+	CHECK("proc_exe", S_ISREG(a.st_mode) && a.st_size == t.st_size && a.st_size > 0);
+	CHECK("proc_exe", lstat("/proc/self/exe", &a) == 0 && S_ISLNK(a.st_mode));
+	printf("ok proc_exe\n");
+}
+
 /* lseek(SEEK_END) on a file whose name is too long for the first stat
  * buffer the kernel tries: rustup resumes a download of its
  * <64-hex-char hash>.partial that way. */
@@ -974,6 +991,7 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "seek_long_name")) seek_long_name();
 		if (all || !strcmp(n, "mremap_span")) mremap_span();
 		if (!strcmp(n, "dirfd_copyup")) dirfd_copyup();
+		if (all || !strcmp(n, "proc_exe")) proc_exe();
 	}
 	return failed;
 }
