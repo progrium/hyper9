@@ -13,7 +13,7 @@ branch: []
 
 ## Abstract
 
-Give every machine its own loopback network. An `announce` or `bind` on 127.0.0.0/8 or `::1`, and a `connect` to one, stays inside the machine's kernel: devip joins the two conversations with in-kernel queues and never makes a host socket. Two machines can then listen on the same loopback port, a guest can't reach the host's loopback services by accident, and a loopback listen is allowed under `--net=outbound`, which is what build tools such as Mix need. It becomes the default on every host and backend, and gives the web host a working loopback for the first time. The host's loopback is reached on purpose through a reserved address, `host.h9.internal` (169.254.0.1), opened port by port with `--net-host`. A guest server is published on a host port with `--publish`, which also remaps ports, in the form the Linux VM draft's `publish` already uses. `--net=enable` keeps its meaning for wildcard listens, which answer on the host and inside the machine.
+Give every machine its own loopback network. An `announce` or `bind` on 127.0.0.0/8 or `::1`, and a `connect` to one, stays inside the machine's kernel: devip joins the two conversations with in-kernel queues and never makes a host socket. Two machines can then listen on the same loopback port, a guest can't reach the host's loopback services by accident, and a loopback listen is allowed under `--net=outbound`, which is what build tools such as Mix need. A new `--net=loopback` gives a machine its loopback and nothing else, and `--net=disable` keeps masking `#I`. It becomes the default on every host and backend, and gives the web host a working loopback for the first time. The host's loopback is reached on purpose through a reserved address, `host.h9.internal` (169.254.0.1), opened port by port with `--net-host`. A guest server is published on a host port with `--publish`, which also remaps ports, in the form the Linux VM draft's `publish` already uses. `--net=enable` keeps its meaning for wildcard listens, which answer on the host and inside the machine.
 
 ## Background
 
@@ -57,11 +57,12 @@ A wildcard announce (`*`, `0.0.0.0`, `::`, or a Linux `bind` to `INADDR_ANY`) me
 
 | `--net` | A wildcard announce | A loopback announce | Any other announce |
 | --- | --- | --- | --- |
-| `disable` | Loopback only | Allowed | Refused |
+| `disable` | - (`#I` is masked) | - | - |
+| `loopback` | Loopback only | Allowed | Refused |
 | `outbound` | Loopback only | Allowed | Refused |
 | `enable` | Loopback and the host's wildcard | Allowed | Allowed, on the host |
 
-- **Under `outbound` and `disable`**, a wildcard announce succeeds and registers on the loopback only. A Linux server that binds `0.0.0.0` by default then runs, answers clients in the same machine, and can be published with `--publish`.
+- **Under `outbound` and `loopback`**, a wildcard announce succeeds and registers on the loopback only. A Linux server that binds `0.0.0.0` by default then runs, answers clients in the same machine, and can be published with `--publish`.
 - **Under `enable`**, it does both: it registers on the loopback and announces on the host's wildcard, as today. One conversation then gets calls from two places, and its `listen` file returns whichever comes first. If the host's port is taken, the announce fails, as today.
 - **An announce on a specific non-loopback address** is a host announce, allowed only under `enable`, as today.
 
@@ -76,7 +77,7 @@ The host's loopback is reached through a reserved address, **`host.h9.internal`*
 - **`--net-allow` patterns don't cover it.** A `connect` to 169.254.0.1 is decided by `--net-host` alone, so `--net-allow '*!*!*'` still doesn't open the host's loopback, and `--net-host` works with or without patterns.
 - **The address is otherwise unreachable.** 169.254.0.0/24 is reserved by RFC 3927 and never configured on a link, so the alias can't hide a real host. The rest of link-local stays as net-policy left it.
 
-`--net-host` needs `#I`, so it's a usage error with `--net=disable` (exit 2), as `--net-allow` is.
+`--net-host` reaches the host, so it's a usage error with `--net=disable` or `--net=loopback` (exit 2), as `--net-allow` is.
 
 ### Publishing a guest port
 
@@ -84,7 +85,7 @@ The host's loopback is reached through a reserved address, **`host.h9.internal`*
 
 - **The forms:** `--publish 8080` is `tcp!127.0.0.1!8080!8080`: it listens on the host's 127.0.0.1:8080 and forwards to the guest's 8080. `--publish 'tcp!127.0.0.1!9000!8080'` remaps. `--publish 'tcp!*!8080'` listens on every host address, as Docker's `-p 8080:8080` does. The short form's host address is loopback, not the wildcard, so a published port isn't on the local network unless asked.
 - **The same shape as the Linux VM draft's.** That draft publishes a VM port by writing `publish tcp!*!8080 80` to `/dev/linux/ctl`, and leaves a `--publish tcp!*!8080!80` flag as an open issue. This is that flag, and the plan line is the ctl message's form.
-- **h9 listens, not the guest.** The listener is h9's own, like `--serve`'s, outside the guest's policy, so publishing works under `outbound` and `disable` and doesn't need `--net=enable`. A host port that can't be listened on is exit 125, as `--serve`'s is.
+- **h9 listens, not the guest.** The listener is h9's own, like `--serve`'s, outside the guest's policy, so publishing works under `outbound` and `loopback` and doesn't need `--net=enable`. Under `disable` there's no loopback to forward to, so it's exit 2. A host port that can't be listened on is exit 125, as `--serve`'s is.
 - **Each host connection** becomes a loopback connect to GUESTPORT, made by h9 for the machine. If nothing is announced there, h9 closes the host connection at once. A guest server that starts later gets the connections that arrive after it announces.
 - **The guest sees the call come from `host.h9.internal`**, not from 127.0.0.1, so a server that trusts loopback peers doesn't trust the host's network by mistake.
 - **UDP** isn't published in this proposal (see Open issues).
@@ -110,8 +111,8 @@ The web host binds `#I` with a loopback and nothing else, beside [websocket-9p](
 
 ### How it fits the other proposals
 
-- **The Linux VM draft** gives the VM a slirp-style link whose gateway, 10.0.2.2, the netproxy Proc dials as 127.0.0.1 through devip. Under this proposal that dial reaches the machine's loopback, so the gateway stands for the machine, as a container's gateway does: a program in the VM reaches a 9front or Linux-personality server in the same machine at 10.0.2.2, and the host's loopback at `host.h9.internal` like any other program, under `--net-host`. Its `publish` ctl message announces through devip as before, so `publish tcp!127.0.0.1!8080 80` is a loopback announce that `outbound` allows, and `--publish` takes it the rest of the way to the host. Its test that `wget` reaches a server on the host's loopback through 10.0.2.2 gains `--net-host` and dials `host.h9.internal`.
-- **[host-handles](host-handles.md)** gives the kernel a `dial` and a `listen` handle, and makes `--net disable` mean neither. The loopback needs no handle, since it never leaves the kernel, which is why it can exist under `disable` and on the web host. `--publish`'s listeners and the `host.h9.internal` dials are made through the `listen` and `dial` handles, so a plan with neither opens nothing on the host.
+- **The Linux VM draft** gives the VM a slirp-style link whose gateway, 10.0.2.2, the netproxy Proc dials as 127.0.0.1 through devip. Under this proposal that dial reaches the machine's loopback, so the gateway stands for the machine, which is what h9's 127.0.0.1 now means, as a container's gateway does: a program in the VM reaches a 9front or Linux-personality server in the same machine at 10.0.2.2, and the host's loopback at `host.h9.internal` like any other program, under `--net-host`. Its `publish` ctl message announces through devip as before, so `publish tcp!127.0.0.1!8080 80` is a loopback announce that `outbound` allows, and `--publish` takes it the rest of the way to the host. Its test that `wget` reaches a server on the host's loopback through 10.0.2.2 gains `--net-host` and dials `host.h9.internal`.
+- **[host-handles](host-handles.md)** gives the kernel a `dial` and a `listen` handle, and makes `--net disable` mean neither. The loopback needs no handle, since it never leaves the kernel, which is why it can exist under `loopback` and on the web host. `--publish`'s listeners and the `host.h9.internal` dials are made through the `listen` and `dial` handles, so a plan with neither opens nothing on the host.
 - **[kernel-port](kernel-port.md)** makes the kernel an instance with no globals. The loopback table is one of its tables, and devip's static conversation tables, which machines share today, become per-instance there too.
 - **[file-interface](file-interface.md)** moves readiness to `ready` and `watch` on every channel, starting with queues and pipes. Loopback conversations are queues, so they get it with no work of their own. Until then, they use the `h9_qwake` path that pipes use.
 - **[child-machines](child-machines.md)** and **[plan-format](plan-format.md)** gain `nethost` and `publish` lines, as above.
@@ -120,7 +121,9 @@ The web host binds `#I` with a loopback and nothing else, beside [websocket-9p](
 ### The policy and the plan
 
 - **`net.loopback`** joins the capability table: "loopback addresses are the machine's own; devip makes no host socket for them". `enforces:` lists it whenever `#I` is bound.
-- **`--net=disable`** keeps the loopback. `#I` is bound, every non-loopback announce and connect is refused before a host socket is made, `cs` resolves only `localhost` and literal addresses, and `/net/ws` stays masked. `net.disable`'s row says so.
+- **`--net=loopback`** is a new mode between `disable` and `outbound`: `#I` is bound, every non-loopback announce and connect is refused before a host socket is made, `cs` resolves only `localhost` and literal addresses, and `/net/ws` stays masked. `enforces:` lists it as `net.local`.
+- **`--net=disable`** is unchanged: `#I` is masked, so the machine has no loopback either, and devip can't be reached at all. The tight profile's default stays `disable`.
+- **The order** for narrowing ([child-machines](child-machines.md), [plan-format](plan-format.md)) is `disable` < `loopback` < `outbound` < `enable`.
 - **`--net-allow` patterns** describe the network outside the machine. A connect to the machine's loopback is never checked against them. A pattern whose whole address range is loopback, such as `tcp!127.0.0.1!8080`, would match nothing, so it's a usage error (exit 2) whose message names `--net-host` and `--publish`.
 - **Plan lines** ([plan-format](plan-format.md)): `nethost tcp!5432` and `publish tcp!127.0.0.1!9000 8080`. Both widen, so a flag after `--plan` can drop one but not add one.
 - **`--print`** prints `net-host:` and `publish:` sections after `net-allow:`. The caveat "outbound connections can reach any address the host can except link-local, including its loopback and local network" loses "its loopback". New ones:
@@ -160,14 +163,14 @@ The web host binds `#I` with a loopback and nothing else, beside [websocket-9p](
 
 **Published calls from `host.h9.internal`, not 127.0.0.1.** Servers often trust loopback peers, for an admin port or an unauthenticated debug endpoint. Calls that came from outside the machine shouldn't get that trust, and Docker's published ports likewise arrive from the bridge's gateway, not from the container's loopback.
 
-**`disable` keeps loopback.** Masking `#I` is a stronger guarantee than a refusal in devip, but net-policy already trusts devip's refusal for `outbound` and `--net-allow`, and the check runs before any host socket exists. In exchange, the tight profile runs programs that only talk to themselves. See Open issues for keeping a fully masked mode.
+**A `loopback` mode, not loopback under `disable`.** Giving `disable` a loopback would let the tight profile run programs that only talk to themselves, but masking `#I` is a stronger guarantee than a refusal in devip, and some runs want devip out of reach entirely. Renaming today's `disable` to `none` and giving `disable` the loopback would change what every existing `--net=disable` means. A new mode keeps `disable` as it is and makes the loopback-only machine one word away.
 
 ## Compatibility
 
 - **Guests that reach host loopback services** stop reaching them: a connect to 127.0.0.1 on a port nothing in the guest announced is "connection refused". They need `--net-host PORT` and `host.h9.internal`.
 - **Host clients of guest servers on 127.0.0.1** stop reaching them, even under `--net=enable`. They need `--publish`. Servers on `*` under `--net=enable` are reachable from the host as before.
 - **`--net=outbound`** now allows loopback and wildcard announces, on the machine's loopback only. Scripts that used `--net=enable` only for that, as h9x's builds do, can drop it.
-- **`--net=disable`** now binds `#I`, with loopback only, so `ls /net` shows `tcp`, `udp`, and `cs`. `net.disable` stays in `enforces:`.
+- **`--net=disable`** is unchanged. **`--net=loopback`** is new, and `#μ` and plan `net` lines take it.
 - **`--net-allow` with a loopback-only pattern** is exit 2, naming `--net-host`. net-policy's case `a name pattern allows a connect through cs` used `tcp!localhost!PORT` against a host listener; it moves to a non-loopback address.
 - **`cs`** answers `localhost` and `host.h9.internal` itself.
 - **h9's own tests** dial listeners the test opens on the host's 127.0.0.1 (net-policy's and the backend tests' `expectNet` cases, and `tests/dotlserver.zig`), and 9p-roots' cases serve from a second h9 on `tcp!127.0.0.1!PORT`. They move to `--net-host` and `host.h9.internal`, or to `--publish`, in the same change.
@@ -179,11 +182,11 @@ The web host binds `#I` with a loopback and nothing else, beside [websocket-9p](
 ## Security
 
 - **What the guest can no longer reach by default:** every service on the host's loopback, including databases, admin interfaces, and other h9 machines' `--serve` listeners. Under `--net-host` it reaches only the ports named.
-- **What the guest newly can:** listen on its own loopback under `outbound` and `disable`. That reaches nothing outside the machine: the only ways in are `--publish`, which the person running it chose, and `--net=enable`, as before.
+- **What the guest newly can:** listen on its own loopback under `outbound` and `loopback`. That reaches nothing outside the machine: the only ways in are `--publish`, which the person running it chose, and `--net=enable`, as before.
 - **Published ports** listen on the host's loopback unless an address is given, so publishing doesn't open the local network by accident, and `--print` lists a non-loopback one as a caveat. Calls arrive from `host.h9.internal`, so they don't get the trust a guest server gives loopback peers.
 - **Isolation between machines in one process** rests on the per-machine table. A machine reaches another's loopback only through that machine's `/net`, mounted on purpose. Tests cover two machines on one port in one process.
 - **The alias** is checked before the policy's link-local rule and decided only by `--net-host`, so `--net-allow` patterns can't open it, and it can't be used to reach other link-local addresses: h9 rewrites only 169.254.0.1, and only to the host's 127.0.0.1.
-- **`disable`** now runs devip code for loopback. Every path out to a host socket goes through the same check, before the socket exists, and a test shows a host listener sees nothing.
+- **`loopback`** runs devip code with no way out: every path to a host socket goes through the same check, before the socket exists, and a test shows a host listener sees nothing. Those who want devip unreachable use `disable`, which masks it as before.
 
 ## Done criteria
 
@@ -199,7 +202,8 @@ Integration cases tagged `[virtual-loopback]`, using rc's writes to `/net` ctl f
 - [ ] `test "--net-allow doesn't open host.h9.internal [virtual-loopback]"`: under `--net-allow '*!*!*'`.
 - [ ] `test "--publish forwards a host port to a guest port [virtual-loopback]"`, with `tcp!127.0.0.1!9000!8080`, and the guest's `remote` is 169.254.0.1.
 - [ ] `test "a published port with no guest listener closes [virtual-loopback]"`
-- [ ] `test "--net=disable keeps loopback [virtual-loopback]"`: a loopback server and client work, and a connect to the test's host listener is refused.
+- [ ] `test "--net=loopback gives loopback and nothing else [virtual-loopback]"`: a loopback server and client work, and a connect to the test's host listener is refused.
+- [ ] `test "--net=disable still masks #I [virtual-loopback]"`
 - [ ] `test "UDP on loopback keeps datagrams [virtual-loopback]"`
 - [ ] `test "epoll on loopback sockets [virtual-loopback]"`: an edge-triggered server and client in Linux.
 - [ ] `test "cs translates localhost and host.h9.internal [virtual-loopback]"`
@@ -214,7 +218,7 @@ Integration cases tagged `[virtual-loopback]`, using rc's writes to `/net` ctl f
 1. `src/kern/loopback.c`: the per-machine port table, conversation pairs over `qio` queues, ephemeral ports, and readiness through `h9_qwake`. Unit tests for the table.
 2. The branches in `devip.c`: loopback `announce`, `connect`, the `listen` open (with both sources for a wildcard under `enable`), read, write, close, and the status files. `cs` answers `localhost` and `host.h9.internal`.
 3. `src/kern/linuxnet.c` and `src/linux/sys.zig`: readiness, `shutdown`, `SO_ERROR`, `recvfrom` and `sendto` with `MSG_PEEK` on loopback conversations, and `bindCall`'s wildcard handling.
-4. The policy: `net.loopback`, loopback under `disable` and `outbound`, `net_host` and the 169.254.0.1 rewrite, the loopback-pattern usage error, `--print`, and the caveats.
+4. The policy: `net.loopback`, the `loopback` mode, loopback under `outbound`, `net_host` and the 169.254.0.1 rewrite, the loopback-pattern usage error, `--print`, and the caveats.
 5. `--publish`: h9's host listeners and the forwarding, with exit 125 on a port that can't be listened on.
 6. The web host: `#I` bound with loopback only.
 7. `#Letc`'s `hosts` line, and `nethost` and `publish` for `#μ` if [child-machines](child-machines.md) is in by then.
@@ -222,9 +226,7 @@ Integration cases tagged `[virtual-loopback]`, using rc's writes to `/net` ctl f
 
 ## Open issues
 
-- **A fully masked mode.** Should a `--net=none` keep today's `disable`, with `#I` masked and no loopback, for those who want devip unreachable?
 - **IPv6 for the alias.** 169.254.0.1 reaches the host's 127.0.0.1 only. A host service on `::1` alone isn't reachable. An IPv6 alias would need an address that can't be routed and doesn't need a zone, as `fe80::` does.
-- **The Linux VM draft's gateway.** Making 10.0.2.2 the machine's loopback, as above, is the consistent reading, but it changes that draft's intent that 10.0.2.2 is the host. Whichever lands second should settle it.
 - **Publishing UDP.** `--publish 'udp!…'` would need h9 to keep a flow table per host peer. Nothing needs it yet.
 - **A page reaching a guest server.** On the web host, `--publish` could hand the page a `MessagePort` per connection, through [port-streams](port-streams.md), for previews of dev servers in a page.
 - **Linux DNS names.** Programs that resolve with their own DNS client, not `/etc/hosts`, won't find `host.h9.internal`. Whether h9 should answer for it there depends on h9 seeing those queries, which it doesn't today.
