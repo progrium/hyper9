@@ -221,7 +221,7 @@ pub fn msrs(shim_kva: u64) [5]struct { u32, u64 } {
 /// CPUID bits to clear before the guest sees them: XSAVE and the AVX
 /// families, so user code uses only state that FXSAVE's image (h9's
 /// vmm.Extra) carries across vCPUs.
-pub const CpuidMask = struct { function: u32, eax: u32 = 0, ebx: u32 = 0, ecx: u32 = 0, edx: u32 = 0 };
+pub const CpuidMask = struct { function: u32, index: u32 = 0, eax: u32 = 0, ebx: u32 = 0, ecx: u32 = 0, edx: u32 = 0 };
 pub const cpuid_clear = [_]CpuidMask{
     // FMA (12), XSAVE (26), OSXSAVE (27), AVX (28), F16C (29).
     .{ .function = 1, .ecx = (1 << 12) | (1 << 26) | (1 << 27) | (1 << 28) | (1 << 29) },
@@ -233,11 +233,25 @@ pub const cpuid_clear = [_]CpuidMask{
         .ecx = (1 << 1) | (1 << 6) | (1 << 9) | (1 << 10) | (1 << 11) | (1 << 12) | (1 << 14),
         .edx = (1 << 2) | (1 << 3) | (1 << 8) | (1 << 22) | (1 << 23) | (1 << 24),
     },
+    // Leaf 7 subleaf 1: AVX-VNNI (4), AVX512-BF16 (5), AMX-FP16 (21), and
+    // AVX-IFMA (23) in EAX; AVX-VNNI-INT8 (4), AVX-NE-CONVERT (5),
+    // AMX-COMPLEX (8), AVX-VNNI-INT16 (10), and AVX10 (19) in EDX.
+    .{
+        .function = 7,
+        .index = 1,
+        .eax = (1 << 4) | (1 << 5) | (1 << 21) | (1 << 23),
+        .edx = (1 << 4) | (1 << 5) | (1 << 8) | (1 << 10) | (1 << 19),
+    },
 };
 
-/// CPUID leaves dropped: 0xD describes XSAVE's state components.
+/// CPUID leaves dropped: 0xD describes XSAVE's state components, 0x1D
+/// and 0x1E AMX's tiles, and 0x24 AVX10's vector lengths. Zig takes
+/// leaf 0x24 alone for AVX10, which brings AVX-512 and AVX with it, so a
+/// program Zig built for the native CPU on a Granite Rapids host (zig
+/// build's own runner) used AVX the guest doesn't have, and stopped with
+/// SIGILL.
 pub fn cpuidDropped(function: u32) bool {
-    return function == 0xd;
+    return function == 0xd or function == 0x1d or function == 0x1e or function == 0x24;
 }
 
 /// Leaf 7 EBX bits for SMEP and SMAP.

@@ -220,7 +220,7 @@ The amd64 shim (`src/arch/amd64/shim.S`) is used by KVM. The host puts the vCPU 
 - One IDT, shared, sending vectors 0–31 through IST1.
 - `STAR`, `LSTAR`, and `SFMASK`.
 
-GS points at the shared page while the shim runs, and `SWAPGS` keeps it in `KERNEL_GS_BASE` in user mode. CPUID hides XSAVE, AVX, and AVX-512, so user code uses only state the FXSAVE image carries across vCPUs.
+GS points at the shared page while the shim runs, and `SWAPGS` keeps it in `KERNEL_GS_BASE` in user mode. CPUID hides XSAVE, AVX, AVX-512, AMX, and AVX10 (in leaves 1, 7, and 7.1, with leaves 0xD, 0x1D, 0x1E, and 0x24 dropped), so user code uses only state the FXSAVE image carries across vCPUs.
 
 The shim's `SYSCALL` entry and exception stubs save the registers into the Ureg (the vector and error code in `type` and `error`, CR2 for a page fault) and ring the doorbell; the restore path loads the next CR3 if set, then the Ureg, with the user selectors and only the user flags (plus IF), and returns with `IRETQ`, one path for syscalls, faults, and notes. The doorbell sits at a fixed offset, so the host can tell from a stopped vCPU's PC whether the shim was saving a Ureg or loading one.
 

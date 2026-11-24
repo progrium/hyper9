@@ -342,7 +342,7 @@ fn maskCpuid(list: *abi.CpuidList, a: *Backend.X86) void {
     for (list.entries[0..list.nent]) |e| {
         if (x86.cpuidDropped(e.function)) continue;
         var k = e;
-        for (x86.cpuid_clear) |m| if (m.function == k.function and k.index == 0) {
+        for (x86.cpuid_clear) |m| if (m.function == k.function and k.index == m.index) {
             k.eax &= ~m.eax;
             k.ebx &= ~m.ebx;
             k.ecx &= ~m.ecx;
