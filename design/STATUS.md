@@ -37,6 +37,7 @@ Every proposal at the top of [design/](README.md), in the order they were writte
 | [fd-mounts](fd-mounts.md) |  | draft |  | Mounting a 9P connection from a host descriptor |
 | [upper-layers](upper-layers.md) |  | draft | in progress on upper-layers; needs port-streams | Writable layers on the host |
 | [headless-screen](headless-screen.md) |  | draft | in progress on claude/project-thread-i8dpw1 | Headless screen (--gfx=headless) |
+| [linux-chroot](linux-chroot.md) |  | implemented |  | chroot for Linux programs |
 
 ```mermaid
 flowchart LR
@@ -75,6 +76,7 @@ flowchart LR
   p_fd_mounts["fd-mounts<br/>draft"]:::draft
   p_upper_layers["upper-layers<br/>draft"]:::draft
   p_headless_screen["headless-screen<br/>draft"]:::draft
+  p_linux_chroot["linux-chroot<br/>implemented"]:::implemented
   p_host_cmd --> p_login_shell
   p_kernel_serve --> p_namespace_kernel
   p_port_streams --> p_namespace_kernel
@@ -99,6 +101,7 @@ flowchart LR
   p_linux_symlinks --> p_upper_layers
   p_linux_fifo --> p_upper_layers
   p_port_streams --> p_upper_layers
+  p_linux_symlinks --> p_linux_chroot
 ```
 
 ## Epoch 0
