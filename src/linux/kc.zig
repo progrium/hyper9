@@ -273,9 +273,11 @@ pub fn poll(pfds: []PollFd, ms: i64, gen: ?*u64) Error!usize {
 }
 
 /// Like poll, but returns 0 after the first wake (anything that may have
-/// changed readiness) instead of asking again.
-pub fn pollOnce(pfds: []PollFd, ms: i64) Error!usize {
-    return try check(c.h9_poll(pfds.ptr, @intCast(pfds.len), @intCast(@max(-1, @min(ms, std.math.maxInt(c_int)))), null, 1));
+/// changed readiness) instead of asking again. `gen` is the generation a
+/// poll answered for: a wake since then ends the wait at once.
+pub fn pollOnce(pfds: []PollFd, ms: i64, gen: u64) Error!usize {
+    var g: c_uint = @truncate(gen);
+    return try check(c.h9_poll(pfds.ptr, @intCast(pfds.len), @intCast(@max(-1, @min(ms, std.math.maxInt(c_int)))), &g, 1));
 }
 
 /// The poll bits ready on fd now, or null if it isn't open.

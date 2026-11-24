@@ -7596,6 +7596,12 @@ test "eventfd counts and wakes epoll [linux-net]" {
     try netCase(&le, &.{ "/mnt/term/cwd/net", "eventfd" }, "ok eventfd\n");
 }
 
+test "an edge-triggered eventfd that stays readable wakes epoll_wait in another thread on every write [linux-net]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/net", "eventfd_waker" }, "ok eventfd_waker\n");
+}
+
 test "named and abstract Unix sockets: bind, listen, epoll, accept, connect, and refused once closed [linux-net]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);

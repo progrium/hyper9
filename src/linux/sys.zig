@@ -6929,6 +6929,6 @@ fn epollWait(p: *Process, epfd: i32, events_va: u64, maxevents: i32, timeout_ms:
             waiting += 1;
         }
         if (kc.pollGen() != gen) continue;
-        _ = kc.pollOnce(pf.items[0..waiting], ms) catch return -E.INTR;
+        _ = kc.pollOnce(pf.items[0..waiting], ms, gen) catch return -E.INTR;
     }
 }
