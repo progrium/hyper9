@@ -450,6 +450,37 @@ static void rename_across(void) {
 	printf("ok rename_across\n");
 }
 
+/* A file its owner can't read or write (mode 0000) can still have its
+ * times and mode set, and be renamed, as apk does writing etc/shadow: it
+ * creates a mode-0000 temporary, sets its times, and renames it into place.
+ * On a host tree h9 mustn't need to open the host file for those. */
+static void mode_zero(void) {
+	const char *d = getenv("DIR");
+	char a[300], b[300], c[300], sub[300];
+	snprintf(a, sizeof a, "%s/z.tmp", d ? d : "/tmp");
+	snprintf(b, sizeof b, "%s/z", d ? d : "/tmp");
+	snprintf(sub, sizeof sub, "%s/zd", d ? d : "/tmp");
+	snprintf(c, sizeof c, "%s/zd/z", d ? d : "/tmp");
+	unlink(a);
+	unlink(b);
+	unlink(c);
+	rmdir(sub);
+	int fd = open(a, O_WRONLY | O_CREAT | O_EXCL, 0);
+	CHECK("mode_zero", fd >= 0 && write(fd, "root:*:1::::::\n", 15) == 15 && close(fd) == 0);
+	struct stat st;
+	CHECK("mode_zero", stat(a, &st) == 0 && (st.st_mode & 0777) == 0 && st.st_size == 15);
+	struct timespec ts[2] = {{.tv_sec = 1000000000}, {.tv_sec = 1234567890}};
+	CHECK("mode_zero", utimensat(AT_FDCWD, a, ts, 0) == 0);
+	CHECK("mode_zero", stat(a, &st) == 0 && st.st_mtime == 1234567890);
+	CHECK("mode_zero", chmod(a, 0) == 0);
+	CHECK("mode_zero", rename(a, b) == 0 && access(a, F_OK) < 0);
+	CHECK("mode_zero", stat(b, &st) == 0 && (st.st_mode & 0777) == 0 && st.st_mtime == 1234567890);
+	CHECK("mode_zero", mkdir(sub, 0755) == 0 && rename(b, c) == 0 && access(b, F_OK) < 0);
+	CHECK("mode_zero", chmod(c, 0640) == 0 && stat(c, &st) == 0 && (st.st_mode & 0777) == 0640 && st.st_size == 15);
+	CHECK("mode_zero", unlink(c) == 0 && rmdir(sub) == 0);
+	printf("ok mode_zero\n");
+}
+
 /* On arm64, EL0 reads of the ID registers are emulated, as Linux does and
  * HWCAP_CPUID says: Zig and LLVM read them to pick the host CPU. */
 static void id_regs(void) {
@@ -1013,6 +1044,7 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "read_cache")) read_cache();
 		if (all || !strcmp(n, "falloc")) falloc();
 		if (all || !strcmp(n, "rename_across")) rename_across();
+		if (all || !strcmp(n, "mode_zero")) mode_zero();
 		if (all || !strcmp(n, "madv_free")) madv_free();
 		if (all || !strcmp(n, "madv_release")) madv_release();
 		if (all || !strcmp(n, "id_regs")) id_regs();

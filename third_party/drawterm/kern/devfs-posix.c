@@ -969,7 +969,8 @@ fswstat(Chan *c, uchar *buf, int n)
 	 * half broken and return an error.  it's hardly perfect.
 	 */
 	struct stat fdst;
-	int byfd, fl, opfd, wfd, trunc;
+	char nbase[NAME_MAX+1];
+	int byfd, fl, opfd, wfd, nfd, trunc, setmode, settimes;
 
 	if(convM2D(buf, n, &d, strs) != n)
 		error(Ebadstat);
@@ -1000,6 +1001,7 @@ fswstat(Chan *c, uchar *buf, int n)
 	byfd = 0;
 	opfd = -1;
 	wfd = -1;
+	nfd = -1;
 	if(openfile(c) && fstat(uif->fd, &fdst) == 0
 	&& (stat(uif->path, &stbuf) < 0 || stbuf.st_dev != fdst.st_dev || stbuf.st_ino != fdst.st_ino)){
 		fl = fcntl(uif->fd, F_GETFL);
@@ -1014,15 +1016,38 @@ fswstat(Chan *c, uchar *buf, int n)
 			error(strerror(errno));
 		if(h9_fs_checkname(ownpath(uif), H9_FSWRITE) < 0)
 			error(Eperm);
-	}else{
-		/* Truncation needs write access; it waits for the check below. */
-		if((opfd = fsopenpath(uif, uif->path, trunc ? O_RDWR : O_RDONLY, 0)) < 0)
+	}else if((~d.mode != 0 && (int)(d.mode&0777) != STMODE(&stbuf))
+	|| ~d.atime != 0 || ~d.mtime != 0 || trunc){
+		/*
+		 * Truncation needs write access; it waits for the check below.
+		 * h9: a rename alone needs no fd (it's done relative to the
+		 * parent's, below), so it doesn't open the file at all.
+		 */
+		if((opfd = fsopenpath(uif, uif->path, trunc ? O_RDWR : O_RDONLY, 0)) < 0){
+#if !defined(__wasi__)
+			/*
+			 * h9: a file its owner can't read (mode 0000, as apk's
+			 * temporary etc/shadow is) can still have its mode and
+			 * times set by its owner, as on Linux. It's changed by
+			 * name relative to an fd for its parent, checked like a
+			 * rename's (h9_parentfd, h9_fs_allowat), never following
+			 * a link at its name, so a link swapped in after the
+			 * check is changed itself, not its target.
+			 */
+			if(errno != EACCES || trunc)
+				error(strerror(errno));
+			nfd = h9_parentfd(uif, uif->path, nbase);
+#else
 			error(strerror(errno));
+#endif
+		}
 		wfd = opfd;
 	}
 	if(waserror()){
 		if(opfd >= 0)
 			close(opfd);
+		if(nfd >= 0)
+			close(nfd);
 		nexterror();
 	}
 	if(opfd >= 0){
@@ -1031,6 +1056,15 @@ fswstat(Chan *c, uchar *buf, int n)
 		if(fstat(opfd, &stbuf) < 0)
 			error(strerror(errno));
 	}
+	if(nfd >= 0){
+		h9_fs_allowat(nfd, nbase, H9_FSWRITE);
+		if(fstatat(nfd, nbase, &stbuf, AT_SYMLINK_NOFOLLOW) < 0)
+			error(strerror(errno));
+		if(S_ISLNK(stbuf.st_mode))
+			error(strerror(EACCES));
+	}
+	setmode = ~d.mode != 0 && (int)(d.mode&0777) != STMODE(&stbuf);
+	settimes = ~d.atime != 0 || ~d.mtime != 0;
 
 	/*
 	 * try things in increasing order of harm to the file.
@@ -1039,28 +1073,38 @@ fswstat(Chan *c, uchar *buf, int n)
 	 * leave truncate until last.
 	 * (see above comment about atomicity).
 	 */
-	if(~d.mode != 0 && (int)(d.mode&0777) != STMODE(&stbuf)) {
+	if(setmode) {
+#if defined(__wasi__)
 		if(wfd < 0)
 			error(strerror(ENOENT));
-#if defined(__wasi__)
 		wmodeset(&stbuf, d.mode);
 #else
-		if(fchmod(wfd, d.mode&0777) < 0)
+		if(nfd >= 0){
+			/* musl and libSystem chmod by name without following a link. */
+			if(fchmodat(nfd, nbase, d.mode&0777, AT_SYMLINK_NOFOLLOW) < 0)
+				error(strerror(errno));
+		}else if(wfd < 0)
+			error(strerror(ENOENT));
+		else if(fchmod(wfd, d.mode&0777) < 0)
 			error(strerror(errno));
 #endif
 		uif->mode &= ~0777;
 		uif->mode |= d.mode&0777;
 	}
-	if(~d.atime != 0 || ~d.mtime != 0){
+	if(settimes){
 		/* h9: futimens, which every libc h9 builds with has. */
 		struct timespec ts[2];
-		if(wfd < 0)
-			error(strerror(ENOENT));
 		ts[0].tv_sec = ~d.atime != 0 ? d.atime : stbuf.st_atime;
 		ts[0].tv_nsec = 0;
 		ts[1].tv_sec = ~d.mtime != 0 ? d.mtime : stbuf.st_mtime;
 		ts[1].tv_nsec = 0;
-		futimens(wfd, ts);
+		if(nfd >= 0){
+			if(utimensat(nfd, nbase, ts, AT_SYMLINK_NOFOLLOW) < 0)
+				error(strerror(errno));
+		}else if(wfd < 0)
+			error(strerror(ENOENT));
+		else
+			futimens(wfd, ts);
 	}
 	if(d.name[0] && strcmp(d.name, lastelem(ownpath(uif))) != 0) {
 		char base[NAME_MAX+1];
@@ -1123,6 +1167,8 @@ fswstat(Chan *c, uchar *buf, int n)
 	poperror();
 	if(opfd >= 0)
 		close(opfd);
+	if(nfd >= 0)
+		close(nfd);
 	return n;
 }
 
