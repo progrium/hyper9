@@ -6825,8 +6825,10 @@ test "a dangling link lists and removes [linux-symlinks]" {
 }
 
 /// Runs the symlink fixture's case `name` in the machine's /tmp, in the
-/// root's overlay, and in a `--writable` host directory.
-fn symlinkFixture(le: *const LinuxEnv, name: []const u8) !void {
+/// root's overlay, and in a `--writable` host directory. A case that
+/// makes links (`makes_links`) skips the host directory on Windows,
+/// where devfs-win32 makes none (h9_fs_symlink is EPERM there).
+fn symlinkFixture(le: *const LinuxEnv, name: []const u8, makes_links: bool) !void {
     var want_buf: [64]u8 = undefined;
     const want = try std.fmt.bufPrint(&want_buf, "ok {s}\n", .{name});
     try netCase(le, &.{ "/mnt/term/cwd/symlink", name }, want);
@@ -6834,21 +6836,28 @@ fn symlinkFixture(le: *const LinuxEnv, name: []const u8) !void {
     var s: Scratch = undefined;
     try s.init();
     defer s.deinit();
-    var dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const dir = try std.fmt.bufPrint(&dir_buf, "DIR=/mnt/term{s}", .{s.path});
+    if (builtin.os.tag == .windows and makes_links) return;
+    // The host directory as the guest names it under /mnt/term: on
+    // Windows, /mnt/term/C:/... with / for each \.
+    var dir_buf: [std.Io.Dir.max_path_bytes + 16]u8 = undefined;
+    const dir = if (builtin.os.tag == .windows) blk: {
+        const d = try std.fmt.bufPrint(&dir_buf, "DIR=/mnt/term/{s}", .{s.path});
+        std.mem.replaceScalar(u8, d, '\\', '/');
+        break :blk d;
+    } else try std.fmt.bufPrint(&dir_buf, "DIR=/mnt/term{s}", .{s.path});
     try netCase(le, &.{ "--writable", s.path, "env", dir, "/mnt/term/cwd/symlink", name }, want);
 }
 
 test "lstat, readlink, and O_NOFOLLOW act on the link [linux-symlinks]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
-    try symlinkFixture(&le, "nofollow");
+    try symlinkFixture(&le, "nofollow", true);
 }
 
 test "a loop of links is ELOOP [linux-symlinks]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
-    try symlinkFixture(&le, "loop");
+    try symlinkFixture(&le, "loop", true);
 }
 
 test "exec of a link and a #! interpreter reached through a link run [linux-symlinks]" {
@@ -6951,7 +6960,7 @@ test "--read-deny holds for a Linux program through links and .. [linux-symlinks
 test "/proc/self/fd/N of a deleted file still opens [linux-symlinks]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
-    try symlinkFixture(&le, "deleted");
+    try symlinkFixture(&le, "deleted", false);
 }
 
 // Named pipes (design/linux-fifo.md), with tests/fixtures/linux/fifo.c.
