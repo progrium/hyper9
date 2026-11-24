@@ -1676,32 +1676,78 @@ unrootqid(void)
 	return q;
 }
 
-/* The union's qid for a member chan's. Under in->ql. */
-static Qid
-unqid(Inst *in, Chan *mc)
+/* The table's entry for a member chan, made if it's missing. Under in->ql. */
+static Qmap*
+qmapof(Inst *in, Chan *mc)
 {
 	Qmap *m;
-	Qid q;
 	ulong h;
 
 	h = (mc->qid.path ^ (mc->qid.path>>17) ^ (mc->type<<7) ^ mc->dev) % Qbuckets;
 	for(m = in->qtab[h]; m != nil; m = m->next)
 		if(m->type == mc->type && m->dev == mc->dev && m->path == mc->qid.path)
-			break;
-	if(m == nil){
-		m = ovmalloc(in, sizeof(Qmap));
-		if(m == nil)
-			error(Efull);
-		m->type = mc->type;
-		m->dev = mc->dev;
-		m->path = mc->qid.path;
-		m->qpath = ++in->qidgen;
-		m->next = in->qtab[h];
-		in->qtab[h] = m;
-	}
+			return m;
+	m = ovmalloc(in, sizeof(Qmap));
+	if(m == nil)
+		error(Efull);
+	m->type = mc->type;
+	m->dev = mc->dev;
+	m->path = mc->qid.path;
+	m->qpath = ++in->qidgen;
+	m->next = in->qtab[h];
+	in->qtab[h] = m;
+	return m;
+}
+
+/* The union's qid for a member chan's. Under in->ql. */
+static Qid
+unqid(Inst *in, Chan *mc)
+{
+	Qid q;
+
 	q = mc->qid;
-	q.path = m->qpath;
+	q.path = qmapof(in, mc)->qpath;
 	return q;
+}
+
+/*
+ * The union qid path of below, a directory below the up layer, which
+ * upwalk is about to make in the layer.
+ */
+static uvlong
+upqpath(Inst *in, Chan *below)
+{
+	uvlong qp;
+
+	qlock(&in->ql);
+	if(waserror()){
+		qunlock(&in->ql);
+		nexterror();
+	}
+	qp = qmapof(in, below)->qpath;
+	poperror();
+	qunlock(&in->ql);
+	return qp;
+}
+
+/*
+ * Gives made, the up layer's copy of a directory below it, the union
+ * qid path qp the directory had, so the directory keeps its identity
+ * once the layer has it, as overlayfs keeps a directory's inode on copy
+ * up: an fd opened on it before (a Linux dirfd, which h9_linux_dotfd
+ * checks against a fresh walk), and stat's inode, see the same one.
+ */
+static void
+upkeepqid(Inst *in, Chan *made, uvlong qp)
+{
+	qlock(&in->ql);
+	if(waserror()){
+		qunlock(&in->ql);
+		nexterror();
+	}
+	qmapof(in, made)->qpath = qp;
+	poperror();
+	qunlock(&in->ql);
 }
 
 static Unc*
@@ -3028,6 +3074,7 @@ upwalk(Inst *in, char *path, int make)
 	uchar sbuf[1024+4*Maxname];
 	char strs[sizeof sbuf];
 	int i, n, nat, upmid;
+	uvlong qp;
 
 	qlock(&in->ql);
 	if(in->nmem == 0 || !in->mem[0].isup){
@@ -3069,10 +3116,11 @@ upwalk(Inst *in, char *path, int make)
 			if(t == nil)
 				error(Enonexist);
 			lowerstat(t->mc[0], &d, sbuf, sizeof sbuf, strs);
-			uncfree(t);
-			t = nil;
 			if((d.qid.type & QTDIR) == 0)
 				error(Enotdir);
+			qp = upqpath(in, t->mc[0]);
+			uncfree(t);
+			t = nil;
 			nc = cclone(c);
 			nc = devtab[nc->type]->create(nc, buf, OREAD, DMDIR|(d.mode & 0777));
 			cclose(nc);
@@ -3084,6 +3132,7 @@ upwalk(Inst *in, char *path, int make)
 			nc = lowerwalk1(c, buf);
 			if(nc == nil)
 				error(Enonexist);
+			upkeepqid(in, nc, qp);
 		}
 		cclose(c);
 		c = nc;
