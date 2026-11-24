@@ -1132,8 +1132,10 @@ struct Lpollfd
  * sleeping until one is when none is, for up to ms (-1: forever, 0:
  * don't sleep). *gen (if not nil) gets the generation the answer is
  * for. With once, it returns 0 after the first wake instead of asking
- * again, for epoll's edge-triggered fds. -1 with the error string set
- * when a note interrupts it.
+ * again, for epoll's edge-triggered fds, and *gen (if not nil) is the
+ * generation the caller's own answer was for, so a wake that came after
+ * that answer ends the wait at once rather than being missed. -1 with
+ * the error string set when a note interrupts it.
  */
 int
 h9_poll(Lpollfd *fds, int n, long ms, ulong *gen, int once)
@@ -1150,7 +1152,15 @@ h9_poll(Lpollfd *fds, int n, long ms, ulong *gen, int once)
 		return syserr();
 	}
 	for(;;){
-		g = h9_pollgen();
+		/*
+		 * epollWait leaves out of fds the edge-triggered entries it
+		 * already reported (an eventfd that stays readable, as tokio's
+		 * waker does), so only the generation tells their next event:
+		 * starting from a fresh one here would miss a wake that came
+		 * between the caller's answer and this call, and sleep until
+		 * something else woke it, forever if nothing did (#276).
+		 */
+		g = once && gen != nil ? *gen : h9_pollgen();
 		ready = 0;
 		for(i = 0; i < n; i++){
 			fds[i].revents = 0;

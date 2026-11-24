@@ -10,7 +10,9 @@
 #include <arpa/inet.h>
 #include <poll.h>
 #include <pthread.h>
+#include <sched.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -150,6 +152,59 @@ static void eventfd_epoll(void) {
 	CHECK("eventfd", read(s, &v, 8) == 8 && v == 1);
 	CHECK("eventfd", read(s, &v, 8) == 8 && v == 1);
 	printf("ok eventfd\n");
+}
+
+/* tokio's I/O driver (mio's waker): an eventfd under EPOLLET that's never
+ * drained, so after its first report it stays readable and only a new
+ * write is a new event. Another thread writes it each time the waiter
+ * has seen the last write; a write that lands while the waiter is
+ * between asking and sleeping must still end the wait (#276). A lost one
+ * shows as a timeout, or, when an unrelated wake rescues it, as a run
+ * that takes far longer than the fraction of a second it needs. */
+static int ew_ep;
+static atomic_int ew_seen, ew_sent, ew_lost;
+enum { ew_n = 5000 };
+
+static void *ew_waiter(void *a) {
+	(void)a;
+	struct epoll_event out;
+	while (atomic_load(&ew_seen) < ew_n) {
+		int r = epoll_wait(ew_ep, &out, 1, 2000);
+		if (r == 0) { atomic_store(&ew_lost, 1); atomic_store(&ew_seen, ew_n); break; }
+		if (r < 0 && errno != EINTR) { atomic_store(&ew_lost, 2); atomic_store(&ew_seen, ew_n); break; }
+		if (r > 0) atomic_store(&ew_seen, atomic_load(&ew_sent));
+	}
+	return 0;
+}
+
+static void eventfd_waker(void) {
+	int e = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+	CHECK("eventfd_waker", e >= 0);
+	ew_ep = epoll_create1(EPOLL_CLOEXEC);
+	struct epoll_event ev = {.events = EPOLLIN | EPOLLET, .data.fd = e};
+	CHECK("eventfd_waker", epoll_ctl(ew_ep, EPOLL_CTL_ADD, e, &ev) == 0);
+	pthread_t t;
+	CHECK("eventfd_waker", pthread_create(&t, 0, ew_waiter, 0) == 0);
+	uint64_t one = 1;
+	unsigned seed = 1;
+	struct timespec t0;
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	for (int i = 1; i <= ew_n && atomic_load(&ew_lost) == 0; i++) {
+		if (ms_since(&t0) > 20000) { atomic_store(&ew_lost, 3); atomic_store(&ew_seen, ew_n); break; }
+		atomic_store(&ew_sent, i);
+		/* Vary when the write lands in the waiter's next epoll_wait. */
+		for (volatile int k = rand_r(&seed) % 4000; k > 0; k--)
+			;
+		if (write(e, &one, 8) != 8) break;
+		while (atomic_load(&ew_seen) < i) sched_yield();
+	}
+	/* A waiter still in epoll_wait after a give-up takes the next write. */
+	write(e, &one, 8);
+	pthread_join(t, 0);
+	close(ew_ep);
+	close(e);
+	CHECK("eventfd_waker", atomic_load(&ew_lost) == 0 /* 1: timed out, 3: too slow */);
+	printf("ok eventfd_waker\n");
 }
 
 static int listener(int *port) {
@@ -807,6 +862,7 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "readv_pipe")) readv_pipe();
 		if (all || !strcmp(n, "epoll_et")) epoll_et();
 		if (all || !strcmp(n, "eventfd")) eventfd_epoll();
+		if (all || !strcmp(n, "eventfd_waker")) eventfd_waker();
 		if (all || !strcmp(n, "unix_sock")) unix_sock();
 		if (all || !strcmp(n, "scm_rights")) scm_rights();
 		if (all || !strcmp(n, "seqpacket")) seqpacket();
