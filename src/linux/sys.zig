@@ -1375,7 +1375,15 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const vmm.Ureg) Err!Outcome {
             return ret(0);
         },
         .futex => return ret(try futex(p, c.a[0], c.uint(1), c.uint(2), c.a[3], c.a[4], c.uint(5))),
-        .chroot, .mount, .umount2, .pivot_root, .unshare, .setns => return ret(-E.PERM),
+        .chroot => {
+            // Narrows the process's view to a directory it can already
+            // reach (design/linux-chroot.md); mount, pivot_root and new
+            // namespaces stay refused.
+            const path = try pathArg(p, c.a[0], &p.name_buf);
+            if (path.len == 0) return ret(-E.NOENT);
+            return okOr(kc.chroot(path.ptr));
+        },
+        .mount, .umount2, .pivot_root, .unshare, .setns => return ret(-E.PERM),
         .linkat => return ret(try link(p, c.int(0), c.a[1], c.int(2), c.a[3], c.uint(4))),
         .link => return ret(try link(p, AT_FDCWD, c.a[0], AT_FDCWD, c.a[1], 0)),
         .symlinkat => return ret(try symlink(p, c.a[0], c.int(1), c.a[2])),

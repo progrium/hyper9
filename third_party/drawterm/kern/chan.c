@@ -764,6 +764,7 @@ extern void h9_fs_anchor(Chan*);
 extern int h9_fs_linkwalk(void);
 extern int h9_fs_nofollowing(void);
 extern int h9_fs_chanreadlink(Chan*, char*, int);
+extern int h9_fs_atroot(Chan*);	/* h9: src/kern/linux.c */
 enum {
 	Qtsymlink	= 0x02,	/* H9_QTSYMLINK */
 	Maxlinks	= 40,	/* H9_MAXLINKS */
@@ -1032,6 +1033,12 @@ walkl(Chan **cp, char **names, int nnames, int nomount, int *nerror, int follow,
 					ntry = i;
 				break;
 			}
+		}
+
+		/* h9: .. at a Linux process's chroot stays there, as on Linux (design/linux-chroot.md). */
+		if(dotdot && h9_fs_atroot(c)){
+			n = 1;
+			continue;
 		}
 
 		if(!dotdot && !nomount && !didmount)

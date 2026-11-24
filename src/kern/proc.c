@@ -1363,6 +1363,10 @@ h9_kern_fork(int flag, ulong pid, void (*fn)(void*), void *arg)
 	}
 	poperror();
 
+	/* The child keeps its parent's chroot (design/linux-chroot.md). */
+	if((h->lroot = ph->lroot) != nil)
+		incref(&h->lroot->ref);
+
 	if(flag & RFNOMNT)
 		devmask(p->pgrp, 1, nomntdevs);
 
@@ -1558,12 +1562,16 @@ h9_kern_release(void)
 	cclose(c);
 
 	h = lookup(up);
-	/* The image's channel (/proc/n/text) can hold an overlay too. */
+	/* The image's channel (/proc/n/text) can hold an overlay too, and so can a chroot's root. */
 	if(h != nil){
 		lock(&h->nlk);
 		c = h->textc;
 		h->textc = nil;
 		unlock(&h->nlk);
+		if(c != nil)
+			cclose(c);
+		c = h->lroot;
+		h->lroot = nil;
 		if(c != nil)
 			cclose(c);
 	}

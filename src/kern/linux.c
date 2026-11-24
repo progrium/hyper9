@@ -47,6 +47,13 @@ swapchan(Chan *c, int which)
 	return old;
 }
 
+/*
+ * Marks the Chan that is a chroot's root (design/linux-chroot.md), held in
+ * the record's lroot and as slash. Not a drawterm flag: only this file
+ * sets or reads it, and clones don't copy it.
+ */
+enum { CLROOT = 0x4000 };
+
 /* Whether path s is p or under it. */
 static int
 under(char *s, char *p)
@@ -111,6 +118,39 @@ renamedot(int tolinux)
  * linux is set, and the machine's 9front root (#/) otherwise. A Chan's
  * mounts are keyed by its qid, so a fresh attach sees the machine's binds.
  */
+static Chan*
+topchan(char *name)
+{
+	Chan *c;
+
+	c = namec(name, Atodir, 0, 0);
+	pathclose(c->path);
+	c->path = newpath("/");
+	return c;
+}
+
+/*
+ * The calling process's Linux root, referenced: its chroot's
+ * (design/linux-chroot.md), or #L.
+ */
+static Chan*
+linuxroot(void)
+{
+	Chan *c;
+
+	c = h9_uphproc()->lroot;
+	if(c == nil)
+		return topchan("#L");
+	incref(&c->ref);
+	return c;
+}
+
+/*
+ * Sets the calling process's root: the Linux view (#L, renamed /, or the
+ * directory a chroot chose) when linux is set, and the machine's 9front
+ * root (#/) otherwise. A Chan's mounts are keyed by its qid, so a fresh
+ * attach sees the machine's binds.
+ */
 int
 h9_linux_setslash(int tolinux)
 {
@@ -118,20 +158,18 @@ h9_linux_setslash(int tolinux)
 
 	if(waserror())
 		return syserr();
-	c = namec(tolinux ? "#L" : "#/", Atodir, 0, 0);
-	pathclose(c->path);
-	c->path = newpath("/");
+	c = tolinux ? linuxroot() : topchan("#/");
 	poperror();
 	cclose(swapchan(c, 1));
 	renamedot(tolinux);
 	return 0;
 }
 
-/* Whether the calling process's root is the Linux view. */
+/* Whether the calling process's root is the Linux view, or a chroot in it. */
 int
 h9_linux_inview(void)
 {
-	return up->slash != nil && devtab[up->slash->type]->dc == 'L';
+	return up->slash != nil && (devtab[up->slash->type]->dc == 'L' || (up->slash->flag & CLROOT) != 0);
 }
 
 /*
@@ -176,6 +214,27 @@ mountedon(Chan *d, Chan *c)
 	return ok;
 }
 
+/*
+ * namec(path, Atodir) from the top of the Linux view rather than the
+ * calling process's chroot: an fd opened before a chroot was named from
+ * there (design/linux-chroot.md).
+ */
+static Chan*
+fromtop(char *path)
+{
+	Chan *old, *d;
+
+	old = swapchan(topchan("#L"), 1);
+	if(waserror()){
+		cclose(swapchan(old, 1));
+		nexterror();
+	}
+	d = namec(path, Atodir, 0, 0);
+	poperror();
+	cclose(swapchan(old, 1));
+	return d;
+}
+
 void*
 h9_linux_dotfd(int fd)
 {
@@ -192,7 +251,26 @@ h9_linux_dotfd(int fd)
 	}
 	if((c->qid.type & QTDIR) == 0)
 		error(Enotdir);
-	d = namec(chanpath(c), Atodir, 0, 0);
+	if((up->slash->flag & CLROOT) == 0)
+		d = namec(chanpath(c), Atodir, 0, 0);
+	else{
+		/*
+		 * In a chroot, the fd's path may be one from before it, named
+		 * from the Linux view's top, as Linux lets an fd from outside
+		 * a chroot be used in it.
+		 */
+		d = nil;
+		if(!waserror()){
+			d = namec(chanpath(c), Atodir, 0, 0);
+			poperror();
+		}
+		if(d != nil && !samedir(d, c) && !mountedon(d, c)){
+			cclose(d);
+			d = nil;
+		}
+		if(d == nil)
+			d = fromtop(chanpath(c));
+	}
 	if(!samedir(d, c) && !mountedon(d, c)){
 		cclose(d);
 		error("directory moved");
@@ -540,6 +618,107 @@ h9_linux_fchdir(int fd)
 		return -1;
 	cclose(old);
 	return 0;
+}
+
+/*
+ * chroot(2) (design/linux-chroot.md): path, walked as any Linux path is,
+ * becomes the calling process's Linux root, which its later forks keep
+ * and exec doesn't change. Its absolute paths, its links' absolute
+ * targets, and .. at the top stop there. The working directory stays as
+ * it is; if it's under the new root, its name becomes the name from
+ * there. A process can only name directories it can already reach, so
+ * the root never widens past the Linux view: chroot to the view's own
+ * top is no chroot at all.
+ */
+int
+h9_linux_chroot(char *path)
+{
+	Hproc *h;
+	Chan *c, *nc, *t, *old;
+	char *p, *n, *s;
+	int top;
+
+	p = nil;
+	c = nil;
+	if(waserror()){
+		free(p);
+		if(c != nil)
+			cclose(c);
+		return syserr();
+	}
+	h = h9_uphproc();
+	nc = namec(path, Atodir, 0, 0);
+	/* A clone, so the walk's chan (up->slash itself, for "/") isn't changed. */
+	if(waserror()){
+		cclose(nc);
+		nexterror();
+	}
+	c = cclone(nc);
+	poperror();
+	cclose(nc);
+	t = topchan("#L");
+	top = samedir(c, t) || mountedon(t, c);
+	cclose(t);
+	p = strdup(chanpath(c));
+	if(p == nil)
+		error(Enomem);
+	if(top){
+		cclose(c);
+		c = nil;
+	}else{
+		pathclose(c->path);
+		c->path = newpath("/");
+		c->flag |= CLROOT;
+	}
+
+	/* The working directory's name from the new root, if it's under it. */
+	n = nil;
+	s = up->dot != nil && up->dot->path != nil ? up->dot->path->s : nil;
+	if(s != nil && strcmp(p, "/") != 0 && under(s, p)){
+		n = strdup(s[strlen(p)] != 0 ? s+strlen(p) : "/");
+		if(n == nil)
+			error(Enomem);
+	}
+	free(p);
+	p = n;
+
+	old = h->lroot;
+	h->lroot = c;
+	c = nil;
+	if(old != nil)
+		cclose(old);
+	cclose(swapchan(linuxroot(), 1));
+
+	/*
+	 * Renamed by a walk from the new root, as renamedot does, so its
+	 * Path is a proper one; kept as it was if that walk goes elsewhere.
+	 */
+	if(p != nil && !waserror()){
+		t = namec(p, Atodir, 0, 0);
+		poperror();
+		if(samedir(t, up->dot) || mountedon(t, up->dot))
+			cclose(swapchan(t, 0));
+		else
+			cclose(t);
+	}
+	free(p);
+	poperror();
+	return 0;
+}
+
+/*
+ * Whether c is the calling process's chroot's root, where .. stays
+ * (chan.c's walkl), as Linux's does at a process's root. Not for the
+ * Linux view's own top, whose devices already keep .. there.
+ */
+int
+h9_fs_atroot(Chan *c)
+{
+	Chan *r;
+
+	if(up == nil || (r = up->slash) == nil || (r->flag & CLROOT) == 0)
+		return 0;
+	return samedir(c, r) || mountedon(r, c);
 }
 
 /*
