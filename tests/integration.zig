@@ -7342,6 +7342,12 @@ test "rename across directories moves in an overlay, and is the host's rename in
     try std.testing.expectEqualStrings("ok rename_across\n", p.stdout);
 }
 
+test "CPUID shows no AVX feature in any leaf where it hides AVX, as Zig reads it [linux-personality]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "cpuid_avx" }, "ok cpuid_avx\n");
+}
+
 test "an arm64 Linux program can read the ID registers, as HWCAP_CPUID says [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);

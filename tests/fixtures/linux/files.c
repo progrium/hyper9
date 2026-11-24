@@ -470,6 +470,33 @@ static void id_regs(void) {
 	printf("ok id_regs\n");
 }
 
+/* On x86-64, CPUID shows no AVX feature, in any leaf, when it shows no
+ * AVX: KVM and the emulator hide AVX, and Zig takes AVX10 (leaf 0x24)
+ * on its own. The native backend runs on the host's CPU, which has it or
+ * hasn't. */
+static void cpuid_avx(void) {
+#if defined(__x86_64__)
+	unsigned a, b, c, d, max;
+	__asm__ volatile("cpuid" : "=a"(max), "=b"(b), "=c"(c), "=d"(d) : "a"(0), "c"(0));
+	__asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(1), "c"(0));
+	if (!(c & (1u << 28))) {
+		if (max >= 7) {
+			__asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(7), "c"(0));
+			CHECK("cpuid_avx", !(b & (1u << 5)) && !(b & (1u << 16)));
+			if (a >= 1) {
+				__asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(7), "c"(1));
+				CHECK("cpuid_avx", !(a & ((1u << 4) | (1u << 23))) && !(d & ((1u << 4) | (1u << 5) | (1u << 10) | (1u << 19))));
+			}
+		}
+		if (max >= 0x24) {
+			__asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(0x24), "c"(0));
+			CHECK("cpuid_avx", b == 0);
+		}
+	}
+#endif
+	printf("ok cpuid_avx\n");
+}
+
 /* MADV_FREE is EINVAL, as before Linux 4.5, and DONTNEED still zeroes. */
 static void madv_free(void) {
 	char *m = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -992,6 +1019,7 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "mremap_span")) mremap_span();
 		if (!strcmp(n, "dirfd_copyup")) dirfd_copyup();
 		if (all || !strcmp(n, "proc_exe")) proc_exe();
+		if (all || !strcmp(n, "cpuid_avx")) cpuid_avx();
 	}
 	return failed;
 }
