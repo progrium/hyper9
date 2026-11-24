@@ -7353,6 +7353,27 @@ test "rename across directories moves in an overlay, and is the host's rename in
     try std.testing.expectEqualStrings("ok rename_across\n", p.stdout);
 }
 
+test "a mode-0000 file in a host tree can have its times and mode set and be renamed, as apk's etc/shadow is [linux-personality]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    // devfs-win32's host files have no Unix permission bits.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    // In a writable host directory, where h9 changes the host file. Run
+    // as root, the host lets h9 open the file anyway; as anyone else,
+    // h9 mustn't need to open it.
+    var sc: Scratch = undefined;
+    try sc.init();
+    defer sc.deinit();
+    var fb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    try std.Io.Dir.copyFile(std.Io.Dir.cwd(), try std.fmt.bufPrint(&fb, "{s}/files", .{le.fixtures}), sc.tmp.dir, "files", std.testing.io, .{});
+    var bit = std.mem.tokenizeScalar(u8, le.backends, ',');
+    const p = try runProcessWith(&.{ le.h9, "--backend", bit.next() orelse "auto", "--arch", le.arch, "--dir", le.lmount, "--cwd", sc.path, "--writable", sc.path, "--env", "DIR=.", "sh", "-c", "./files mode_zero" }, null, null, 120_000);
+    defer gpa.free(p.stdout);
+    defer gpa.free(p.stderr);
+    errdefer std.debug.print("stderr: {s}\n", .{p.stderr});
+    try std.testing.expectEqualStrings("ok mode_zero\n", p.stdout);
+}
+
 test "CPUID shows no AVX feature in any leaf where it hides AVX, as Zig reads it [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
