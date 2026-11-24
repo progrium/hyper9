@@ -373,6 +373,12 @@ h9so_recvfrom(int fd, void *buf, long n, int peek, int dontwait, unsigned char *
 	e = WSAGetLastError();
 	if(dontwait)
 		ioctlsocket(fd, FIONBIO, &off);
+	/*
+	 * A datagram longer than buf: Windows fills buf (and takes the
+	 * datagram unless peeking) but fails; Linux returns what it copied.
+	 */
+	if(r < 0 && e == WSAEMSGSIZE)
+		r = n;
 	if(r < 0)
 		return -h9so_linuxerrno(e);
 	if(raddr != nil)
