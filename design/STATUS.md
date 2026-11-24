@@ -24,7 +24,7 @@ Every proposal at the top of [design/](README.md), in the order they were writte
 | [port-streams](port-streams.md) |  | draft |  | 9P over a MessagePort |
 | [linux-fifo](linux-fifo.md) |  | implemented |  | Linux named pipes |
 | [mounts](mounts.md) |  | implemented |  | Mounts, binds, and a Plan 9 root |
-| [baseline-1](baseline-1.md) |  | draft | needs renames, retire-unicorn | Baseline 1 (h9 at the end of epoch 0) |
+| [baseline-1](baseline-1.md) |  | draft | needs renames | Baseline 1 (h9 at the end of epoch 0) |
 | [file-interface](file-interface.md) |  | draft | needs kernel-port | A wider file interface inside the kernel, with 9P2000 as a view |
 | [host-handles](host-handles.md) |  | draft | needs kernel-port | Host access through handles |
 | [kernel-port](kernel-port.md) |  | draft | needs baseline-1, namespace-kernel, kernel-serve | Port the kernel core to Zig, as an instance |
@@ -32,7 +32,7 @@ Every proposal at the top of [design/](README.md), in the order they were writte
 | [memory-model](memory-model.md) |  | draft | needs baseline-1 | One memory model under both ABIs |
 | [plan-format](plan-format.md) |  | draft | needs baseline-1, child-machines | The plan as a file, and the one way in |
 | [renames](renames.md) |  | draft |  | Rename the parts, to ABI, engine, sud, and hcpu |
-| [retire-unicorn](retire-unicorn.md) |  | draft | in progress on retire-unicorn | Retire Unicorn as an engine |
+| [retire-unicorn](retire-unicorn.md) |  | implemented |  | Retire Unicorn as an engine |
 | [scheduler](scheduler.md) |  | draft | needs kernel-port | A scheduler, with processes on per-core executors |
 | [fd-mounts](fd-mounts.md) |  | draft |  | Mounting a 9P connection from a host descriptor |
 | [upper-layers](upper-layers.md) |  | draft | in progress on upper-layers; needs port-streams | Writable layers on the host |
@@ -70,7 +70,7 @@ flowchart LR
   p_memory_model["memory-model<br/>draft"]:::draft
   p_plan_format["plan-format<br/>draft"]:::draft
   p_renames["renames<br/>draft"]:::draft
-  p_retire_unicorn["retire-unicorn<br/>draft"]:::draft
+  p_retire_unicorn["retire-unicorn<br/>implemented"]:::implemented
   p_scheduler["scheduler<br/>draft"]:::draft
   p_fd_mounts["fd-mounts<br/>draft"]:::draft
   p_upper_layers["upper-layers<br/>draft"]:::draft
