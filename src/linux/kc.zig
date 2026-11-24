@@ -35,7 +35,10 @@ const real = struct {
     extern fn h9_linux_sockrecv(fd: c_int, buf: [*]u8, n: c_int, peek: c_int, dontwait: c_int, raddr: ?*[16]u8, rport: ?*u16) c_int;
     extern fn h9_linux_socksend(fd: c_int, buf: [*]const u8, n: c_int, dontwait: c_int, raddr: ?*const [16]u8, rport: u16) c_int;
     extern fn h9_linux_soerror(fd: c_int) c_int;
-    extern fn h9_linux_pipequeued(fd: c_int) c_long;
+    extern fn h9_linux_pipequeued(fd: c_int) c_int;
+    // drawterm's long is 32 bits (include/lib.h): a c_long here would read
+    // the top half of the return register as garbage.
+    extern fn h9_linux_pipetryread(fd: c_int, buf: [*]u8, n: c_int) c_int;
     extern fn h9so_hasv6() c_int;
     extern fn h9so_ifaddrs(a: [*]IfAddr, max: c_int) c_int;
     extern fn h9_linux_sockctl(fd: c_int, msg: [*:0]const u8) c_int;
@@ -146,7 +149,10 @@ const stub = struct {
     fn h9_linux_soerror(_: c_int) c_int {
         return 9;
     }
-    fn h9_linux_pipequeued(_: c_int) c_long {
+    fn h9_linux_pipetryread(_: c_int, _: [*]u8, _: c_int) c_int {
+        return -3;
+    }
+    fn h9_linux_pipequeued(_: c_int) c_int {
         return -1;
     }
     fn h9_linux_sockctl(_: c_int, _: [*:0]const u8) c_int {
@@ -341,6 +347,21 @@ pub fn sockSend(fd: i32, buf: []const u8, dontwait: bool, to: ?*const NetAddr) i
 /// -1 if fd isn't a pipe end.
 pub fn pipeQueued(fd: i32) i64 {
     return c.h9_linux_pipequeued(fd);
+}
+
+pub const PipeRead = union(enum) { n: usize, again, not_pipe };
+
+/// Takes what's queued on pipe end `fd` now without waiting: the bytes
+/// read (0 at end of file), `again` when the pipe is empty and a writer
+/// is still open, or `not_pipe`. Checking that the pipe is readable and
+/// then reading would race another thread reading the same pipe.
+pub fn pipeTryRead(fd: i32, buf: []u8) Error!PipeRead {
+    const r = c.h9_linux_pipetryread(fd, buf.ptr, @intCast(@min(buf.len, std.math.maxInt(c_int))));
+    return switch (r) {
+        -2 => .again,
+        -3 => .not_pipe,
+        else => if (r < 0) error.Kern else .{ .n = @intCast(r) },
+    };
 }
 
 pub fn soError(fd: i32) u32 {

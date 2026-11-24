@@ -207,6 +207,90 @@ static void eventfd_waker(void) {
 	printf("ok eventfd_waker\n");
 }
 
+/* fcntl(F_DUPFD_CLOEXEC) in several threads at once, as tokio does for
+ * its signal pipe while building a runtime in each, beside epoll and
+ * eventfd fds the other threads open: each dup takes a free fd without
+ * replacing one another thread just got, and keeps the original's
+ * O_NONBLOCK (#276). */
+static int df_sock;
+static atomic_int df_bad;
+
+static void *df_thread(void *a) {
+	(void)a;
+	for (int i = 0; i < 2000 && atomic_load(&df_bad) == 0; i++) {
+		int ep = epoll_create1(EPOLL_CLOEXEC);
+		int e = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+		int d = fcntl(df_sock, F_DUPFD_CLOEXEC, 3);
+		struct epoll_event ev = {.events = EPOLLIN | EPOLLET};
+		if (ep < 0 || e < 0 || d < 3 || epoll_ctl(ep, EPOLL_CTL_ADD, e, &ev) != 0)
+			atomic_store(&df_bad, 1);
+		else if (!(fcntl(d, F_GETFL) & O_NONBLOCK) || !(fcntl(d, F_GETFD) & FD_CLOEXEC))
+			atomic_store(&df_bad, 2);
+		close(d);
+		close(e);
+		close(ep);
+	}
+	return 0;
+}
+
+static void dupfd_threads(void) {
+	int sv[2];
+	CHECK("dupfd_threads", socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0, sv) == 0);
+	df_sock = sv[0];
+	pthread_t t[4];
+	for (int i = 0; i < 4; i++) CHECK("dupfd_threads", pthread_create(&t[i], 0, df_thread, 0) == 0);
+	for (int i = 0; i < 4; i++) pthread_join(t[i], 0);
+	close(sv[0]);
+	close(sv[1]);
+	CHECK("dupfd_threads", atomic_load(&df_bad) == 0 /* 1: an fd was replaced, 2: a dup lost its flags */);
+	printf("ok dupfd_threads\n");
+}
+
+/* tokio's runtimes each read their own dup of one nonblocking signal
+ * pipe until EAGAIN. Each byte goes to one of them; the rest must get
+ * EAGAIN, not wait in a read for a byte another thread took (#276). */
+static int pd_sock;
+static atomic_int pd_done, pd_taken;
+enum { pd_n = 5000 };
+
+static void *pd_thread(void *a) {
+	(void)a;
+	int d = fcntl(pd_sock, F_DUPFD_CLOEXEC, 3);
+	char buf[128];
+	while (!atomic_load(&pd_done)) {
+		struct pollfd pf = {.fd = d, .events = POLLIN};
+		poll(&pf, 1, 50);
+		ssize_t r;
+		while ((r = read(d, buf, sizeof buf)) > 0) atomic_fetch_add(&pd_taken, (int)r);
+	}
+	close(d);
+	return 0;
+}
+
+static void pipe_drain(void) {
+	int sv[2];
+	CHECK("pipe_drain", socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0, sv) == 0);
+	pd_sock = sv[0];
+	pthread_t t[4];
+	for (int i = 0; i < 4; i++) CHECK("pipe_drain", pthread_create(&t[i], 0, pd_thread, 0) == 0);
+	struct timespec t0;
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	int i = 1;
+	for (; i <= pd_n; i++) {
+		if (write(sv[1], "x", 1) != 1) break;
+		while (atomic_load(&pd_taken) < i && ms_since(&t0) < 20000) sched_yield();
+		if (atomic_load(&pd_taken) < i) break;
+	}
+	atomic_store(&pd_done, 1);
+	/* Bytes for any reader left waiting in a read, so the threads end. */
+	write(sv[1], "xxxx", 4);
+	for (int k = 0; k < 4; k++) pthread_join(t[k], 0);
+	close(sv[0]);
+	close(sv[1]);
+	CHECK("pipe_drain", i > pd_n /* a reader waited in a read of an empty pipe */);
+	printf("ok pipe_drain\n");
+}
+
 static int listener(int *port) {
 	int l = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
 	if (l < 0) return -1;
@@ -862,6 +946,8 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "readv_pipe")) readv_pipe();
 		if (all || !strcmp(n, "epoll_et")) epoll_et();
 		if (all || !strcmp(n, "eventfd")) eventfd_epoll();
+		if (all || !strcmp(n, "dupfd_threads")) dupfd_threads();
+		if (all || !strcmp(n, "pipe_drain")) pipe_drain();
 		if (all || !strcmp(n, "eventfd_waker")) eventfd_waker();
 		if (all || !strcmp(n, "unix_sock")) unix_sock();
 		if (all || !strcmp(n, "scm_rights")) scm_rights();

@@ -1271,6 +1271,42 @@ sysdup(int fd0, int fd1)
 	return n;
 }
 
+/*
+ * h9: fd0 dup'ed onto the lowest free fd at or above min, found and
+ * taken under the fgrp's lock, close-on-exec if cexec, for Linux's
+ * F_DUPFD and F_DUPFD_CLOEXEC (src/linux/sys.zig). Finding a free fd
+ * first and then dup'ing onto it would replace one another thread
+ * opened in between.
+ */
+int
+h9_dupfrom(int fd0, int min, int cexec)
+{
+	int fd;
+	Chan *c;
+	Fgrp *f = up->fgrp;
+
+	starterror();
+	if(waserror()){
+		_syserror();
+		return -1;
+	}
+	c = fdtochan(fd0, -1, 0, 1);
+	lock(&f->ref.lk);
+	fd = findfreefd(f, min < 0 ? 0 : min);
+	if(fd < 0){
+		unlockfgrp(f);
+		cclose(c);
+		error(Enofd);
+	}
+	if(fd > f->maxfd)
+		f->maxfd = fd;
+	f->fd[fd] = c;
+	f->flag[fd] = cexec ? CCEXEC : 0;
+	unlockfgrp(f);
+	enderror();
+	return fd;
+}
+
 int
 sysfstat(int fd, uchar *buf, int n)
 {

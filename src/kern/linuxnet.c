@@ -1323,6 +1323,43 @@ h9_linux_pipequeued(int fd)
 	return n;
 }
 
+/*
+ * Takes what's queued on pipe end fd's read side now, without waiting,
+ * for O_NONBLOCK reads and for gathering more after a read (src/linux/
+ * sys.zig): the bytes read, 0 at end of file, -2 when nothing is
+ * queued and a writer is still open, -3 if fd isn't a pipe's data file,
+ * or -1 with the error string set. Asking whether the pipe is readable
+ * and then reading isn't enough: another thread reading the same pipe
+ * (tokio's runtimes each drain a dup of one signal pipe) can take the
+ * bytes in between, and the read then waits for more that may never
+ * come (#276).
+ */
+long
+h9_linux_pipetryread(int fd, void *va, long n)
+{
+	Chan *c;
+	Queue *q;
+	long r;
+
+	if(waserror())
+		return syserr();
+	c = fdtochan(fd, OREAD, 0, 1);
+	if(devtab[c->type]->dc != '|' || (c->qid.type & QTDIR) || (q = h9_pipeq(c, 0)) == nil){
+		cclose(c);
+		poperror();
+		return -3;
+	}
+	r = qconsume(q, va, n);
+	/* A writer that closed after writing left its bytes to read first. */
+	if(r < 0 && qisclosed(q) && (r = qconsume(q, va, n)) < 0)
+		r = 0;
+	else if(r < 0)
+		r = -2;
+	cclose(c);
+	poperror();
+	return r;
+}
+
 int
 h9_linux_soerror(int fd)
 {
