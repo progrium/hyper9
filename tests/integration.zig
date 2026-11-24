@@ -7372,6 +7372,12 @@ test "a path through /proc/self/fd/N walks on from the directory the fd names [l
     try netCase(&le, &.{ "/mnt/term/cwd/files", "proc_fd_dir" }, "ok proc_fd_dir\n");
 }
 
+test "/proc/self/exe opens and stats as the program's file, as rustup-init.sh reads it [linux-personality]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "proc_exe" }, "ok proc_exe\n");
+}
+
 test "lseek to the end of a file with a long name, as rustup resumes a download [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);

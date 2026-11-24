@@ -1822,6 +1822,10 @@ fn openAt(p: *Process, dirfd: i32, path_va: u64, flags: u32, mode: u32) Err!i64 
     if (dirfd == AT_FDCWD or path[0] == '/') if (procFd(p, path)) |n| {
         path = std.fmt.bufPrintZ(&tty_buf, "#d/{d}", .{n}) catch unreachable;
     };
+    var exe_buf: [256 + 1]u8 = undefined;
+    if (dirfd == AT_FDCWD or path[0] == '/') if (procExe(p, path, &exe_buf)) |exe| {
+        path = exe;
+    };
     var omode: c_int = switch (flags & O_ACCMODE) {
         0 => kern.OREAD,
         1 => kern.OWRITE,
@@ -2754,10 +2758,12 @@ fn statAt(p: *Process, dirfd: i32, path_va: u64, buf: u64, flags: u32, fmt: Stat
         try putStat(p, buf, &st, fmt);
         return 0;
     };
+    var exe_buf: [256 + 1]u8 = undefined;
+    const fpath = if (flags & AT_SYMLINK_NOFOLLOW == 0 and path[0] == '/') procExe(p, path, &exe_buf) orelse path else path;
     const n = (if (flags & AT_SYMLINK_NOFOLLOW != 0)
         atNoFollow(dirfd, path, usize, kern.stat, .{ path, &b })
     else
-        at(dirfd, path, usize, kern.stat, .{ path, &b })) catch return kerr();
+        at(dirfd, fpath, usize, kern.stat, .{ fpath, &b })) catch return kerr();
     const d, _ = attr.Dir.parse(b[0..n]) orelse return -E.IO;
     var st = attr.Stat.fromDir(&d, kindOfDir(&d), 0, 0);
     if (d.type == pty_dc and d.qid_type & 0x80 == 0) st.rdev = ptyRdev(d.qid_path);
@@ -3221,6 +3227,19 @@ fn procSelf(p: *Process, path: []const u8) ?[]const u8 {
     const pid = std.fmt.parseInt(u32, r[0..slash], 10) catch return null;
     if (pid != p.pid) return null;
     return r[slash + 1 ..];
+}
+
+/// The exe's path in buf, if path is the calling process's
+/// /proc/self/exe: an open or a stat that follows the link reaches the
+/// program's file, as on Linux, where devlinux's /proc has only an empty
+/// entry. rustup-init.sh reads the first bytes of /proc/self/exe to tell
+/// a 64-bit system from a 32-bit one.
+fn procExe(p: *Process, path: []const u8, buf: *[256 + 1]u8) ?[:0]const u8 {
+    const r = procSelf(p, path) orelse return null;
+    if (!std.mem.eql(u8, r, "exe") or p.exe_len == 0 or p.exe[0] != '/') return null;
+    @memcpy(buf[0..p.exe_len], p.exe[0..p.exe_len]);
+    buf[p.exe_len] = 0;
+    return buf[0..p.exe_len :0];
 }
 
 /// N, if path is the calling process's /proc/self/fd/N.
