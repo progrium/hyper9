@@ -540,7 +540,11 @@ test "amd64 vDSO code reads the clock page" {
     try std.testing.expect(ts.sec < 100);
     // An unknown clock: the syscall's EINVAL.
     try std.testing.expectEqual(@as(i64, -22), cg(99, &ts));
-    try std.testing.expectEqual(@as(i64, -22), cg(-1000, &ts));
+    // A negative id is a CPU clock or a clock fd. -1000 named pid 124's
+    // CPU clock, which a host with many CPUs has (a kworker), so the
+    // syscall answered 0. An fd clock on a closed fd is EINVAL anywhere.
+    const closed_fd_clock: i32 = (~@as(i32, 999_999) << 3) | 3;
+    try std.testing.expectEqual(@as(i64, -22), cg(closed_fd_clock, &ts));
 
     var tv: Timeval = undefined;
     try std.testing.expectEqual(@as(i64, 0), gtod(&tv, null));
