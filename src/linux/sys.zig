@@ -172,11 +172,28 @@ const DirBuf = struct {
     /// Hashes of the names returned so far: a union directory lists a
     /// name once for each of its members, and Linux lists it once.
     seen: std.AutoHashMapUnmanaged(u64, void) = .empty,
+    /// Held while a getdents64 or lseek uses the buffer: threads sharing
+    /// the fd take turns, as Linux serializes them on the file's position.
+    mu: std.atomic.Mutex = .unlocked,
+    /// The group's table's reference, and one for each call using the
+    /// buffer, so a close on another thread doesn't free it under one.
+    /// Under the group's lock.
+    refs: u32 = 1,
+
+    fn lock(b: *DirBuf) void {
+        while (!b.mu.tryLock()) std.atomic.spinLoopHint();
+    }
 };
 
 fn freeDirBuf(gpa: std.mem.Allocator, b: *DirBuf) void {
     b.seen.deinit(gpa);
     gpa.destroy(b);
+}
+
+/// Drops a reference to b, freeing it with the last. Under the group's lock.
+fn unrefDirBuf(gpa: std.mem.Allocator, b: *DirBuf) void {
+    b.refs -= 1;
+    if (b.refs == 0) freeDirBuf(gpa, b);
 }
 
 /// A reaped child: its pid, wait status, and CPU time in ms, which
@@ -588,7 +605,7 @@ pub const Process = struct {
         g.lockSpin();
         defer g.lock.unlock();
         var it = g.dirbufs.iterator();
-        while (it.next()) |e| freeDirBuf(p.gpa, e.value_ptr.*);
+        while (it.next()) |e| unrefDirBuf(p.gpa, e.value_ptr.*);
         g.dirbufs.clearRetainingCapacity();
         // Flags of fds that survive stay; closed ones are dropped as
         // their numbers are reused (see `fdClosed`).
@@ -607,7 +624,7 @@ pub const Process = struct {
         g.lockSpin();
         defer g.lock.unlock();
         _ = g.fdflags.remove(fd);
-        if (g.dirbufs.fetchRemove(fd)) |e| freeDirBuf(p.gpa, e.value);
+        if (g.dirbufs.fetchRemove(fd)) |e| unrefDirBuf(p.gpa, e.value);
     }
 
     fn lockTrace(p: *Process) void {
@@ -1411,14 +1428,23 @@ fn lseek(p: *Process, fd: i32, off: i64, whence: i32) i64 {
     if (fd < 0) return -E.BADF;
     if (whence < 0 or whence > 2) return -E.INVAL;
     const r = kern.seek(@intCast(fd), off, whence) catch return kerr();
+    if (r != 0) return r;
     p.g.lockSpin();
-    defer p.g.lock.unlock();
-    if (p.g.dirbufs.get(fd)) |b| if (r == 0) {
-        b.len = 0;
-        b.off = 0;
-        b.eof = false;
-        b.seen.clearRetainingCapacity();
+    const b = p.g.dirbufs.get(fd) orelse {
+        p.g.lock.unlock();
+        return r;
     };
+    b.refs += 1;
+    p.g.lock.unlock();
+    b.lock();
+    b.len = 0;
+    b.off = 0;
+    b.eof = false;
+    b.seen.clearRetainingCapacity();
+    b.mu.unlock();
+    p.g.lockSpin();
+    unrefDirBuf(p.gpa, b);
+    p.g.lock.unlock();
     return r;
 }
 
@@ -2664,7 +2690,17 @@ fn getdents(p: *Process, fd: i32, buf: u64, count: u32) Err!i64 {
         };
         break :blk b;
     };
+    // Another thread may use or close the fd meanwhile: keep the buffer,
+    // and take turns with the others using it.
+    db.refs += 1;
     p.g.lock.unlock();
+    db.lock();
+    defer {
+        db.mu.unlock();
+        p.g.lockSpin();
+        unrefDirBuf(p.gpa, db);
+        p.g.lock.unlock();
+    }
     var out: [8192]u8 = undefined;
     const cap = @min(out.len, count);
     var n: usize = 0;

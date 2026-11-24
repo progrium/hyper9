@@ -524,6 +524,54 @@ static void meminfo_threads(void) {
 	printf("ok meminfo_threads\n");
 }
 
+/* getdents64 from several threads at once: each on its own fd while
+ * the others open and close theirs (so a number is reused under a
+ * reader), and all on one shared fd, which Linux serializes. rustup
+ * reads directories from many threads, and h9 crashed in its getdents
+ * buffer when two threads used one at the same time. */
+static int dents_shared = -1;
+static atomic_int dents_bad;
+
+static int count_dents(int fd) {
+	char buf[1024];
+	int n = 0;
+	long r;
+	while ((r = syscall(SYS_getdents64, fd, buf, sizeof buf)) > 0)
+		for (long o = 0; o < r; o += *(unsigned short *)(buf + o + 16)) n++;
+	return r < 0 ? -1 : n;
+}
+
+static void *dents_own(void *arg) {
+	(void)arg;
+	for (int i = 0; i < 300; i++) {
+		int fd = open("/etc", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+		if (fd < 0 || count_dents(fd) < 3) atomic_fetch_add(&dents_bad, 1);
+		close(fd);
+	}
+	return 0;
+}
+
+static void *dents_one(void *arg) {
+	(void)arg;
+	for (int i = 0; i < 300; i++)
+		if (count_dents(dents_shared) < 0) atomic_fetch_add(&dents_bad, 1);
+	return 0;
+}
+
+static void getdents_threads(void) {
+	pthread_t t[8];
+	for (int i = 0; i < 8; i++) CHECK("getdents_threads", pthread_create(&t[i], 0, dents_own, 0) == 0);
+	for (int i = 0; i < 8; i++) pthread_join(t[i], 0);
+	CHECK("getdents_threads", atomic_load(&dents_bad) == 0);
+	dents_shared = open("/etc", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	CHECK("getdents_threads", dents_shared >= 0);
+	for (int i = 0; i < 8; i++) CHECK("getdents_threads", pthread_create(&t[i], 0, dents_one, 0) == 0);
+	for (int i = 0; i < 8; i++) pthread_join(t[i], 0);
+	CHECK("getdents_threads", atomic_load(&dents_bad) == 0);
+	close(dents_shared);
+	printf("ok getdents_threads\n");
+}
+
 /* Two threads blocked reading one pipe, as cargo's and rustc's jobserver
  * helpers are: a signal to the second, whose handler isn't SA_RESTART,
  * breaks its read with EINTR, though the first still holds the read. */
@@ -602,6 +650,7 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "meminfo_threads")) meminfo_threads();
 		if (all || !strcmp(n, "sched_params")) sched_params();
 		if (all || !strcmp(n, "pipe_intr")) pipe_intr();
+		if (all || !strcmp(n, "getdents_threads")) getdents_threads();
 		if (!strcmp(n, "exit_main")) exit_main();
 		if (!strcmp(n, "exit_thread")) exit_thread();
 		if (!strcmp(n, "exec_thread")) exec_thread(argv);
