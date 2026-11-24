@@ -2618,15 +2618,15 @@ fn function(
     } else {
         nr32 += 1;
     };
-    const nf32: u32 = @typeInfo(fixed32).@"enum".fields.len;
-    const nf64: u32 = @typeInfo(fixed64).@"enum".fields.len;
+    const nf32: u32 = @typeInfo(fixed32).@"enum".field_names.len;
+    const nf64: u32 = @typeInfo(fixed64).@"enum".field_names.len;
     e.base32 = e.nparams;
     e.reg32 = e.base32 + nf32;
     e.pool32 = e.reg32 + nr32;
     e.base64 = e.pool32 + pools.n32;
     e.reg64 = e.base64 + nf64;
     e.pool64 = e.reg64 + nr64;
-    const nf128: u32 = @typeInfo(fixed128).@"enum".fields.len;
+    const nf128: u32 = @typeInfo(fixed128).@"enum".field_names.len;
     e.base128 = e.pool64 + pools.n64;
     e.pool128 = e.base128 + nf128;
     {

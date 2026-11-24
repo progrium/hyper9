@@ -51,11 +51,11 @@ comptime {
         if (@offsetOf(L, f) != @offsetOf(R, f)) @compileError("flags.Lazy." ++ f ++ " is not where ir.LazyRecord puts it");
     if (@offsetOf(iflags.Flags, "lazy") != @offsetOf(iflags.Flags, "bits") + 4) @compileError("flags.Flags.lazy is not at bits + 4");
     if (@typeInfo(iflags.Kind).@"enum".tag_type != @typeInfo(ir.LazyKind).@"enum".tag_type) @compileError("flags.Kind and ir.LazyKind differ in tag type");
-    const ik = @typeInfo(iflags.Kind).@"enum".fields;
-    const jk = @typeInfo(ir.LazyKind).@"enum".fields;
-    if (ik.len != jk.len) @compileError("flags.Kind and ir.LazyKind differ");
-    for (ik, jk) |x, y|
-        if (x.value != y.value or !std.mem.eql(u8, x.name, y.name)) @compileError("flags.Kind." ++ x.name ++ " is not ir.LazyKind." ++ y.name);
+    const ik = @typeInfo(iflags.Kind).@"enum";
+    const jk = @typeInfo(ir.LazyKind).@"enum";
+    if (ik.field_names.len != jk.field_names.len) @compileError("flags.Kind and ir.LazyKind differ");
+    for (ik.field_names, ik.field_values, jk.field_names, jk.field_values) |xn, xv, yn, yv|
+        if (xv != yv or !std.mem.eql(u8, xn, yn)) @compileError("flags.Kind." ++ xn ++ " is not ir.LazyKind." ++ yn);
 }
 
 const Cpu = cpu_mod.Cpu;

@@ -375,7 +375,7 @@ inline fn dispatch(m: *Machine, o: *const Op, pc: u64) Next {
 const handlers: [dec.nkinds]Handler = blk: {
     @setEvalBranchQuota(100000);
     var h: [dec.nkinds]Handler = undefined;
-    for (@typeInfo(Kind).@"enum".fields, 0..) |f, i| h[i] = handlerFor(@enumFromInt(f.value));
+    for (@typeInfo(Kind).@"enum".field_values, 0..) |v, i| h[i] = handlerFor(@enumFromInt(v));
     break :blk h;
 };
 
@@ -536,7 +536,7 @@ pub fn cond(nzcv: u32, c: u8) bool {
 
 /// AddWithCarry: the result and NZCV.
 pub fn addFlags(comptime T: type, a: T, b: T, carry_in: u1) struct { T, u32 } {
-    const S = std.meta.Int(.signed, @bitSizeOf(T));
+    const S = @Int(.signed, @bitSizeOf(T));
     const r1 = @addWithOverflow(a, b);
     const r2 = @addWithOverflow(r1[0], @as(T, carry_in));
     const res = r2[0];
@@ -554,7 +554,7 @@ fn logicFlags(comptime T: type, res: T) u32 {
 }
 
 fn shiftReg(comptime T: type, v: T, ty: u8, amt: u8) T {
-    const S = std.meta.Int(.signed, @bitSizeOf(T));
+    const S = @Int(.signed, @bitSizeOf(T));
     const a: std.math.Log2Int(T) = @intCast(amt);
     return switch (ty) {
         0 => v << a,
@@ -579,7 +579,7 @@ fn extendReg(v: u64, option: u8, amt: u8) u64 {
 }
 
 fn signExtend(comptime T: type, v: T, bits_: u8) T {
-    const S = std.meta.Int(.signed, @bitSizeOf(T));
+    const S = @Int(.signed, @bitSizeOf(T));
     const sh: std.math.Log2Int(T) = @intCast(@bitSizeOf(T) - @as(u32, bits_));
     return @bitCast(@as(S, @bitCast(v << sh)) >> sh);
 }
@@ -677,7 +677,7 @@ inline fn single(comptime k: Kind, m: *Machine, o: *const Op, pc: u64) Next {
         if (s.vreg) {
             cpu.v[o.d] = v;
         } else if (s.signed) {
-            const S = std.meta.Int(.signed, @bitSizeOf(s.T));
+            const S = @Int(.signed, @bitSizeOf(s.T));
             const e: u64 = @bitCast(@as(i64, @as(S, @bitCast(v))));
             r[o.d] = if (s.to32) w32(e) else e;
         } else r[o.d] = v;
@@ -907,7 +907,7 @@ fn ldop(comptime T: type, m: *Machine, o: *const Op, pc: u64) Next {
     var f: MemFault = undefined;
     const h = atomicHost(m, T, r[o.n], pc, &f) orelse return .exit;
     const v: T = @truncate(r[o.m]);
-    const S = std.meta.Int(.signed, @bitSizeOf(T));
+    const S = @Int(.signed, @bitSizeOf(T));
     const old: T = if (@sizeOf(T) > max_atomic) blk: {
         // wasm32: one vCPU per instance, so a plain read-modify-write.
         const p: *T = @ptrFromInt(h);

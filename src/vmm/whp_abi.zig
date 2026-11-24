@@ -328,9 +328,9 @@ pub fn load() ?*const Api {
     }
     loaded = .missing;
     const dll = LoadLibraryExW(std.unicode.utf8ToUtf16LeStringLiteral("WinHvPlatform.dll"), null, LOAD_LIBRARY_SEARCH_SYSTEM32) orelse return null;
-    inline for (@typeInfo(Api).@"struct".fields) |f| {
-        const p = GetProcAddress(dll, f.name) orelse return null;
-        @field(api, f.name) = @ptrCast(@alignCast(p));
+    inline for (comptime std.meta.fieldNames(Api)) |name| {
+        const p = GetProcAddress(dll, name) orelse return null;
+        @field(api, name) = @ptrCast(@alignCast(p));
     }
     loaded = .ok;
     return &api;

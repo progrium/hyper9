@@ -1446,7 +1446,7 @@ pub fn ExecIn(comptime mode: Mode, comptime M: type) type {
                 const qq = @divTrunc(sn, sd);
                 const max: SN = @as(SN, 1) << @intCast(bits - 1);
                 if (qq >= max or qq < -max) return x.exc(cpu_mod.vec_de);
-                const US = std.meta.Int(.unsigned, @bitSizeOf(SN));
+                const US = @Int(.unsigned, @bitSizeOf(SN));
                 q = @truncate(@as(US, @bitCast(qq)));
                 r = @truncate(@as(US, @bitCast(@rem(sn, sd))));
             }

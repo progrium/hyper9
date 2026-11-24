@@ -2,7 +2,7 @@
     .name = .h9,
     .version = "0.0.0",
     .fingerprint = 0xb3f87b583a0c8c8e, // Changing this has security and trust implications.
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.1",
     .dependencies = .{},
     .paths = .{
         "build.zig",

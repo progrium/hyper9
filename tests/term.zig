@@ -181,7 +181,7 @@ const Posix = struct {
         // Everything the child needs is prepared before fork, since only
         // async-signal-safe calls are allowed after it.
         const args = try arena.allocSentinel(?[*:0]const u8, argv.len, null);
-        for (argv, 0..) |a, i| args[i] = try arena.dupeZ(u8, a);
+        for (argv, 0..) |a, i| args[i] = try arena.dupeSentinel(u8, a, 0);
         // The inherited environment, less the names `extra` sets, then
         // `extra`.
         var envs: std.ArrayList(?[*:0]const u8) = .empty;
@@ -194,7 +194,7 @@ const Posix = struct {
             }
             try envs.append(arena, v);
         }
-        for (extra) |x| try envs.append(arena, try arena.dupeZ(u8, x));
+        for (extra) |x| try envs.append(arena, try arena.dupeSentinel(u8, x, 0));
         const envp = try envs.toOwnedSliceSentinel(arena, null);
 
         const o: c.O = .{ .ACCMODE = .RDWR, .NOCTTY = true };
@@ -202,7 +202,7 @@ const Posix = struct {
         if (master < 0) return error.TermFailed;
         errdefer _ = c.close(master);
         if (grantpt(master) != 0 or unlockpt(master) != 0) return error.TermFailed;
-        const name = try arena.dupeZ(u8, std.mem.span(ptsname(master) orelse return error.TermFailed));
+        const name = try arena.dupeSentinel(u8, std.mem.span(ptsname(master) orelse return error.TermFailed), 0);
         _ = c.fcntl(master, c.F.SETFD, @as(c_int, c.FD_CLOEXEC));
         // 80x25, as the Windows pseudoconsole is. It's set on the slave
         // once the child has opened it: macOS resets a pty's size at the

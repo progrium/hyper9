@@ -1927,10 +1927,10 @@ fn frameSize(msg: anytype) usize {
     // The size of what wire.encode writes: the header and each field.
     var n: usize = wire.header_size;
     const T = @TypeOf(msg);
-    inline for (@typeInfo(T).@"struct".fields) |f| {
-        const v = @field(msg, f.name);
-        n += switch (f.type) {
-            u8, u16, u32, u64 => @sizeOf(f.type),
+    inline for (comptime std.meta.fieldNames(T), comptime std.meta.fieldTypes(T)) |f_name, f_type| {
+        const v = @field(msg, f_name);
+        n += switch (f_type) {
+            u8, u16, u32, u64 => @sizeOf(f_type),
             wire.Str => 2 + v.len,
             wire.Qid => wire.Qid.wire_size,
             wire.Stat => wire.Stat.wire_size,
@@ -1942,7 +1942,7 @@ fn frameSize(msg: anytype) usize {
                 break :blk s;
             },
             wire.Qids => 2 + v.n * wire.Qid.wire_size,
-            else => @compileError("no size for " ++ @typeName(f.type)),
+            else => @compileError("no size for " ++ @typeName(f_type)),
         };
     }
     return n;

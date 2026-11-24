@@ -2669,7 +2669,7 @@ fn hintPlan(r: *const ir.Region, save: []i8, use: []i8) void {
     for (r.blocks.items) |blk| {
         // The accesses that some later one names.
         const end = blk.start + blk.len;
-        var named = std.StaticBitSet(4096).initEmpty();
+        var named = std.StaticBitSet(4096).empty;
         if (blk.len > named.capacity()) continue;
         for (blk.start..end) |k| {
             const i = r.insts.items[k];
@@ -3129,7 +3129,7 @@ fn stillDiffers(gpa: std.mem.Allocator, region: *codemem.Region, env: *cases.Env
         const got = runNative(gpa, region, env, &r, c) catch |err| linux.exit(if (err == error.Invalid) 1 else 2);
         linux.exit(if (cases.same(want, got)) 0 else 1);
     }
-    var status: u32 = 0;
+    var status: i32 = 0;
     _ = linux.waitpid(@intCast(pid), &status, 0);
     return status != 0 and status != 2 << 8;
 }

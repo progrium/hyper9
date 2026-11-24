@@ -830,7 +830,7 @@ pub fn bits(comptime W: type, v: anytype) W {
 /// A lane-wise comparison's mask: all ones where true.
 pub fn mask(comptime W: type, comptime T: type, c: @Vector(@bitSizeOf(W) / @bitSizeOf(T), bool)) W {
     const n = @bitSizeOf(W) / @bitSizeOf(T);
-    const U = std.meta.Int(.unsigned, @bitSizeOf(T));
+    const U = @Int(.unsigned, @bitSizeOf(T));
     const ones: @Vector(n, U) = @splat(std.math.maxInt(U));
     const zeros: @Vector(n, U) = @splat(0);
     return @bitCast(@select(U, c, ones, zeros));
@@ -1012,7 +1012,7 @@ fn shift(comptime W: type, comptime T: type, v: W, count: u64, how: Shift) W {
     const lanes_: @Vector(n, T) = @bitCast(v);
     if (count >= width) {
         if (how != .sra) return 0;
-        const I = std.meta.Int(.signed, width);
+        const I = @Int(.signed, width);
         const sl: @Vector(n, I) = @bitCast(lanes_);
         return @bitCast(sl >> @splat(width - 1));
     }
@@ -1021,7 +1021,7 @@ fn shift(comptime W: type, comptime T: type, v: W, count: u64, how: Shift) W {
         .sll => @bitCast(lanes_ << c),
         .srl => @bitCast(lanes_ >> c),
         .sra => blk: {
-            const I = std.meta.Int(.signed, width);
+            const I = @Int(.signed, width);
             const sl: @Vector(n, I) = @bitCast(lanes_);
             break :blk @bitCast(sl >> c);
         },

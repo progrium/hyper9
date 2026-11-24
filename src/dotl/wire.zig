@@ -839,8 +839,8 @@ pub const l = struct {
 
     /// Whether a T-message of this type carries an envelope under .L.Z.
     pub fn isMutation(id: u8) bool {
-        inline for (@typeInfo(T).@"union".fields) |f| {
-            if (f.type.id == id) return @hasDecl(f.type, "mutation");
+        inline for (comptime std.meta.fieldTypes(T)) |f_type| {
+            if (f_type.id == id) return @hasDecl(f_type, "mutation");
         }
         return false;
     }
@@ -906,7 +906,7 @@ pub const Reader = struct {
 
     pub fn stat(r: *Reader) Error!Stat {
         var s: Stat = .{ .qid = try r.qid() };
-        inline for (@typeInfo(Stat).@"struct".fields[1..]) |f| @field(s, f.name) = try r.int(f.type);
+        inline for (comptime std.meta.fieldNames(Stat)[1..], comptime std.meta.fieldTypes(Stat)[1..]) |f_name, f_type| @field(s, f_name) = try r.int(f_type);
         return s;
     }
 
@@ -980,7 +980,7 @@ pub const Writer = struct {
 
     pub fn stat(w: *Writer, s: Stat) Error!void {
         try w.qid(s.qid);
-        inline for (@typeInfo(Stat).@"struct".fields[1..]) |f| try w.int(f.type, @field(s, f.name));
+        inline for (comptime std.meta.fieldNames(Stat)[1..], comptime std.meta.fieldTypes(Stat)[1..]) |f_name, f_type| try w.int(f_type, @field(s, f_name));
     }
 
     pub fn envelope(w: *Writer, e: Envelope) Error!void {
@@ -1026,7 +1026,7 @@ pub fn encode(out: []u8, tag: u16, msg: anytype, env: ?Envelope) Error![]u8 {
     if (@hasDecl(T, "mutation")) {
         if (env) |e| try w.envelope(e);
     }
-    inline for (@typeInfo(T).@"struct".fields) |f| try w.field(f.type, @field(msg, f.name));
+    inline for (comptime std.meta.fieldNames(T), comptime std.meta.fieldTypes(T)) |f_name, f_type| try w.field(f_type, @field(msg, f_name));
     if (w.at > std.math.maxInt(u32)) return error.NoSpace;
     std.mem.writeInt(u32, out[0..4], @intCast(w.at), .little);
     return out[0..w.at];
@@ -1037,7 +1037,7 @@ pub fn encode(out: []u8, tag: u16, msg: anytype, env: ?Envelope) Error![]u8 {
 pub fn decodeBody(comptime T: type, body: []const u8) Error!T {
     var r: Reader = .{ .b = body };
     var msg: T = undefined;
-    inline for (@typeInfo(T).@"struct".fields) |f| @field(msg, f.name) = try r.field(f.type);
+    inline for (comptime std.meta.fieldNames(T), comptime std.meta.fieldTypes(T)) |f_name, f_type| @field(msg, f_name) = try r.field(f_type);
     if (r.rest() != 0) return error.Malformed;
     return msg;
 }
@@ -1058,15 +1058,15 @@ pub fn decode(comptime U: type, frame: []const u8, msize: u32, lz: bool) Error!F
     const h = (try header(frame, msize)) orelse return error.Malformed;
     if (h.size != frame.len) return error.Malformed;
     var body = frame[header_size..];
-    inline for (@typeInfo(U).@"union".fields) |f| {
-        if (f.type.id == h.type) {
+    inline for (comptime std.meta.fieldNames(U), comptime std.meta.fieldTypes(U)) |f_name, f_type| {
+        if (f_type.id == h.type) {
             var env: ?Envelope = null;
-            if (lz and @hasDecl(f.type, "mutation")) {
+            if (lz and @hasDecl(f_type, "mutation")) {
                 var r: Reader = .{ .b = body };
                 env = try r.envelope();
                 body = body[Envelope.wire_size..];
             }
-            return .{ .tag = h.tag, .env = env, .msg = @unionInit(U, f.name, try decodeBody(f.type, body)) };
+            return .{ .tag = h.tag, .env = env, .msg = @unionInit(U, f_name, try decodeBody(f_type, body)) };
         }
     }
     return error.Malformed;
@@ -1151,7 +1151,7 @@ test "walks" {
     try t.expectEqual(@as(u64, 99), dr.msg.Rwalkgetattr.stat.size);
 
     // More than 16 names is malformed.
-    var big = [_]u8{0} ** 64;
+    var big = @as([64]u8, @splat(0));
     std.mem.writeInt(u32, big[0..4], 17, .little);
     big[4] = l.Twalk.id;
     std.mem.writeInt(u16, big[15..17], 17, .little);
@@ -1248,8 +1248,8 @@ test "frames are checked against msize and their own size" {
 /// A message of type T with every field filled.
 fn sample(comptime T: type) T {
     var msg: T = undefined;
-    inline for (@typeInfo(T).@"struct".fields) |sf| {
-        @field(msg, sf.name) = switch (sf.type) {
+    inline for (comptime std.meta.fieldNames(T), comptime std.meta.fieldTypes(T)) |sf_name, sf_type| {
+        @field(msg, sf_name) = switch (sf_type) {
             u8 => 0x12,
             u16 => 0x1234,
             u32 => 0x12345678,
@@ -1269,16 +1269,16 @@ fn sample(comptime T: type) T {
 
 test "every message round-trips" {
     inline for (.{ p9.T, p9.R, l.T, l.R }) |U| {
-        inline for (@typeInfo(U).@"union".fields) |f| {
+        inline for (comptime std.meta.fieldNames(U), comptime std.meta.fieldTypes(U)) |f_name, f_type| {
             for ([_]bool{ false, true }) |lz| {
                 var buf: [512]u8 = undefined;
                 const env: ?Envelope = if (lz) .{ .flags = 1 } else null;
-                const frame = try encode(&buf, 42, sample(f.type), env);
+                const frame = try encode(&buf, 42, sample(f_type), env);
                 const d = try decode(U, frame, 8192, lz);
                 try t.expectEqual(@as(u16, 42), d.tag);
-                try t.expect(std.meta.activeTag(d.msg) == @field(std.meta.Tag(U), f.name));
+                try t.expect(std.meta.activeTag(d.msg) == @field(std.meta.Tag(U), f_name));
                 var again: [512]u8 = undefined;
-                try t.expectEqualSlices(u8, frame, try encode(&again, 42, @field(d.msg, f.name), d.env));
+                try t.expectEqualSlices(u8, frame, try encode(&again, 42, @field(d.msg, f_name), d.env));
             }
         }
     }
@@ -1306,9 +1306,9 @@ test "mutated frames decode cleanly or not at all" {
     var prng: std.Random.DefaultPrng = .init(0x9f2000);
     const rand = prng.random();
     inline for (.{ p9.T, p9.R, l.T, l.R }) |U| {
-        inline for (@typeInfo(U).@"union".fields) |f| {
+        inline for (comptime std.meta.fieldTypes(U)) |f_type| {
             var buf: [512]u8 = undefined;
-            const frame = try encode(&buf, 1, sample(f.type), if (rand.boolean()) Envelope{} else null);
+            const frame = try encode(&buf, 1, sample(f_type), if (rand.boolean()) Envelope{} else null);
             for (0..50) |_| {
                 var m: [512]u8 = undefined;
                 var n = frame.len;

@@ -275,17 +275,17 @@ test "jolietName" {
 }
 
 test "cutShort" {
-    const long = "a" ** 62;
+    const long = &@as([62]u8, @splat('a'));
     try std.testing.expect(cutShort(long, long ++ "bcd"));
     try std.testing.expect(!cutShort("cropmarks", "cropmarks.rc"));
     try std.testing.expect(!cutShort("CW", "R.nomath"));
-    try std.testing.expect(!cutShort(long, "b" ** 70));
+    try std.testing.expect(!cutShort(long, &@as([70]u8, @splat('b'))));
 }
 
 test "plan9 mode" {
     // A file record named "RC" (even, so one pad byte) with uid and gid
     // "sys" and mode 0775.
-    const raw = [_]u8{0} ** 32 ++ [_]u8{ 2, 'R', 'C', 0, 0, 3, 's', 'y', 's', 3, 's', 'y', 's', 0, 0xfd, 0x01, 0, 0 };
+    const raw = @as([32]u8, @splat(0)) ++ [_]u8{ 2, 'R', 'C', 0, 0, 3, 's', 'y', 's', 3, 's', 'y', 's', 0, 0xfd, 0x01, 0, 0 };
     const m = (Record{ .raw = &raw }).plan9().?;
     try std.testing.expectEqual(@as(u32, 0o775), m.mode);
     try std.testing.expectEqualStrings("", m.name);

@@ -420,7 +420,7 @@ fn bindUnix(s: *Server, l: *Listener, p: []const u8) BindError!void {
     if (!posix) return error.Unsupported;
     const c = std.c;
     const gpa = s.gpa;
-    const pz = try gpa.dupeZ(u8, p);
+    const pz = try gpa.dupeSentinel(u8, p, 0);
     errdefer gpa.free(pz);
     const lz = try std.fmt.allocPrintSentinel(gpa, "{s}.lock", .{p}, 0);
     const lfd = c.open(lz, .{ .ACCMODE = .RDWR, .CREAT = true, .CLOEXEC = true }, @as(c.mode_t, 0o600));

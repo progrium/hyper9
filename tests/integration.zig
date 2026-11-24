@@ -2,9 +2,10 @@
 //! checks their output and exit status. Each case is a separate h9 process,
 //! so it covers the CLI, root resolution and exit codes end to end.
 //!
-//! The build passes the h9 binary, the root tree (-Droot, default
-//! .local/9front/root) and the backends to test (H9_TEST_BACKENDS, the
-//! ones built in) through the environment. Every case runs on each backend
+//! The build passes the root tree (-Droot, default .local/9front/root) and
+//! the backends to test (H9_TEST_BACKENDS, the ones built in) through the
+//! environment, and the h9 binary and fixtures as build options, which the
+//! environment overrides (getenv). Every case runs on each backend
 //! that can run arm64 here. Without a root tree, the tests are skipped.
 //! `zig build install-tests` builds this file for another target, and
 //! `scripts/lima/vm test` runs it in a test VM with the same variables.
@@ -27,6 +28,7 @@ const Term = @import("term.zig").Term;
 const wsrelay = @import("wsrelay.zig");
 const deadline = @import("deadline.zig");
 const design = @import("design");
+const test_paths = @import("test_paths");
 const DotlServer = @import("dotlserver.zig").DotlServer;
 
 const gpa = std.testing.allocator;
@@ -46,10 +48,33 @@ var env_buf: [7][std.Io.Dir.max_path_bytes]u8 = undefined;
 fn getenv(comptime slot: usize, key: []const u8) ?[]const u8 {
     var map = std.testing.environ.createMap(gpa) catch return null;
     defer map.deinit();
-    const v = map.get(key) orelse return null;
-    if (v.len > env_buf[slot].len) return null;
-    @memcpy(env_buf[slot][0..v.len], v);
-    return env_buf[slot][0..v.len];
+    if (map.get(key)) |v| {
+        if (v.len > env_buf[slot].len) return null;
+        @memcpy(env_buf[slot][0..v.len], v);
+        return env_buf[slot][0..v.len];
+    }
+    // The cases run h9 in other directories, so the build's paths are made
+    // absolute.
+    const p = buildPath(key) orelse return null;
+    if (std.fs.path.isAbsolute(p)) return p;
+    const buf = &env_buf[slot];
+    const n = std.process.currentPath(std.testing.io, buf) catch return null;
+    if (n + 1 + p.len > buf.len) return null;
+    buf[n] = std.fs.path.sep;
+    @memcpy(buf[n + 1 ..][0..p.len], p);
+    return buf[0 .. n + 1 + p.len];
+}
+
+/// The path zig build gives for `key` (H9_TEST_BIN, H9_TEST_LINUX,
+/// H9_TEST_GO, or H9_TEST_SERVER) when the environment doesn't set it:
+/// build options, since the install prefix isn't known until the build
+/// runs. A relative one is relative to where zig build ran, which is this
+/// process's directory.
+fn buildPath(key: []const u8) ?[]const u8 {
+    inline for (comptime std.meta.declarations(test_paths)) |name| {
+        if (std.mem.eql(u8, key, name)) return @field(test_paths, name);
+    }
+    return null;
 }
 
 /// The case's environment. `src` is the case's @src(), whose tags decide
@@ -8221,7 +8246,7 @@ test "exec into recycled pages doesn't run stale JIT code [browser-host]" {
     const r = try run(e, &.{ "--timeout", "120s", "--rc", "for(i in `{seq 1 40}){ /bin/echo a; /bin/basename /x/b }" });
     defer r.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{r.err});
-    try std.testing.expectEqualStrings("a\nb\n" ** 40, r.out);
+    try std.testing.expectEqualStrings(rep("a\nb\n", 40), r.out);
     try std.testing.expectEqual(0, r.code);
 }
 
@@ -11552,4 +11577,14 @@ test "bind -c '#O' over a union copies up and whites out [mounts]" {
     try std.testing.expect(!s.exists("a/z"));
     var buf: [16]u8 = undefined;
     try std.testing.expectEqualStrings("bg\n", try s.tmp.dir.readFile(std.testing.io, "b/d/g", &buf));
+}
+
+/// `s` repeated `n` times, at compile time.
+inline fn rep(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    comptime {
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const final = out;
+        return &final;
+    }
 }

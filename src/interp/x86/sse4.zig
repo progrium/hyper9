@@ -197,7 +197,7 @@ pub fn map38(x: anytype) !void {
 /// All ones in each T lane of `m` whose sign bit is set.
 fn lanesBy(comptime T: type, m: u128) u128 {
     const n = 128 / @bitSizeOf(T);
-    const S = std.meta.Int(.signed, @bitSizeOf(T));
+    const S = @Int(.signed, @bitSizeOf(T));
     const v: @Vector(n, S) = @bitCast(m);
     return @bitCast(v >> @splat(@bitSizeOf(T) - 1));
 }
@@ -209,8 +209,8 @@ fn widen(x: anytype, comptime From: type, comptime To: type, sx: bool) !u128 {
     const s = try xsrc(x, n * @sizeOf(From), false);
     const f: [16 / @sizeOf(From)]From = @bitCast(s);
     var r: [n]To = undefined;
-    const SF = std.meta.Int(.signed, @bitSizeOf(From));
-    const ST = std.meta.Int(.signed, @bitSizeOf(To));
+    const SF = @Int(.signed, @bitSizeOf(From));
+    const ST = @Int(.signed, @bitSizeOf(To));
     inline for (0..n) |k| {
         r[k] = if (sx) @bitCast(@as(ST, @as(SF, @bitCast(f[k])))) else f[k];
     }
@@ -491,7 +491,7 @@ pub fn map3a(x: anytype) !void {
 
 /// a:b shifted right by n bytes, the low half kept.
 fn palignr(comptime W: type, a: W, b: W, n: u8) W {
-    const D = std.meta.Int(.unsigned, 2 * @bitSizeOf(W));
+    const D = @Int(.unsigned, 2 * @bitSizeOf(W));
     const both = @as(D, a) << @bitSizeOf(W) | b;
     if (n >= 2 * @sizeOf(W)) return 0;
     return @truncate(both >> @intCast(8 * @as(u16, n)));

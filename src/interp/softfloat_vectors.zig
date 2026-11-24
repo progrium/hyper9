@@ -155,7 +155,7 @@ fn run(s: Section, in: []const u64) Result {
                     const I = Int(i);
                     const r = sf.toInt(T, I, &env, @intCast(in[0]), s.rounding);
                     if (!s.exact) env.flags &= ~sf.PE;
-                    const U = std.meta.Int(.unsigned, @bitSizeOf(I));
+                    const U = @Int(.unsigned, @bitSizeOf(I));
                     // Out of range, the value is each caller's.
                     return .{ .v = if (r) |v| @as(U, @bitCast(v)) else 0, .flags = env.flags, .any = r == null };
                 },
@@ -166,7 +166,7 @@ fn run(s: Section, in: []const u64) Result {
                 inline else => |i| {
                     const T = Bits(f);
                     const I = Int(i);
-                    const U = std.meta.Int(.unsigned, @bitSizeOf(I));
+                    const U = @Int(.unsigned, @bitSizeOf(I));
                     const r = sf.fromInt(T, I, &env, @bitCast(@as(U, @intCast(in[0]))));
                     return .{ .v = r, .flags = env.flags };
                 },

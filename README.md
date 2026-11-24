@@ -18,7 +18,7 @@ and an Alpine `sh` can share one machine.
 
 ## Quick start
 
-On a Mac with Apple Silicon, Zig 0.16, and Xcode:
+On a Mac with Apple Silicon, Zig 0.17, and Xcode:
 
 ```sh
 git clone https://github.com/progrium/hyper9 && cd hyper9

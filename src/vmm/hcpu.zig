@@ -230,7 +230,7 @@ pub fn Emu(comptime A64: type, comptime X86: type, comptime X64: type) type {
                     // perf(1)'s map file, on POSIX hosts.
                     if (builtin.os.tag != .windows and std.c.getenv("H9_PERF_MAP") != null and dispatch.perf_fd < 0) {
                         var path: [64:0]u8 = undefined;
-                        if (std.fmt.bufPrintZ(&path, "/tmp/perf-{d}.map", .{std.c.getpid()})) |z| {
+                        if (std.fmt.bufPrintSentinel(&path, "/tmp/perf-{d}.map", .{std.c.getpid()}, 0)) |z| {
                             dispatch.perf_fd = std.c.open(z.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true, .TRUNC = true }, @as(std.c.mode_t, 0o644));
                         } else |_| {}
                     }

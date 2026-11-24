@@ -633,15 +633,15 @@ test "packArgs cuts argv to args_max at a character boundary" {
     try std.testing.expectEqualStrings("ar\x00vu\x00", buf[0..packArgs(&buf, &.{ "ar", "vu" })]);
 
     // Exactly full, then more arguments: ar's argv in libc's mkfile.
-    const full = "x" ** (args_max - 1);
+    const full = &@as([(args_max - 1)]u8, @splat('x'));
     try std.testing.expectEqual(args_max, packArgs(&buf, &.{ full, "a.7", "b.7" }));
     try std.testing.expectEqual(0, buf[args_max - 1]);
 
     // The cut would fall inside é, so it backs up to before it.
-    const long = "y" ** (args_max - 5) ++ "\u{e9}z";
+    const long = &@as([(args_max - 5)]u8, @splat('y')) ++ "\u{e9}z";
     const n = packArgs(&buf, &.{ "ab", long });
     try std.testing.expectEqual(args_max - 1, n);
-    try std.testing.expectEqualStrings("y" ** (args_max - 5), buf[3 .. n - 1]);
+    try std.testing.expectEqualStrings(&@as([(args_max - 5)]u8, @splat('y')), buf[3 .. n - 1]);
 }
 
 /// Who posted a note (9front's NUser, NExit, NDebug). A note that isn't
@@ -1615,7 +1615,7 @@ test "spawn a process and read a host file through kern" {
         }
         fn body(t: *@This()) !void {
             var spec: [std.fs.max_path_bytes + 3]u8 = undefined;
-            try bind(try std.fmt.bufPrintZ(&spec, "#U{s}", .{t.root}), "/", MREPL);
+            try bind(try std.fmt.bufPrintSentinel(&spec, "#U{s}", .{t.root}, 0), "/", MREPL);
             try bind("#c", "/dev", MREPL);
             const fd = try open("/lib/namespace", OREAD);
             defer close(fd) catch {};
@@ -1702,7 +1702,7 @@ test "fork shares or copies groups, and await returns wait records" {
         }
         fn body(t: *@This()) !void {
             var spec: [std.fs.max_path_bytes + 3]u8 = undefined;
-            try bind(try std.fmt.bufPrintZ(&spec, "#U{s}", .{t.root}), "/", MREPL);
+            try bind(try std.fmt.bufPrintSentinel(&spec, "#U{s}", .{t.root}, 0), "/", MREPL);
             try bind("#e", "/env", MREPL | MCREATE);
             setGuestPid(1);
             try writeAll("/env/x", "parent");
@@ -2157,9 +2157,9 @@ test "#O overlays a host tree in memory and never writes it" {
         }
         fn body(t: *@This()) !void {
             var spec: [std.fs.max_path_bytes + 16]u8 = undefined;
-            try bind(try std.fmt.bufPrintZ(&spec, "#U{s}", .{t.root}), "/", MREPL);
+            try bind(try std.fmt.bufPrintSentinel(&spec, "#U{s}", .{t.root}, 0), "/", MREPL);
             const id = try overlayNew("/lower");
-            try bind(try std.fmt.bufPrintZ(&spec, "#O{d}", .{id}), "/mnt", MREPL | MCREATE);
+            try bind(try std.fmt.bufPrintSentinel(&spec, "#O{d}", .{id}, 0), "/mnt", MREPL | MCREATE);
 
             t.where = "read through";
             try expectRead("/mnt/a.txt", "host a\n");
@@ -2242,7 +2242,7 @@ test "#O overlays a host tree in memory and never writes it" {
 
             t.where = "a tree in memory only";
             const mid = try overlayNew(null);
-            try bind(try std.fmt.bufPrintZ(&spec, "#O{d}", .{mid}), "/mem", MREPL | MCREATE);
+            try bind(try std.fmt.bufPrintSentinel(&spec, "#O{d}", .{mid}, 0), "/mem", MREPL | MCREATE);
             try writeNew("/mem/scratch", "scratch\n");
             try expectRead("/mem/scratch", "scratch\n");
 
@@ -2250,7 +2250,7 @@ test "#O overlays a host tree in memory and never writes it" {
             const other: Pages = .{ .ctx = undefined, .alloc = undefined, .free = undefined };
             setPages(&other);
             defer setPages(null);
-            if (bind(try std.fmt.bufPrintZ(&spec, "#O{d}", .{id}), "/mem", MREPL)) |_| return error.AttachedOtherMachine else |_| {}
+            if (bind(try std.fmt.bufPrintSentinel(&spec, "#O{d}", .{id}, 0), "/mem", MREPL)) |_| return error.AttachedOtherMachine else |_| {}
         }
     };
     var t: T = .{ .root = root };
@@ -2304,16 +2304,16 @@ test "#O finds, removes and lists the children of a large directory" {
         }
         fn body(t: *@This()) !void {
             var spec: [std.fs.max_path_bytes + 16]u8 = undefined;
-            try bind(try std.fmt.bufPrintZ(&spec, "#U{s}", .{t.root}), "/", MREPL);
+            try bind(try std.fmt.bufPrintSentinel(&spec, "#U{s}", .{t.root}, 0), "/", MREPL);
             const id = try overlayNew(null);
-            try bind(try std.fmt.bufPrintZ(&spec, "#O{d}", .{id}), "/mem", MREPL | MCREATE);
+            try bind(try std.fmt.bufPrintSentinel(&spec, "#O{d}", .{id}, 0), "/mem", MREPL | MCREATE);
             var p: [32]u8 = undefined;
-            for (0..count) |i| close(try create(try std.fmt.bufPrintZ(&p, "/mem/f{d}", .{i}), OWRITE, 0o664)) catch {};
+            for (0..count) |i| close(try create(try std.fmt.bufPrintSentinel(&p, "/mem/f{d}", .{i}, 0), OWRITE, 0o664)) catch {};
             // Every other one goes, from the middle of the list and its ends.
             var i: usize = 0;
-            while (i < count) : (i += 2) try remove(try std.fmt.bufPrintZ(&p, "/mem/f{d}", .{i}));
+            while (i < count) : (i += 2) try remove(try std.fmt.bufPrintSentinel(&p, "/mem/f{d}", .{i}, 0));
             for (0..count) |j| {
-                const name = try std.fmt.bufPrintZ(&p, "/mem/f{d}", .{j});
+                const name = try std.fmt.bufPrintSentinel(&p, "/mem/f{d}", .{j}, 0);
                 if (open(name, OREAD)) |fd| {
                     close(fd) catch {};
                     if (j % 2 == 0) return error.StillThere;
@@ -2386,8 +2386,8 @@ test "#U!c resolves symlinks inside the tree it's bound from [34]" {
         }
         fn body(t: *@This()) !void {
             var spec: [std.fs.max_path_bytes + 16]u8 = undefined;
-            try bind(try std.fmt.bufPrintZ(&spec, "#U{s}", .{t.root}), "/", MREPL);
-            try bind(try std.fmt.bufPrintZ(&spec, "#U!c{s}/top", .{t.root}), "/mnt", MREPL);
+            try bind(try std.fmt.bufPrintSentinel(&spec, "#U{s}", .{t.root}, 0), "/", MREPL);
+            try bind(try std.fmt.bufPrintSentinel(&spec, "#U!c{s}/top", .{t.root}, 0), "/mnt", MREPL);
 
             t.where = "absolute link";
             try expectRead("/mnt/bin/ls", "tree busybox\n");

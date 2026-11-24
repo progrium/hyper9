@@ -1425,7 +1425,7 @@ pub const Machine = struct {
                     const nine = head.len > 0 and !elf.isElf(head) and !std.mem.startsWith(u8, head, "#!");
                     if (nine and std.mem.startsWith(u8, found, "/9/")) break :blk try m.loadNine(p, a, found[2..], &argv, &text_path);
                     var name_buf: [kern.ERRMAX]u8 = undefined;
-                    kern.setText(std.fmt.bufPrintZ(&name_buf, "{s}", .{basename(found)}) catch "a.out");
+                    kern.setText(std.fmt.bufPrintSentinel(&name_buf, "{s}", .{basename(found)}, 0) catch "a.out");
                     m.linuxExecPath(p, null, found, argv, envp) catch {
                         m.err_msg = kern.errstr();
                         return if (attr.errno(m.err_msg) == attr.E.NOENT) error.NotFound else error.NotExecutable;
@@ -1460,7 +1460,7 @@ pub const Machine = struct {
             .guest => |n| n,
             .bytes => if (j.argv.len > 0) j.argv[0] else "a.out",
         };
-        kern.setText(std.fmt.bufPrintZ(&name_buf, "{s}", .{basename(name)}) catch "a.out");
+        kern.setText(std.fmt.bufPrintSentinel(&name_buf, "{s}", .{basename(name)}, 0) catch "a.out");
 
         p.as = try m.backend.newAddressSpace();
         const img = try loader.load(m.gpa, m.backend, p.as.?, bytes, argv, p.pid);
@@ -1473,7 +1473,7 @@ pub const Machine = struct {
         p.initSys();
         p.noteMem();
         kern.setArgs(argv);
-        if (text_path) |t| kern.setTextPath(arena.allocator().dupeZ(u8, t) catch null);
+        if (text_path) |t| kern.setTextPath(arena.allocator().dupeSentinel(u8, t, 0) catch null);
         return m.loop(p);
     }
 
@@ -1590,7 +1590,7 @@ pub const Machine = struct {
         try argv.append(a, "exportfs");
         if (m.plan.write == .none) try argv.append(a, "-R");
         try argv.appendSlice(a, &.{ "-r", m.opts.serve_root });
-        const path = try a.dupeZ(u8, j.exportfs);
+        const path = try a.dupeSentinel(u8, j.exportfs, 0);
         const bytes = readFile(a, path) catch |e| {
             return .{ .killed = std.fmt.bufPrint(&p.msg_buf, "h9: {s}: {t}", .{ j.exportfs, e }) catch "h9: no exportfs" };
         };
@@ -1897,7 +1897,7 @@ pub const Machine = struct {
                     // 9front's faultnote; popnote adds the pc. If the note
                     // can't be queued, the fault would only repeat.
                     var buf: [kern.ERRMAX]u8 = undefined;
-                    const note = std.fmt.bufPrintZ(&buf, "sys: trap: fault {t} addr=0x{x}", .{ f.access, f.addr }) catch unreachable;
+                    const note = std.fmt.bufPrintSentinel(&buf, "sys: trap: fault {t} addr=0x{x}", .{ f.access, f.addr }, 0) catch unreachable;
                     if (!(kern.postNote(p.pid, note, .debug) catch false)) {
                         return .{ .killed = try std.fmt.bufPrint(&p.msg_buf, "{s} pc=0x{x}", .{ note, u.pc() }) };
                     }
@@ -2103,7 +2103,7 @@ pub const Machine = struct {
                 };
                 if (skipped) continue;
                 var pbuf: [kern.ERRMAX + 8]u8 = undefined;
-                const path = std.fmt.bufPrintZ(&pbuf, "/env/{s}", .{name}) catch continue;
+                const path = std.fmt.bufPrintSentinel(&pbuf, "/env/{s}", .{name}, 0) catch continue;
                 const vfd = kern.open(path, kern.OREAD) catch continue;
                 defer kern.close(vfd) catch {};
                 var vbuf: [16384]u8 = undefined;
@@ -2233,7 +2233,7 @@ pub const Machine = struct {
         kern.setArgs(argv);
         kern.closeExec();
         var name_buf: [kern.ERRMAX]u8 = undefined;
-        kern.setText(std.fmt.bufPrintZ(&name_buf, "{s}", .{basename(path)}) catch "a.out");
+        kern.setText(std.fmt.bufPrintSentinel(&name_buf, "{s}", .{basename(path)}, 0) catch "a.out");
         p.vforkRelease();
     }
 
@@ -2248,7 +2248,7 @@ pub const Machine = struct {
     /// for writing fails with ETXTBSY (LazyFile.openExec).
     fn imageSrc(gpa: std.mem.Allocator, path: []const u8, bytes: []const u8, linux_only: bool) ?*lmm.Src {
         var zbuf: [4096]u8 = undefined;
-        const zpath = std.fmt.bufPrintZ(&zbuf, "{s}", .{path}) catch return null;
+        const zpath = std.fmt.bufPrintSentinel(&zbuf, "{s}", .{path}, 0) catch return null;
         const in_view = kc.inView();
         for ([_]bool{ false, true }) |linux| {
             if (linux_only and !linux) continue;
@@ -2272,7 +2272,7 @@ pub const Machine = struct {
         const swap = !kc.inView();
         if (swap) kc.setSlash(true) catch return error.NotFound;
         defer if (swap) kc.setSlash(false) catch {};
-        return readFile(arena, try arena.dupeZ(u8, path));
+        return readFile(arena, try arena.dupeSentinel(u8, path, 0));
     }
 
     /// `path` in the Linux view made absolute with its symbolic links
@@ -2306,7 +2306,7 @@ pub const Machine = struct {
             const save = out.items.len;
             out.append(arena, '/') catch return path;
             out.appendSlice(arena, elem) catch return path;
-            const z = arena.dupeZ(u8, out.items) catch return path;
+            const z = arena.dupeSentinel(u8, out.items, 0) catch return path;
             const target = kern.readlink(z, &link_buf) catch continue;
             links += 1;
             if (links > 40 or target.len == 0) return path;
@@ -2327,7 +2327,7 @@ pub const Machine = struct {
         var it = std.mem.tokenizeScalar(u8, path_var, ':');
         while (it.next()) |dir| {
             const full = std.fmt.allocPrint(arena, "{s}/{s}", .{ dir, name }) catch return null;
-            const z = arena.dupeZ(u8, full) catch return null;
+            const z = arena.dupeSentinel(u8, full, 0) catch return null;
             var st: [512]u8 = undefined;
             const n = kern.stat(z, &st) catch continue;
             if (n >= 25 and std.mem.readInt(u32, st[21..25], .little) & 0x80000000 == 0) return full;
@@ -2392,14 +2392,14 @@ pub const Machine = struct {
                 // Linux view, so it runs rc itself, and rc opens the script
                 // in the 9front view, where /9/x is /x.
                 const zargv = arena.alloc([:0]u8, argv.len) catch return failWith("no memory");
-                for (argv, zargv) |a, *z| z.* = arena.dupeZ(u8, if (std.mem.startsWith(u8, a, "/9/")) a[2..] else a) catch return failWith("no memory");
-                try m.exec(p, v, .{ .path = arena.dupeZ(u8, path) catch return failWith("no memory"), .argv = zargv });
+                for (argv, zargv) |a, *z| z.* = arena.dupeSentinel(u8, if (std.mem.startsWith(u8, a, "/9/")) a[2..] else a, 0) catch return failWith("no memory");
+                try m.exec(p, v, .{ .path = arena.dupeSentinel(u8, path, 0) catch return failWith("no memory"), .argv = zargv });
                 nineEnv(envp);
                 return;
             }
             const zargv = arena.alloc([:0]u8, argv0.len) catch return failWith("no memory");
-            for (argv0, zargv) |a, *z| z.* = arena.dupeZ(u8, a) catch return failWith("no memory");
-            try m.exec(p, v, .{ .path = arena.dupeZ(u8, path0) catch return failWith("no memory"), .argv = zargv });
+            for (argv0, zargv) |a, *z| z.* = arena.dupeSentinel(u8, a, 0) catch return failWith("no memory");
+            try m.exec(p, v, .{ .path = arena.dupeSentinel(u8, path0, 0) catch return failWith("no memory"), .argv = zargv });
             nineEnv(envp);
             return;
         }
@@ -3148,8 +3148,8 @@ pub const Machine = struct {
         kern.setArgs(prog.argv);
         kern.closeExec();
         var name_buf: [kern.ERRMAX]u8 = undefined;
-        kern.setText(std.fmt.bufPrintZ(&name_buf, "{s}", .{elem}) catch "a.out");
-        kern.setTextPath(arena.dupeZ(u8, prog.path) catch null);
+        kern.setText(std.fmt.bufPrintSentinel(&name_buf, "{s}", .{elem}, 0) catch "a.out");
+        kern.setTextPath(arena.dupeSentinel(u8, prog.path, 0) catch null);
         // With ctl hang, it stops before its first instruction.
         if (kern.execHang()) p.stop_flag.store(true, .release);
     }
@@ -3250,7 +3250,7 @@ pub const Machine = struct {
                 // Made through the stack's overlay: /root takes no creates.
                 var st: [512]u8 = undefined;
                 const rel = if (std.mem.startsWith(u8, b.from, "/root/")) b.from["/root".len..] else b.from;
-                const from = try std.fmt.bufPrintZ(&buf, "{s}{s}", .{ if (rel.len < b.from.len) policy.mount.Stack.root.dev() else "", rel });
+                const from = try std.fmt.bufPrintSentinel(&buf, "{s}{s}", .{ if (rel.len < b.from.len) policy.mount.Stack.root.dev() else "", rel }, 0);
                 if (kern.stat(from, &st)) |_| {} else |_| mkdirAll(from) catch {};
             }
             if (b.mount) {
@@ -3258,16 +3258,16 @@ pub const Machine = struct {
                 continue;
             }
             const from = if (b.console)
-                try std.fmt.bufPrintZ(&buf, "{s}{d}{s}", .{ b.from, con_id, if (b.cons_file) "/cons" else "" })
+                try std.fmt.bufPrintSentinel(&buf, "{s}{d}{s}", .{ b.from, con_id, if (b.cons_file) "/cons" else "" }, 0)
             else
-                try std.fmt.bufPrintZ(&buf, "{s}", .{b.from});
+                try std.fmt.bufPrintSentinel(&buf, "{s}", .{b.from}, 0);
             var flag: c_int = switch (b.flag) {
                 .repl => kern.MREPL,
                 .before => kern.MBEFORE,
                 .after => kern.MAFTER,
             };
             if (b.create) flag |= kern.MCREATE;
-            const to = try std.fmt.bufPrintZ(&buf2, "{s}", .{b.to});
+            const to = try std.fmt.bufPrintSentinel(&buf2, "{s}", .{b.to}, 0);
             if (b.recursive or b.empty or b.upper) {
                 m.bindMember(b, from, to, flag) catch {
                     if (b.optional) continue;
@@ -3288,7 +3288,7 @@ pub const Machine = struct {
                 continue;
             } else |_| {}
             if (b.fallback) |fb| {
-                if (bindOrOverlay(from, b.lower, b.contained, try std.fmt.bufPrintZ(&buf2, "{s}", .{fb}), flag, &buf)) |_| {
+                if (bindOrOverlay(from, b.lower, b.contained, try std.fmt.bufPrintSentinel(&buf2, "{s}", .{fb}, 0), flag, &buf)) |_| {
                     if (std.mem.eql(u8, b.to, "/mnt/term/cwd")) cwd_at = "/mnt/term";
                     if (std.mem.eql(u8, b.to, policy.linux_view ++ "/mnt/term/cwd")) cwd_at = policy.linux_view ++ "/mnt/term";
                     continue;
@@ -3343,7 +3343,7 @@ pub const Machine = struct {
         if (b.to.len == 0 or b.to[0] != '/') return true;
         var buf: [std.fs.max_path_bytes + 8]u8 = undefined;
         var st: [512]u8 = undefined;
-        const to = try std.fmt.bufPrintZ(&buf, "{s}", .{b.to});
+        const to = try std.fmt.bufPrintSentinel(&buf, "{s}", .{b.to}, 0);
         if (kern.stat(to, &st)) |_| return true else |_| {}
         if (!m.plan.root_overlay) {
             if (b.optional or b.fallback != null) return true;
@@ -3363,7 +3363,7 @@ pub const Machine = struct {
         var i: usize = 1;
         while (i <= path.len) : (i += 1) {
             if (i < path.len and path[i] != '/') continue;
-            const p = std.fmt.bufPrintZ(&buf, "{s}", .{path[0..i]}) catch return error.Kern;
+            const p = std.fmt.bufPrintSentinel(&buf, "{s}", .{path[0..i]}, 0) catch return error.Kern;
             if (kern.stat(p, &st)) |_| continue else |_| {}
             const fd = try kern.create(p, kern.OREAD, dmdir | 0o775);
             kern.close(fd) catch {};
@@ -3383,7 +3383,7 @@ pub const Machine = struct {
         if (b.empty) {
             const id = try kern.overlayNew(null);
             fresh = id;
-            from = std.fmt.bufPrintZ(&num, "#O{d}", .{id}) catch unreachable;
+            from = std.fmt.bufPrintSentinel(&num, "#O{d}", .{id}, 0) catch unreachable;
             if (b.archive) |path| {
                 // Attaching takes the instance's first ref, so it's no
                 // longer ours to drop. The fd holds it until the tree is
@@ -3408,7 +3408,7 @@ pub const Machine = struct {
         if (b.recursive) {
             if (stackName(b.to)) |sn| {
                 var at: [std.fs.max_path_bytes + 1]u8 = undefined;
-                _ = try kern.unionAdd(sn.name, from, std.fmt.bufPrintZ(&at, "{s}", .{sn.at}) catch return error.Kern, flags);
+                _ = try kern.unionAdd(sn.name, from, std.fmt.bufPrintSentinel(&at, "{s}", .{sn.at}, 0) catch return error.Kern, flags);
             } else try bindRecursive(from, to, b.flag == .after, b.create);
             fresh = null;
             return;
@@ -3455,7 +3455,7 @@ pub const Machine = struct {
             for (diag.errors.items[seen..]) |e| switch (e) {
                 .unsupported_file_type => |u| if (u.file_type == .fifo) {
                     const rel = archiveName(u.file_name) orelse continue;
-                    const dst = std.fmt.bufPrintZ(&pbuf, "{s}/{s}", .{ root, rel }) catch continue;
+                    const dst = std.fmt.bufPrintSentinel(&pbuf, "{s}/{s}", .{ root, rel }, 0) catch continue;
                     mkdirUnder(root, std.fs.path.dirname(rel) orelse "") catch return m.fail("--archive {s}: {s}: {s}", .{ path, u.file_name, kern.errstr() });
                     kern.mkfifo(dst, 0o644) catch return m.fail("--archive {s}: {s}: {s}", .{ path, u.file_name, kern.errstr() });
                 },
@@ -3465,13 +3465,13 @@ pub const Machine = struct {
             const f = next orelse break;
             const rel = archiveName(f.name) orelse return m.fail("--archive {s}: {s}: a name outside the tree", .{ path, f.name });
             if (rel.len == 0) continue;
-            const dst = std.fmt.bufPrintZ(&pbuf, "{s}/{s}", .{ root, rel }) catch return m.fail("--archive {s}: {s}: name too long", .{ path, f.name });
+            const dst = std.fmt.bufPrintSentinel(&pbuf, "{s}/{s}", .{ root, rel }, 0) catch return m.fail("--archive {s}: {s}: name too long", .{ path, f.name });
             const parent = if (f.kind == .directory) rel else std.fs.path.dirname(rel) orelse "";
             mkdirUnder(root, parent) catch return m.fail("--archive {s}: {s}: {s}", .{ path, f.name, kern.errstr() });
             switch (f.kind) {
                 .directory => {},
                 .sym_link => {
-                    const target = std.fmt.bufPrintZ(&tbuf, "{s}", .{f.link_name}) catch return m.fail("--archive {s}: {s}: link too long", .{ path, f.name });
+                    const target = std.fmt.bufPrintSentinel(&tbuf, "{s}", .{f.link_name}, 0) catch return m.fail("--archive {s}: {s}: link too long", .{ path, f.name });
                     kern.symlink(dst, target) catch return m.fail("--archive {s}: {s}: {s}", .{ path, f.name, kern.errstr() });
                 },
                 .file => {
@@ -3526,7 +3526,7 @@ pub const Machine = struct {
             const is_dir = mode & 0o170000 == 0o040000;
             mkdirUnder(root, if (is_dir) rel else std.fs.path.dirname(rel) orelse "") catch return m.fail("--archive {s}: {s}: {s}", .{ path, name, kern.errstr() });
             if (is_dir) continue;
-            const dst = std.fmt.bufPrintZ(&pbuf, "{s}/{s}", .{ root, rel }) catch return m.fail("--archive {s}: {s}: name too long", .{ path, name });
+            const dst = std.fmt.bufPrintSentinel(&pbuf, "{s}/{s}", .{ root, rel }, 0) catch return m.fail("--archive {s}: {s}: name too long", .{ path, name });
             const fd = kern.create(dst, kern.OWRITE, (mode & 0o777) | 0o200) catch return m.fail("--archive {s}: {s}: {s}", .{ path, name, kern.errstr() });
             defer kern.close(fd) catch {};
             var w: FdWriter = .{ .fd = fd, .w = .{ .buffer = &.{}, .vtable = &FdWriter.vtable } };
@@ -3542,7 +3542,7 @@ pub const Machine = struct {
         var i: usize = 0;
         while (i < rel.len) : (i += 1) {
             if (i + 1 < rel.len and rel[i + 1] != '/') continue;
-            const p = std.fmt.bufPrintZ(&buf, "{s}/{s}", .{ root, rel[0 .. i + 1] }) catch return error.Kern;
+            const p = std.fmt.bufPrintSentinel(&buf, "{s}/{s}", .{ root, rel[0 .. i + 1] }, 0) catch return error.Kern;
             if (kern.stat(p, &st)) |_| continue else |_| {}
             const fd = try kern.create(p, kern.OREAD, dmdir | 0o775);
             kern.close(fd) catch {};
@@ -3649,7 +3649,7 @@ pub const Machine = struct {
         }
         if (std.mem.startsWith(u8, b.to, "/srv/")) {
             const name = b.to["/srv/".len..];
-            const srv = kern.create(try std.fmt.bufPrintZ(&buf, "#s/{s}", .{name}), kern.OWRITE, 0o666) catch return m.fail("{s} {f}: post {s}: {s}", .{ what, shown, b.to, kern.errstr() });
+            const srv = kern.create(try std.fmt.bufPrintSentinel(&buf, "#s/{s}", .{name}, 0), kern.OWRITE, 0o666) catch return m.fail("{s} {f}: post {s}: {s}", .{ what, shown, b.to, kern.errstr() });
             defer kern.close(srv) catch {};
             var nb: [16]u8 = undefined;
             _ = kern.pwrite(srv, std.fmt.bufPrint(&nb, "{d}", .{fd}) catch unreachable, 0) catch return m.fail("{s} {f}: post {s}: {s}", .{ what, shown, b.to, kern.errstr() });
@@ -3663,7 +3663,7 @@ pub const Machine = struct {
         saved[own.len] = 0;
         // `user=`, or else the server's 9P-User for us.
         const as: ?[]const u8 = r.user orelse if (ident) |id| id.user else null;
-        if (as) |u| kern.setProcUser(try std.fmt.bufPrintZ(&buf2, "{s}", .{u}));
+        if (as) |u| kern.setProcUser(try std.fmt.bufPrintSentinel(&buf2, "{s}", .{u}, 0));
         defer if (as != null) kern.setProcUser(saved[0..own.len :0]);
         defer if (m.opts.index != .none) {
             if (first_root) {
@@ -3671,27 +3671,27 @@ pub const Machine = struct {
             } else if (num) |n| m.indexNotes(n, b.to);
         };
         var specb: [256]u8 = undefined;
-        const spec = std.fmt.bufPrintZ(&specb, "{s}", .{b.spec}) catch return m.fail("{s} {f}: spec too long", .{ what, shown });
+        const spec = std.fmt.bufPrintSentinel(&specb, "{s}", .{b.spec}, 0) catch return m.fail("{s} {f}: spec too long", .{ what, shown });
         if (b.upper) {
             // The server is the layer (design/upper-layers.md).
             const up: kern.UnionFlags = .{ .up = true, .create = true };
             if (stackName(b.to)) |sn| {
                 var at: [std.fs.max_path_bytes + 1]u8 = undefined;
-                _ = kern.unionMount(sn.name, fd, spec, std.fmt.bufPrintZ(&at, "{s}", .{sn.at}) catch unreachable, up) catch
+                _ = kern.unionMount(sn.name, fd, spec, std.fmt.bufPrintSentinel(&at, "{s}", .{sn.at}, 0) catch unreachable, up) catch
                     return m.fail("{s} {f}: {s}", .{ what, shown, kern.errstr() });
                 return;
             }
-            const to = try std.fmt.bufPrintZ(&buf, "{s}", .{b.to});
+            const to = try std.fmt.bufPrintSentinel(&buf, "{s}", .{b.to}, 0);
             const id = kern.unionMount("", fd, spec, "", up) catch return m.fail("{s} {f}: {s}", .{ what, shown, kern.errstr() });
             var unum: [16]u8 = undefined;
-            upperOver(id, to, kern.unionAdd, .{ std.fmt.bufPrintZ(&unum, "{d}", .{id}) catch unreachable, to, "", kern.UnionFlags{ .after = true } }) catch
+            upperOver(id, to, kern.unionAdd, .{ std.fmt.bufPrintSentinel(&unum, "{d}", .{id}, 0) catch unreachable, to, "", kern.UnionFlags{ .after = true } }) catch
                 return m.fail("{s} {f}: {s}", .{ what, shown, kern.errstr() });
             return;
         }
         if (b.recursive) {
             if (stackName(b.to)) |sn| {
                 var at: [std.fs.max_path_bytes + 1]u8 = undefined;
-                _ = kern.unionMount(sn.name, fd, spec, std.fmt.bufPrintZ(&at, "{s}", .{sn.at}) catch unreachable, .{ .after = b.flag == .after, .create = b.create }) catch
+                _ = kern.unionMount(sn.name, fd, spec, std.fmt.bufPrintSentinel(&at, "{s}", .{sn.at}, 0) catch unreachable, .{ .after = b.flag == .after, .create = b.create }) catch
                     return m.fail("{s} {f}: {s}", .{ what, shown, kern.errstr() });
                 return;
             }
@@ -3702,7 +3702,7 @@ pub const Machine = struct {
             .after => kern.MAFTER,
         };
         if (b.create) flag |= kern.MCREATE;
-        _ = kern.mount(fd, -1, try std.fmt.bufPrintZ(&buf, "{s}", .{b.to}), flag, spec) catch return m.fail("{s} {f}: {s}", .{ what, shown, kern.errstr() });
+        _ = kern.mount(fd, -1, try std.fmt.bufPrintSentinel(&buf, "{s}", .{b.to}, 0), flag, spec) catch return m.fail("{s} {f}: {s}", .{ what, shown, kern.errstr() });
     }
 
     /// Connects to a 9P server and returns an fd on a `#ℓ` conversation's
@@ -3749,7 +3749,7 @@ pub const Machine = struct {
                 const path = r.addr["unix!".len..];
                 if (std.mem.indexOfScalar(u8, path, ',') == null)
                     return dotlConv("dial {s}", r.addr) catch return m.fail(what ++ " {s}: {s}", .{ r.addr, kern.errstr() });
-                const conn = kern.unixDial(std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return m.fail(what ++ " {s}: name too long", .{r.addr})) catch
+                const conn = kern.unixDial(std.fmt.bufPrintSentinel(&buf, "{s}", .{path}, 0) catch return m.fail(what ++ " {s}: name too long", .{r.addr})) catch
                     return m.fail(what ++ " {s}: {s}", .{ r.addr, kern.errstr() });
                 defer kern.close(conn) catch {};
                 return dotlConv("fd {d}", conn) catch return m.fail(what ++ " {s}: {s}", .{ r.addr, kern.errstr() });
@@ -3817,7 +3817,7 @@ pub const Machine = struct {
     fn makeHome() void {
         var buf: [128]u8 = undefined;
         var st: [512]u8 = undefined;
-        const home = std.fmt.bufPrintZ(&buf, "/usr/{s}", .{kern.user()}) catch return;
+        const home = std.fmt.bufPrintSentinel(&buf, "/usr/{s}", .{kern.user()}, 0) catch return;
         if (kern.stat(home, &st)) |_| return else |_| {}
         for ([_][:0]const u8{ "/usr", home }) |dir| {
             if (kern.stat(dir, &st)) |_| continue else |_| {}
@@ -4018,7 +4018,7 @@ pub const Machine = struct {
         var cmd: [32]u8 = undefined;
         _ = try kern.pwrite(clone, std.fmt.bufPrint(&cmd, "fd {d}", .{conn}) catch unreachable, 0);
         var path: [64]u8 = undefined;
-        return kern.open(std.fmt.bufPrintZ(&path, dev ++ "{s}/data", .{n}) catch unreachable, kern.ORDWR);
+        return kern.open(std.fmt.bufPrintSentinel(&path, dev ++ "{s}/data", .{n}, 0) catch unreachable, kern.ORDWR);
     }
 
     /// A namespace-file mount's connection `conn` under `#ι`, using its
@@ -4050,7 +4050,7 @@ pub const Machine = struct {
         var cmd: [std.fs.max_path_bytes + 16]u8 = undefined;
         _ = try kern.pwrite(clone, std.fmt.bufPrint(&cmd, fmt, .{arg}) catch return error.Kern, 0);
         var path: [64]u8 = undefined;
-        return kern.open(std.fmt.bufPrintZ(&path, dev ++ "{s}/data", .{n}) catch unreachable, kern.ORDWR);
+        return kern.open(std.fmt.bufPrintSentinel(&path, dev ++ "{s}/data", .{n}, 0) catch unreachable, kern.ORDWR);
     }
 
     /// The first 9P member of the root stack, if it has one: the root's
@@ -4095,7 +4095,7 @@ pub const Machine = struct {
             _ = try kern.pwrite(clone, std.fmt.bufPrint(&cmd, "redial {s}", .{url}) catch return error.Kern, 0);
         _ = try kern.pwrite(clone, std.fmt.bufPrint(&cmd, "fd {d}", .{conn}) catch return error.Kern, 0);
         var path: [64]u8 = undefined;
-        return kern.open(std.fmt.bufPrintZ(&path, dev ++ "{s}/data", .{n}) catch unreachable, kern.ORDWR);
+        return kern.open(std.fmt.bufPrintSentinel(&path, dev ++ "{s}/data", .{n}, 0) catch unreachable, kern.ORDWR);
     }
 
     /// Connects a host-made WebSocket stream to `url` (`what` names it in
@@ -4132,7 +4132,7 @@ pub const Machine = struct {
             try kern.bind(from, to, flag);
             return null;
         };
-        return try overlay(std.fmt.bufPrintZ(buf, "#U{s}{s}", .{ if (contained) "!c" else "", l }) catch return error.Kern, to, flag);
+        return try overlay(std.fmt.bufPrintSentinel(buf, "#U{s}{s}", .{ if (contained) "!c" else "", l }, 0) catch return error.Kern, to, flag);
     }
 
     /// Binds a fresh `#O` overlay over the directory `lower` at `to`, and
@@ -4140,7 +4140,7 @@ pub const Machine = struct {
     fn overlay(lower: [:0]const u8, to: [:0]const u8, flag: c_int) kern.Error!u32 {
         const id = try kern.overlayNew(lower);
         var spec: [16]u8 = undefined;
-        kern.bind(std.fmt.bufPrintZ(&spec, "#O{d}", .{id}) catch unreachable, to, flag) catch |e| {
+        kern.bind(std.fmt.bufPrintSentinel(&spec, "#O{d}", .{id}, 0) catch unreachable, to, flag) catch |e| {
             kern.overlayDrop(id);
             return e;
         };
@@ -4161,18 +4161,18 @@ pub const Machine = struct {
         }
         var num: [16]u8 = undefined;
         if (kern.unionOf(to)) |id| {
-            _ = try kern.unionAdd(std.fmt.bufPrintZ(&num, "{d}", .{id}) catch unreachable, from, "", flags);
+            _ = try kern.unionAdd(std.fmt.bufPrintSentinel(&num, "{d}", .{id}, 0) catch unreachable, from, "", flags);
             return;
         }
         const id = try kern.unionAdd("", to, "", .{ .after = true });
-        _ = kern.unionAdd(std.fmt.bufPrintZ(&num, "{d}", .{id}) catch unreachable, from, "", flags) catch |e| {
+        _ = kern.unionAdd(std.fmt.bufPrintSentinel(&num, "{d}", .{id}, 0) catch unreachable, from, "", flags) catch |e| {
             kern.overlayDrop(id);
             return e;
         };
         // Creatable: the union itself refuses a create without a member
         // that takes them.
         var spec: [16]u8 = undefined;
-        kern.bind(std.fmt.bufPrintZ(&spec, "#O{d}", .{id}) catch unreachable, to, kern.MREPL | kern.MCREATE) catch |e| {
+        kern.bind(std.fmt.bufPrintSentinel(&spec, "#O{d}", .{id}, 0) catch unreachable, to, kern.MREPL | kern.MCREATE) catch |e| {
             kern.overlayDrop(id);
             return e;
         };
@@ -4185,7 +4185,7 @@ pub const Machine = struct {
         const up: kern.UnionFlags = .{ .up = true, .create = true };
         if (stackName(to)) |sn| {
             var at: [std.fs.max_path_bytes + 1]u8 = undefined;
-            _ = try kern.unionAdd(sn.name, from, std.fmt.bufPrintZ(&at, "{s}", .{sn.at}) catch return error.Kern, up);
+            _ = try kern.unionAdd(sn.name, from, std.fmt.bufPrintSentinel(&at, "{s}", .{sn.at}, 0) catch return error.Kern, up);
             return;
         }
         if (std.mem.startsWith(u8, to, "#O") and to.len > 2 and std.mem.indexOfScalar(u8, to, '/') == null) {
@@ -4194,7 +4194,7 @@ pub const Machine = struct {
         }
         const id = try kern.unionAdd("", to, "", .{ .after = true });
         var num: [16]u8 = undefined;
-        try upperOver(id, to, kern.unionAdd, .{ std.fmt.bufPrintZ(&num, "{d}", .{id}) catch unreachable, from, "", up });
+        try upperOver(id, to, kern.unionAdd, .{ std.fmt.bufPrintSentinel(&num, "{d}", .{id}, 0) catch unreachable, from, "", up });
     }
 
     /// Adds the layer to the fresh union `id` over `to`, with `add` and its
@@ -4206,7 +4206,7 @@ pub const Machine = struct {
             return e;
         };
         var spec: [16]u8 = undefined;
-        kern.bind(std.fmt.bufPrintZ(&spec, "#O{d}", .{id}) catch unreachable, to, kern.MREPL | kern.MCREATE) catch |e| {
+        kern.bind(std.fmt.bufPrintSentinel(&spec, "#O{d}", .{id}, 0) catch unreachable, to, kern.MREPL | kern.MCREATE) catch |e| {
             kern.overlayDrop(id);
             return e;
         };
@@ -4263,7 +4263,7 @@ pub const Machine = struct {
                 const from = if (std.mem.eql(u8, b.from, "#O")) blk: {
                     const id = kern.overlayNew(null) catch return;
                     fresh = id;
-                    break :blk std.fmt.bufPrintZ(&num, "#O{d}", .{id}) catch unreachable;
+                    break :blk std.fmt.bufPrintSentinel(&num, "#O{d}", .{id}, 0) catch unreachable;
                 } else try m.nsPath(arena, b.from, con_id);
                 bindUpper(from, try m.nsPath(arena, b.to, con_id)) catch {
                     if (fresh) |id| kern.overlayDrop(id);
@@ -4327,12 +4327,12 @@ pub const Machine = struct {
                 var num: ?u32 = null;
                 const fd = m.indexMount(dfd, mt.file, mt.spec, &num);
                 defer kern.close(fd) catch {};
-                _ = kern.mount(fd, -1, try m.nsPath(arena, mt.to, con_id), mountFlag(mt.flag), try arena.dupeZ(u8, mt.spec)) catch return;
+                _ = kern.mount(fd, -1, try m.nsPath(arena, mt.to, con_id), mountFlag(mt.flag), try arena.dupeSentinel(u8, mt.spec, 0)) catch return;
                 if (num) |n| m.indexNotes(n, mt.to);
             } else {
                 const fd = kern.open(try m.nsPath(arena, mt.file, con_id), kern.ORDWR) catch return;
                 defer kern.close(fd) catch {};
-                _ = kern.mount(fd, -1, try m.nsPath(arena, mt.to, con_id), mountFlag(mt.flag), try arena.dupeZ(u8, mt.spec)) catch {};
+                _ = kern.mount(fd, -1, try m.nsPath(arena, mt.to, con_id), mountFlag(mt.flag), try arena.dupeSentinel(u8, mt.spec, 0)) catch {};
             },
             .unmount => |u| kern.unmount(if (u.from) |f| try m.nsPath(arena, f, con_id) else null, try m.nsPath(arena, u.to, con_id)) catch {},
             .cd => |d| {
@@ -4348,7 +4348,7 @@ pub const Machine = struct {
     /// filled in.
     fn nsPath(_: *Machine, arena: std.mem.Allocator, p: []const u8, con_id: u32) RunError![:0]const u8 {
         if (std.mem.indexOf(u8, p, "<id>")) |i| return std.fmt.allocPrintSentinel(arena, "{s}{d}{s}", .{ p[0..i], con_id, p[i + 4 ..] }, 0);
-        return arena.dupeZ(u8, p);
+        return arena.dupeSentinel(u8, p, 0);
     }
 
     fn mountFlag(f: newns.Flag) c_int {
@@ -4397,7 +4397,7 @@ pub const Machine = struct {
 
     fn putEnv(name: []const u8, value: []const u8) RunError!void {
         var buf: [kern.ERRMAX + 8]u8 = undefined;
-        const path = std.fmt.bufPrintZ(&buf, "/env/{s}", .{name}) catch return error.NamespaceFailed;
+        const path = std.fmt.bufPrintSentinel(&buf, "/env/{s}", .{name}, 0) catch return error.NamespaceFailed;
         const fd = kern.create(path, kern.OWRITE, 0o664) catch return;
         defer kern.close(fd) catch {};
         _ = kern.pwrite(fd, value, 0) catch {};

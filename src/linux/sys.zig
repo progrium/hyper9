@@ -730,13 +730,13 @@ pub const Process = struct {
     fn stringAlloc(p: *Process, va: u64, max: usize) Err![:0]u8 {
         var tmp: [4096]u8 = undefined;
         if (p.string(va, tmp[0..@min(tmp.len, max)])) |s| {
-            return p.gpa.dupeZ(u8, s) catch error.NoMem;
+            return p.gpa.dupeSentinel(u8, s, 0) catch error.NoMem;
         } else |e| if (e != error.NameTooLong or max <= tmp.len) return if (e == error.NameTooLong) error.TooBig else e;
         // A long one: read it into a buffer of the most it may be.
         const big = p.gpa.alloc(u8, max) catch return error.NoMem;
         defer p.gpa.free(big);
         const s = p.string(va, big) catch |e| return if (e == error.NameTooLong) error.TooBig else e;
-        return p.gpa.dupeZ(u8, s) catch error.NoMem;
+        return p.gpa.dupeSentinel(u8, s, 0) catch error.NoMem;
     }
 };
 
@@ -1852,13 +1852,13 @@ fn openAt(p: *Process, dirfd: i32, path_va: u64, flags: u32, mode: u32) Err!i64 
     // otherwise (design/epoch-0/linux-pty.md).
     var tty_buf: [32]u8 = undefined;
     if (std.mem.eql(u8, path, "/dev/tty")) if (kc.ptyBySid(p.sid)) |n| {
-        path = std.fmt.bufPrintZ(&tty_buf, pty_dev ++ "/{d}", .{n}) catch unreachable;
+        path = std.fmt.bufPrintSentinel(&tty_buf, pty_dev ++ "/{d}", .{n}, 0) catch unreachable;
     };
     // /proc/self/fd/N is the file fd N has, which may be gone from its
     // directory or a pipe: it opens as fd N's dup (#d), as /dev/fd/N
     // does, not by walking its target's name (design/linux-symlinks.md).
     if (dirfd == AT_FDCWD or path[0] == '/') if (procFd(p, path)) |n| {
-        path = std.fmt.bufPrintZ(&tty_buf, "#d/{d}", .{n}) catch unreachable;
+        path = std.fmt.bufPrintSentinel(&tty_buf, "#d/{d}", .{n}, 0) catch unreachable;
     };
     var exe_buf: [256 + 1]u8 = undefined;
     if (dirfd == AT_FDCWD or path[0] == '/') if (procExe(p, path, &exe_buf)) |exe| {
@@ -1975,7 +1975,7 @@ fn memfdCreate(p: *Process, flags: u32) Err!i64 {
     const dirs = [_][]const u8{ "/dev/shm", "/tmp" };
     for (dirs) |d| {
         var b: [96]u8 = undefined;
-        const path = std.fmt.bufPrintZ(&b, "{s}/.memfd.{d}.{d}", .{ d, p.tgid(), memfd_seq.fetchAdd(1, .monotonic) }) catch unreachable;
+        const path = std.fmt.bufPrintSentinel(&b, "{s}/.memfd.{d}.{d}", .{ d, p.tgid(), memfd_seq.fetchAdd(1, .monotonic) }, 0) catch unreachable;
         const fd = kern.create(path, omode | OEXCL, 0o600) catch continue;
         kern.remove(path) catch {};
         p.fdClosed(fd);
@@ -2772,7 +2772,7 @@ fn kindOfDir(d: *const attr.Dir) attr.Kind {
 fn isListeningUnix(d: *const attr.Dir) bool {
     if (d.qid_type & 0x80 != 0 or d.length != 0) return false;
     var b: [80]u8 = undefined;
-    const z = std.fmt.bufPrintZ(&b, "#s/lx.{d}.{d}.{d}", .{ d.type, d.dev, d.qid_path }) catch return false;
+    const z = std.fmt.bufPrintSentinel(&b, "#s/lx.{d}.{d}.{d}", .{ d.type, d.dev, d.qid_path }, 0) catch return false;
     const fd = kern.open(z, kern.OREAD) catch return false;
     kern.close(fd) catch {};
     return true;
@@ -3019,7 +3019,7 @@ fn rename(p: *Process, olddir: i32, old_va: u64, newdir: i32, new_va: u64, flags
                 kern.fd2path(@intCast(@max(newdir, 0)), &db) catch return -E.BADF;
                 break :blk std.mem.sliceTo(&db, 0);
             };
-            new_full = std.fmt.bufPrintZ(&newbuf, "{s}/{s}", .{ d, new }) catch return -E.NAMETOOLONG;
+            new_full = std.fmt.bufPrintSentinel(&newbuf, "{s}/{s}", .{ d, new }, 0) catch return -E.NAMETOOLONG;
             new_abs = true;
         }
         const base: i32 = if (old_abs and new_abs) AT_FDCWD else if (!old_abs and new_abs) olddir else if (olddir == newdir) olddir else return -E.XDEV;
@@ -3666,7 +3666,7 @@ fn ptyPeer(p: *Process, st: kc.PtyState, flags: u32) Err!i64 {
     };
     if (flags & O_CLOEXEC != 0) omode |= OCEXEC;
     var b: [32]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&b, pty_dev ++ "/{d}", .{st.n}) catch unreachable;
+    const path = std.fmt.bufPrintSentinel(&b, pty_dev ++ "/{d}", .{st.n}, 0) catch unreachable;
     const fd = kern.open(path, omode) catch return kerr();
     p.fdClosed(fd);
     if (flags & O_NONBLOCK != 0) setFlags(p, fd, .{ .nonblock = true });
@@ -3712,7 +3712,7 @@ fn execve(p: *Process, dirfd: i32, path_va: u64, argv_va: u64, envp_va: u64, fla
         const d = std.mem.sliceTo(&pathbuf, 0);
         break :blk std.fmt.bufPrint(&p.name2_buf, "{s}/{s}", .{ d, raw }) catch return ret(-E.NAMETOOLONG);
     } else raw;
-    const owned = p.gpa.dupeZ(u8, path) catch return error.NoMem;
+    const owned = p.gpa.dupeSentinel(u8, path, 0) catch return error.NoMem;
     errdefer p.gpa.free(owned);
     const argv = try strings(p, argv_va);
     errdefer freeStrings(p.gpa, argv);
@@ -5008,8 +5008,8 @@ fn protoName(conv: u32) []const u8 {
 /// Opens one of a conversation's files.
 fn convOpen(conv: u32, file: []const u8, mode: c_int) kern.Error!u31 {
     var b: [64]u8 = undefined;
-    if (conv & conv_remote != 0) return open9(std.fmt.bufPrintZ(&b, "/net/{s}/{d}/{s}", .{ protoName(conv), conv & 0xfff, file }) catch unreachable, mode);
-    const path = std.fmt.bufPrintZ(&b, "#I/{s}/{d}/{s}", .{ protoName(conv), conv & 0xfff, file }) catch unreachable;
+    if (conv & conv_remote != 0) return open9(std.fmt.bufPrintSentinel(&b, "/net/{s}/{d}/{s}", .{ protoName(conv), conv & 0xfff, file }, 0) catch unreachable, mode);
+    const path = std.fmt.bufPrintSentinel(&b, "#I/{s}/{d}/{s}", .{ protoName(conv), conv & 0xfff, file }, 0) catch unreachable;
     return kern.open(path, mode);
 }
 
@@ -5202,7 +5202,7 @@ fn writeSockaddr(p: *Process, va: u64, lenp: u64, family: u16, a: kc.NetAddr) Er
 
 fn ctlMsg(fd: i32, comptime fmt: []const u8, args: anytype) i64 {
     var b: [160]u8 = undefined;
-    const msg = std.fmt.bufPrintZ(&b, fmt, args) catch return -E.INVAL;
+    const msg = std.fmt.bufPrintSentinel(&b, fmt, args, 0) catch return -E.INVAL;
     kc.sockCtl(fd, msg) catch return kerr();
     return 0;
 }
@@ -5302,7 +5302,7 @@ fn acceptCall(p: *Process, fd: i32, addr: u64, lenp: u64, flags: u32) Err!i64 {
         if (w < 0) return w;
     }
     var b: [64]u8 = undefined;
-    const listen = std.fmt.bufPrintZ(&b, "#I/{s}/{d}/listen", .{ protoName(conv), conv & 0xfff }) catch unreachable;
+    const listen = std.fmt.bufPrintSentinel(&b, "#I/{s}/{d}/listen", .{ protoName(conv), conv & 0xfff }, 0) catch unreachable;
     // A mounted conversation's call was taken by the kernel's listener,
     // which made it ready; devip's is opened here.
     const opened = if (conv & conv_remote != 0) blk: {
@@ -5858,7 +5858,7 @@ fn scmConsumed(p: *Process, key: u64, n: u64) void {
 }
 
 fn scmPost(base: u32, i: u32, out: *[32]u8) [:0]const u8 {
-    return std.fmt.bufPrintZ(out, "#s/lxf.{d}", .{base +% i}) catch unreachable;
+    return std.fmt.bufPrintSentinel(out, "#s/lxf.{d}", .{base +% i}, 0) catch unreachable;
 }
 
 /// Closes the fds of every batch waiting for `key`'s reader.
@@ -6382,7 +6382,7 @@ fn unixKey(path: []const u8, out: []u8, create: bool) union(enum) { key: []const
         return .{ .key = w.buffered() };
     }
     var zb: [112]u8 = undefined;
-    const z = std.fmt.bufPrintZ(&zb, "{s}", .{path}) catch return .{ .err = -E.NAMETOOLONG };
+    const z = std.fmt.bufPrintSentinel(&zb, "{s}", .{path}, 0) catch return .{ .err = -E.NAMETOOLONG };
     const OEXCL = 0x1000;
     const fd = (if (create) kern.create(z, kern.OREAD | OEXCL, 0o777) else kern.open(z, kern.OREAD)) catch {
         const e = kerr();
@@ -6396,7 +6396,7 @@ fn unixKey(path: []const u8, out: []u8, create: bool) union(enum) { key: []const
 /// Posts fd in #s as `name`.
 fn srvPost(name: []const u8, fd: u31) i64 {
     var b: [64]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&b, "#s/{s}", .{name}) catch return -E.NAMETOOLONG;
+    const path = std.fmt.bufPrintSentinel(&b, "#s/{s}", .{name}, 0) catch return -E.NAMETOOLONG;
     const sfd = kern.create(path, kern.OWRITE, 0o600) catch return kerr();
     defer kern.close(sfd) catch {};
     var nb: [16]u8 = undefined;
@@ -6407,7 +6407,7 @@ fn srvPost(name: []const u8, fd: u31) i64 {
 
 fn srvRemove(name: []const u8) void {
     var b: [64]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&b, "#s/{s}", .{name}) catch return;
+    const path = std.fmt.bufPrintSentinel(&b, "#s/{s}", .{name}, 0) catch return;
     kern.remove(path) catch {};
 }
 
@@ -6427,7 +6427,7 @@ fn unixBind(p: *Process, u: *USock, va: u64, len: u64) Err!i64 {
         // An abstract name is held from the bind by an empty post,
         // which devsrv's create keeps unique; the listen fills it.
         var sb: [64]u8 = undefined;
-        const sfd = kern.create(std.fmt.bufPrintZ(&sb, "#s/{s}", .{key}) catch return -E.NAMETOOLONG, kern.OWRITE, 0o600) catch return -E.ADDRINUSE;
+        const sfd = kern.create(std.fmt.bufPrintSentinel(&sb, "#s/{s}", .{key}, 0) catch return -E.NAMETOOLONG, kern.OWRITE, 0o600) catch return -E.ADDRINUSE;
         kern.close(sfd) catch {};
     }
     @memcpy(u.key[0..key.len], key);
@@ -6472,7 +6472,7 @@ fn unixConnect(p: *Process, fd: i32, u: *USock, va: u64, len: u64) Err!i64 {
         .err => |e| return e,
     };
     var sb: [64]u8 = undefined;
-    const lf = kern.open(std.fmt.bufPrintZ(&sb, "#s/{s}", .{key}) catch return -E.NAMETOOLONG, kern.OWRITE) catch return -E.CONNREFUSED;
+    const lf = kern.open(std.fmt.bufPrintSentinel(&sb, "#s/{s}", .{key}, 0) catch return -E.NAMETOOLONG, kern.OWRITE) catch return -E.CONNREFUSED;
     defer kern.close(lf) catch {};
     const c = kern.pipe() catch return kerr();
     var nb: [32]u8 = undefined;
@@ -6516,7 +6516,7 @@ fn unixAccept(p: *Process, fd: i32, u: *USock, addr: u64, lenp: u64, flags: u32)
     }
     const name = nb[0 .. std.mem.indexOfScalar(u8, &nb, 0) orelse nb.len];
     var sb: [80]u8 = undefined;
-    const nfd = kern.open(std.fmt.bufPrintZ(&sb, "#s/{s}", .{name}) catch return -E.IO, kern.ORDWR | if (flags & SOCK_CLOEXEC != 0) @as(c_int, OCEXEC) else 0) catch return -E.CONNABORTED;
+    const nfd = kern.open(std.fmt.bufPrintSentinel(&sb, "#s/{s}", .{name}, 0) catch return -E.IO, kern.ORDWR | if (flags & SOCK_CLOEXEC != 0) @as(c_int, OCEXEC) else 0) catch return -E.CONNABORTED;
     srvRemove(name);
     var nu: USock = .{ .stype = u.stype, .state = .connected };
     @memcpy(nu.path[0..u.path_len], u.path[0..u.path_len]);

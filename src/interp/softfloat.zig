@@ -658,7 +658,7 @@ pub fn toFixed(comptime T: type, comptime I: type, env: *Env, a: T, rnd: Roundin
         return null;
     }
     if (r.inexact) env.flags |= PE;
-    const U = std.meta.Int(.unsigned, info.bits);
+    const U = @Int(.unsigned, info.bits);
     const m: U = @intCast(r.m);
     return @bitCast(if (x.sign) 0 -% m else m);
 }

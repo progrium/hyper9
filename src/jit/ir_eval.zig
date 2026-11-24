@@ -328,7 +328,7 @@ fn toInt(comptime T: type, comptime I: type, e: *sf.Env, x: ir.ExtAux, a: T) I {
 }
 
 fn fromInt(comptime T: type, comptime I: type, e: *sf.Env, v: u64, imm: u32) T {
-    const U = std.meta.Int(.unsigned, @bitSizeOf(I));
+    const U = @Int(.unsigned, @bitSizeOf(I));
     return sf.fromFixed(T, I, e, @bitCast(@as(U, @truncate(v))), imm);
 }
 

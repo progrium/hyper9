@@ -169,7 +169,7 @@ falls back to the emulator.
 
 #### Building from source
 
-On a Mac with Zig 0.16 and Xcode installed:
+On a Mac with Zig 0.17 and Xcode installed:
 
 ```sh
 host$ git clone https://github.com/progrium/hyper9 && cd hyper9

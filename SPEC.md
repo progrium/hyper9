@@ -39,7 +39,7 @@ h9 is a small Zig library and CLI that runs native 9front executables directly o
 | Plan 9 flavour | 9front only, at a pinned release | One syscall table and one a.out format per architecture |
 | Root filesystem | Mount flags stacked into `#Oroot` behind the kernel's `#/`: host trees, 9P servers over TCP, a unix socket, or a WebSocket, static dotfs trees over HTTP, archives, and the built-in root | A 9P root is mounted through devmnt ([ninep-roots](design/epoch-0/ninep-roots.md), [websocket-9p](design/epoch-0/websocket-9p.md), [mounts](design/mounts.md)); disk images were declined ([image-roots](design/epoch-0/image-roots.md)) |
 | Toolchain inside | The 9front compilers (7c/6c, 7l/6l, mk) must run | It's a goal ([self-host](design/epoch-0/self-host.md)), and a source of test binaries |
-| Language | Zig 0.16.x (`minimum_zig_version` in `build.zig.zon`) | Change versions only when we hit a blocking bug. drawterm's C is compiled with `zig cc`. |
+| Language | Zig 0.17.x (`minimum_zig_version` in `build.zig.zon`) | Change versions deliberately, in a PR of their own, after building and testing on every host. drawterm's C is compiled with `zig cc`. |
 | Terminal | Text mode on the host TTY; with `--gfx`, one host window drawn by drawterm's GUI backends ([gfx](design/epoch-0/gfx.md)) | consctl `rawon`; the interrupt key posts an `interrupt` note |
 | Guest exit mechanism | MMIO doorbell (`OUT` on x86) | Works the same on all three hypervisors |
 | Emulator | A user-mode emulator backend on h9's own CPUs, ha64, h86, and hx64 ([hcpu](design/hcpu.md)), built into every `h9` | For development and CI on hosts and VMs without a usable hypervisor |

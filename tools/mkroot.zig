@@ -831,7 +831,7 @@ test toBuild {
 }
 
 test mbrPartition {
-    var mbr = [_]u8{0} ** 512;
+    var mbr = @as([512]u8, @splat(0));
     mbr[446 + 16 + 4] = 0x0B;
     std.mem.writeInt(u32, mbr[446 + 16 + 8 ..][0..4], 2048, .little);
     std.mem.writeInt(u32, mbr[446 + 16 + 12 ..][0..4], 4096, .little);
@@ -843,7 +843,7 @@ test fat16Read {
     // A tiny FAT16 volume: 512-byte sectors, 1 sector per cluster, 1
     // reserved sector, 1 FAT of 1 sector, 16 root entries (1 sector).
     const gpa = std.testing.allocator;
-    var img = [_]u8{0} ** (512 * 6);
+    var img = @as([(512 * 6)]u8, @splat(0));
     std.mem.writeInt(u16, img[11..13], 512, .little);
     img[13] = 1;
     std.mem.writeInt(u16, img[14..16], 1, .little);
