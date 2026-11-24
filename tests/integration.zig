@@ -6602,19 +6602,26 @@ test "a Linux program killed by a signal exits 128+N, and a handler can catch a 
     try std.testing.expectEqual(4, caught.code);
 }
 
-test "an instruction an x86 CPU doesn't have is SIGILL for a Linux program, not SIGSEGV [linux-personality]" {
+test "an instruction the CPU doesn't have is SIGILL for a Linux program, not SIGSEGV [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
-    if (std.mem.eql(u8, le.arch, "arm64")) return error.SkipZigTest;
+    const arm64 = std.mem.eql(u8, le.arch, "arm64");
     const ill = try runLinux(&le, false, &.{ "/mnt/term/cwd/die", "ill" });
     defer ill.deinit();
     errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ ill.out, ill.err });
     try std.testing.expectEqual(132, ill.code);
     const caught = try runLinux(&le, false, &.{ "/mnt/term/cwd/die", "illhandled" });
     defer caught.deinit();
-    // ILL_ILLOPN, as Linux's do_error_trap gives #UD.
-    try std.testing.expectEqualStrings("caught SIGILL code 2\n", caught.out);
+    // ILL_ILLOPN, as Linux's do_error_trap gives #UD; ILL_ILLOPC on
+    // arm64, as its do_undefinstr does.
+    try std.testing.expectEqualStrings(if (arm64) "caught SIGILL code 1\n" else "caught SIGILL code 2\n", caught.out);
     try std.testing.expectEqual(5, caught.code);
+    if (!arm64) return;
+    // An SVE instruction, which h9 doesn't enable, as OpenSSL probes for it.
+    const sve = try runLinux(&le, false, &.{ "/mnt/term/cwd/die", "sve" });
+    defer sve.deinit();
+    try std.testing.expectEqualStrings("caught SIGILL code 1\n", sve.out);
+    try std.testing.expectEqual(5, sve.code);
 }
 
 test "rt_sigreturn can't raise a Linux program's privilege [linux-personality]" {
