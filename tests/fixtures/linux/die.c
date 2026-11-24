@@ -1,7 +1,9 @@
 /* Dies the way its argument says: "term" by SIGTERM to itself, "segv" by a
  * fault, "handled" catches the fault in a SIGSEGV handler and exits 4.
- * On x86, "ill" runs UD2, an instruction no CPU has, which is SIGILL, and
- * "illhandled" catches it in a SIGILL handler and exits 5. */
+ * "ill" runs an instruction no CPU has (UD2 on x86, UDF on arm64), which
+ * is SIGILL, and "illhandled" catches it in a SIGILL handler and exits 5.
+ * On arm64, "sve" runs an SVE instruction under a SIGILL handler, as
+ * OpenSSL probes for SVE, and exits 5 when it's SIGILL. */
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,6 +27,14 @@ static void onill(int s, siginfo_t *si, void *uc) {
 static void ud2(void) {
 #if defined(__x86_64__) || defined(__i386__)
 	__asm__ volatile("ud2");
+#elif defined(__aarch64__)
+	__asm__ volatile(".inst 0x00000000"); /* udf #0 */
+#endif
+}
+
+static void sve(void) {
+#if defined(__aarch64__)
+	__asm__ volatile(".inst 0x04a03000"); /* eor z0.d, z0.d, z0.d */
 #endif
 }
 
@@ -49,6 +59,12 @@ int main(int argc, char **argv) {
 		sa.sa_flags = SA_SIGINFO;
 		sigaction(SIGILL, &sa, 0);
 		ud2();
+	} else if (strcmp(how, "sve") == 0) {
+		struct sigaction sa = {0};
+		sa.sa_sigaction = onill;
+		sa.sa_flags = SA_SIGINFO;
+		sigaction(SIGILL, &sa, 0);
+		sve();
 	}
 	return 1;
 }

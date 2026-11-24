@@ -58,6 +58,7 @@ pub const SEGV_ACCERR: i32 = 2;
 /// mapping's page past the file's end).
 pub const BUS_ADRERR: i32 = 2;
 pub const BUS_ADRALN: i32 = 1;
+pub const ILL_ILLOPC: i32 = 1;
 pub const ILL_ILLOPN: i32 = 2;
 pub const FPE_INTDIV: i32 = 1;
 pub const CLD_EXITED: i32 = 1;
@@ -211,7 +212,7 @@ pub fn noteSignal(msg: []const u8) ?NoteSignal {
 /// sent SIGSEGV, so a program that probes for an instruction with a SIGILL
 /// handler, or a binary built for a newer CPU than the emulator's, read as
 /// a crash with nothing to say why.
-pub fn x86Exception(vector: u64) ?struct { signo: u32, code: i32 } {
+pub fn x86Exception(vector: u64) ?Exception {
     return switch (vector) {
         0 => .{ .signo = SIGFPE, .code = FPE_INTDIV }, // #DE
         6 => .{ .signo = SIGILL, .code = ILL_ILLOPN }, // #UD
@@ -219,6 +220,25 @@ pub fn x86Exception(vector: u64) ?struct { signo: u32, code: i32 } {
         17 => .{ .signo = SIGBUS, .code = BUS_ADRALN }, // #AC
         14 => null, // #PF goes through the address space
         else => if (vector < 32) .{ .signo = SIGSEGV, .code = SI_KERNEL } else null,
+    };
+}
+
+pub const Exception = struct { signo: u32, code: i32 };
+
+/// The signal Linux sends for an arm64 exception at the PC that isn't an
+/// abort (arch/arm64/kernel/traps.c and fpsimd.c), by the syndrome's
+/// exception class: an instruction the CPU doesn't have or doesn't let
+/// EL0 run (EC 0x00, an MSR or MRS other than the ID reads emulated
+/// before this, an illegal execution state), or an SVE or SME one, which
+/// h9 doesn't enable or advertise in AT_HWCAP, is SIGILL; a misaligned PC
+/// or SP is SIGBUS. OpenSSL, inside rustup-init and much else, probes for
+/// SVE by running an SVE instruction under a SIGILL handler, and read
+/// the SIGSEGV this used to be as a crash.
+pub fn a64Exception(esr: u64) ?Exception {
+    return switch (@as(u6, @truncate(esr >> 26))) {
+        0x00, 0x0e, 0x18, 0x19, 0x1d => .{ .signo = SIGILL, .code = ILL_ILLOPC },
+        0x22, 0x26 => .{ .signo = SIGBUS, .code = BUS_ADRALN },
+        else => null,
     };
 }
 
@@ -624,6 +644,14 @@ test "x86 exceptions map to Linux's signals" {
     try std.testing.expectEqual(SIGBUS, x86Exception(17).?.signo);
     try std.testing.expect(x86Exception(14) == null);
     try std.testing.expect(x86Exception(64) == null);
+}
+
+test "arm64 exceptions map to Linux's signals" {
+    try std.testing.expectEqual(SIGILL, a64Exception(0x02000000).?.signo); // unknown
+    try std.testing.expectEqual(SIGILL, a64Exception(0x66000000).?.signo); // SVE
+    try std.testing.expectEqual(SIGBUS, a64Exception(0x8a000000).?.signo); // PC alignment
+    try std.testing.expect(a64Exception(0x82000007) == null); // instruction abort
+    try std.testing.expect(a64Exception(0x56000000) == null); // SVC
 }
 
 test "note signals" {
