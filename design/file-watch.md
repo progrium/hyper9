@@ -13,7 +13,7 @@ branch: []
 
 ## Abstract
 
-h9 has no way for a guest to learn that a file changed, so every watcher in it polls. The Linux ABI lists `inotify_init`, `inotify_init1`, `inotify_add_watch`, and `inotify_rm_watch` in its syscall table and implements none of them, so .NET, Node's `fs.watch`, dev servers, and editors either poll or fail to start. This proposal adds one change journal to the kernel, fed by three sources: the changes the machine's own processes make, on any device; changes made on the host to a `--dir` tree, found through the host's own API (inotify on Linux, FSEvents on macOS, `ReadDirectoryChangesW` on Windows) or, where that isn't available or isn't trusted, by polling; and changes on a 9P server that offers [dotfs](https://github.com/progrium/dotfs/blob/main/docs/9p-dotfs.md)'s `.fs/events`. Union and overlay instances pass their members' changes up through their own rules, so a change below an up layer or an in-memory overlay is reported only if the guest can see it. Plan 9 programs read the journal as dotfs event records from a new device, `#ν`, and a machine that serves its namespace serves it as `.fs/events`, so another h9 or a dotfs client can follow it. Linux programs get inotify on the same journal.
+h9 has no way for a guest to learn that a file changed, so every watcher in it polls. The Linux ABI lists `inotify_init`, `inotify_init1`, `inotify_add_watch`, and `inotify_rm_watch` in its syscall table and implements none of them, so .NET, Node's `fs.watch`, dev servers, and editors either poll or fail to start. This proposal adds one change journal to the kernel, fed by three sources: the changes the machine's own processes make, on any device; changes made on the host to a `--dir` tree, found through the host's own API (inotify on Linux, FSEvents on macOS, `ReadDirectoryChangesW` on Windows) or, where that isn't available or isn't trusted, by polling; and changes on a 9P server that offers [dotfs](https://github.com/progrium/dotfs/blob/main/docs/9p-dotfs.md)'s `.fs/events`. Union and overlay instances pass their members' changes up through their own rules, so a change below an up layer or an in-memory overlay is reported only if the guest can see it. Plan 9 programs read the journal as dotfs event records from a new device, `#ν`, and a machine that serves its namespace serves it as `.fs/events`, so another h9 or a dotfs client can follow it. Linux programs get inotify on the same journal. The work lands in three phases, each useful alone: the journal with the guest's own changes, `#ν`, and inotify; then the host and server sources, with unions passing changes up; then serving.
 
 ## Background
 
@@ -33,6 +33,18 @@ h9 has no way for a guest to learn that a file changed, so every watcher in it p
 - **Watching inside a machine.** One guest process reacting to another's writes, in any tree, including ones that exist only in memory.
 
 ## Proposal
+
+### Phases
+
+The proposal is one design, built in three phases. Each phase ships on its own, with its own Done criteria, and leaves nothing half made for the next.
+
+| Phase | Adds | Useful for |
+| --- | --- | --- |
+| 1: the journal | The journal, Source 1 (the guest's own changes), `#ν` and `fsevents`, Linux inotify, and `--watch guest` and `none` | Programs that need inotify to start, such as ASP.NET, and one guest process watching another's writes, in any tree |
+| 2: outside changes | Source 2 (host trees, on each host's backend or polling), Source 3 (9P servers' `.fs/events`), unions passing up their members' changes, `--watch auto` and `poll`, `--watch-interval`, and `watch=` | Dev loops: a guest watcher seeing an edit made on the host |
+| 3: serving | `.fs/events` under `--serve` | Watching a machine from outside it |
+
+Until Phase 2, `--watch auto` means `guest`. Phase 3 doesn't need [kernel-serve](kernel-serve.md): with exportfs, `.fs` is a bind on the served root, and kernel-serve later hides it from listings.
 
 ### The journal
 
@@ -185,6 +197,10 @@ The four inotify calls are implemented on the journal, in the Linux ABI, with th
 
 **Rejected: kqueue on macOS.** `EVFILT_VNODE` needs an open descriptor per file watched and gives no names, so watching a tree costs a descriptor per file. FSEvents is recursive with one stream.
 
+**Phases, not three proposals.** The parts land at different speeds: Phase 1 is kernel and Linux ABI code that runs anywhere, Phase 2 is a watcher per host OS with testing on each, and Phase 3 is small. But the journal's shape (identity, not paths; hints, then a stat; three sources, two views) only makes sense with all of them in view, so it's one design with Done criteria per phase.
+
+**Not waiting for [kernel-port](kernel-port.md).** The port is a draft behind [baseline-1](baseline-1.md), [namespace-kernel](namespace-kernel.md), and [kernel-serve](kernel-serve.md), and nothing here needs it. The journal, `#ν`, and `#ε`'s inotify are h9's own C and Zig, which the port adapts as it does the other devices h9 wrote. The host watcher is Zig outside the kernel. What touches vendored code is Source 1's hooks, a few marked lines in `chan.c` and `sysfile.c`, both files the port replaces, so the hooks become calls in the ported code. The journal's interface (a directory identity, an operation, and a name) is what the port's device table would carry anyway.
+
 **Rejected: polling only.** It's the fallback, and it works everywhere, but a second's delay and a stat of every watched directory every interval is what watchers in the guest do now, and the reason they're slow.
 
 **Rejected: inotify without the rest.** A Linux-only inotify that watched host trees and nothing else would miss in-memory overlays, up layers, and 9P mounts, and would leave Plan 9 programs with nothing.
@@ -223,9 +239,21 @@ echo hi > proj/x
 h9 --tmp /n/t rc -c 'fsevents -c /n/t & sleep 1; touch /n/t/a; rm /n/t/a'
 ```
 
-Integration cases:
+Phase 1:
 
 - [ ] `test "a guest create, write, and remove are recorded on #U, #O, and a 9P mount [file-watch]"`
+- [ ] `test "/dev/fsevents takes scope, since, path, coalesce, and depth [file-watch]"`
+- [ ] `test "fsevents prints dotfs records [file-watch]"`
+- [ ] `test "inotify reports create, modify, close_write, attrib, delete, and moves with a cookie [file-watch]"`
+- [ ] `test "inotify self events, IN_IGNORED, and IN_Q_OVERFLOW [file-watch]"`
+- [ ] `test "inotify fds work with poll, epoll, and FIONREAD [file-watch]"`
+- [ ] `test "Node's fs.watch and .NET's FileSystemWatcher see a guest edit [file-watch]"`
+- [ ] `test "--watch none keeps inotify ENOSYS and no /dev/fsevents [file-watch]"`
+- [ ] h9x's `dotnet-api` example (ASP.NET 8) builds and serves without `DOTNET_USE_POLLING_FILE_WATCHER`.
+- [ ] [spec/kernel.md](../spec/kernel.md) and [spec/abi-linux.md](../spec/abi-linux.md) describe the journal, `#ν`, and inotify, and MANUAL.md has a section on watching.
+
+Phase 2:
+
 - [ ] `test "a host edit to a --dir tree is recorded, on the host's backend [file-watch]"`
 - [ ] `test "a host edit is recorded with --watch poll and watch=poll [file-watch]"`
 - [ ] `test "a guest write to a host tree is recorded once, not echoed by the host [file-watch]"`
@@ -235,43 +263,38 @@ Integration cases:
 - [ ] `test "a change below an up layer shows through, and one to a copied-up file doesn't [file-watch]"`
 - [ ] `test "a whiteout is a remove through a stack [file-watch]"`
 - [ ] `test "a 9P server's .fs/events reaches a guest watcher [file-watch]"`
-- [ ] `test "/dev/fsevents takes scope, since, path, coalesce, and depth [file-watch]"`
-- [ ] `test "fsevents prints dotfs records [file-watch]"`
-- [ ] `test "--serve serves .fs/events, and another h9 follows it [file-watch]"`
-- [ ] `test "inotify reports create, modify, close_write, attrib, delete, and moves with a cookie [file-watch]"`
-- [ ] `test "inotify self events, IN_IGNORED, and IN_Q_OVERFLOW [file-watch]"`
-- [ ] `test "inotify fds work with poll, epoll, and FIONREAD [file-watch]"`
 - [ ] `test "Node's fs.watch and .NET's FileSystemWatcher see a host edit [file-watch]"`
-- [ ] `test "--watch none keeps inotify ENOSYS and no /dev/fsevents [file-watch]"`
-
-- [ ] h9x's `dotnet-api` example (ASP.NET 8) builds and serves without `DOTNET_USE_POLLING_FILE_WATCHER`.
-
-Hosts:
-
 - [ ] The host cases pass on macOS (FSEvents), Linux (inotify, and the native backend), and Windows (`ReadDirectoryChangesExW`).
+- [ ] `test('a guest watcher sees changes on a port mount whose server has .fs/events [file-watch]')`, on the browser host.
+- [ ] [spec/ninep.md](../spec/ninep.md) and [spec/cli.md](../spec/cli.md) describe the sources and the flags.
 
-Browser host:
+Phase 3:
 
-- [ ] `test('a guest watcher sees changes on a port mount whose server has .fs/events [file-watch]')`
-
-Docs:
-
-- [ ] [spec/kernel.md](../spec/kernel.md), [spec/abi-linux.md](../spec/abi-linux.md), [spec/ninep.md](../spec/ninep.md), and [spec/cli.md](../spec/cli.md) describe the journal, inotify, `.fs/events`, and the flags, and MANUAL.md has a section on watching.
+- [ ] `test "--serve serves .fs/events, and another h9 follows it [file-watch]"`
+- [ ] [spec/ninep.md](../spec/ninep.md)'s Serving describes `.fs/events`.
 
 ## Implementation
+
+Phase 1:
 
 1. The journal and Source 1, with subscriptions by directory identity, and kernel tests on `#O` and `#U`.
 2. `#ν` and `fsevents`, so the rest can be tested from rc.
 3. Linux inotify on the journal, in `#ε`, with the `/proc/sys/fs/inotify` files.
-4. Source 2: polling first, as the fallback every host has, then inotify, FSEvents, and `ReadDirectoryChangesExW`, with the echo table and deny rules.
-5. Source 3, through `#ι`, and its pass-through under `--index none`.
-6. Unions passing up their members' changes.
-7. `.fs/events` under `--serve`.
-8. The flags, `Machine.Options`, `--print`, the browser host, h9x without `DOTNET_USE_POLLING_FILE_WATCHER`, and the docs.
+4. `--watch guest` and `none`, `Machine.Options.watch`, `--print`, h9x without `DOTNET_USE_POLLING_FILE_WATCHER`, and the docs.
+
+Phase 2:
+
+5. Source 2: polling first, as the fallback every host has, then inotify, FSEvents, and `ReadDirectoryChangesExW`, with the echo table and deny rules.
+6. Source 3, through `#ι`, and its pass-through under `--index none`.
+7. Unions passing up their members' changes.
+8. `--watch auto` and `poll`, `--watch-interval`, `watch=`, the browser host, and the docs.
+
+Phase 3:
+
+9. `.fs/events` under `--serve`, and the docs.
 
 ## Open issues
 
-- **Splitting.** The journal with inotify and Source 1, the host sources, and serving could finish far apart. If they do, this splits into three proposals, as [file-interface](file-interface.md) may.
 - **`close` for host changes.** inotify on a Linux host reports `IN_CLOSE_WRITE`, and FSEvents, Windows, and polling don't. Tools that wait for `IN_CLOSE_WRITE` (some build watchers do) would see only `IN_MODIFY` for an edit on a macOS or Windows host. A `close` could be made up once a written file has been quiet for a moment, at the cost of being a guess.
 - **Mounts under a scope after it's opened.** A subscription follows the namespace as it was walked. Following later binds would mean the mount table telling the journal about every bind.
 - **`.fs/index` beside `.fs/events` when serving.** `mkindex` already writes one, and serving it would let a client bootstrap without walking, as dotfs's watchable profile allows.
