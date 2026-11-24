@@ -7842,6 +7842,12 @@ test "pthreads program with 8 threads and a mutex [linux-threads]" {
     try threadCase(&le, "condvar");
 }
 
+test "getdents64 from many threads, on their own fds and on one shared fd [linux-threads]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try threadCase(&le, "getdents_threads");
+}
+
 test "a signal breaks the read of a second thread blocked on the same pipe [linux-threads]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
