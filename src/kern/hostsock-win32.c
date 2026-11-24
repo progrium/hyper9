@@ -307,8 +307,32 @@ h9so_nread(int fd)
 	if(fd < 0)
 		return 0;
 	n = 0;
-	if(ioctlsocket(fd, FIONREAD, &n) != 0)
+	if(ioctlsocket(fd, FIONREAD, &n) != 0 || n == 0)
 		return 0;
+	/*
+	 * On a datagram socket Windows' FIONREAD counts every datagram
+	 * queued; Linux's is the next one's length, so peek at it, without
+	 * waiting if another thread took it first.
+	 */
+	{
+		int type, len, r;
+		u_long on, off;
+		char *b;
+
+		len = sizeof type;
+		if(getsockopt(fd, SOL_SOCKET, SO_TYPE, (char*)&type, &len) == 0 && type == SOCK_DGRAM
+		&& (b = malloc(65536)) != nil){
+			on = 1;
+			off = 0;
+			ioctlsocket(fd, FIONBIO, &on);
+			r = recv(fd, b, 65536, MSG_PEEK);
+			ioctlsocket(fd, FIONBIO, &off);
+			free(b);
+			if(r < 0)
+				return 0;
+			return r;
+		}
+	}
 	return n;
 }
 
