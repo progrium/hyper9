@@ -131,6 +131,10 @@ pub const Backend = struct {
     parked: std.ArrayList(*State) = .empty,
     next_as_id: std.atomic.Value(u64) = .init(1),
     arch: if (is_x86) X86 else Arm = .{},
+    /// x86: every vCPU's TSC offset is zero, so a guest's `rdtsc` reads
+    /// the host's count (vmm.Backend.hostTsc). False on a kernel without
+    /// KVM_VCPU_TSC_OFFSET (before 5.16).
+    host_tsc: bool = false,
 
     const X86 = struct {
         cpuid: ?*abi.CpuidList = null,
@@ -194,6 +198,7 @@ pub const Backend = struct {
             maskCpuid(list, &b.arch);
             b.arch.cpuid = list;
             b.kernel_root = try pt.kernelRoot(&b.ram);
+            b.host_tsc = checkExtension(vm, abi.CAP_VCPU_ATTRIBUTES) != 0;
         } else {
             _ = try ioctl(vm, abi.ARM_PREFERRED_TARGET, @intFromPtr(&b.arch.target));
             b.kernel_root = try pt.kernelRoot(&b.ram, doorbell_ipa);
@@ -288,6 +293,14 @@ pub const Backend = struct {
         if (is_x86) {
             try pt.mapShared(&b.ram, b.kernel_root, slot, page);
             _ = try ioctl(fd, abi.SET_CPUID2, @intFromPtr(b.arch.cpuid.?));
+            // KVM starts each vCPU's TSC near zero; zero its offset
+            // instead, so the guest reads the host's count, as the vDSO's
+            // clock needs (linux/vclock.zig).
+            const zero: u64 = 0;
+            const attr: abi.DeviceAttr = .{ .group = abi.VCPU_TSC_CTRL, .attr = abi.VCPU_TSC_OFFSET, .addr = @intFromPtr(&zero) };
+            _ = ioctl(fd, abi.SET_DEVICE_ATTR, @intFromPtr(&attr)) catch {
+                b.host_tsc = false;
+            };
         } else {
             try pt.mapPage(&b.ram, b.kernel_root, pt.sharedKva(slot), b.ram.gpaOf(page), pt.pteAttrs(false, .{ .write = true }));
         }

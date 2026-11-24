@@ -7,6 +7,7 @@ const std = @import("std");
 const vmm = @import("../vmm.zig");
 const mm = @import("mm.zig");
 const elf = @import("elf.zig");
+const vclock = @import("vclock.zig");
 
 pub const Error = elf.Error || mm.Error || vmm.CreateError;
 
@@ -60,12 +61,21 @@ pub fn build(gpa: std.mem.Allocator, backend: vmm.Backend, a: Args) Error!Progra
     errdefer m.put();
     // The stack: 8 MiB below the top, growing down within it.
     try m.insert(.{ .start = m.lay.stack_top - m.lay.stack_size, .end = m.lay.stack_top, .prot = .rw, .kind = .stack });
-    // The vDSO, on arm64 only: it holds __kernel_rt_sigreturn.
+    // The vDSO: on arm64, it holds __kernel_rt_sigreturn; on amd64, the
+    // clock (vclock.zig), after its clock page, where the backend can
+    // give it one.
     var vdso: u64 = 0;
     if (a.arch == .arm64) {
         vdso = m.findFree(vmm.page_size) orelse return error.NoSpace;
         try m.insert(.{ .start = vdso, .end = vdso + vmm.page_size, .prot = .{ .read = true, .exec = true }, .kind = .vdso });
         const img = elf.vdsoImage();
+        try m.hostWrite(vdso, &img);
+    } else if (a.arch == .amd64 and vclock.supported(backend)) {
+        const vvar = m.findFree(2 * vmm.page_size) orelse return error.NoSpace;
+        try m.insertFile(.{ .start = vvar, .end = vvar + vmm.page_size, .prot = .{ .read = true }, .kind = .file, .shared = true, .name = .init("[vvar]") }, backend, vclock.pagesFor);
+        vdso = vvar + vmm.page_size;
+        try m.insert(.{ .start = vdso, .end = vdso + vmm.page_size, .prot = .{ .read = true, .exec = true }, .kind = .vdso });
+        const img = vclock.image();
         try m.hostWrite(vdso, &img);
     }
     const base: ?u64 = if (a.exe.ehdr.type == 3) m.lay.pie_base else null;

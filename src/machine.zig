@@ -34,6 +34,7 @@ const lsys = @import("linux/sys.zig");
 const lsig = @import("linux/signal.zig");
 const lexec = @import("linux/exec.zig");
 const lmm = @import("linux/mm.zig");
+const vclock = @import("linux/vclock.zig");
 const elf = @import("linux/elf.zig");
 const kc = @import("linux/kc.zig");
 const attr = @import("dotl/attr.zig");
@@ -526,6 +527,7 @@ pub const Machine = struct {
         // leaked rather than freed under it.
         if (m.stuck) return;
         if (m.gfx_claim) |cl| gfx.release(cl);
+        vclock.forget(m.backend);
         m.backend.destroy();
         m.arena.deinit();
         m.gpa.destroy(m.arena);

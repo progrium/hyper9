@@ -65,6 +65,7 @@ test {
     _ = @import("linux/nr.zig");
     _ = @import("linux/mm.zig");
     _ = @import("linux/elf.zig");
+    _ = @import("linux/vclock.zig");
     _ = @import("linux/signal.zig");
     _ = @import("linux/sys.zig");
     _ = @import("linux/locks.zig");
