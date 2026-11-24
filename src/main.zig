@@ -32,7 +32,26 @@ const exit_failed = 125;
 const exit_not_executable = 126;
 const exit_not_found = 127;
 
+/// Raises the soft limit on open files to the hard one (on macOS, where
+/// the hard limit can be unlimited, at most OPEN_MAX if that's refused).
+/// A file a guest opens in a host tree is an fd of h9's, and macOS's soft
+/// limit is 256, so a parallel build there (cargo running its linkers)
+/// failed with EMFILE while the guest was told it had 1024. KVM's backend
+/// already did this for its vCPU fds; this does it for every backend.
+fn raiseFdLimit() void {
+    if (comptime web or builtin.os.tag == .windows) return;
+    var rl = std.posix.getrlimit(.NOFILE) catch return;
+    if (rl.cur >= rl.max) return;
+    const max = rl.max;
+    rl.cur = max;
+    std.posix.setrlimit(.NOFILE, rl) catch {
+        rl.cur = @min(max, 10240);
+        std.posix.setrlimit(.NOFILE, rl) catch {};
+    };
+}
+
 pub fn main(init: std.process.Init) !u8 {
+    raiseFdLimit();
     const arena = init.arena.allocator();
     const io = if (web) h9.web.io() else init.io;
     const args = try init.minimal.args.toSlice(arena);
