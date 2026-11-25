@@ -923,7 +923,7 @@ pub fn symlink(path: [*:0]const u8, target: [*:0]const u8) Error!void {
 
 /// Makes `path` a FIFO with permissions `perm`: a node in memory in an
 /// overlay, or a host FIFO in a devfs tree, where the new name is checked
-/// like a create (design/linux-fifo.md). For the Linux personality's
+/// like a create (design/epoch-0/linux-fifo.md). For the Linux personality's
 /// mknodat; Plan 9 programs see an empty file.
 pub fn mkfifo(path: [*:0]const u8, perm: u32) Error!void {
     _ = try check(c.h9_fs_mkfifopath(path, perm));
@@ -936,7 +936,7 @@ pub fn renameAcross(old: [*:0]const u8, new: [*:0]const u8) Error!bool {
     return try check(c.h9_fs_renamepath(old, new)) == 0;
 }
 
-/// Where a union member goes (design/mounts.md, "Union instances").
+/// Where a union member goes (design/epoch-0/mounts.md, "Union instances").
 pub const UnionFlags = packed struct(c_int) {
     /// At the bottom, not on top.
     after: bool = false,
@@ -1105,7 +1105,7 @@ pub fn unixDial(path: [*:0]const u8) Error!u31 {
     return try check(c.h9_unixdial(path));
 }
 
-/// Wraps host descriptors `rd` and `wr` (design/fd-mounts.md), which the
+/// Wraps host descriptors `rd` and `wr` (design/epoch-0/fd-mounts.md), which the
 /// kernel takes and closes, as channels, and returns fds on them: the
 /// one read from and, when `wr` isn't `rd`, the one written to. On
 /// failure both are closed. Fails on the browser host.
@@ -1137,7 +1137,7 @@ pub fn hstreamWait(id: u32) Error!void {
     _ = try check(c.h9_hstream_wait(id));
 }
 
-/// The kernel's 9P2000 server (src/kern/kserve.c, design/kernel-serve.md),
+/// The kernel's 9P2000 server (src/kern/kserve.c, design/epoch-0/kernel-serve.md),
 /// serving the calling process's namespace.
 pub const Kserve = opaque {
     /// Serves from `root`, a path in the caller's namespace, with ..

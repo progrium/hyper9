@@ -30,7 +30,7 @@
 //! their vCPUs, and only then are pages freed.
 //!
 //! `fork` shares the parent's private chunks with the child copy-on-write
-//! (design/cow-fork.md): both Mms hold the chunk's `Pages`, mapped without
+//! (design/epoch-0/cow-fork.md): both Mms hold the chunk's `Pages`, mapped without
 //! write, and the first write to it by either side, from the guest (a
 //! fault) or from the host on its behalf (`own`), copies the pages, or
 //! keeps them if the other side has dropped them already. A chunk is the
@@ -48,7 +48,7 @@ const page = vmm.page_size;
 /// beside the few it keeps in the same chunk. With 1 MiB chunks, Zig's
 /// allocators, which map and unmap thousands of small regions across
 /// threads, kept over half a cold `zig build-exe`'s memory in chunks that
-/// held a page or two (design/cow-fork.md, Updates).
+/// held a page or two (design/epoch-0/cow-fork.md, Updates).
 pub const chunk_size: u64 = 64 << 10;
 pub const pages_per_chunk = chunk_size / page;
 

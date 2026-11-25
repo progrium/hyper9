@@ -1,4 +1,4 @@
-//! Metadata indexes for 9P roots and mounts (design/mount-index.md): the
+//! Metadata indexes for 9P roots and mounts (design/epoch-0/mount-index.md): the
 //! text format, dotfs's `fsindex 1` (its index extension), and the
 //! compiled form h9 keeps in its cache and answers walks, stats, and
 //! directory reads from.

@@ -17,7 +17,7 @@ areas: [sandbox, kern]
 
 ## Background
 
-This was an open question in SPEC.md, before milestones became proposals ([#1](epoch-0/proposals.md)):
+This was an open question in SPEC.md, before milestones became proposals ([#1](proposals.md)):
 
 > `/proc/n/ns` shows the host paths of bound host trees (`bind '#U/Users/…' /mnt/term/cwd`), which tells the guest the host's layout. The stricter profiles should hide them, or show the guest path or a placeholder instead; which one, and whether `--ns` can still replay the result, is open.
 
@@ -33,4 +33,4 @@ This was an open question in SPEC.md, before milestones became proposals ([#1](e
 
 ## Updates
 
-- 2026-11-25: Superseded by [host-handles](host-handles.md). With the host tree device reached only through named directory handles, `#U` is attached by a handle's name, so `/proc/n/ns` shows no host path under any profile, and `--ns` still replays it in a machine with the same handles. That answers the open question here without a profile-specific format.
+- 2026-11-25: Superseded by [host-handles](../host-handles.md). With the host tree device reached only through named directory handles, `#U` is attached by a handle's name, so `/proc/n/ns` shows no host path under any profile, and `--ns` still replays it in a machine with the same handles. That answers the open question here without a profile-specific format.

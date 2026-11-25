@@ -25,9 +25,9 @@
  *		missing is walked to as itself, and opening it fails. Its qid
  *		has H9_QTSYMLINK. A Linux process's walk doesn't follow it,
  *		or a lower tree's link: it stops there, for the kernel's walk
- *		to follow from the process's root (design/linux-symlinks.md).
+ *		to follow from the process's root (design/epoch-0/linux-symlinks.md).
  *	Nfifo	a FIFO made by the Linux personality (h9_overlay_mkfifo,
- *		design/linux-fifo.md): a file with no data, whose Dir has
+ *		design/epoch-0/linux-fifo.md): a file with no data, whose Dir has
  *		H9_DMFIFO. A Linux open of it joins a pipe (src/kern/fifo.c);
  *		a Plan 9 program reads it as empty and can't write it.
  *
@@ -194,7 +194,7 @@ struct Inst
 	Chunk	*free[Nclass];
 	void	*track;	/* told of each change once set (h9_overlay_track), or nil */
 
-	/* Unions (design/mounts.md, "Union instances"); see below. */
+	/* Unions (design/epoch-0/mounts.md, "Union instances"); see below. */
 	int	mode;		/* Cow or Union */
 	char	name[16];	/* a named union's name ("root", "linux"), or "" */
 	Inst	*cow;		/* a named union's copy-on-write instance over it, not counted in ref */
@@ -700,7 +700,7 @@ node2dir(Chan *c, Node *n, Dir *d)
 	d->mode = n->mode;
 	if(n->kind == Nfifo)
 		d->mode |= H9_DMFIFO;
-	/* A link is one only to a Linux process (design/linux-symlinks.md). */
+	/* A link is one only to a Linux process (design/epoch-0/linux-symlinks.md). */
 	if(n->kind == Nlink){
 		if(h9_fs_linkwalk())
 			d->mode |= H9_DMSYMLINK;
@@ -1637,7 +1637,7 @@ h9_overlay_lowerdev(int type, int dev, Qid qid, int *ltype, int *ldev)
 static int ovname(char*);
 
 /*
- * Unions (design/mounts.md, "Union instances").
+ * Unions (design/epoch-0/mounts.md, "Union instances").
  *
  * A union instance has no tree in memory: it has an ordered list of
  * members, each a chan on another device's directory, rooted at the
@@ -4643,7 +4643,7 @@ h9_overlay_unpin(char *name)
 
 
 /*
- * The control tree (design/mounts.md, "Union instances"): a bare #O
+ * The control tree (design/epoch-0/mounts.md, "Union instances"): a bare #O
  * attach is a directory with one file, clone. Opening clone makes an
  * unnamed union owned by the opener's machine, unattached; reading it
  * gives the union's number, and writes to it take

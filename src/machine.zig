@@ -159,7 +159,7 @@ pub const builtin_root = struct {
 };
 
 pub const Machine = struct {
-    /// A mount (design/mounts.md): a host directory, a 9P server's URL,
+    /// A mount (design/epoch-0/mounts.md): a host directory, a 9P server's URL,
     /// an archive, the built-in root, or an empty tree, with its
     /// destination and options. `Mount.parse` reads the flag syntax.
     pub const Mount = policy.mount.Mount;
@@ -170,9 +170,9 @@ pub const Machine = struct {
     /// root and namespace-file mounts. Guest connections always go direct.
     pub const Proxy = ws.ProxyConfig;
 
-    /// A `--cred PATTERN=COMMAND` entry (design/credential-helpers.md).
+    /// A `--cred PATTERN=COMMAND` entry (design/epoch-0/credential-helpers.md).
     pub const CredHelper = cred.Helper;
-    /// Whether metadata indexes are used (design/mount-index.md): `auto`
+    /// Whether metadata indexes are used (design/epoch-0/mount-index.md): `auto`
     /// uses one wherever one is found, `none` never.
     pub const IndexMode = enum { auto, none };
 
@@ -193,7 +193,7 @@ pub const Machine = struct {
         backend: vmm.BackendKind = .auto,
         /// Architecture of the binaries this machine runs; null means the host's.
         arch: ?vmm.Arch = null,
-        /// The mounts, in order (design/mounts.md). Mounts on `/` stack
+        /// The mounts, in order (design/epoch-0/mounts.md). Mounts on `/` stack
         /// into the root, and mounts on `#L` into the Linux tree. With
         /// nothing on `/` the root is an empty tree in memory, so only
         /// host-path programs can run. `.dir` and `.archive` sources are host paths,
@@ -203,10 +203,10 @@ pub const Machine = struct {
         binds: []const Bind = &.{},
         /// Credential helpers for host-made WebSocket handshakes: its
         /// mounts and a namespace file's, never a guest's
-        /// (design/credential-helpers.md).
+        /// (design/epoch-0/credential-helpers.md).
         cred_helpers: []const CredHelper = &.{},
         /// Metadata indexes for the 9P root and namespace-file mounts
-        /// (design/mount-index.md).
+        /// (design/epoch-0/mount-index.md).
         index: IndexMode = .auto,
         /// The 9P root's index (`index=` on a `--url` on `/`), instead of
         /// its server's `.fs/index`. Needs a 9P member on `/`.
@@ -259,7 +259,7 @@ pub const Machine = struct {
         /// Namespaces (newns syntax, src/newns.zig, with `;` between
         /// lines) to replay in order in the first process, after the
         /// policy's namespace is built and before the program is looked
-        /// up (design/mounts.md, "Namespace files"). They're text: the
+        /// up (design/epoch-0/mounts.md, "Namespace files"). They're text: the
         /// CLI reads `--ns @FILE` on the host.
         ns: []const []const u8 = &.{},
         /// How many processes may own a vCPU before the rest share the
@@ -276,7 +276,7 @@ pub const Machine = struct {
         gfx: ?Gfx = null,
         /// Listeners that serve the machine's namespace over 9P while a run
         /// is in progress, each connection served by the kernel's 9P server
-        /// (design/epoch-0/serve.md, design/kernel-serve.md). With an empty `argv`, `run` only serves,
+        /// (design/epoch-0/serve.md, design/epoch-0/kernel-serve.md). With an empty `argv`, `run` only serves,
         /// until a note ends it.
         serve: []const Listen = &.{},
         /// The guest path each connection exports.
@@ -385,11 +385,11 @@ pub const Machine = struct {
     /// The listeners' bound addresses, once a run has opened them; in
     /// `arena`.
     serve_addrs: []const []const u8 = &.{},
-    /// The 9P root's `#ι` conversation (design/mount-index.md), in a run.
+    /// The 9P root's `#ι` conversation (design/epoch-0/mount-index.md), in a run.
     hidx_root: ?u32 = null,
     /// The root's first 9P member went through `indexRoot`.
     root_indexed: bool = false,
-    /// The static dotfs trees h9 serves the kernel (design/mounts.md,
+    /// The static dotfs trees h9 serves the kernel (design/epoch-0/mounts.md,
     /// "Static trees"), until the run ends.
     static_servers: std.ArrayList(*statictree.Server) = .empty,
     /// The last `connectUrl` connected to a static tree, which has no
@@ -434,7 +434,7 @@ pub const Machine = struct {
             }
         }
         // A winsock SOCKET isn't a handle ReadFile and WriteFile work on
-        // (design/fd-mounts.md, "Windows handles").
+        // (design/epoch-0/fd-mounts.md, "Windows handles").
         if (builtin.os.tag == .windows) for (opts.mounts) |mt| if (mt.kind == .fd) {
             for ([_]?std.posix.fd_t{ mt.fd, mt.fd_write }) |h| if (h) |hd| if (isSocket(hd)) {
                 err_msg.* = "an .fd mount on Windows takes pipe handles, not a socket";
@@ -490,7 +490,7 @@ pub const Machine = struct {
         return win.getsockopt(h, ws2.SOL.SOCKET, ws2.SO.TYPE, @ptrCast(&v), &len) == 0;
     }
 
-    /// The Windows calls `.fd` mounts make (design/fd-mounts.md).
+    /// The Windows calls `.fd` mounts make (design/epoch-0/fd-mounts.md).
     const win = struct {
         const w = std.os.windows;
         extern "ws2_32" fn WSAStartup(version: u16, data: *anyopaque) callconv(.winapi) i32;
@@ -801,7 +801,7 @@ pub const Machine = struct {
         procs: std.ArrayList(*Proc) = .empty,
         next_pid: u32 = 1,
         /// Of `procs`: the program's, which `--pids` caps. The server Proc
-        /// isn't counted (design/kernel-serve.md, "Caps").
+        /// isn't counted (design/epoch-0/kernel-serve.md, "Caps").
         n_program: u32 = 0,
         /// The listeners, with `--serve` (design/epoch-0/serve.md).
         srv: ?*serve.Server = null,
@@ -872,7 +872,7 @@ pub const Machine = struct {
         /// Allocates and registers a process with the next pid. Fails with
         /// TooManyProcs at the policy's `--pids` cap, which only the
         /// program's processes are counted against
-        /// (design/kernel-serve.md, "Caps").
+        /// (design/epoch-0/kernel-serve.md, "Caps").
         fn newProc(j: *Job, owner: Owner) error{ OutOfMemory, TooManyProcs }!*Proc {
             const gpa = j.m.gpa;
             const p = try gpa.create(Proc);
@@ -1489,7 +1489,7 @@ pub const Machine = struct {
     /// a copy of the first Proc's namespace, without `/net` unless
     /// `serve_net`, in a note group of its own, with no wait record for
     /// the program to see. It runs no guest code; it hands each ready
-    /// stream to the kernel's 9P server (design/kernel-serve.md).
+    /// stream to the kernel's 9P server (design/epoch-0/kernel-serve.md).
     fn startServer(m: *Machine, first: *Proc) RunError!void {
         const j = first.job;
         const p = j.newProc(.serving) catch |e| switch (e) {
@@ -3444,7 +3444,7 @@ pub const Machine = struct {
     }
 
     /// Makes a plan line's target in the root's overlay if it's missing
-    /// (design/mounts.md, "Destinations"). Returns false to skip an
+    /// (design/epoch-0/mounts.md, "Destinations"). Returns false to skip an
     /// optional line whose target can't be made.
     fn makeTarget(m: *Machine, b: policy.Bind) RunError!bool {
         if (b.to.len == 0 or b.to[0] != '/') return true;
@@ -3719,7 +3719,7 @@ pub const Machine = struct {
         else if (is_root) try m.connectUrl(r, host, "root", &ib, &ident) else try m.connectUrl(r, host, "mount", &ib, &ident);
         // A static tree answers walks from its index already.
         const static = m.conn_static;
-        // Through #ι (design/mount-index.md): the root's first 9P member
+        // Through #ι (design/epoch-0/mount-index.md): the root's first 9P member
         // with its given index or its server's, and any other with its
         // server's `.fs/index`.
         var num: ?u32 = null;
@@ -3834,7 +3834,7 @@ pub const Machine = struct {
                     .cred = m.opts.cred_helpers,
                     .static_tree = r.http != null,
                 }, what, ib, ident) catch |e| {
-                    // The probe (design/mounts.md): an `http` URL whose
+                    // The probe (design/epoch-0/mounts.md): an `http` URL whose
                     // server doesn't upgrade may be a static tree.
                     const url = r.http orelse return e;
                     if (e != error.NamespaceFailed or std.mem.indexOf(u8, m.err_msg, ": server answered ") == null) return e;
@@ -3865,7 +3865,7 @@ pub const Machine = struct {
         }
     }
 
-    /// An `.fd` mount's connection (design/fd-mounts.md): duplicates the
+    /// An `.fd` mount's connection (design/epoch-0/fd-mounts.md): duplicates the
     /// embedder's descriptors, `rd` and `wr` if it's given, so the run's
     /// channels own the copies and the embedder keeps its own, wraps the
     /// copies as kernel channels, and returns an fd on a `#ℓ` conversation
@@ -3926,7 +3926,7 @@ pub const Machine = struct {
         }
     }
 
-    /// Serves the static dotfs tree at `url` (design/mounts.md, "Static
+    /// Serves the static dotfs tree at `url` (design/epoch-0/mounts.md, "Static
     /// trees") on a host socket and returns an fd on a `#ℓ` conversation
     /// dialed to it, as for a unix-socket server. `m.err_msg` holds why
     /// the WebSocket handshake failed, for the message if there's no
@@ -4012,7 +4012,7 @@ pub const Machine = struct {
     }
 
     /// Puts the root's connection `conn` under a `#ι` conversation
-    /// (design/mount-index.md) and returns an fd on its data file, or
+    /// (design/epoch-0/mount-index.md) and returns an fd on its data file, or
     /// returns `conn` itself under `--index none`. Takes `conn`.
     fn indexRoot(m: *Machine, r: policy.NinePRoot, conn: u31) RunError!u31 {
         const shown = ws.Url.elide(r.addr);
@@ -4191,7 +4191,7 @@ pub const Machine = struct {
     }
 
     /// A namespace-file mount's connection `conn` under `#ι`, using its
-    /// server's `.fs/index` (design/mount-index.md); `conn` itself under
+    /// server's `.fs/index` (design/epoch-0/mount-index.md); `conn` itself under
     /// `--index none`. Takes `conn`.
     fn indexMount(m: *Machine, conn: u31, file: []const u8, spec: []const u8, num: *?u32) u31 {
         if (m.opts.index == .none) return conn;
@@ -4248,7 +4248,7 @@ pub const Machine = struct {
     /// A `#ℓ` conversation over WebSocket connection `conn` to `url`,
     /// which `#ℓ` dials again through hstream if the connection drops and
     /// the server speaks 9P2000.L.Z, so a credential helper runs again
-    /// (design/credential-helpers.md). `ident` is the server's 9P-Uid and
+    /// (design/epoch-0/credential-helpers.md). `ident` is the server's 9P-Uid and
     /// 9P-User, for the user map. Returns an fd on its data file.
     fn wsConv(conn: u31, url: []const u8, ident: ?hstream.Identity) kern.Error!u31 {
         const dev = "#" ++ policy.dotl_dev ++ "/dotl/";
@@ -4316,7 +4316,7 @@ pub const Machine = struct {
         return id;
     }
 
-    /// `bind -r` (design/mounts.md, "Union instances"): `from` joins a
+    /// `bind -r` (design/epoch-0/mounts.md, "Union instances"): `from` joins a
     /// union merged at every depth at `to`, on top unless `after`, taking
     /// creates with `create`. On a named union, `#O<name>`, it's added
     /// there and nothing is bound. On a union already at `to`, it's
@@ -4401,7 +4401,7 @@ pub const Machine = struct {
         };
         for (ops) |op| {
             // A missing target is made in the root's overlay, as a mount
-            // flag's is, so a printed plan replays (design/mounts.md,
+            // flag's is, so a printed plan replays (design/epoch-0/mounts.md,
             // "Destinations").
             switch (op) {
                 .bind => |b| m.replayTarget(try m.nsPath(arena, b.to, con_id)),
@@ -4451,7 +4451,7 @@ pub const Machine = struct {
             // Its connection goes through a `#ℓ` conversation
             // (design/epoch-0/dotl.md), so a 9P2000.L server works too.
             .mount => |mt| if (std.mem.indexOf(u8, mt.file, "://") != null) {
-                // A URL (design/mounts.md, "Namespace files"), connected
+                // A URL (design/epoch-0/mounts.md, "Namespace files"), connected
                 // as a mount flag's is, with the line's settings words;
                 // unlike other failures, one that fails stops the run.
                 if (m.plan.write == .none) return m.fail("mount {f}: --write=none can't be enforced on a {s} mount", .{ ws.Url.elide(mt.file), if (ws.Url.is(mt.file)) "WebSocket" else "9P" });

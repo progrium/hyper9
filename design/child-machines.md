@@ -41,7 +41,7 @@ The inner h9 starts, parses its flags, boots its kernel, and runs its probes. It
 - **devcmd's shape.** `#C` runs host commands through a conversation: `clone`, `ctl` (`dir`, `exec`), `data`, `stderr`, and `wait` ([host-cmd](host-cmd.md)). `hcmd` wraps it.
 - **Guest tools.** `#H/bin` puts h9's own rc scripts on the guest's path ([guest-tools](epoch-0/guest-tools.md)).
 
-**Nested runs elsewhere.** [host-binfmt](epoch-0/host-binfmt.md) refuses to start an h9 from a host command a guest ran (`H9_NESTED`), because the new h9 would get the host user's rights and a fresh default policy, broader than the guest's. It leaves "carrying the policy across" open. [login-shell](login-shell.md) uses `H9_NESTED` the same way.
+**Nested runs elsewhere.** [host-binfmt](epoch-0/host-binfmt.md) refuses to start an h9 from a host command a guest ran (`H9_NESTED`), because the new h9 would get the host user's rights and a fresh default policy, broader than the guest's. It leaves "carrying the policy across" open. [login-shell](epoch-0/login-shell.md) uses `H9_NESTED` the same way.
 
 ## Proposal
 
@@ -69,7 +69,7 @@ Lines written to `ctl` set options before `exec`. Each matches a host flag, with
 | `profile tight` | `--profile` |
 | `net disable\|outbound\|enable`, `netallow PATTERN` | `--net`, `--net-allow` |
 | `write overlay\|ephemeral\|scope\|none` | `--write` |
-| `dir PATH[:DST[:OPTS]]`, `archive PATH[:DST[:OPTS]]`, `builtin[=DST[:OPTS]]`, `tmp DST`, `bind SRC:DST[:OPTS]` | The mount flags ([mounts](mounts.md)), in order |
+| `dir PATH[:DST[:OPTS]]`, `archive PATH[:DST[:OPTS]]`, `builtin[=DST[:OPTS]]`, `tmp DST`, `bind SRC:DST[:OPTS]` | The mount flags ([mounts](epoch-0/mounts.md)), in order |
 | `cwd PATH` | `--cwd` |
 | `readable PATH`, `writable PATH`, `readdeny PATH` | `--readable`, `--writable`, `--read-deny` |
 | `ns PATH` | `--ns` |

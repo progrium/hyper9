@@ -4,7 +4,7 @@
 //! accepted streams. Once a stream's first 9P message has passed the
 //! dialect slot it's queued here, and the machine's server Proc takes it
 //! from the queue (`next`) and hands it to the kernel's 9P server
-//! (src/kern/kserve.c, design/kernel-serve.md).
+//! (src/kern/kserve.c, design/epoch-0/kernel-serve.md).
 //!
 //! The listeners are bound before the program starts, so a listen that
 //! fails ends the run before anything runs, and they're closed when it

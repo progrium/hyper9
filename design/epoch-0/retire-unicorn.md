@@ -49,7 +49,7 @@ Once [hcpu](hcpu.md) is implemented, h9's own CPUs run every guest on every host
 - **Build.** `-Demu` and `-Dunicorn` are removed, and passing either is an error that says hcpu is built in.
 - **Releases.** No `h9-emu` assets, which [hcpu](hcpu.md) already decided. The source tarball for it goes too.
 - **Licences.** h9 is MIT with no GPLv2 build. LICENSE and README.md drop the paragraph about it.
-- **[renames](renames.md).** It says a `-Demu=unicorn` build's emulator is the `unicorn` engine, and that `-Demu` keeps its name. If this lands first, neither exists and renames needs no `unicorn` value. It's a draft and can say so.
+- **[renames](../renames.md).** It says a `-Demu=unicorn` build's emulator is the `unicorn` engine, and that `-Demu` keeps its name. If this lands first, neither exists and renames needs no `unicorn` value. It's a draft and can say so.
 - **`third_party/`.** `third_party/unicorn/` is removed.
 
 ## Security
@@ -63,7 +63,7 @@ None. Guests reach nothing new, and one engine's worth of code leaves the truste
 - [x] `zig build lockstep` passes for h86, ha64, and hx64 with the library fetched, and fails with a hint without it.
 - [x] `zig build mkroot` for amd64 on an arm64 host, the web integration run's WebSocket cases, and `zig build go-stdtest` pass on hcpu.
 - [x] `scripts/release.sh` produces no `h9-emu` asset.
-- [x] [spec/engines.md](../spec/engines.md) has no Unicorn engine section, and README.md, LICENSE, and DEVELOPING.md describe one licence.
+- [x] [spec/engines.md](../../spec/engines.md) has no Unicorn engine section, and README.md, LICENSE, and DEVELOPING.md describe one licence.
 
 ## Implementation
 
@@ -76,7 +76,7 @@ None. Guests reach nothing new, and one engine's worth of code leaves the truste
 ## Open issues
 
 - Whether to remove the oracle too. It would take another independent 386 implementation to check h86 against, such as QEMU's user mode run as a separate process, and lockstep by instruction over a process boundary is slow. As written, the oracle stays.
-- Whether this lands before or after [renames](renames.md). Before is less work for renames.
+- Whether this lands before or after [renames](../renames.md). Before is less work for renames.
 
 ## Updates
 

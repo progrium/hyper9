@@ -15,17 +15,17 @@ Nov 25, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially direct
 
 ## Abstract
 
-A machine's namespace is set up with one family of flags, each of which becomes one line of the plan. Mount flags bring a tree in from outside the machine: `--dir` for a host directory or file, `--url` for a 9P server over `tcp://`, `unix://`, `ws://`, or `wss://`, or a static tree over `http://` or `https://`, `--archive` for a tar unpacked into memory, `--builtin` for the built-in root, and `--tmp` for an empty tree in memory. `--bind` rearranges what's already inside, and `--ns` takes namespace lines inline, separated by `;`, or a host file as `--ns @FILE`. The mount flags and `--bind` all take `SRC:DST[:OPTS]`, with options such as `ro`, `rw`, `eph`, `b`, `a`, `c`, and `r`. Mounts on `/` stack into one tree merged at every depth, which replaces the proposed `--layer`, and mounts on `#L` (devlinux, renamed from `#λ`) do the same for the Linux tree. `/` is built as on 9front: the kernel's `#/` first, with the root stack unioned behind it and bound at `/root`, so a remote root is never asked for `/dev` or `/proc`. `--root` and its `--root-*` flags are removed, and so is detecting a Linux tree by its contents. `--print` output is exactly what `--ns` replays, Linux trees and 9P options included. This proposal takes in [recursive-unions](epoch-0/recursive-unions.md)' union instances and [host-srv](epoch-0/host-srv.md)'s posting, and both are superseded by it.
+A machine's namespace is set up with one family of flags, each of which becomes one line of the plan. Mount flags bring a tree in from outside the machine: `--dir` for a host directory or file, `--url` for a 9P server over `tcp://`, `unix://`, `ws://`, or `wss://`, or a static tree over `http://` or `https://`, `--archive` for a tar unpacked into memory, `--builtin` for the built-in root, and `--tmp` for an empty tree in memory. `--bind` rearranges what's already inside, and `--ns` takes namespace lines inline, separated by `;`, or a host file as `--ns @FILE`. The mount flags and `--bind` all take `SRC:DST[:OPTS]`, with options such as `ro`, `rw`, `eph`, `b`, `a`, `c`, and `r`. Mounts on `/` stack into one tree merged at every depth, which replaces the proposed `--layer`, and mounts on `#L` (devlinux, renamed from `#λ`) do the same for the Linux tree. `/` is built as on 9front: the kernel's `#/` first, with the root stack unioned behind it and bound at `/root`, so a remote root is never asked for `/dev` or `/proc`. `--root` and its `--root-*` flags are removed, and so is detecting a Linux tree by its contents. `--print` output is exactly what `--ns` replays, Linux trees and 9P options included. This proposal takes in [recursive-unions](recursive-unions.md)' union instances and [host-srv](host-srv.md)'s posting, and both are superseded by it.
 
 ## Background
 
 ### How roots are set up today
 
-- **A host directory,** with `--root DIR`, `$H9ROOT`, the development tree, or the built-in root, in that order ([builtin-root](epoch-0/builtin-root.md)). The plan's first line is `bind '#U/…' / ro`.
-- **A 9P server,** with `--root tcp!host!564`, `unix!/path`, or a socket's path ([ninep-roots](epoch-0/ninep-roots.md)), `ws://` or `wss://` ([websocket-9p](epoch-0/websocket-9p.md)), or a URL without a scheme ([schemeless-roots](epoch-0/schemeless-roots.md)). A .L server works with no flag ([dotl](epoch-0/dotl.md)). `--root-spec`, `--root-user`, `--root-header`, and `--root-ca` configure the connection. h9 posts it as `/srv/root` and mounts it at `/`.
-- **A Linux tree,** with a second `--root`, recognised by `/etc/os-release` or a `/lib/ld-*` loader ([linux-personality](epoch-0/linux-personality.md)). It's unioned after devlinux's directories at `#λ`, and always contained ([symlinks-in-root](epoch-0/symlinks-in-root.md)).
+- **A host directory,** with `--root DIR`, `$H9ROOT`, the development tree, or the built-in root, in that order ([builtin-root](builtin-root.md)). The plan's first line is `bind '#U/…' / ro`.
+- **A 9P server,** with `--root tcp!host!564`, `unix!/path`, or a socket's path ([ninep-roots](ninep-roots.md)), `ws://` or `wss://` ([websocket-9p](websocket-9p.md)), or a URL without a scheme ([schemeless-roots](schemeless-roots.md)). A .L server works with no flag ([dotl](dotl.md)). `--root-spec`, `--root-user`, `--root-header`, and `--root-ca` configure the connection. h9 posts it as `/srv/root` and mounts it at `/`.
+- **A Linux tree,** with a second `--root`, recognised by `/etc/os-release` or a `/lib/ld-*` loader ([linux-personality](linux-personality.md)). It's unioned after devlinux's directories at `#λ`, and always contained ([symlinks-in-root](symlinks-in-root.md)).
 - **The built-in root,** with `--builtin auto|only|before|after|off`. `before` and `after` add its commands to `/bin` only.
-- **Writes** are set by `--write`: an `#O` overlay over the root by default ([overlay](epoch-0/overlay.md)), or the root read-only, or `--writable` to write through.
+- **Writes** are set by `--write`: an `#O` overlay over the root by default ([overlay](overlay.md)), or the root read-only, or `--writable` to write through.
 - **On the browser host,** `createMachine({ root, layers })` takes an archive or a WebSocket URL, plus archives unpacked over it.
 - **In `Machine.Options`,** `root` is `.dir`, `.tcp`, `.unix`, or `.ws`, with `root_spec`, `root_user`, `root_headers`, `root_ca`, `root_contained`, `linux_root`, and `builtin`.
 - **Everything else** goes in a namespace file. `--ns` replays it after the namespace is built and `#U` is masked, so it can't reach host paths except through `/mnt/term`, can't mount a unix socket, and can't set a WebSocket's headers.
@@ -34,9 +34,9 @@ That's three syntaxes for addresses (paths, dial strings, and URLs), a flag fami
 
 ### What's proposed but not built
 
-- [recursive-unions](epoch-0/recursive-unions.md) adds `#O` instances with several members, `bind -r`, `#Oroot`, `#Olinux`, and `--layer DIR`. `--layer` was never built.
-- [host-srv](epoch-0/host-srv.md) adds `--srv name=ADDR` to post connections to `/srv`.
-- [tilde-roots](epoch-0/tilde-roots.md) adds `~name` roots. It's left alone here.
+- [recursive-unions](recursive-unions.md) adds `#O` instances with several members, `bind -r`, `#Oroot`, `#Olinux`, and `--layer DIR`. `--layer` was never built.
+- [host-srv](host-srv.md) adds `--srv name=ADDR` to post connections to `/srv`.
+- [tilde-roots](tilde-roots.md) adds `~name` roots. It's left alone here.
 - [mount-index](mount-index.md) adds `/.h9index`. A 9P extension, [9p-dotfs](https://progrium.xyz/docs/proposals/9p-dotfs/), is meant to replace it with `.fs/index`, and this proposal uses dotfs's index for HTTP trees.
 
 ### `/` on 9front
@@ -91,7 +91,7 @@ DST is a guest path:
 
 - **`/`** is the 9front root stack, `#Oroot` (see Building `/`).
 - **`#L`**, or a path under it, is the Linux tree's stack, `#Olinux`. devlinux, today `#λ`, is renamed `#L`.
-- **`/srv/NAME`**, for `--url` only, connects to the server and posts the connection as `/srv/NAME` without mounting it, so a namespace file or a guest program mounts it with its own spec. This is what [host-srv](epoch-0/host-srv.md) proposed as `--srv`.
+- **`/srv/NAME`**, for `--url` only, connects to the server and posts the connection as `/srv/NAME` without mounting it, so a namespace file or a guest program mounts it with its own spec. This is what [host-srv](host-srv.md) proposed as `--srv`.
 - **Any other path** is a bind or mount point, as `bind(1)` and `mount(1)` use it.
 
 A DST that doesn't exist is made as a directory in the overlay of the stack it's under, if that stack has one (`eph`, the default). Otherwise it fails with exit 125: "--dir ./data:/app/data: /app/data does not exist (the root is read-only)".
@@ -136,7 +136,7 @@ Options follow DST, separated by commas. Each has a short and a long form, and `
 | --- | --- | --- |
 | `spec=NAME` | `--url` | The attach spec |
 | `user=NAME` | `--url` | The user name sent with the attach |
-| `auth=…` | `--url` | Reserved for [root-auth](epoch-0/root-auth.md)'s p9any key |
+| `auth=…` | `--url` | Reserved for [root-auth](root-auth.md)'s p9any key |
 | `index=URL\|PATH` | `--url` | A dotfs index for the tree, hosted elsewhere |
 | `header=NAME: VALUE` or `header=@FILE` | `ws`, `wss`, `http`, `https` | A header on the handshake and index fetches; repeatable |
 | `ca=FILE` | `wss`, `https` | A PEM file the server must chain to |
@@ -185,7 +185,7 @@ The Linux view is built the same way: devlinux's own directories first, with `#O
 
 ### Union instances
 
-This section is [recursive-unions](epoch-0/recursive-unions.md)' design, which this proposal takes in.
+This section is [recursive-unions](recursive-unions.md)' design, which this proposal takes in.
 
 An `#O` instance has an ordered list of members and a mode. In `cow` mode, made by `bind -c '#O' PATH`, writes copy up into memory and removes leave whiteouts, as `#O` works now. In `union` mode, made by `bind -r`, there's no memory tree: writes go to the member that holds the file, and creates go to the first member marked `-c` that has the parent directory, or fail with "mounted directory forbids creation".
 
@@ -219,7 +219,7 @@ An `#O` instance has an ordered list of members and a mode. In `cow` mode, made 
 - Looking for the development tree (`defaultRoot` in `src/main.zig`). The built-in root covers a fresh checkout, and `zig build mkroot` still makes `.local/9front/root` for `-Droot`, the demos, and the integration tests, which pass it explicitly.
 - `--ns FILE` with a bare guest path. It's `--ns @FILE`, read from the host.
 - `tcp!` and `unix!` dial strings on the command line. They stay in namespace files and `mount` inside the machine.
-- [recursive-unions](epoch-0/recursive-unions.md)' `--layer`, never built: repeated sources on `/` or `#L` do what it did.
+- [recursive-unions](recursive-unions.md)' `--layer`, never built: repeated sources on `/` or `#L` do what it did.
 
 ### The device rename
 
@@ -275,7 +275,7 @@ The CLI fills both from its flags. On the browser host, `createMachine({ mounts,
 - **Browser host:** `createMachine`'s `root` and `layers` become `mounts`.
 - **Guests:** a bare `#O` attach serves `clone` instead of failing, and `/bin/bind` is h9's fork, which behaves as 9front's without `-r`.
 - **`third_party/`:** the device letter of devlfd (`devlfd-posix.c` and `devlfd-win32.c`), one character each. devroot is unchanged.
-- **Other proposals:** [recursive-unions](epoch-0/recursive-unions.md) and [host-srv](epoch-0/host-srv.md) are superseded by this one. [root-auth](epoch-0/root-auth.md)'s `--root-auth` becomes `auth=`. [credential-helpers](credential-helpers.md)' helpers cover every `--url`. [mount-index](mount-index.md)'s `--root-index` becomes `index=`, with dotfs's format. [tilde-roots](epoch-0/tilde-roots.md) is unchanged and would need its own update.
+- **Other proposals:** [recursive-unions](recursive-unions.md) and [host-srv](host-srv.md) are superseded by this one. [root-auth](root-auth.md)'s `--root-auth` becomes `auth=`. [credential-helpers](credential-helpers.md)' helpers cover every `--url`. [mount-index](mount-index.md)'s `--root-index` becomes `index=`, with dotfs's format. [tilde-roots](tilde-roots.md) is unchanged and would need its own update.
 - **Docs and repos:** MANUAL.md, README.md, the docs (containers, recipes, and embedding), the site, the workloads, and the READMEs of h9reg and mkroot-9front all use `--root`, and change to these flags.
 
 ## Security
@@ -380,4 +380,4 @@ Browser host:
   - **`index=` off `/` replaced [mount-index](mount-index.md)'s usage error,** whose case is waived there, by `test "index= on a mount off / names its index [mounts]"`.
   - **An `http` URL's plan line keeps the `http` form,** so `--print` replays with the probe, and its note says "or a static tree".
   - **9box runs a script named for one of its commands with the script's interpreter.** h9's `bind` in `#H/over` is an rc script, and over a slim root, where `/bin/rc` is a hard link to 9box, the kernel's `#!` exec gave 9box `bind` as argv[0], so it ran its own `bind` with the script's path as an argument. When argv[1] is a script with the same name, 9box now takes the command its `#!` line names (src/9box/9box.c).
-- 2026-11-23: **Implemented.** The work landed on main in [#211](https://github.com/progrium/hyper9/pull/211), after the design in [#198](https://github.com/progrium/hyper9/pull/198) and [#200](https://github.com/progrium/hyper9/pull/200), with [#216](https://github.com/progrium/hyper9/pull/216) and [#217](https://github.com/progrium/hyper9/pull/217) fixing it on Windows. #211 left the status at draft until step 9's docs were done, and they are now: the spec describes mounts ([spec/ninep.md](../spec/ninep.md), [spec/kernel.md](../spec/kernel.md), [spec/machine.md](../spec/machine.md), [spec/cli.md](../spec/cli.md), and the decisions table in [SPEC.md](../SPEC.md)), docs/embedding.md's Options table lists `mounts`, and the h9reg and mkroot-9front READMEs use `--url` (progrium/h9reg#8 and progrium/mkroot-9front#3).
+- 2026-11-23: **Implemented.** The work landed on main in [#211](https://github.com/progrium/hyper9/pull/211), after the design in [#198](https://github.com/progrium/hyper9/pull/198) and [#200](https://github.com/progrium/hyper9/pull/200), with [#216](https://github.com/progrium/hyper9/pull/216) and [#217](https://github.com/progrium/hyper9/pull/217) fixing it on Windows. #211 left the status at draft until step 9's docs were done, and they are now: the spec describes mounts ([spec/ninep.md](../../spec/ninep.md), [spec/kernel.md](../../spec/kernel.md), [spec/machine.md](../../spec/machine.md), [spec/cli.md](../../spec/cli.md), and the decisions table in [SPEC.md](../../SPEC.md)), docs/embedding.md's Options table lists `mounts`, and the h9reg and mkroot-9front READMEs use `--url` (progrium/h9reg#8 and progrium/mkroot-9front#3).

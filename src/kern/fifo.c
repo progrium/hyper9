@@ -1,5 +1,5 @@
 /*
- * FIFOs for the Linux personality (design/linux-fifo.md).
+ * FIFOs for the Linux personality (design/epoch-0/linux-fifo.md).
  *
  * A FIFO file (an overlay's Nfifo node, or a host FIFO in a devfs tree)
  * is never read or written itself. A Linux open of one joins a pipe kept

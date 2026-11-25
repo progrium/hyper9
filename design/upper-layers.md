@@ -15,14 +15,14 @@ Nov 25, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially direct
 
 ## Abstract
 
-Add `up`, a mount option that makes a writable tree the copy-on-write layer over what's below it, the way overlayfs's `upperdir` is: `--dir ./step1:#L:up` puts `step1` on top of the Linux stack, and every change the guest makes lands there as a layer. A file from below is copied into `step1` on its first write, a removed name leaves a `.wh.<name>` file, and a directory removed and made again gets `.wh..wh..opq`, so `step1` is an [OCI image layer](https://github.com/opencontainers/image-spec/blob/main/layer.md), unpacked. Every stack member reads those whiteouts, so `--dir ./step1:#L` mounts the layer again in a later run, and `tar -C step1 -cf step1.tar .` makes it an archive that `--archive` stacks the same way. Writes go to the host as the guest makes them, never to the trees below, and never to memory, so a build can go step by step as a Dockerfile does, with each step's layer kept on disk. This supersedes [overlay-export](overlay-export.md), which wrote the in-memory overlay to a tar at the end of the run.
+Add `up`, a mount option that makes a writable tree the copy-on-write layer over what's below it, the way overlayfs's `upperdir` is: `--dir ./step1:#L:up` puts `step1` on top of the Linux stack, and every change the guest makes lands there as a layer. A file from below is copied into `step1` on its first write, a removed name leaves a `.wh.<name>` file, and a directory removed and made again gets `.wh..wh..opq`, so `step1` is an [OCI image layer](https://github.com/opencontainers/image-spec/blob/main/layer.md), unpacked. Every stack member reads those whiteouts, so `--dir ./step1:#L` mounts the layer again in a later run, and `tar -C step1 -cf step1.tar .` makes it an archive that `--archive` stacks the same way. Writes go to the host as the guest makes them, never to the trees below, and never to memory, so a build can go step by step as a Dockerfile does, with each step's layer kept on disk. This supersedes [overlay-export](epoch-0/overlay-export.md), which wrote the in-memory overlay to a tar at the end of the run.
 
 ## Background
 
 ### h9 today
 
-- **[ephemeral-writes](epoch-0/ephemeral-writes.md)** added `#O` (`src/kern/devoverlay.c`). A `cow` instance is a tree in memory over a lower chan, made of copies, whiteouts, and directory markers, and since [linux-symlinks](linux-symlinks.md) and [linux-fifo](linux-fifo.md) also links and FIFOs. Renames within an instance, across directories too, are moves in that tree.
-- **[mounts](mounts.md)** made `/` and `#L` stacks, `#Oroot` and `#Olinux`: `union` instances whose members are merged at every depth. Under `--write=overlay` and `ephemeral` a `cow` instance goes over the whole stack, in memory. A member marked `rw` takes the writes instead, and the stack then has no overlay: creates go to that member, writes go to whichever member holds the file, a read-only member's file can't be written, and a removed name in a lower member comes back.
+- **[ephemeral-writes](epoch-0/ephemeral-writes.md)** added `#O` (`src/kern/devoverlay.c`). A `cow` instance is a tree in memory over a lower chan, made of copies, whiteouts, and directory markers, and since [linux-symlinks](epoch-0/linux-symlinks.md) and [linux-fifo](epoch-0/linux-fifo.md) also links and FIFOs. Renames within an instance, across directories too, are moves in that tree.
+- **[mounts](epoch-0/mounts.md)** made `/` and `#L` stacks, `#Oroot` and `#Olinux`: `union` instances whose members are merged at every depth. Under `--write=overlay` and `ephemeral` a `cow` instance goes over the whole stack, in memory. A member marked `rw` takes the writes instead, and the stack then has no overlay: creates go to that member, writes go to whichever member holds the file, a read-only member's file can't be written, and a removed name in a lower member comes back.
 - **A rename across directories** in a stack with an `rw` member is the union's, which answers `EXDEV` (`h9_overlay_move`), so package managers that stage files in one directory and rename them into another copy them instead, or fail.
 - **`--archive`** reads every tar entry as a file, so an OCI layer's whiteouts come out as empty files named `.wh.<name>`.
 
@@ -83,7 +83,7 @@ A layer has to mount again as it was, so a stack's `union` instance honors white
 - **Directory reads** leave out whiteouts and the names they hide.
 - **`--archive`** keeps an archive's whiteouts as `#O` whiteout nodes instead of files, so the same rules apply to it.
 
-Off a stack, a `--dir` or `--archive` is bound as it is, and a `.wh.` file in it is a file. A tree with no `.wh.` files behaves exactly as now. The extra walk happens only on a miss, and only in members above the bottom one: on a host tree it's a local `lstat`, and on a 9P member a mount index ([mount-index](mount-index.md)) answers it without the server.
+Off a stack, a `--dir` or `--archive` is bound as it is, and a `.wh.` file in it is a file. A tree with no `.wh.` files behaves exactly as now. The extra walk happens only on a miss, and only in members above the bottom one: on a host tree it's a local `lstat`, and on a 9P member a mount index ([mount-index](epoch-0/mount-index.md)) answers it without the server.
 
 So `--dir ./deps:#L --dir ./app:#L` stacks `app` over `deps` with `app`'s deletions applied, and `--archive deps.tar:#L --archive app.tar:#L` does the same from archives, whoever made them.
 
@@ -112,7 +112,7 @@ So `--dir ./deps:#L --dir ./app:#L` stacks `app` over `deps` with `app`'s deleti
 
 ## Rationale
 
-**On disk, not in memory then exported.** [overlay-export](overlay-export.md) kept the run's changes in the `#O` overlay and wrote them to a tar when the run ended. That bounds a step by `--memory`, loses everything if h9 is killed, and needs an export step and a flag to say where. A layer on disk has none of those, and an archive is one `tar` away. What the export offered beyond that, a run that writes nothing on the host until it ends, is close enough here: an `up` layer is a directory the user chose, usually a fresh one, and nothing else on the host is written.
+**On disk, not in memory then exported.** [overlay-export](epoch-0/overlay-export.md) kept the run's changes in the `#O` overlay and wrote them to a tar when the run ended. That bounds a step by `--memory`, loses everything if h9 is killed, and needs an export step and a flag to say where. A layer on disk has none of those, and an archive is one `tar` away. What the export offered beyond that, a run that writes nothing on the host until it ends, is close enough here: an `up` layer is a directory the user chose, usually a fresh one, and nothing else on the host is written.
 
 **overlayfs's model and OCI's format.** An upper directory over read-only lowers, with copy up, `.wh.` whiteouts, and opaque directories, is what overlayfs, Docker, and Podman use, and what every container tool reads. A layer h9 makes is a layer those tools can stack, and theirs stack in h9.
 
@@ -130,7 +130,7 @@ So `--dir ./deps:#L --dir ./app:#L` stacks `app` over `deps` with `app`'s deleti
 
 **`bind -u`.** The plan has to replay, so `up` needs a namespace form. `-u` follows `-r` in h9's fork of `bind(1)`, and reads as overlayfs's `upperdir`.
 
-**Rejected: exporting the in-memory overlay ([overlay-export](overlay-export.md)).** Superseded by this: it covers the same uses with one mechanism, one format, and no memory ceiling. Embedders that want a layer as bytes can put `up` on a tree they serve.
+**Rejected: exporting the in-memory overlay ([overlay-export](epoch-0/overlay-export.md)).** Superseded by this: it covers the same uses with one mechanism, one format, and no memory ceiling. Embedders that want a layer as bytes can put `up` on a tree they serve.
 
 **Rejected: an `rw` member that reads whiteouts but doesn't copy up.** It would keep today's union semantics for writes, so a file from a lower member still couldn't be changed, and a removed lower name would still come back. Copy up is what makes a member a layer.
 
@@ -142,7 +142,7 @@ So `--dir ./deps:#L --dir ./app:#L` stacks `app` over `deps` with `app`'s deleti
 - **`Machine.Options`:** `Mount.access` gains `.up`.
 - **Browser host:** `up` on a port mount.
 - **Sandbox defaults:** unchanged. Nothing is an `up` layer unless a mount says so.
-- **Other proposals:** [overlay-export](overlay-export.md) is superseded. [linux-fifo](linux-fifo.md)'s note that exported overlays carry FIFOs becomes: a layer on a host directory holds them as host FIFOs.
+- **Other proposals:** [overlay-export](epoch-0/overlay-export.md) is superseded. [linux-fifo](epoch-0/linux-fifo.md)'s note that exported overlays carry FIFOs becomes: a layer on a host directory holds them as host FIFOs.
 - **Root tree and `third_party/`:** unchanged.
 
 ## Security

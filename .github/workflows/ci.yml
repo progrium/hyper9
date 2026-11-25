@@ -127,7 +127,7 @@ jobs:
           npx playwright install --with-deps chromium
       - run: zig build web-test -Doptimize=ReleaseSafe
 
-  # hcpu's Done criteria (design/hcpu.md) on every host GitHub has: the
+  # hcpu's Done criteria (design/epoch-0/hcpu.md) on every host GitHub has: the
   # roots once, then the unit and backend cases and the integration cases
   # on the emulator, with the arm64 root, the 386 binaries, and the amd64
   # root. Only on "Run workflow", since a full pass takes a few hours.

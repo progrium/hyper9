@@ -10,7 +10,7 @@
 // { type: 'exit', code } or { type: 'error', message }.
 //
 // With start's `credentials` set, the page has a credentials callback
-// (design/credential-helpers.md, "Browser host"): the Worker sends
+// (design/epoch-0/credential-helpers.md, "Browser host"): the Worker sends
 // { type: 'cred', id, url, failed, helper } before each handshake h9
 // makes, and the page answers { type: 'cred-reply', id, result } or
 // { type: 'cred-reply', id, error }.
@@ -95,7 +95,7 @@ async function start({ argv, env = {}, mounts = [], tty = false, gfx: canvas, cr
     return new Uint8Array(await r.arrayBuffer());
   };
   // Each archive is unpacked into the tree WASI serves, under /.mnt/N, and
-  // mounted from there as a --dir (design/mounts.md), so archives on one
+  // mounted from there as a --dir (design/epoch-0/mounts.md), so archives on one
   // destination stack as the CLI's do.
   const archives = mounts.map((m, i) => ({ m, at: `/.mnt/${i}` })).filter(({ m }) => m.kind === 'archive');
   const [h9, ...bytes] = await Promise.all([

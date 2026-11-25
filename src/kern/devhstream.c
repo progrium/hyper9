@@ -255,7 +255,7 @@ hostchan(ulong id)
 }
 
 /*
- * For devdotl's redial (design/credential-helpers.md): connects a
+ * For devdotl's redial (design/epoch-0/credential-helpers.md): connects a
  * host-made stream to url for machine mach, with the handshake options
  * the machine registered (src/hstream.zig), so its credential helper runs
  * again, waits for it, and returns its channel. Raises the connect's

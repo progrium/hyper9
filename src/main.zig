@@ -163,7 +163,7 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
     // does, and a guest one runs the host's.
     var arch: ?h9.vmm.Arch = cfg.arch;
     // A host #! script runs by its guest path, found once the plan is
-    // compiled (design/host-scripts.md).
+    // compiled (design/epoch-0/host-scripts.md).
     var host_script: ?[]const u8 = null;
     var prog: h9.Program = if (serve_only) .{ .guest = "" } else switch (cli.programKind(prog_arg)) {
         .host => blk: {
@@ -306,7 +306,7 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
     if (host_script) |hp| {
         const gp = try h9.policy.guestPath(arena, &plan, mounts, cwd, pol, hp) orelse {
             // The interpreter runs in the machine, so it can open only
-            // what the sandbox shares (design/host-scripts.md).
+            // what the sandbox shares (design/epoch-0/host-scripts.md).
             for (pol.read_deny) |d| if (h9.policy.relUnder(d, hp) != null) {
                 std.debug.print("h9: {s}: the machine can't read this script: --read-deny {s} hides it\n", .{ prog_arg, d });
                 return exit_not_executable;
@@ -343,7 +343,7 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
     opts.trace = if (cfg.trace) |t| (if (t.len > 0) &trace_w.interface else &err_w.interface) else null;
     // --ns @FILE is read on the host, with h9's own permissions, before
     // the machine starts; inline lines are taken as they are
-    // (design/mounts.md, "Namespace files").
+    // (design/epoch-0/mounts.md, "Namespace files").
     var ns_texts: std.ArrayList([]const u8) = .empty;
     for (cfg.ns) |v| {
         if (v[0] != '@') {
@@ -502,7 +502,7 @@ fn realPath(io: std.Io, arena: std.mem.Allocator, p: []const u8) ![]u8 {
 
 const MountError = error{ Usage, NotFound, OutOfMemory };
 
-/// The mount flags, resolved for the machine (design/mounts.md): a
+/// The mount flags, resolved for the machine (design/epoch-0/mounts.md): a
 /// --dir's or --archive's host path made absolute, with symlinks
 /// resolved; a URL's `header=@FILE` read and every header checked; and
 /// `ca=` resolved. With nothing on `/`, `$H9ROOT` (a --url if it has
@@ -627,7 +627,7 @@ fn hostNameservers(arena: std.mem.Allocator, io: std.Io) error{OutOfMemory}![]co
 }
 
 /// The `index=` of the first 9P member of `/`, which is the root's
-/// index (design/mount-index.md).
+/// index (design/epoch-0/mount-index.md).
 fn rootIndexOf(mounts: []const h9.Machine.Mount) ?[]const u8 {
     for (mounts) |m| if (m.kind == .url or m.kind == .fd) if (m.stack()) |st| if (st[0] == .root) return m.index;
     return null;
@@ -658,7 +658,7 @@ fn rootIndexCounts(arena: std.mem.Allocator, io: std.Io, arg: ?[]const u8) @Fiel
 const WsError = error{ Usage, NotFound, OutOfMemory };
 
 
-/// --cred entries, then $H9CRED's (design/credential-helpers.md).
+/// --cred entries, then $H9CRED's (design/epoch-0/credential-helpers.md).
 /// cli.parse checked --cred's; a bad $H9CRED entry is a usage error.
 fn credHelpers(arena: std.mem.Allocator, cfg: cli.Config, env: *const std.process.Environ.Map) WsError![]const h9.Machine.CredHelper {
     var list: std.ArrayList(h9.Machine.CredHelper) = .empty;
@@ -674,7 +674,7 @@ fn credHelpers(arena: std.mem.Allocator, cfg: cli.Config, env: *const std.proces
         },
     };
     // On the web host the embedder's credentials callback gets the
-    // matching helper's command to run, or not (design/credential-helpers.md,
+    // matching helper's command to run, or not (design/epoch-0/credential-helpers.md,
     // "Browser host").
     return list.items;
 }

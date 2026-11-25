@@ -1,4 +1,4 @@
-//! Credential helpers (design/credential-helpers.md): host commands h9
+//! Credential helpers (design/epoch-0/credential-helpers.md): host commands h9
 //! runs before a WebSocket handshake it makes, chosen by matching the URL
 //! against `--cred PATTERN=COMMAND` patterns, whose output is headers to
 //! send with the handshake.

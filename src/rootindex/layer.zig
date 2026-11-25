@@ -1,4 +1,4 @@
-//! The index layer (design/mount-index.md, "Serving from the index"):
+//! The index layer (design/epoch-0/mount-index.md, "Serving from the index"):
 //! a state machine over 9P2000 between devmnt and a server connection,
 //! which answers walks, stats, and directory reads from a metadata index
 //! and sends opens, reads, and writes on to the server.

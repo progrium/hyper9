@@ -167,7 +167,7 @@ const nextTask = (() => {
  *   without graphics.
  * - credentials(url, failed, helper): called before each WebSocket
  *   handshake h9 makes, a root's or a namespace file's mount
- *   (design/credential-helpers.md, "Browser host"). `failed` is null, or
+ *   (design/epoch-0/credential-helpers.md, "Browser host"). `failed` is null, or
  *   why the last try failed, for a retry; `helper` is the matching
  *   `--cred` helper's command as an array, or undefined. It returns (or
  *   resolves to) null for no credential, header lines (a string or an
@@ -588,7 +588,7 @@ export class GfxHost {
 // their CLI names: profile, write, net, memory, timeout, pids, cpus,
 // readable, writable, and readDeny (lists), and env (an object).
 /**
- * A mount for createMachine (design/mounts.md): { kind, src, dst, opts },
+ * A mount for createMachine (design/epoch-0/mounts.md): { kind, src, dst, opts },
  * from a flag's string or an object. An object's `up: true` is the `up`
  * option (design/upper-layers.md).
  */
@@ -836,7 +836,7 @@ function attachCanvas(canvas, worker, { clipboard, scale, size, events }) {
  * A machine in its own Worker (design/epoch-0/browser-host.md), from the
  * page:
  *
- * - mounts: the machine's mounts (design/mounts.md), in order, each a
+ * - mounts: the machine's mounts (design/epoch-0/mounts.md), in order, each a
  *   flag's string, such as '--archive=linux.h9a:#L' or
  *   '--url wss://fs.example/9p:/n/fs', or an object: { archive: URL },
  *   { url: URL }, { builtin: true }, or { tmp: true }, with dst (default
@@ -864,7 +864,7 @@ function attachCanvas(canvas, worker, { clipboard, scale, size, events }) {
  * - env: h9's own environment (an object), not its programs': the
  *   emulator's knobs, such as H9_JIT_HOT (src/jit/wasm_t1.zig)
  * - credentials: async (url, failed, helper) => lines, the page's
- *   credential helper (design/credential-helpers.md), called in place
+ *   credential helper (design/epoch-0/credential-helpers.md), called in place
  *   of running a --cred helper, before each WebSocket handshake h9 makes:
  *   url is the URL, failed is null or why the last try failed, and helper
  *   is the matching --cred command's words, if any. It resolves to the

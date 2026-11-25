@@ -20,7 +20,7 @@ Every run of h9 compiles its flags into a plan: a namespace, a policy, and limit
 ## Background
 
 - **The plan exists but isn't an interface.** `--print` shows the namespace, the policy, and the limits in three sections with three syntaxes. Only the namespace section can be fed back, through `--ns`.
-- **A flag per idea.** The usage text has about forty flags, and several interact (`--write`, `--sandbox`, `--profile`, `--readable`, and `--writable`). [mounts](mounts.md) reduces the namespace flags to one family where each is one line of the plan, and makes `--print`'s namespace exactly what `--ns` replays.
+- **A flag per idea.** The usage text has about forty flags, and several interact (`--write`, `--sandbox`, `--profile`, `--readable`, and `--writable`). [mounts](epoch-0/mounts.md) reduces the namespace flags to one family where each is one line of the plan, and makes `--print`'s namespace exactly what `--ns` replays.
 - **Four front doors.** The CLI takes flags. `Machine.Options` is a struct with a field per flag. `createMachine` takes a JavaScript object with some of them. [child-machines](child-machines.md)' `#μ` takes `ctl` lines such as `memory`, `pids`, `net`, and `writable`. Each is kept in step with the others by hand, and each lacks something another has.
 - **No way to hand someone a sandbox.** A recipe in [docs/recipes.md](../docs/recipes.md) is a long command line. It can't be checked in, diffed, reviewed, or pinned.
 
@@ -54,7 +54,7 @@ cwd /src
 run /bin/sh -c 'make test'
 ```
 
-- **Namespace lines** are what [mounts](mounts.md) defines, with no change.
+- **Namespace lines** are what [mounts](epoch-0/mounts.md) defines, with no change.
 - **Policy lines** are one per rule: `net`, `netallow`, `write`, `deny`, `devices`, and `profile`, which expands to its lines.
 - **Limit and run lines** are `memory`, `pids`, `cpus`, `timeout`, `engine`, `arch`, `env`, `cwd`, `gfx`, `serve`, and `run`.
 
@@ -75,7 +75,7 @@ Order matters only among namespace lines. A line h9 doesn't know is an error, wi
 
 ### Pinned roots
 
-A `mount` line can carry a content hash for its tree, `b3=…`, from the index [mounts](mounts.md) and [mount-index](mount-index.md) define. A plan with every root pinned describes the same machine wherever it runs, and h9 refuses a tree whose index doesn't match.
+A `mount` line can carry a content hash for its tree, `b3=…`, from the index [mounts](epoch-0/mounts.md) and [mount-index](epoch-0/mount-index.md) define. A plan with every root pinned describes the same machine wherever it runs, and h9 refuses a tree whose index doesn't match.
 
 ## Rationale
 
@@ -85,11 +85,11 @@ A `mount` line can carry a content hash for its tree, `b3=…`, from the index [
 
 **Why narrowing only.** A plan that's been reviewed should mean what it says when someone adds a flag. Widening is done by editing the plan.
 
-**Why not design the plan first and derive the flags.** That's what a from-scratch design would do. h9 has the flags, and [mounts](mounts.md) is already reshaping them, so this follows it.
+**Why not design the plan first and derive the flags.** That's what a from-scratch design would do. h9 has the flags, and [mounts](epoch-0/mounts.md) is already reshaping them, so this follows it.
 
 ## Compatibility
 
-- **`--print`.** Its output changes format. It's documented as a plan from here on. The namespace part is already what [mounts](mounts.md) makes it.
+- **`--print`.** Its output changes format. It's documented as a plan from here on. The namespace part is already what [mounts](epoch-0/mounts.md) makes it.
 - **`--ns`.** Unchanged: it takes namespace lines only, and a plan's namespace lines are valid there.
 - **Flags and exit codes.** Unchanged, except that a widening flag with `--plan` is exit 2.
 - **`Machine.Options` and `createMachine`.** `plan` is new. Existing fields keep working.

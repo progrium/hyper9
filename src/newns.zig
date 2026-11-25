@@ -4,7 +4,7 @@
 //!
 //! Supported: `bind`, `mount`, `unmount`, `cd` and `clear`, with the flags
 //! `-a`, `-b`, `-c`, `-C`, `-r` (a union merged at every depth,
-//! design/mounts.md), and `-u` (a writable layer, design/upper-layers.md), `#` comments, and `'` quoting (`''` is a literal
+//! design/epoch-0/mounts.md), and `-u` (a writable layer, design/upper-layers.md), `#` comments, and `'` quoting (`''` is a literal
 //! quote). A `;` outside quotes ends a line, as a newline does, so
 //! `--ns` takes a namespace inline, and a comment ends at either. As in
 //! newns, a failed operation doesn't stop the replay.
@@ -19,7 +19,7 @@ const std = @import("std");
 pub const Op = union(enum) {
     bind: struct { from: []const u8, to: []const u8, flag: Flag },
     /// `settings` are a URL mount's trailing `key=value` words
-    /// (design/mounts.md, "Namespace files").
+    /// (design/epoch-0/mounts.md, "Namespace files").
     mount: struct { file: []const u8, to: []const u8, spec: []const u8, flag: Flag, settings: []const []const u8 = &.{} },
     unmount: struct { from: ?[]const u8, to: []const u8 },
     cd: []const u8,
@@ -30,7 +30,7 @@ pub const Flag = struct {
     order: enum { repl, before, after } = .repl,
     create: bool = false,
     cache: bool = false,
-    /// `-r`: a union merged at every depth (design/mounts.md).
+    /// `-r`: a union merged at every depth (design/epoch-0/mounts.md).
     recursive: bool = false,
     /// `-u`: `from` is a writable layer over `to` (design/upper-layers.md).
     upper: bool = false,
@@ -59,7 +59,7 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8, line_no: *usize) Error!
     return ops.items;
 }
 
-/// devlinux was `#λ` before design/mounts.md renamed it `#L`, and
+/// devlinux was `#λ` before design/epoch-0/mounts.md renamed it `#L`, and
 /// namespace files may still name it so.
 fn alias(arena: std.mem.Allocator, w: []const u8) Error![]const u8 {
     const old = "#\u{3bb}";

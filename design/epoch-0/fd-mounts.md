@@ -19,7 +19,7 @@ An embedder that serves 9P in its own process, such as uitreefs, should be able 
 
 ## Background
 
-- **What `.fd` does now.** `Machine.connectUrl` (`src/machine.zig`) sends `fd N` to a new `#ℓ` conversation's ctl file, and devdotl (`src/kern/devdotl.c`) calls `fdtochan(N, …)`, which looks N up in the calling process's kernel fd table. A number from the host's fd table names some other kernel file, or nothing. Nothing in the repository makes an `.fd` mount, and [docs/embedding.md](../docs/embedding.md) describes it as taking "a connection you already hold", which it can't.
+- **What `.fd` does now.** `Machine.connectUrl` (`src/machine.zig`) sends `fd N` to a new `#ℓ` conversation's ctl file, and devdotl (`src/kern/devdotl.c`) calls `fdtochan(N, …)`, which looks N up in the calling process's kernel fd table. A number from the host's fd table names some other kernel file, or nothing. Nothing in the repository makes an `.fd` mount, and [docs/embedding.md](../../docs/embedding.md) describes it as taking "a connection you already hold", which it can't.
 - **How a unix socket gets in.** For `unix://`, `h9_unixdial` (`src/kern/rootdial.c`) connects on the host, wraps the socket with devlfd's `lfdchan`, gives it a kernel fd with `newfd`, and `connectUrl` passes that fd to `#ℓ`. That's the whole path a host descriptor needs, minus the `connect`.
 - **The relay.** An in-process server today listens on a unix socket in a temporary directory, and the embedder passes `unix:///PATH` as an `.url` mount. That's a file on disk, a cleanup at exit, a path length limit, and a listener another local process could connect to first.
 - **Windows.** `h9_unixchan` refuses Windows: a winsock `SOCKET` isn't a handle `ReadFile` and `WriteFile` work on, and those are what devlfd-win32 calls. They do work on pipe handles: drawterm uses devlfd-win32 for a host command's stdio pipes (`third_party/drawterm/kern/win32.c`).
@@ -40,7 +40,7 @@ fd: ?std.posix.fd_t = null,
 fd_write: ?std.posix.fd_t = null,
 ```
 
-`std.posix.fd_t` is an `i32` on POSIX hosts and a `HANDLE` on Windows. An `.fd` mount needs `fd`, and `fd_write` is only for `.fd`; either mistake is a usage error (`PolicyConflict`, with `conflict` naming the field). Everything else about the mount is as for `.url`: any destination, `/srv/NAME` to post without mounting, `spec`, `user`, `auth`, `index`, the access options, and the stacks' rules for `/` and `#L`. With `up` on `/` or `#L`, the embedder's server holds the machine's writable layer ([upper-layers](upper-layers.md)), as a page's `MessagePort` does on the browser host ([port-streams](port-streams.md)), so an embedder can keep a machine's changes in its own store.
+`std.posix.fd_t` is an `i32` on POSIX hosts and a `HANDLE` on Windows. An `.fd` mount needs `fd`, and `fd_write` is only for `.fd`; either mistake is a usage error (`PolicyConflict`, with `conflict` naming the field). Everything else about the mount is as for `.url`: any destination, `/srv/NAME` to post without mounting, `spec`, `user`, `auth`, `index`, the access options, and the stacks' rules for `/` and `#L`. With `up` on `/` or `#L`, the embedder's server holds the machine's writable layer ([upper-layers](../upper-layers.md)), as a page's `MessagePort` does on the browser host ([port-streams](../port-streams.md)), so an embedder can keep a machine's changes in its own store.
 
 ```zig
 var sv: [2]std.posix.fd_t = undefined;
@@ -93,7 +93,7 @@ An `.fd` mount has no address, so its plan line can't replay. `--print` writes i
 
 **Not devhstream.** devhstream carries a host-made stream through a host thread that pumps it, for WebSockets that need framing and TLS. A raw descriptor needs no pump: devlfd already reads and writes it from the conversation's kproc.
 
-**Duplicating in Zig, not in the kernel.** [host-handles](host-handles.md) moves every host call out of `src/kern/`, so the kernel only wraps descriptors it's given. Duplicating in `connectUrl` keeps `rootdial.c`'s new code to the wrap, and under host-handles an `.fd` mount's descriptor is one more handle the embedder puts in the machine's host table.
+**Duplicating in Zig, not in the kernel.** [host-handles](../host-handles.md) moves every host call out of `src/kern/`, so the kernel only wraps descriptors it's given. Duplicating in `connectUrl` keeps `rootdial.c`'s new code to the wrap, and under host-handles an `.fd` mount's descriptor is one more handle the embedder puts in the machine's host table.
 
 ## Compatibility
 
@@ -107,7 +107,7 @@ An `.fd` mount has no address, so its plan line can't replay. `--print` writes i
 
 ## Security
 
-The guest reaches nothing new: an `.fd` mount is a 9P tree, as an `.url` mount is, and the embedder chose to give it. h9 makes no connection of its own, so the network policy has nothing to check, as for a unix socket the CLI dials. Removing the relay removes a listening socket another local process could connect to. An `.fd` mount of another machine's served `/net` reaches that machine's network, its loopback included ([virtual-loopback](virtual-loopback.md)), as importing any machine's `/net` does; the embedder chose to hand it over. Duplicates are made close-on-exec, and are closed when the run ends, so a host command h9 runs doesn't inherit them.
+The guest reaches nothing new: an `.fd` mount is a 9P tree, as an `.url` mount is, and the embedder chose to give it. h9 makes no connection of its own, so the network policy has nothing to check, as for a unix socket the CLI dials. Removing the relay removes a listening socket another local process could connect to. An `.fd` mount of another machine's served `/net` reaches that machine's network, its loopback included ([virtual-loopback](../virtual-loopback.md)), as importing any machine's `/net` does; the embedder chose to hand it over. Duplicates are made close-on-exec, and are closed when the run ends, so a host command h9 runs doesn't inherit them.
 
 ## Done criteria
 

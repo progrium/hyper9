@@ -410,7 +410,7 @@ readns1(Chan *c, Groups *g, char *buf, int nbuf)
 				"mount %s %q %q %q\n": "mount %s %q %q\n", flag,
 				f->to->mchan->srvname != nil ? f->to->mchan->srvname : chanpath(f->to->mchan),
 				chanpath(f->umh->from), f->spec);
-		/* An unnamed union as the bind -r lines that make it (design/mounts.md). */
+		/* An unnamed union as the bind -r lines that make it (design/epoch-0/mounts.md). */
 		else if((i = h9_overlay_nsunion(f->to, chanpath(f->umh->from), buf, nbuf)) < 0)
 			i = snprint(buf, nbuf, "bind %s %q %q\n", flag,
 				chanpath(f->to), chanpath(f->umh->from));

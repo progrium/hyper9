@@ -1,7 +1,7 @@
 #!/bin/rc
 # mkindex [-o file] [-s spec] [dir]: writes the metadata index of the
 # tree at dir, / by default, to standard output or file, in dotfs's
-# fsindex 1 format with h9's 9p. fields (design/mount-index.md). For /,
+# fsindex 1 format with h9's 9p. fields (design/epoch-0/mount-index.md). For /,
 # it walks the root's own connection, /srv/root, attached with spec, so
 # the paths bound over the root are left out. .fs is left out. A name
 # walk can't print whole, or with a control character, is left out and

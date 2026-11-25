@@ -15,7 +15,7 @@ Nov 25, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially direct
 
 ## Abstract
 
-`zig build nskernel` builds h9's kernel with nothing for running programs: drawterm's channels, mount tables, devmnt, and a handful of devices, with no vmm, CPU, loaders, segments, system call tables, personalities, devproc, or console. It holds any number of namespaces, each a Pgrp, made and composed through a new device, `#N`: open `/ns/clone` to get a namespace, copied from another or empty, and write `bind`, `mount`, and `unmount` lines in newns syntax to its `ctl`. Everything is reached over 9P2000. The host attaches to a namespace by its id as the attach name, through [kernel-serve](kernel-serve.md)'s server, and hands the kernel 9P servers to mount over `MessagePort`s ([port-streams](port-streams.md)), WebSockets, or 9P2000.L through [dotl](epoch-0/dotl.md). On the web it's `h9ns.wasm` and `h9ns.js`, run in a Worker on the browser host's JSPI coroutines; natively it's a static library with a small C API. Its first user is [Wanix](https://github.com/tractordev/wanix), whose host module on the page asks for one namespace per task and hands it to the task's runner: for Linux and 9front executables, an h9 machine, as `createMachine({ mounts: [{ port, dst: '/' }] })`.
+`zig build nskernel` builds h9's kernel with nothing for running programs: drawterm's channels, mount tables, devmnt, and a handful of devices, with no vmm, CPU, loaders, segments, system call tables, personalities, devproc, or console. It holds any number of namespaces, each a Pgrp, made and composed through a new device, `#N`: open `/ns/clone` to get a namespace, copied from another or empty, and write `bind`, `mount`, and `unmount` lines in newns syntax to its `ctl`. Everything is reached over 9P2000. The host attaches to a namespace by its id as the attach name, through [kernel-serve](epoch-0/kernel-serve.md)'s server, and hands the kernel 9P servers to mount over `MessagePort`s ([port-streams](port-streams.md)), WebSockets, or 9P2000.L through [dotl](epoch-0/dotl.md). On the web it's `h9ns.wasm` and `h9ns.js`, run in a Worker on the browser host's JSPI coroutines; natively it's a static library with a small C API. Its first user is [Wanix](https://github.com/tractordev/wanix), whose host module on the page asks for one namespace per task and hands it to the task's runner: for Linux and 9front executables, an h9 machine, as `createMachine({ mounts: [{ port, dst: '/' }] })`.
 
 ## Background
 
@@ -23,7 +23,7 @@ Nov 25, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially direct
 - **drawterm's kernel is mostly namespace already.** Its channels and walks (`chan.c`), mount tables (`pgrp.c`, and h9's `pgrpcpy` in `src/kern/proc.c`), the device switch (`dev.c`), the system call wrappers (`sysfile.c`), the 9P client (`devmnt.c`), `devroot`, `devpipe`, and the runtime under them (`qio.c`, `allocb.c`, `sleep.c`, `qlock.c`, `rwlock.c`, `waserror.c`) are about 8,000 lines, plus libc's formatting and 9P conversion. Everything h9 adds to run programs sits on top: `src/vmm/`, the a.out and ELF loaders, `segment.zig`, `syscall.zig`, `src/linux/`, devproc, devcons and the console, devlinux, and most of `machine.zig`.
 - **h9 already composes namespaces without a guest.** The namespace builder calls `sysbind`, `sysmount`, and `sysopen` from Zig through `src/kern.zig`, and `--ns` replays newns-syntax files (`src/newns.zig`, run by `machine.zig`'s replay), including a bare `#O` as a fresh in-memory overlay.
 - **The browser host already runs this kernel in a Worker** ([browser-host](epoch-0/browser-host.md)): kernel processes are coroutines on JSPI (`src/web/coro.c`, `src/kern/os-wasm.c`), no `SharedArrayBuffer` or cross-origin isolation is needed, and `hstream.zig` carries 9P over the page's WebSockets.
-- **What's missing** is a server that needs no guest process ([kernel-serve](kernel-serve.md)), a transport to the page ([port-streams](port-streams.md)), a way to hold and name many namespaces (this proposal), and a build that leaves the rest out (this proposal).
+- **What's missing** is a server that needs no guest process ([kernel-serve](epoch-0/kernel-serve.md)), a transport to the page ([port-streams](port-streams.md)), a way to hold and name many namespaces (this proposal), and a build that leaves the rest out (this proposal).
 
 ## Proposal
 
@@ -34,7 +34,7 @@ Nov 25, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially direct
 | Channels, walks, mount tables, the device switch, the `sys*` wrappers | drawterm `kern/`: `chan.c`, `pgrp.c`, `dev.c`, `sysfile.c`, `parse.c`, `error.c`, `data.c`, `alloc.c`, `allocb.c`, `qio.c`, `sleep.c`, `qlock.c`, `rwlock.c`, `waserror.c`, `procinit.c` |
 | Namespace copying | `pgrpcpy` and the Pgrp parts of `src/kern/proc.c`, moved to `src/kern/ns.c` so both builds share them |
 | Devices | `#/` devroot, `#M` devmnt, `#|` devpipe, `#s` devsrv, `#O` overlay, `#ℏ` devhstream (WebSockets and ports), `#ℓ` dotl, and the new `#N` |
-| Server | [kernel-serve](kernel-serve.md)'s `kserve.c` |
+| Server | [kernel-serve](epoch-0/kernel-serve.md)'s `kserve.c` |
 | Runtime | web: `os-wasm.c`, `coro.c`, `stack.S`, `io.zig`; native: drawterm's `posix.c` |
 | libc, libsec | drawterm's, for `fmt`, `convM2S`/`convS2M`, `cleanname`, and what dotl and hstream use |
 
@@ -68,7 +68,7 @@ Every other namespace starts with no board: `#s` is masked in it along with `#N`
 
 ### Serving
 
-The kernel serves 9P2000 with [kernel-serve](kernel-serve.md)'s server and its named-namespace source: `Tattach`'s `aname` is a namespace id, and the empty name is 0. The host attaches to 0 for control and to N for each task. 9P2000.L clients go through dotl's server side, as serve's dialect slot does.
+The kernel serves 9P2000 with [kernel-serve](epoch-0/kernel-serve.md)'s server and its named-namespace source: `Tattach`'s `aname` is a namespace id, and the empty name is 0. The host attaches to 0 for control and to N for each task. 9P2000.L clients go through dotl's server side, as serve's dialect slot does.
 
 ### The JS API
 
@@ -131,7 +131,7 @@ It's for native Wanix hosts and for testing the kernel without a browser. The na
 
 ## Compatibility
 
-- **h9 machines:** unchanged. `pgrpcpy` moves to `src/kern/ns.c`, `#N` isn't in their device table, and kserve is shared with [kernel-serve](kernel-serve.md).
+- **h9 machines:** unchanged. `pgrpcpy` moves to `src/kern/ns.c`, `#N` isn't in their device table, and kserve is shared with [kernel-serve](epoch-0/kernel-serve.md).
 - **Build:** new steps `nskernel` and `nskernel-test`, and new release artifacts `h9ns-<version>.tar.gz` (the web files) and the native library. h9 stays MIT.
 - **`third_party/`:** unchanged; the build selects files.
 
@@ -164,7 +164,7 @@ It's for native Wanix hosts and for testing the kernel without a browser. The na
 
 1. Move `pgrpcpy` and the Pgrp helpers to `src/kern/ns.c`; build the kernel subset for wasm32-wasi and native, with stubs where a kept file references a left-out one.
 2. `#N`: clone, boards and `srv!`, ctl through `newns.zig` (its replay loop moves out of `machine.zig` so both builds run it), ns, lifetime, the control namespace, the device mask.
-3. Serving through [kernel-serve](kernel-serve.md)'s named source; `h9ns.js`'s Worker, `connect`, and `addPort` on [port-streams](port-streams.md)' JS host code.
+3. Serving through [kernel-serve](epoch-0/kernel-serve.md)'s named source; `h9ns.js`'s Worker, `connect`, and `addPort` on [port-streams](port-streams.md)' JS host code.
 4. The native library and its API.
 5. The Node and Chromium cases, release artifacts, and [spec/host-js.md](../spec/host-js.md).
 

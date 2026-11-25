@@ -857,7 +857,7 @@ You can change the namespace two ways:
 Because `--print`'s namespace section is in namespace-file syntax, you can
 save it, edit it, and replay it with `--ns`.
 
-h9's `bind` also takes `-r` ([mounts](design/mounts.md)): `bind -r new
+h9's `bind` also takes `-r` ([mounts](design/epoch-0/mounts.md)): `bind -r new
 old` merges `new` with `old` at every depth, not only at the top, so a
 directory both have shows the files of both. `-b` puts `new` on top, the
 default, and `-a` at the bottom; `-c` sends creates to it. Removing a file
@@ -1516,7 +1516,7 @@ devices in Plan 9.
   doesn't, so make the mount point first: `mkdir /n/x` works in the root's
   overlay, or make one in `/tmp` and union it onto `/mnt` with `bind -a` as
   in chapter 15.
-- **9P mounts and roots** ([mounts](design/mounts.md)). `--url` mounts a
+- **9P mounts and roots** ([mounts](design/epoch-0/mounts.md)). `--url` mounts a
   9P server: `tcp://host:port`, `unix:///path`, or a WebSocket URL (below).
   On `/`, its default, the server is the root, or a layer of it; on another
   path it's mounted there, and on `/srv/NAME` it's posted without being
@@ -1540,7 +1540,7 @@ devices in Plan 9.
   `wss` trusts the host's CA bundle, or a PEM file given with `ca=FILE`.
   `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY` are honored. A namespace file
   can mount a URL too: `mount -c wss://fs.example/9p /n`. For a short-lived token, a credential helper
-  ([credential-helpers](design/credential-helpers.md)) is better than a
+  ([credential-helpers](design/epoch-0/credential-helpers.md)) is better than a
   header: `--cred 'PATTERN=COMMAND'` runs `COMMAND get URL` on the host
   before each handshake whose URL matches `PATTERN`, the root's and a
   namespace file's mounts alike, and sends the `Name: value` lines it
@@ -1568,7 +1568,7 @@ devices in Plan 9.
   `https://fs.example.com/9p`, and `localhost`, `127.x.x.x`, and `[::1]`
   are `http://`; both probe as below. `--print` shows the URL h9 chose.
 - **`http://` and `https://`: a WebSocket or a static tree**
-  ([mounts](design/mounts.md)). h9 first tries the URL as a WebSocket, in
+  ([mounts](design/epoch-0/mounts.md)). h9 first tries the URL as a WebSocket, in
   its `ws://` or `wss://` form. If the server doesn't upgrade, h9 fetches
   `URL/.fs/index`, and a `200` makes the URL a **static tree**: dotfs's
   index served as plain files by any web server or CDN, with each file's
@@ -1597,7 +1597,7 @@ devices in Plan 9.
   `Access-Control-Allow-Origin` (and to allow the `Range` header); a
   browser's WebSocket doesn't say why it failed, so any failure there tries
   the index.
-- **Metadata indexes** ([mount-index](design/mount-index.md)). A 9P
+- **Metadata indexes** ([mount-index](design/epoch-0/mount-index.md)). A 9P
   root, or a 9P server a namespace file mounts by dial string or URL, can
   come with an index: dotfs's `.fs/index` at the top of its tree, a text
   file in the `fsindex 1` format listing every name with its mode, length,
@@ -2816,7 +2816,7 @@ without nested virtualization), where there's no KVM and you won't opt into
 the native backend, for Go programs on Apple Silicon, and for programs of
 another architecture on any host. It's hcpu, h9's own CPUs: ha64 runs arm64
 programs, h86 runs 386 programs, and hx64 runs amd64 programs
-([hcpu](design/hcpu.md)). Each compiles hot guest code to host code (its
+([hcpu](design/epoch-0/hcpu.md)). Each compiles hot guest code to host code (its
 JIT, T1), and interprets the rest (T0); `h9 --check` says which tier it
 uses. A program's threads, and separate processes, run on host threads in
 parallel, so CPU-bound work gets faster with more of them. System calls

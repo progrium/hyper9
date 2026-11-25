@@ -1,4 +1,4 @@
-//! The other end of an `.fd` mount (design/fd-mounts.md) for
+//! The other end of an `.fd` mount (design/epoch-0/fd-mounts.md) for
 //! tests/backends.zig: a 9P2000 server over a tree in memory, small
 //! enough to read, and a thread that serves it, or src/dotl/testserver.zig's
 //! 9P2000.L one, on host descriptors the test holds, as an embedder's

@@ -1,5 +1,5 @@
 /*
- * #ι: metadata indexes for 9P roots and mounts (design/mount-index.md).
+ * #ι: metadata indexes for 9P roots and mounts (design/epoch-0/mount-index.md).
  * A conversation puts the index layer (src/rootindex/layer.zig) between
  * devmnt and a server connection: devmnt mounts the conversation's data
  * file, and the layer answers walks, stats, and directory reads from

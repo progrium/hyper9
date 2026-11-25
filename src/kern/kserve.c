@@ -1,5 +1,5 @@
 /*
- * kserve: h9's 9P2000 server in the kernel (design/kernel-serve.md).
+ * kserve: h9's 9P2000 server in the kernel (design/epoch-0/kernel-serve.md).
  * serve's per-connection path (src/machine.zig) hands it a channel that
  * reads and writes whole 9P2000 messages, a #ℓ conversation's data, and
  * it answers them from kernel channels directly, in place of an exportfs
@@ -144,7 +144,7 @@ struct Kconn
 	int	nfid;
 };
 
-/* Where attaches get their namespace (design/kernel-serve.md, Namespaces). */
+/* Where attaches get their namespace (design/epoch-0/kernel-serve.md, Namespaces). */
 typedef struct Ksource Ksource;
 struct Ksource
 {

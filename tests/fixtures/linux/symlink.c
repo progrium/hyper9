@@ -1,4 +1,4 @@
-/* Linux symlinks (design/linux-symlinks.md): each case named on the
+/* Linux symlinks (design/epoch-0/linux-symlinks.md): each case named on the
  * command line prints "ok NAME" or "FAIL NAME: why". The links are made
  * in $DIR, or /tmp. */
 #define _GNU_SOURCE

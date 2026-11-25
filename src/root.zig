@@ -22,7 +22,7 @@ pub const newns = @import("newns.zig");
 pub const consin = @import("consin.zig");
 pub const ws = @import("ws.zig");
 pub const hstream = @import("hstream.zig");
-/// Credential helpers for WebSocket handshakes (design/credential-helpers.md).
+/// Credential helpers for WebSocket handshakes (design/epoch-0/credential-helpers.md).
 pub const cred = @import("cred.zig");
 /// `--serve` listeners (design/epoch-0/serve.md).
 pub const serve = @import("serve.zig");

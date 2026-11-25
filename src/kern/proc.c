@@ -442,7 +442,7 @@ h9_uphproc(void)
 
 /*
  * Whether the calling process's next lookup acts on a link in its last
- * name (design/linux-symlinks.md, fscheck.h); h9_fs_nofollow sets it and
+ * name (design/epoch-0/linux-symlinks.md, fscheck.h); h9_fs_nofollow sets it and
  * returns what it was. A process that isn't h9's always follows.
  */
 int
@@ -1411,7 +1411,7 @@ h9_kern_fork(int flag, ulong pid, void (*fn)(void*), void *arg)
 	}
 	poperror();
 
-	/* The child keeps its parent's chroot (design/linux-chroot.md). */
+	/* The child keeps its parent's chroot (design/epoch-0/linux-chroot.md). */
 	if((h->lroot = ph->lroot) != nil)
 		incref(&h->lroot->ref);
 
@@ -1917,7 +1917,7 @@ h9_kern_closeexec(void)
 }
 
 /*
- * kserve's kernel processes (kserve.c, design/kernel-serve.md) act for
+ * kserve's kernel processes (kserve.c, design/epoch-0/kernel-serve.md) act for
  * the process that started serving: each gets a record of its own in
  * that process's machine, sharing its environment, so devices that look
  * up the caller's machine (#ℓ, #s, #p) see the server's. Its pid is 0,

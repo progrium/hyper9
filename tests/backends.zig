@@ -1994,7 +1994,7 @@ test "a copy-up while another process has the lower file open leaves that reader
     if (ran == 0) return error.SkipZigTest;
 }
 
-// Linux named pipes (design/linux-fifo.md).
+// Linux named pipes (design/epoch-0/linux-fifo.md).
 
 /// A run of `sh -c script` from the Alpine root in `H9_TEST_LINUX_ROOT`
 /// (scripts/fetch.sh), in host directory `dir`, writable. With `dst` "/"
@@ -2754,7 +2754,7 @@ inline fn rep(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
     }
 }
 
-// An `.fd` mount (design/fd-mounts.md): a 9P server on a host descriptor
+// An `.fd` mount (design/epoch-0/fd-mounts.md): a 9P server on a host descriptor
 // the test holds, as an embedder's in-process server would, mounted from
 // Machine.Options without a socket on disk. The fixtures run on the
 // emulator, which runs everywhere, and on HVF where it's here.

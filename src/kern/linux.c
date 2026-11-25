@@ -49,8 +49,8 @@ swapchan(Chan *c, int which)
 
 /*
  * Mark the Chan that is a root where .. stops (h9_fs_markroot): a
- * chroot's (design/linux-chroot.md), held in the record's lroot and as
- * slash, and a served attach root (kserve.c, design/kernel-serve.md),
+ * chroot's (design/epoch-0/linux-chroot.md), held in the record's lroot and as
+ * slash, and a served attach root (kserve.c, design/epoch-0/kernel-serve.md),
  * held as its workers' slash. Only a chroot's makes the process's root
  * the Linux view. Not drawterm flags: only this file sets or reads them,
  * and clones don't copy them.
@@ -136,7 +136,7 @@ topchan(char *name)
 
 /*
  * The calling process's Linux root, referenced: its chroot's
- * (design/linux-chroot.md), or #L.
+ * (design/epoch-0/linux-chroot.md), or #L.
  */
 static Chan*
 linuxroot(void)
@@ -179,7 +179,7 @@ h9_linux_inview(void)
 
 /*
  * Whether the calling process's walks stop at links, for the kernel's
- * walk to follow from its root (design/linux-symlinks.md): a Linux
+ * walk to follow from its root (design/epoch-0/linux-symlinks.md): a Linux
  * process's, whose root is the Linux view.
  */
 int
@@ -222,7 +222,7 @@ mountedon(Chan *d, Chan *c)
 /*
  * namec(path, Atodir) from the top of the Linux view rather than the
  * calling process's chroot: an fd opened before a chroot was named from
- * there (design/linux-chroot.md).
+ * there (design/epoch-0/linux-chroot.md).
  */
 static Chan*
 fromtop(char *path)
@@ -626,7 +626,7 @@ h9_linux_fchdir(int fd)
 }
 
 /*
- * chroot(2) (design/linux-chroot.md): path, walked as any Linux path is,
+ * chroot(2) (design/epoch-0/linux-chroot.md): path, walked as any Linux path is,
  * becomes the calling process's Linux root, which its later forks keep
  * and exec doesn't change. Its absolute paths, its links' absolute
  * targets, and .. at the top stop there. The working directory stays as

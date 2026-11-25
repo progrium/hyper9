@@ -103,7 +103,7 @@ An uncontained `#U` attach is unchanged. `--dir PATH:DST:contained`, and every `
 
 ### Linux symlinks
 
-A Linux process's walks ([linux-symlinks](../design/linux-symlinks.md)) stop at a link instead of following it, and the kernel's walk follows it from the process's root, the Linux view, so a link resolves through the same mounts, binds, and `#L` layers as the path the program would get by writing its target out. A 9front process's walks are unchanged. A process walks this way when its root is the Linux view (`h9_fs_linkwalk`, `src/kern/linux.c`).
+A Linux process's walks ([linux-symlinks](../design/epoch-0/linux-symlinks.md)) stop at a link instead of following it, and the kernel's walk follows it from the process's root, the Linux view, so a link resolves through the same mounts, binds, and `#L` layers as the path the program would get by writing its target out. A 9front process's walks are unchanged. A process walks this way when its root is the Linux view (`h9_fs_linkwalk`, `src/kern/linux.c`).
 
 A device's walk stops at the first link it meets: the link is the last qid of its `Walkqid`, with `H9_QTSYMLINK` (`0x02`, 9P2000.u's and .L's qid bit) in its type, and the names after it aren't walked. The link `stat`s with `H9_DMSYMLINK` (9P2000.u's `0x02000000`) and its own size and times, and a directory read lists it so, with or without a target. devfs (posix and win32, contained or not), the overlay's `Nlink` nodes and its lower tree's links, a union's members, and a 9P2000.L mount ([ninep.md](ninep.md)) stop this way. `namec` refuses to open a link that a Linux open didn't follow, on any device.
 

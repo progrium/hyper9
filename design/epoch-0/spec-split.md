@@ -24,7 +24,7 @@ SPEC.md describes h9 as built, and every finishing PR adds to it ([proposals](pr
 - **It's too long to read in one pass.** A person changing the CLI reads past the hypervisors, the Linux personality, and the kernel to get there, and a coding agent's file read stops short of the end.
 - **Every finishing PR edits the same file.** Two open PRs that touch different parts of h9 still conflict in it.
 - **Signing means re-reading all of it.** SPEC.md is signed by the person who last reviewed it as a whole, so a change to one section asks for a review of every section.
-- **`spec/` already exists.** [hcpu](../hcpu.md) put the CPUs' descriptions in `spec/jit.md`, `spec/h86.md`, `spec/hx64.md`, and `spec/ha64.md`, since they would have doubled SPEC.md.
+- **`spec/` already exists.** [hcpu](hcpu.md) put the CPUs' descriptions in `spec/jit.md`, `spec/h86.md`, `spec/hx64.md`, and `spec/ha64.md`, since they would have doubled SPEC.md.
 
 ## Proposal
 

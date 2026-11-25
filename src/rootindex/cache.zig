@@ -1,4 +1,4 @@
-//! The host's cache of compiled indexes (design/mount-index.md,
+//! The host's cache of compiled indexes (design/epoch-0/mount-index.md,
 //! "Fetching and caching"): one file per index, under `--index-cache`, by
 //! default `$XDG_CACHE_HOME/h9/index`, `~/Library/Caches/h9/index` on
 //! macOS, and `%LOCALAPPDATA%\h9\index` on Windows.

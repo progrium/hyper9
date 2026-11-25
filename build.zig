@@ -369,7 +369,7 @@ fn addSdkPaths(b: *std.Build, m: *std.Build.Module) void {
 /// for arm64 guests, h86 for 386, and hx64 for amd64. It's built in on
 /// every target that has a JIT for it (arm64 and x86-64, and the web
 /// host, which sets it itself) and left out elsewhere
-/// (design/retire-unicorn.md).
+/// (design/epoch-0/retire-unicorn.md).
 pub const Emu = enum { none, hcpu };
 
 /// The emulator a target gets: hcpu wherever it has a JIT.
@@ -945,13 +945,13 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const os = target.result.os.tag;
     // hcpu is built in wherever it has a JIT, arm64 and x86-64 hosts, so
-    // `auto` falls back to it without a hypervisor (design/hcpu.md). There's
-    // no option to pick another emulator (design/retire-unicorn.md); -Demu
+    // `auto` falls back to it without a hypervisor (design/epoch-0/hcpu.md). There's
+    // no option to pick another emulator (design/epoch-0/retire-unicorn.md); -Demu
     // and -Dunicorn are kept only to say so.
     const emu = emuFor(target.result);
     for ([_][]const u8{ "emu", "unicorn" }) |gone| {
-        if (b.option([]const u8, gone, "Removed: hcpu is always built in (design/retire-unicorn.md)") != null)
-            b.getInstallStep().dependOn(&b.addFail(b.fmt("-D{s} is gone: hcpu, h9's own emulator, is always built in, and Unicorn is only zig build lockstep's oracle (design/retire-unicorn.md)", .{gone})).step);
+        if (b.option([]const u8, gone, "Removed: hcpu is always built in (design/epoch-0/retire-unicorn.md)") != null)
+            b.getInstallStep().dependOn(&b.addFail(b.fmt("-D{s} is gone: hcpu, h9's own emulator, is always built in, and Unicorn is only zig build lockstep's oracle (design/epoch-0/retire-unicorn.md)", .{gone})).step);
     }
     // T0 in a Debug build runs several times slower than in a release one,
     // enough for long integration cases to time out.
@@ -1701,7 +1701,7 @@ pub fn build(b: *std.Build) void {
     }
     test_step.dependOn(&run_backend_tests.step);
     // With hcpu, the backend cases run on each tier: T1 (the default)
-    // above, and T0 here (design/hcpu.md).
+    // above, and T0 here (design/epoch-0/hcpu.md).
     if (emu == .hcpu and !no_jit) {
         const run_t0 = b.addRunArtifact(backend_tests);
         run_t0.setName("run test backends (hcpu T0)");
@@ -2041,7 +2041,7 @@ fn addHcpuTests(b: *std.Build, test_step: *std.Build.Step, target: std.Build.Res
     test_step.dependOn(&x86_run.step);
     b.step("x86-jit", "Run h86's [hcpu] cases on T0 and T1 (tests/x86.zig)").dependOn(&x86_run.step);
 
-    // hx64's [hcpu] cases, on T0 and T1 (design/hcpu.md).
+    // hx64's [hcpu] cases, on T0 and T1 (design/epoch-0/hcpu.md).
     const x64 = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("tests/x64.zig"),
         .target = target,

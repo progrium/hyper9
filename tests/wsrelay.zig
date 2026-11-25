@@ -31,7 +31,7 @@ pub const Options = struct {
     require_header: ?[]const u8 = null,
     /// A file holding the header line the handshake must carry, read at
     /// each handshake, or it's answered 401: a credential helper writes
-    /// its newest token there (design/credential-helpers.md).
+    /// its newest token there (design/epoch-0/credential-helpers.md).
     require_header_file: ?[]const u8 = null,
     /// Header lines, each ending in CRLF, added to the 101, such as
     /// 9P-Uid and 9P-User.

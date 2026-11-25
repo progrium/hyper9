@@ -1,4 +1,4 @@
-//! The leaves `#ι` (src/kern/devhidx.c, design/mount-index.md) calls the
+//! The leaves `#ι` (src/kern/devhidx.c, design/epoch-0/mount-index.md) calls the
 //! index layer through: each takes and returns bytes and never raises,
 //! returning -1 with the error in the caller's ERRMAX buffer. devhidx.c
 //! holds a lock per layer around every call.

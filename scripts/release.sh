@@ -11,7 +11,7 @@
 # Every binary is built from an unpacked `git archive` of HEAD, not the
 # checkout, so what ships is exactly the commit. There's one licence:
 # hcpu, always built in, is the emulator and there is no h9-emu
-# (design/hcpu.md).
+# (design/epoch-0/hcpu.md).
 #
 #   scripts/release.sh [version]    (default: git describe --tags --always)
 #

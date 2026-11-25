@@ -84,10 +84,10 @@ const js = struct {
     /// this host's WebSocket can't send them (a browser's). With
     /// `static_tree`, a server that doesn't upgrade is tried as a static
     /// dotfs tree at the URL's `http` form, which the host then serves as
-    /// the socket's 9P server (design/mounts.md, "Static trees").
+    /// the socket's 9P server (design/epoch-0/mounts.md, "Static trees").
     extern "h9" fn ws_open(url: [*]const u8, url_n: u32, protocols: [*]const u8, protocols_n: u32, headers: [*]const u8, headers_n: u32, static_tree: u32) i32;
     /// Asks the embedder's credentials callback for a host-made stream's
-    /// handshake (design/credential-helpers.md, "Browser host"): `failed`
+    /// handshake (design/epoch-0/credential-helpers.md, "Browser host"): `failed`
     /// is empty, or why the last try failed; `argv` is the matching
     /// `--cred` helper's command, one word per line, or empty. Writes
     /// `Name: value` lines to `out`, the first of which may instead be
@@ -302,7 +302,7 @@ pub const HostOptions = struct {
     /// the host's bundle.
     ca_file: ?[]const u8 = null,
     proxy: ws.ProxyConfig = .{},
-    /// Credential helpers (design/credential-helpers.md): the one whose
+    /// Credential helpers (design/epoch-0/credential-helpers.md): the one whose
     /// pattern matches the URL best runs before each handshake, and its
     /// headers go with it, after `headers`, which win on a name.
     cred: []const cred.Helper = &.{},
@@ -339,7 +339,7 @@ pub const Served = struct {
 
 /// The dialect slot (design/epoch-0/serve.md, "Each connection"): what
 /// serves a connection whose first message has type `typ`. Every
-/// connection goes to the kernel's 9P server (design/kernel-serve.md)
+/// connection goes to the kernel's 9P server (design/epoch-0/kernel-serve.md)
 /// through a `#ℓ` conversation's server side (design/epoch-0/dotl.md),
 /// which translates a 9P2000.L client and passes any other version to
 /// the server to answer.
@@ -402,7 +402,7 @@ pub const Stream = struct {
     /// starts.
     addrs: []net.IpAddress = &.{},
     /// A host-made stream's credential helper, copied from the pattern
-    /// that matched its URL (design/credential-helpers.md).
+    /// that matched its URL (design/epoch-0/credential-helpers.md).
     cred_helper: ?cred.Helper = null,
     /// Why the helper failed, when connect returns error.CredHelper.
     cred_why: cred.Why = .{},
@@ -411,7 +411,7 @@ pub const Stream = struct {
     /// HostOptions.static_tree.
     static_tree: bool = false,
     /// The server's uid and name for the client, from the 101's 9P-Uid
-    /// and 9P-User (design/credential-helpers.md).
+    /// and 9P-User (design/epoch-0/credential-helpers.md).
     ident_uid: ?u32 = null,
     ident_user: [ws.max_user]u8 = undefined,
     ident_len: usize = 0,
@@ -707,7 +707,7 @@ pub fn result(id: u32, buf: []u8) ?[]const u8 {
 }
 
 /// The server's identity for the client, from a host-made stream's
-/// handshake (design/credential-helpers.md).
+/// handshake (design/epoch-0/credential-helpers.md).
 pub const Identity = struct { uid: u32, user: []const u8 };
 
 /// Stream `id`'s 9P-Uid and 9P-User, copied into `buf`, or null if the
@@ -723,7 +723,7 @@ pub fn identity(id: u32, buf: *[ws.max_user]u8) ?Identity {
 }
 
 // What each machine's host-made streams are made with, for `#ℓ`'s redials
-// (design/credential-helpers.md): the root's options for its URL, and
+// (design/epoch-0/credential-helpers.md): the root's options for its URL, and
 // the mounts' for the rest.
 
 const HostEntry = struct { owner: usize, root_url: ?[]const u8, root: HostOptions, mounts: HostOptions };
@@ -1085,7 +1085,7 @@ fn connect(s: *Stream) ConnectError!void {
     const url = ws.Url.parse(s.url) catch unreachable;
     const proxy: ?ws.Proxy = if (s.proxy) |p| ws.Proxy.parse(p) catch return error.BadProxy else null;
     // With a credential helper, a 401 or 403 runs it once more, with the
-    // response on stdin, on a new connection (design/credential-helpers.md).
+    // response on stdin, on a new connection (design/epoch-0/credential-helpers.md).
     var head: ws.Response.Head = .{};
     var prev: []const u8 = "";
     while (true) {
@@ -1222,7 +1222,7 @@ fn webConnect(s: *Stream) ConnectError!void {
     }
     // A host-made stream asks the embedder's credentials callback before
     // each try, and tries once more if one gave a credential and the
-    // open failed (design/credential-helpers.md, "Browser host").
+    // open failed (design/epoch-0/credential-helpers.md, "Browser host").
     var failed: [96]u8 = undefined;
     var failed_len: usize = 0;
     while (true) {
@@ -2385,7 +2385,7 @@ test "the keepalive pings an idle stream" {
     try testing.expect(echo.pings.load(.acquire) >= 2);
 }
 
-// Fetching an `index=` URL (design/mount-index.md), with the
+// Fetching an `index=` URL (design/epoch-0/mount-index.md), with the
 // connection code WebSocket roots use: the proxy's CONNECT, then TLS for
 // `https`, then one GET.
 
@@ -2514,7 +2514,7 @@ pub const GetOptions = struct {
 
 /// GETs `url_s`, an `https://` or `http://` URL, through the proxy and
 /// TLS as a WebSocket root connects, and returns whatever status the
-/// server answers with (design/mounts.md, "Static trees").
+/// server answers with (design/epoch-0/mounts.md, "Static trees").
 pub fn fetch(alloc: std.mem.Allocator, io: Io, url_s: []const u8, o: GetOptions, req: Request, msg: []u8) anyerror!Response {
     if (web.enabled) return error.Unsupported;
     setIo(io);

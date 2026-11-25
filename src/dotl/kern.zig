@@ -84,7 +84,7 @@ const Tr = struct {
         server: server.Server,
     },
     /// The server's name for the client, from a WebSocket handshake's
-    /// 9P-User (design/credential-helpers.md), which the user map holds.
+    /// 9P-User (design/epoch-0/credential-helpers.md), which the user map holds.
     ident: [32]u8 = undefined,
 };
 
@@ -104,7 +104,7 @@ fn secondsNow() u32 {
 /// `mode` is 0 for a client offering 9P2000.L, 1 for one offering
 /// 9P2000.L.Z, and 2 for the server side. `uid` and `user` are the
 /// server's identity for the client, from a WebSocket handshake's 9P-Uid
-/// and 9P-User (design/credential-helpers.md), or -1 and null: without a
+/// and 9P-User (design/epoch-0/credential-helpers.md), or -1 and null: without a
 /// `--user-map`, the map then takes them as the machine's user.
 fn h9_dotl_new(mach: ?*anyopaque, mode: c_int, uid: c_long, user: ?[*:0]const u8, err: [*]u8) callconv(.c) ?*Tr {
     const cfg = configFor(@intFromPtr(mach)) orelse Config{ .user = "none" };
@@ -148,7 +148,7 @@ fn h9_dotl_free(t: *Tr) callconv(.c) void {
 }
 
 /// `linkwalk` is whether the writer is a Linux process, whose walks stop
-/// at links (design/linux-symlinks.md).
+/// at links (design/epoch-0/linux-symlinks.md).
 fn h9_dotl_frommount(t: *Tr, buf: [*]const u8, n: c_long, linkwalk: c_int, err: [*]u8) callconv(.c) c_int {
     const b = buf[0..@intCast(n)];
     (switch (t.side) {

@@ -1,4 +1,4 @@
-/* Named pipes (design/linux-fifo.md): each case named on the command line
+/* Named pipes (design/epoch-0/linux-fifo.md): each case named on the command line
  * prints "ok NAME" or "FAIL NAME: why". The FIFOs are made in $DIR, or
  * /tmp. */
 #define _GNU_SOURCE

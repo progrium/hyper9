@@ -60,7 +60,7 @@ A device is a table of the nine operations, which every device has, plus optiona
 ### Views
 
 - **9front processes** call the nine operations. A symbolic link reads as it does today.
-- **A 9P2000 server** ([kernel-serve](kernel-serve.md)) serves the nine. A 9P2000.L server, where one is added, serves the wide form.
+- **A 9P2000 server** ([kernel-serve](epoch-0/kernel-serve.md)) serves the nine. A 9P2000.L server, where one is added, serves the wide form.
 - **devmnt** uses the nine against a 9P2000 server, and devdotl uses the wide form against a 9P2000.L one, so a Linux process on a .L root translates once.
 
 ## Rationale

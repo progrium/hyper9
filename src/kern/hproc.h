@@ -117,7 +117,7 @@ struct Hproc
 
 	Hproc	*parent;	/* nil with RFNOWAIT or for a machine's first process */
 	int	nofollow;	/* the next lookup acts on a link in its last name (h9_fs_nofollow); only its own thread looks */
-	Chan	*lroot;		/* the Linux root chroot(2) set (design/linux-chroot.md), or nil for #L; only its own thread looks */
+	Chan	*lroot;		/* the Linux root chroot(2) set (design/epoch-0/linux-chroot.md), or nil for #L; only its own thread looks */
 	/*
 	 * A Linux thread's group leader (RFLXTHREAD), or nil: its forks are
 	 * the leader's children, and its Linux waits read the leader's wait

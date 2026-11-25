@@ -1,4 +1,4 @@
-/* chroot (design/linux-chroot.md): each case named on the command line
+/* chroot (design/epoch-0/linux-chroot.md): each case named on the command line
  * prints "ok NAME" or "FAIL NAME: why". Each case runs in a child, which
  * chroots, so the next one starts from the Linux view's top. The trees
  * are made in $DIR, or /tmp. */

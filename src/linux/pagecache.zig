@@ -1,4 +1,4 @@
-//! A page cache for private file mappings (design/cow-fork.md, "A shared
+//! A page cache for private file mappings (design/epoch-0/cow-fork.md, "A shared
 //! page cache for executables"): the pages of one chunk of a file,
 //! shared by every process whose private mapping of the file covers that
 //! chunk whole, at the address the chunk's offset puts it at (offset and

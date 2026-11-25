@@ -1,4 +1,4 @@
-//! The mount flags (design/mounts.md): `--dir`, `--url`, `--archive`,
+//! The mount flags (design/epoch-0/mounts.md): `--dir`, `--url`, `--archive`,
 //! `--builtin`, and `--tmp` bring a tree in from outside the machine, and
 //! `--bind` rearranges what's already inside. Each is `SRC[:DST[:OPTS]]`,
 //! or the long form `src=…,dst=…,…`, and each becomes lines of the plan.
@@ -20,7 +20,7 @@ pub const Kind = enum {
     /// An empty tree in memory.
     tmp,
     /// A 9P connection the embedder already holds, as a host descriptor
-    /// (Machine.Options only, design/fd-mounts.md).
+    /// (Machine.Options only, design/epoch-0/fd-mounts.md).
     fd,
 
     pub fn flag(k: Kind) []const u8 {
@@ -42,7 +42,7 @@ pub const Access = enum { ro, rw, eph, up };
 /// Where a mount goes relative to what's at DST.
 pub const Order = enum { before, after };
 
-/// The two stacks (design/mounts.md, "Stacks").
+/// The two stacks (design/epoch-0/mounts.md, "Stacks").
 pub const Stack = enum {
     /// `/`: the 9front root stack, `#Oroot`.
     root,
@@ -69,7 +69,7 @@ pub const Mount = struct {
     /// The host path (resolved by the CLI for `--dir`), URL, or archive
     /// file. Empty for `--builtin` and `--tmp`.
     src: []const u8 = "",
-    /// An `.fd` mount's connection (design/fd-mounts.md): a descriptor
+    /// An `.fd` mount's connection (design/epoch-0/fd-mounts.md): a descriptor
     /// in the host process, a POSIX fd or a Windows `HANDLE`, read from
     /// and, without `fd_write`, written to. h9 duplicates it for each run,
     /// and the embedder keeps it.
@@ -273,7 +273,7 @@ pub fn scheme(s: []const u8) ?[]const u8 {
 
 /// Where DST starts: the last `:` followed by `/` or `#`, except the
 /// `://` after a URL's scheme and a Windows drive letter's `:`
-/// (design/mounts.md, "Parsing"). Null if there's none.
+/// (design/epoch-0/mounts.md, "Parsing"). Null if there's none.
 pub fn dstStart(arg: []const u8) ?usize {
     const skip: ?usize = if (scheme(arg)) |s| s.len else null;
     var i = arg.len;

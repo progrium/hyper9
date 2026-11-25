@@ -140,11 +140,11 @@ integration cases; release builds don't (`-Dguest-test` overrides it).
 
 ### The emulator, and Windows
 
-The emulator backend is hcpu, h9's own CPUs ([hcpu](design/hcpu.md)): ha64
+The emulator backend is hcpu, h9's own CPUs ([hcpu](design/epoch-0/hcpu.md)): ha64
 for arm64, h86 for 386, and hx64 for amd64, each with a JIT (T1) and an
 interpreter (T0). It's MIT and always built in on arm64 and x86-64
 targets, so every `h9` has it, and `-Dno-jit` builds the interpreter
-alone. There's no other emulator to build ([retire-unicorn](design/retire-unicorn.md)). `H9_EMU_TIER=t0` or `t1` picks a
+alone. There's no other emulator to build ([retire-unicorn](design/epoch-0/retire-unicorn.md)). `H9_EMU_TIER=t0` or `t1` picks a
 tier at run time, for tests:
 
 ```sh

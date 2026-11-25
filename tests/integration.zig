@@ -543,7 +543,7 @@ const Scratch = struct {
     ns_buf: [std.Io.Dir.max_path_bytes + 8]u8 = undefined,
 
     /// `@<scratch>/ns`: --ns's value for the namespace file `ns` the case
-    /// wrote, read on the host (design/mounts.md).
+    /// wrote, read on the host (design/epoch-0/mounts.md).
     fn ns(s: *Scratch) []const u8 {
         return std.fmt.bufPrint(&s.ns_buf, "@{s}/ns", .{s.path}) catch unreachable;
     }
@@ -858,7 +858,7 @@ test "ls /bin | wc -l (demo) [baseline]" {
     const h = try run(e, &.{ "--rc", "ls '#H/bin' | wc -l" });
     defer h.deinit();
     const in_h = try std.fmt.parseInt(usize, std.mem.trim(u8, h.out, " \n"), 10);
-    // So is #H/over, h9's bind with -r, before the root's (design/mounts.md).
+    // So is #H/over, h9's bind with -r, before the root's (design/epoch-0/mounts.md).
     const o = try run(e, &.{ "--rc", "ls '#H/over' | wc -l" });
     defer o.deinit();
     const in_over = try std.fmt.parseInt(usize, std.mem.trim(u8, o.out, " \n"), 10);
@@ -1660,7 +1660,7 @@ test "--write=scope keeps the root read-only [overlay]" {
         const r = try run(e, &.{ prof, "--write=scope", "--rc", "echo x > /lib/h9-overlay-scope" });
         defer r.deinit();
         try std.testing.expectEqual(1, r.code);
-        // A stack with no member taking creates (design/mounts.md).
+        // A stack with no member taking creates (design/epoch-0/mounts.md).
         try std.testing.expect(std.mem.indexOf(u8, r.err, "mounted directory forbids creation") != null);
     }
     try expectRootLacks(e, "lib/h9-overlay-scope");
@@ -3498,7 +3498,7 @@ const RootServer = struct {
         return std.fmt.bufPrint(&s.dial_buf, "tcp!127.0.0.1!{d}", .{s.port}) catch unreachable;
     }
 
-    /// The server as a --url (design/mounts.md).
+    /// The server as a --url (design/epoch-0/mounts.md).
     fn url(s: *RootServer) []const u8 {
         return std.fmt.bufPrint(&s.url_buf, "tcp://127.0.0.1:{d}", .{s.port}) catch unreachable;
     }
@@ -3517,7 +3517,7 @@ fn urlOpts(buf: []u8, url: []const u8, opts: []const u8) []const u8 {
     return std.fmt.bufPrint(buf, "{s}:/:{s}", .{ url, opts }) catch unreachable;
 }
 
-/// The flag that mounts `root` on `/` (design/mounts.md): `--dir` for
+/// The flag that mounts `root` on `/` (design/epoch-0/mounts.md): `--dir` for
 /// a host path (starting with `/` or `.`), and `--url` for anything else.
 fn rootFlag(root: []const u8) [2][]const u8 {
     const u = dialUrl(&root_url_buf, root);
@@ -3641,7 +3641,7 @@ const FakeAttach = struct {
         return std.fmt.bufPrint(&f.dial_buf, "tcp!127.0.0.1!{d}", .{f.srv.socket.address.getPort()}) catch unreachable;
     }
 
-    /// The server as a --url (design/mounts.md).
+    /// The server as a --url (design/epoch-0/mounts.md).
     fn url(f: *FakeAttach) []const u8 {
         return std.fmt.bufPrint(&f.url_buf, "tcp://127.0.0.1:{d}", .{f.srv.socket.address.getPort()}) catch unreachable;
     }
@@ -3888,7 +3888,7 @@ test "--url tcp:// and unix:// mount 9P, with spec from the path or spec= [mount
     }
 }
 
-// Static dotfs trees (design/mounts.md, "Static trees"): StaticHttp serves
+// Static dotfs trees (design/epoch-0/mounts.md, "Static trees"): StaticHttp serves
 // a host directory over plain HTTP, answering a WebSocket upgrade with 404,
 // as a static file host does, and logs each request.
 
@@ -4402,7 +4402,7 @@ test "--check runs /bin/echo from a 9P root [ninep-roots]" {
     try std.testing.expect(std.mem.indexOf(u8, r.out, "ok, /bin/echo runs") != null);
 }
 
-// Metadata indexes (design/mount-index.md). The server is a second h9
+// Metadata indexes (design/epoch-0/mount-index.md). The server is a second h9
 // serving a small tree copied from the test root (a few commands,
 // rcmain, the mount points, and /lib/x) with exportfs, behind a relay
 // that counts the T-messages and keeps the names walked. Each case
@@ -6443,7 +6443,7 @@ const LinuxEnv = struct {
     nine: ?[]const u8,
     arch: []const u8,
     backends: []const u8,
-    /// `root:#L`, the --dir that mounts it (design/mounts.md).
+    /// `root:#L`, the --dir that mounts it (design/epoch-0/mounts.md).
     lmount: []const u8 = "",
     buf: [2][std.Io.Dir.max_path_bytes]u8 = undefined,
     lbuf: [std.Io.Dir.max_path_bytes + 3]u8 = undefined,
@@ -6777,7 +6777,7 @@ test "/proc/self/exe is the file a Linux program runs, its links followed [linux
     try std.testing.expectEqual(0, r.code);
 }
 
-// Linux symlinks (design/linux-symlinks.md). Each case runs sh in the
+// Linux symlinks (design/epoch-0/linux-symlinks.md). Each case runs sh in the
 // Alpine root with a scratch directory as its cwd, an uncontained host
 // tree, and its own trees mounted or bound into the Linux view: /srv is
 // a directory in the Alpine root to bind over.
@@ -7046,7 +7046,7 @@ test "/proc/self/fd/N of a deleted file still opens [linux-symlinks]" {
     try symlinkFixture(&le, "deleted", false);
 }
 
-// chroot (design/linux-chroot.md), with tests/fixtures/linux/chroot.c,
+// chroot (design/epoch-0/linux-chroot.md), with tests/fixtures/linux/chroot.c,
 // which runs each case in a child that chroots and prints "ok NAME".
 
 /// Runs the chroot fixture's case `name` with its trees in the machine's
@@ -7138,7 +7138,7 @@ test "busybox chroot runs a dynamic program in a staging tree [linux-chroot]" {
     try linkCase(&le, &s, &.{}, script, "bin\netc\nlib\nstaged\n/\nnone\n");
 }
 
-// Named pipes (design/linux-fifo.md), with tests/fixtures/linux/fifo.c.
+// Named pipes (design/epoch-0/linux-fifo.md), with tests/fixtures/linux/fifo.c.
 
 /// Runs the fifo fixture's case `name` in the machine's /tmp, and then in
 /// a `--writable` host directory, where its FIFOs are host FIFOs.
@@ -10518,7 +10518,7 @@ test "--serve works over a root without /bin/exportfs [serve]" {
     try serveScratch(&s);
     defer s.deinit();
     // --read-deny hides the root's exportfs, which serving doesn't need
-    // (design/kernel-serve.md).
+    // (design/epoch-0/kernel-serve.md).
     var db: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const deny = try std.fmt.bufPrint(&db, "{s}/{s}/bin/exportfs", .{ e.root, testArch(e) });
     var t = try startServer(e, &.{ "--cwd", s.path, "--read-deny", deny, "--serve", "tcp!127.0.0.1!0", "--rc", "test -e /bin/exportfs || echo ready; sleep 60" });
@@ -11074,7 +11074,7 @@ const Diod = struct {
         return std.fmt.bufPrint(&d.dial_buf, "tcp!127.0.0.1!{d}", .{d.port}) catch unreachable;
     }
 
-    /// The server as a --url (design/mounts.md).
+    /// The server as a --url (design/epoch-0/mounts.md).
     fn url(d: *Diod) []const u8 {
         return std.fmt.bufPrint(&d.url_buf, "tcp://127.0.0.1:{d}", .{d.port}) catch unreachable;
     }
@@ -11330,7 +11330,7 @@ const ZeroFs = struct {
         return std.fmt.bufPrint(&z.dial_buf, "tcp!127.0.0.1!{d}", .{z.relay.listen_port}) catch unreachable;
     }
 
-    /// The server as a --url (design/mounts.md).
+    /// The server as a --url (design/epoch-0/mounts.md).
     fn url(z: *ZeroFs) []const u8 {
         return std.fmt.bufPrint(&z.url_buf, "tcp://127.0.0.1:{d}", .{z.relay.listen_port}) catch unreachable;
     }
@@ -11913,7 +11913,7 @@ test "--user-map wins over 9P-Uid [credential-helpers]" {
     try std.testing.expect(std.mem.indexOf(u8, r.out, "progrium") == null);
 }
 
-// Mounts, binds, and a Plan 9 root (design/mounts.md).
+// Mounts, binds, and a Plan 9 root (design/epoch-0/mounts.md).
 
 test "--ns splits inline lines on ; outside quotes [mounts]" {
     const e = try env(@src());

@@ -57,7 +57,7 @@ const host = {
   setRaw: (on) => { if (stdin.isTTY) stdin.setRawMode(on); },
 };
 
-// --cred helpers (design/credential-helpers.md): Node runs the helper the
+// --cred helpers (design/epoch-0/credential-helpers.md): Node runs the helper the
 // native h9 would, as `argv... get URL`, with why the last try failed on
 // stdin for a retry, and its stderr passed through. A browser's WebSocket
 // only says that a handshake failed, so that's all a retry's stdin has.

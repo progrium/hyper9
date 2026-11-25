@@ -1,4 +1,4 @@
-//! Static dotfs trees (design/mounts.md, "Static trees"): dotfs's index
+//! Static dotfs trees (design/epoch-0/mounts.md, "Static trees"): dotfs's index
 //! profile served as plain files over HTTP, `URL/.fs/index` for the
 //! metadata and `URL/PATH` for each file's contents. h9 serves one to the
 //! kernel as a read-only 9P2000 server on the host, on a unix socket in a
