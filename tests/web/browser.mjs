@@ -211,7 +211,97 @@ try {
     if (!stLog.includes('RANGE /big') || stLog.includes('GET /big')) throw new Error(`static tree requests: ${stLog.join(', ')}`);
   });
 
-  // With linux.h9a, ?linux runs Alpine's arm64 busybox sh, jq and sqlite3
+  // design/port-streams.md: the page makes a channel between a Worker that
+  // serves the static tree at /st over 9P (statictree.js's Session) and a
+  // machine, which mounts it as its root; the page stays out of the data path.
+  await test('createMachine mounts a port to another Worker\'s 9P server [port-streams]', async () => {
+    const r = await page.evaluate(async (st) => {
+      const { createMachine } = await import('./h9-web.js');
+      const code = `import { openStatic, Session } from ${JSON.stringify(new URL('statictree.js', location.href).href)};
+        onmessage = async ({ data: { port, url } }) => {
+          const s = new Session(await openStatic(url));
+          port.onmessage = ({ data }) => {
+            if (data === null) return port.close();
+            s.feed(new Uint8Array(data), (r) => { const b = r.slice(); port.postMessage(b.buffer, [b.buffer]); });
+          };
+        };`;
+      const w = new Worker(URL.createObjectURL(new Blob([code], { type: 'text/javascript' })), { type: 'module' });
+      const ch = new MessageChannel();
+      w.postMessage({ port: ch.port2, url: st }, [ch.port2]);
+      const out = [];
+      const terminal = { write: (b) => out.push(new TextDecoder().decode(b)), setRaw() {} };
+      const m = await createMachine({ mounts: [{ port: ch.port1, dst: '/' }, { archive: 'root.h9a' }], terminal });
+      const code2 = await m.run(['/bin/rc', '-c', "ls / | grep -c '^/(a|big|sub)$'; cat /a"]);
+      w.terminate();
+      return { code: code2, out: out.join('') };
+    }, `${url}st`);
+    r.out = r.out.replace(/^h9: warning: .*\n/m, '');
+    if (r.code !== 0 || r.out !== '3\napple\n') throw new Error(`port root: ${JSON.stringify(r)}`);
+  });
+
+  // createMachine({ serve: port }): a 9P client in the page, over the
+  // channel's other end, attaches and lists the machine's /bin.
+  await test('createMachine serves the machine on a port, and a JS 9P client lists /bin [port-streams]', async () => {
+    const r = await page.evaluate(async () => {
+      const { createMachine } = await import('./h9-web.js');
+      const ch = new MessageChannel();
+      const m = await createMachine({ mounts: [{ archive: 'root.h9a' }], serve: ch.port1, terminal: { write() {}, setRaw() {} } });
+      const running = m.run(['/bin/rc', '-c', 'sleep 60']);
+      // One 9P2000 request at a time, each answered in order.
+      const port = ch.port2;
+      const answers = [];
+      let waiter = null;
+      let closed = false;
+      port.onmessage = ({ data }) => { if (data === null) closed = true; else answers.push(new Uint8Array(data)); waiter?.(); };
+      const enc = new TextEncoder(), dec = new TextDecoder();
+      const rpc = async (type, body) => {
+        const b = new Uint8Array(7 + body.length);
+        const v = new DataView(b.buffer);
+        v.setUint32(0, b.length, true);
+        b[4] = type;
+        v.setUint16(5, type === 100 ? 0xffff : 1, true);
+        b.set(body, 7);
+        port.postMessage(b.buffer, [b.buffer]);
+        const t = setTimeout(() => waiter?.(), 30_000);
+        while (!answers.length) {
+          if (closed) throw new Error('the machine hung up');
+          const at = Date.now();
+          await new Promise((res) => { waiter = res; });
+          if (!answers.length && Date.now() - at >= 30_000) throw new Error(`no answer to type ${type}`);
+        }
+        clearTimeout(t);
+        const a = answers.shift();
+        if (a[4] === 107) throw new Error(`Rerror: ${dec.decode(a.subarray(9, 9 + new DataView(a.buffer).getUint16(7, true)))}`);
+        return a;
+      };
+      const u16 = (n) => [n & 255, n >> 8], u32 = (n) => [n & 255, (n >> 8) & 255, (n >> 16) & 255, n >>> 24];
+      const str = (s) => { const b = enc.encode(s); return [...u16(b.length), ...b]; };
+      await rpc(100, [...u32(8192), ...str('9P2000')]);
+      await rpc(104, [...u32(0), ...u32(0xffffffff), ...str('glenda'), ...str('')]);
+      await rpc(110, [...u32(0), ...u32(1), ...u16(1), ...str('bin')]);
+      await rpc(112, [...u32(1), 0]);
+      const names = [];
+      for (let off = 0; ; ) {
+        const a = await rpc(116, [...u32(1), ...u32(off), 0, 0, 0, 0, ...u32(8000)]);
+        const v = new DataView(a.buffer);
+        const n = v.getUint32(7, true);
+        if (n === 0) break;
+        off += n;
+        for (let p = 11; p < 11 + n; ) {
+          const size = v.getUint16(p, true);
+          const np = p + 2 + 2 + 4 + 13 + 4 + 4 + 4 + 8;
+          names.push(dec.decode(a.subarray(np + 2, np + 2 + v.getUint16(np, true))));
+          p += 2 + size;
+        }
+      }
+      m.terminate();
+      void running;
+      return names;
+    });
+    if (!r.includes('rc') || !r.includes('ls') || r.length < 40) throw new Error(`served /bin: ${JSON.stringify(r)}`);
+  });
+
+  // With linux.h9a, ?linux runs Alpine's arm64 busybox sh, jq and sqlite3  // With linux.h9a, ?linux runs Alpine's arm64 busybox sh, jq and sqlite3
   // on ha64 (design/hcpu.md).
   if (await readFile(path.join(dir, 'linux.h9a')).then(() => true, () => false)) {
     await page.goto(`${url}?linux`);

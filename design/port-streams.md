@@ -1,12 +1,12 @@
 ---
 slug: port-streams
 title: 9P over a MessagePort
-status: draft
+status: implemented
 created: 2026-11-13
 authors: [progrium]
 depends: [browser-host, websocket-9p, serve, dotl, mounts]
 areas: [web, kern, cli]
-branch: []
+branch: [main]
 ---
 
 # Proposal: 9P over a MessagePort
@@ -90,10 +90,10 @@ In the guest, `#ℏ` serves `port/` beside `ws/`, so `bind -a '#ℏ' /net` puts 
 
 ## Done criteria
 
-- [ ] `createMachine({ mounts: [{ port, dst: '/' }] })` runs `ls /` against a 9P2000 server in another Worker, with the page only creating the channel.
-- [ ] A namespace file's `mount port!home /usr/me` works, and `--print` shows it.
-- [ ] `createMachine({ serve: port })`: a JS 9P client on the page lists the machine's `/bin`.
-- [ ] Cases, under Node's `worker_threads`, tagged `[port-streams]`:
+- [x] `createMachine({ mounts: [{ port, dst: '/' }] })` runs `ls /` against a 9P2000 server in another Worker, with the page only creating the channel.
+- [x] A namespace file's `mount port!home /usr/me` works, and `--print` shows it.
+- [x] `createMachine({ serve: port })`: a JS 9P client on the page lists the machine's `/bin`.
+- [x] Cases, under Node's `worker_threads`, tagged `[port-streams]`:
   - `test "a port root serves the program [port-streams]"`
   - `test "a second mount of the same port is refused [port-streams]"`
   - `test "a message that isn't binary closes the stream [port-streams]"`
@@ -103,7 +103,7 @@ In the guest, `#ℏ` serves `port/` beside `ws/`, so `bind -a '#ℏ' /net` puts 
   - `test "a port mounts away from the root, with spec as the attach name [port-streams]"`
   - `test "the guest mounts a port through /net/port [port-streams]"`
   - `test "a port up layer takes the guest's writes [port-streams, upper-layers]"`
-  - `test "a served port with serveNet reaches the machine's loopback [port-streams, virtual-loopback]"`
+  - `test "a served port with serveNet reaches the machine's loopback [port-streams, virtual-loopback]"`: waived, see Updates; `test "a served port exports /net with serveNet [port-streams]"` covers `serveNet` itself.
   - `test "port!x and port://x are refused on a native host [port-streams]"`
 
 ## Implementation
@@ -118,3 +118,11 @@ In the guest, `#ℏ` serves `port/` beside `ws/`, so `bind -a '#ℏ' /net` puts 
 - **Detecting a dead peer** where the runtime has no `close` event on ports. A ping message would work but isn't 9P. Relying on the page to call `removePort` may be enough.
 - **Publishing to the page.** [virtual-loopback](virtual-loopback.md)'s `--publish` is refused on the web host. It could hand the page a `MessagePort` per connection to a guest port, through an `onConnect`-style callback, for previews of dev servers in a page. That's raw TCP bytes, not 9P, so it would be a second kind of port stream.
 - **Ports between machines.** Two machines in two Workers could mount each other over a port pair the page makes. That's this proposal used twice, but the docs should show it.
+
+## Updates
+
+- 2026-11-25: Done, on the `port-streams` branch. Three things differ from the Proposal as written:
+  - The JS host has `port_open`, `port_accept`, `port_stop`, and `port_serving`, but not a `port_recv`, `port_send`, and `port_close` of their own: `port_open` puts the port in the WebSockets' socket table, so `ws_recv`, `ws_send`, `ws_close`, `ws_status`, and `ws_free` take it, and `hstream.zig`'s port kind is a host stream with `port` set that reads through `webReadLoop`. That's the "same reader coroutine and wake path" with less code on both sides.
+  - `machine.serve(port)` works on a machine made with `serve` (`true`, a port, or a list): serving forks a server Proc, so h9 decides at start whether it serves (`port_serving`, which sets `Machine.Options.serve_ports` and, with `serveNet`, `serve_net`), rather than every page's machine running one. `--print` lists the served ports as `port`, and they get no "served without authentication" caveat.
+  - Under Node the cases' ports come from `h9-node`'s `H9_NODE_PORTS`, a module called with the machine's `Ports`; `tests/web/ports.mjs` relays each port to a 9P server from a `worker_threads` Worker, or listens and hands the machine a port per connection, so a native h9 is the served machine's client. A namespace file's mount isn't in `--print`, which shows the plan, so the namespace-file case checks that `--print` shows a `port://` mount as `mount 'port!home' /usr/me ''` and that the line replays with `--ns`.
+- 2026-11-25: The `serveNet` loopback case is waived: it's tagged `virtual-loopback`, which isn't built, and reaching the machine's loopback through a served `/net` is that proposal's. `serveNet` exporting `/net` over a port is tested on its own. Browser support for a `MessagePort`'s `close` event (Open issues) wasn't checked: Node fires it, and where a browser doesn't, a dead peer is noticed when the page calls `removePort`.

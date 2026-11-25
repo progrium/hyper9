@@ -281,7 +281,9 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
         .serve_root = cfg.serve_root orelse "/",
         .serve_token = so.token,
         .serve_origins = cfg.serve_origins,
-        .serve_net = cfg.serve_net,
+        .serve_net = cfg.serve_net or (web and h9.hstream.portServing().net),
+        // The page's served ports (design/port-streams.md).
+        .serve_ports = web and h9.hstream.portServing().serve,
         .user_map = user_map,
         .stdio = undefined,
     };
@@ -549,6 +551,20 @@ fn resolveMount(arena: std.mem.Allocator, io: std.Io, given: h9.Machine.Mount) M
             m.src = if (m.kind == .archive) real else kernPath(arena, real);
         },
         .url => {
+            // A page's port (design/port-streams.md): only the web host
+            // has them, and a name is letters, digits, -, _, and .
+            if (std.mem.startsWith(u8, m.src, "port://")) {
+                const rest = m.src["port://".len..];
+                const name = rest[0 .. std.mem.indexOfScalar(u8, rest, '/') orelse rest.len];
+                if (!web) {
+                    std.debug.print("h9: --url {s}: ports are only on the web host\n", .{m.src});
+                    return error.Usage;
+                }
+                if (!h9.hstream.validPortName(name)) {
+                    std.debug.print("h9: --url {s}: a port's name is letters, digits, -, _, and .\n", .{m.src});
+                    return error.Usage;
+                }
+            }
             // The page's (or Node's) WebSocket does the handshake and TLS,
             // with its own trust and proxy, and can't set headers.
             if (web and (m.headers.len > 0 or m.ca != null)) {

@@ -243,7 +243,7 @@ pub const Mount = struct {
         if (m.srvName() == null and std.mem.startsWith(u8, m.dst, "/srv/") and m.kind == .url) return conflict(why, "a /srv destination is /srv/NAME");
         if (m.kind == .url) {
             if (scheme(m.src)) |s| {
-                if (!eqAny(s, &.{ "tcp", "unix", "ws", "wss", "http", "https" })) return conflict(why, "a URL is tcp://, unix://, ws://, wss://, http://, or https://");
+                if (!eqAny(s, &.{ "tcp", "unix", "ws", "wss", "http", "https", "port" })) return conflict(why, "a URL is tcp://, unix://, ws://, wss://, http://, https://, or port://");
             } else if (std.mem.indexOfScalar(u8, m.src, '!') != null) {
                 return conflict(why, "dial strings aren't URLs: use tcp://HOST:PORT or unix:///PATH");
             }
