@@ -19,15 +19,15 @@ Every proposal at the top of [design/](README.md), in the order they were writte
 | [wine-draw](wine-draw.md) | [#158](../../../issues/158) | proposed | in progress on wine-draw | Wine windows through draw |
 | [mount-index](mount-index.md) |  | implemented |  | Metadata indexes for 9P roots and mounts |
 | [hcpu](hcpu.md) | [#174](../../../issues/174) | implemented |  | hcpu, h9's own CPUs for the emulator |
-| [kernel-serve](kernel-serve.md) |  | draft |  | A 9P server in the kernel |
-| [namespace-kernel](namespace-kernel.md) |  | draft | needs kernel-serve, port-streams | A namespace-only kernel build |
+| [kernel-serve](kernel-serve.md) |  | implemented |  | A 9P server in the kernel |
+| [namespace-kernel](namespace-kernel.md) |  | draft | needs port-streams | A namespace-only kernel build |
 | [port-streams](port-streams.md) |  | draft |  | 9P over a MessagePort |
 | [linux-fifo](linux-fifo.md) |  | implemented |  | Linux named pipes |
 | [mounts](mounts.md) |  | implemented |  | Mounts, binds, and a Plan 9 root |
 | [baseline-1](baseline-1.md) |  | draft | needs renames | Baseline 1 (h9 at the end of epoch 0) |
 | [file-interface](file-interface.md) |  | draft | needs kernel-port | A wider file interface inside the kernel, with 9P2000 as a view |
 | [host-handles](host-handles.md) |  | draft | needs kernel-port | Host access through handles |
-| [kernel-port](kernel-port.md) |  | draft | needs baseline-1, namespace-kernel, kernel-serve | Port the kernel core to Zig, as an instance |
+| [kernel-port](kernel-port.md) |  | draft | needs baseline-1, namespace-kernel | Port the kernel core to Zig, as an instance |
 | [linux-symlinks](linux-symlinks.md) |  | implemented |  | Linux symlinks resolved in the guest's namespace |
 | [memory-model](memory-model.md) |  | draft | needs baseline-1 | One memory model under both ABIs |
 | [plan-format](plan-format.md) |  | draft | needs baseline-1, child-machines | The plan as a file, and the one way in |
@@ -60,7 +60,7 @@ flowchart LR
   p_wine_draw["wine-draw<br/>proposed"]:::draft
   p_mount_index["mount-index<br/>implemented"]:::implemented
   p_hcpu["hcpu<br/>implemented"]:::implemented
-  p_kernel_serve["kernel-serve<br/>draft"]:::draft
+  p_kernel_serve["kernel-serve<br/>implemented"]:::implemented
   p_namespace_kernel["namespace-kernel<br/>draft"]:::draft
   p_port_streams["port-streams<br/>draft"]:::draft
   p_linux_fifo["linux-fifo<br/>implemented"]:::implemented
