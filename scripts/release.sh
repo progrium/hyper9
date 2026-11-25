@@ -6,6 +6,11 @@
 #   h9-web-<version>.tar.gz               MIT: the browser host
 #                                         (h9.wasm, h9-web.js, h9-node,
 #                                         the demo page and its root archive)
+#   h9ns-<version>.tar.gz                 MIT: the namespace kernel for the
+#                                         web (h9ns.wasm, h9ns.js, and the
+#                                         JS files they import)
+#   h9ns-<version>-<target>.tar.gz        MIT: the namespace kernel as a
+#                                         static library (libh9ns.a, h9ns.h)
 #   SHA256SUMS
 #
 # Every binary is built from an unpacked `git archive` of HEAD, not the
@@ -76,6 +81,26 @@ web_root=()
 [ -f "$H9_LOCAL/9front/root386/386/bin/rc" ] && web_root=(-Dweb-root="$H9_LOCAL/9front/root386")
 (cd "$src" && zig build web -p "$work/build-web" -Doptimize=ReleaseSafe -Dversion="$version" "${web_root[@]}")
 cp -R "$work/build-web/web" "$work/$name"
+cp "$src/LICENSE" "$work/$name/LICENSE"
+cp "$src/third_party/drawterm/LICENSE" "$work/$name/LICENSE.drawterm"
+archive "$work/$name" "$name"
+
+# The namespace kernel (design/namespace-kernel.md): the web files once,
+# and the native library for each target but Windows.
+for t in $H9_TARGETS; do
+	case $t in *windows*) continue ;; esac
+	(cd "$src" && zig build nskernel -p "$work/build-ns-$t" -Doptimize=ReleaseSmall -Dtarget="$t" -Dversion="$version")
+	name="h9ns-$version-$t"
+	mkdir -p "$work/$name"
+	cp "$work/build-ns-$t/nskernel/libh9ns.a" "$work/build-ns-$t/nskernel/h9ns.h" "$work/$name/"
+	cp "$src/LICENSE" "$work/$name/LICENSE"
+	cp "$src/third_party/drawterm/LICENSE" "$work/$name/LICENSE.drawterm"
+	archive "$work/$name" "$name"
+	ns_web="$work/build-ns-$t/nskernel"
+done
+name="h9ns-$version"
+mkdir -p "$work/$name"
+for f in h9ns.wasm h9ns.js h9ns-worker.js h9-web.js wasi-mem.js statictree.js; do cp "$ns_web/$f" "$work/$name/"; done
 cp "$src/LICENSE" "$work/$name/LICENSE"
 cp "$src/third_party/drawterm/LICENSE" "$work/$name/LICENSE.drawterm"
 archive "$work/$name" "$name"

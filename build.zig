@@ -788,7 +788,9 @@ fn addNsKernel(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.la
         } else libc.append(b.allocator, f) catch @panic("OOM");
     }
     m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/libc"), .files = libc.items, .flags = flags });
-    if (target.result.abi.isMusl() and !web) {
+    // Zig's bundled memccpy, musl's and wasi-libc's, is broken; see
+    // src/kern/memccpy.c.
+    if (web or target.result.abi.isMusl()) {
         m.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"memccpy.c"}, .flags = flags });
         m.addCMacro("memccpy", "h9_memccpy");
     }
@@ -1220,7 +1222,7 @@ pub fn build(b: *std.Build) void {
     web_gfx_test.has_side_effects = true;
     web_gfx_test.expectExitCode(0);
     web_gfx_test.step.dependOn(web.install);
-    const web_test_step = b.step("web-test", "Run the browser host's demo page and its canvas cases in Chromium with Playwright (needs a 386 root for root.h9a)");
+    const web_test_step = b.step("web-test", "Run the browser host's demo page, its canvas cases, and the namespace kernel's machine cases in Chromium with Playwright (needs a 386 root for root.h9a)");
     web_test_step.dependOn(&web_test.step);
 
     // The namespace kernel (design/namespace-kernel.md): h9ns.wasm and its
@@ -1257,6 +1259,17 @@ pub fn build(b: *std.Build) void {
     ns_node.expectExitCode(0);
     ns_node.step.dependOn(ns_step);
     ns_test_step.dependOn(&ns_node.step);
+    // With an h9 machine in Chromium (tests/web/nskernel-browser.mjs), which
+    // needs the web build and its 386 root: run with web-test.
+    const ns_browser = b.addSystemCommand(&.{ "node", "tests/web/nskernel-browser.mjs" });
+    ns_browser.addDirectoryArg2(b.graph.path(.install_prefix, "nskernel"), .{ .make_absolute = true });
+    ns_browser.addDirectoryArg2(b.graph.path(.install_prefix, "web"), .{ .make_absolute = true });
+    ns_browser.setCwd(b.path("."));
+    ns_browser.has_side_effects = true;
+    ns_browser.expectExitCode(0);
+    ns_browser.step.dependOn(ns_step);
+    ns_browser.step.dependOn(web.install);
+    web_test_step.dependOn(&ns_browser.step);
     if (web_gfx != .none) web_test_step.dependOn(&web_gfx_test.step);
 
     const exe = b.addExecutable(.{
@@ -1345,6 +1358,8 @@ pub fn build(b: *std.Build) void {
     // `zig build proposal -Dp=...` runs them along with its tagged cases.
     var demos: std.StringHashMapUnmanaged(std.ArrayList(*std.Build.Step)) = .empty;
     addWebCases(b, &demos, "tests/web/browser.mjs", &web_test.step);
+    addWebCases(b, &demos, "tests/web/nskernel.mjs", &ns_node.step);
+    addWebCases(b, &demos, "tests/web/nskernel-browser.mjs", &ns_browser.step);
     if (web_gfx != .none) addWebCases(b, &demos, "tests/web/gfx.mjs", &web_gfx_test.step);
 
     // Baseline demos: the host architecture's hello on the default backend,

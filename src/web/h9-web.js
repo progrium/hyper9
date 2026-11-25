@@ -179,7 +179,7 @@ const nextTask = (() => {
  *   or an object from names to ports, which `port!NAME` and
  *   `port://NAME` name; and its served ports, from Ports.serve.
  */
-export async function run({ h9, wasi, host, log = console.error, stats, gfx, credentials, ports }) {
+export async function run({ h9, wasi, host, log = console.error, stats, gfx, credentials, ports, maxMemory }) {
   if (!haveJSPI) throw new Error('this browser lacks JavaScript Promise Integration');
   const h9mod = h9 instanceof WebAssembly.Module ? h9 : new WebAssembly.Module(h9);
   const h9pages = importedMemoryPages(h9 instanceof WebAssembly.Module ? new Uint8Array(0) : h9);
@@ -188,7 +188,9 @@ export async function run({ h9, wasi, host, log = console.error, stats, gfx, cre
 
   // h9's memory: wasm32's 4 GiB at most, grown by h9's allocator and the
   // emulator's arena.
-  const mem = new WebAssembly.Memory({ initial: Math.max(h9pages, 1), maximum: 65536 });
+  // maxMemory, in bytes, caps it lower.
+  const maxPages = maxMemory ? Math.max(h9pages, 1, Math.min(65536, Math.ceil(maxMemory / 65536))) : 65536;
+  const mem = new WebAssembly.Memory({ initial: Math.max(h9pages, 1), maximum: maxPages });
   const str = (p, n) => new TextDecoder().decode(new Uint8Array(mem.buffer, p >>> 0, n >>> 0));
 
   // Coroutines. A park is a Promise that unpark resolves; an unpark
@@ -327,10 +329,13 @@ export class Ports {
     return true;
   }
 
-  /** Hands `port` to the machine to serve (port_accept). */
-  serve(port) {
+  /**
+   * Hands `port` to the machine to serve (port_accept). `aname` is the
+   * attach name the namespace kernel fixes for it (port_aname).
+   */
+  serve(port, aname = '') {
     if (!port || typeof port.postMessage !== 'function') throw new Error('serve: not a MessagePort');
-    this.served.push(port);
+    this.served.push({ port, aname: String(aname) });
     const w = this.serveWait;
     this.serveWait = null;
     w?.();
@@ -414,11 +419,25 @@ function wsImports(memory, str, credentials, ports) {
     port_accept: new WebAssembly.Suspending(async () => {
       for (;;) {
         if (ports.stopped) return -1;
-        const port = ports.served.shift();
-        if (port) return addSock(portSock(port, poke));
+        const e = ports.served.shift();
+        if (e) {
+          const s = portSock(e.port, poke);
+          s.aname = e.aname;
+          return addSock(s);
+        }
         await new Promise((res) => { ports.serveWait = res; });
       }
     }),
+    // An accepted port's attach name, copied to p, n bytes at most: its
+    // length, or -1 if it doesn't fit or there's no such port.
+    port_aname: (id, p, n) => {
+      const s = socks.get(id);
+      if (!s) return -1;
+      const b = enc.encode(s.aname ?? '');
+      if (b.length > n >>> 0) return -1;
+      u8(p, b.length).set(b);
+      return b.length;
+    },
     port_stop: () => ports.stop(),
     port_serving: () => (ports.serving ? 1 : 0) | (ports.serveNet ? 2 : 0),
     ws_cred: new WebAssembly.Suspending(async (up, un, fp, fn, ap, an, op, on) => {
