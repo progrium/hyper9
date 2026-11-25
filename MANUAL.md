@@ -417,17 +417,20 @@ scripts.
 
 **Scripts.** rc scripts (files starting with `#!/bin/rc`) in the machine,
 including many 9front commands such as `man`, `lc`, `kill`, and `hget`,
-run directly: `h9 man 1 bind`. A script named by a host path
-(`./script.rc`) can't be run directly yet: h9 reports `not a 9front
-executable` (*Not yet available ([host-scripts](design/host-scripts.md))*).
-Run it through rc instead, as `h9 rc script.rc`, or by its guest path,
-`h9 /mnt/term/cwd/script.rc`.
+run directly: `h9 man 1 bind`. A script named by a host path runs too:
+`h9 ./greet world` runs `greet` from your directory as if you'd typed
+`h9 /mnt/term/cwd/greet world`, so `$0` is `/mnt/term/cwd/greet`, and the
+interpreter on its `#!` line is found in the machine, not on your host.
+Since the interpreter opens the script inside the machine, the script must
+be somewhere the machine can read: in your directory, or in one you share
+with `--readable` (chapter 23). Otherwise h9 says which flag would share it
+and exits 126.
 
 #### How h9 finds the program
 
 | You write | h9 runs |
 | --- | --- |
-| `h9 ./hello`, `h9 ../bin/hello` | A file on the **host**, relative to your current directory. It doesn't need to be anywhere the machine can see. It must be a 9front a.out or a Linux ELF binary (chapter 20), not a script. |
+| `h9 ./hello`, `h9 ../bin/hello` | A file on the **host**, relative to your current directory: a 9front a.out or a Linux ELF binary (chapter 20), which doesn't need to be anywhere the machine can see, or a `#!` script, which does. |
 | `h9 ls`, `h9 aux/vga` | A program found through the machine's `$path`, which is `(. /bin)`: the current directory, then `/bin`. With a Linux root, the Linux `PATH` instead (chapter 20). |
 | `h9 /bin/ls` | A path **inside the machine**. `/Users/me/prog` isn't a host path here; inside, your cwd is `/mnt/term/cwd`. |
 | `h9 --rc 'cmd'` | `/bin/rc -c 'cmd'` |
@@ -2220,13 +2223,13 @@ h9 --help          (or -h alone)
 
 | Argument | Resolution |
 | --- | --- |
-| Starts with `./` or `../` (on Windows also `.\` or `..\`) | A host file, relative to the host's current directory, read before the machine starts. It must be a 9front a.out or a Linux ELF binary. Its header decides the architecture unless `--arch` says otherwise. |
+| Starts with `./` or `../` (on Windows also `.\` or `..\`) | A host file, relative to the host's current directory, read before the machine starts. A 9front a.out or a Linux ELF binary is loaded from its bytes, and its header decides the architecture unless `--arch` says otherwise. A `#!` script runs by its path in the machine (`/mnt/term/cwd/...` for one in the current directory), so it must be shared; it runs the host's architecture unless `--arch` says otherwise. |
 | Starts with `/` | A path in the machine's namespace, or in the Linux view with a Linux root (`/9/bin/ls` is then 9front's `ls`). The host's `/Users/me/x` is `/mnt/term/Users/me/x` inside, and only if it's shared. |
 | Anything else (`ls`, `aux/vga`) | Looked up through `$path`, `(. /bin)`, or with a Linux root through the Linux `PATH` |
 | `--rc 'cmd'` | `/bin/rc -c 'cmd'`, with the remaining arguments as `$*` |
 
-A program found in the namespace may be an rc script starting with `#!`; a
-host file may not (*Not yet available ([host-scripts](design/host-scripts.md))*).
+A program found in the namespace or named by a host path may be a script
+starting with `#!`; its interpreter is found in the namespace.
 With `--ns FILE`, the file is replayed before the program is looked up, so
 the program can come from something the file binds.
 
@@ -2343,7 +2346,7 @@ Tools:
 | 2 | Usage error or refused combination | The usage, or `h9: ...` |
 | 124 | `--timeout` was reached | `h9: PROG: h9: timeout` |
 | 125 | h9 failed: no root, no usable backend, too little memory, a 9P root that can't be reached, a `--serve` address that can't be listened on, or the machine failed mid-run | `h9: ...` |
-| 126 | The program isn't a runnable a.out or ELF binary for this machine | `h9: PROG: not a 9front executable...` |
+| 126 | The program isn't a runnable a.out or ELF binary for this machine, or it's a host script the machine can't read | `h9: PROG: not a 9front executable...`, or `h9: PROG: the machine can't read this script...` |
 | 127 | The program wasn't found | `h9: PROG: ...` |
 | 128+N | The program was killed by a note that's signal N, as a shell reports it: 130 for Ctrl-C (`interrupt`), 129 for `hangup`, 137 for `kill`, 141 for a closed pipe, 139 for a fault; a Linux program killed by signal N (`linux: signal N`); or a second Ctrl-C (130), SIGHUP (129), or SIGTERM (143) stopped the machine. N is the host's number for the signal, so `usr1` is 138 on Linux and 158 on macOS | Nothing for Ctrl-C and a closed pipe; otherwise `h9: PROG: NOTE` |
 
@@ -2888,11 +2891,13 @@ work), a 9P root that refused the connection or wants authentication, or
 too little memory (`OutOfGuestMemory`: raise `--memory`).
 
 **Exit 126: not a 9front executable.** The file isn't a Plan 9 a.out or a
-Linux ELF binary (a script given by host path, a Mach-O or PE binary), or
+Linux ELF binary (a Mach-O or PE binary), or
 it's for an architecture this backend can't run: an amd64 binary on an Apple
 Silicon Mac needs the emulator, and so does a 386 binary everywhere
 (`--backend auto` or `emu`). A guest `#!`
-script whose interpreter line is empty also gives 126.
+script whose interpreter line is empty also gives 126, and so does a host
+script outside every shared directory (`the machine can't read this
+script`): share its directory with `--readable`, or run h9 from it.
 
 **Exit 127: not found.** Bare names are looked up in `.` and `/bin` inside
 the machine. To run a program from your host directory, write `./prog`; to
