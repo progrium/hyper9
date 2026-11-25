@@ -931,7 +931,7 @@ kernel has. `intro(3)` introduces them, and each has its own page in section
 | `#O` | overlay | `/tmp`, ephemeral paths | h9's copy-on-write overlay in memory (chapter 22), and the unions `bind -r` and `bind -u` make (chapter 6) |
 | `#C` | cmd | | Host commands. Not built: they live on the [`host-cmd`](https://github.com/progrium/hyper9/tree/host-cmd) branch while [host-cmd](design/host-cmd.md) rethinks them. The letter stays masked. |
 | `#H` | htools | `/bin`, after the root's | h9's own commands: small rc scripts built into h9 that wrap its devices, read-only. Masked under `--no-guest-tools`. |
-| `#L` | lfd | | Host file descriptors as channels; h9 uses it for unix-socket roots |
+| `#L` | lfd | | Host file descriptors as channels; h9 uses it for unix-socket roots and an embedder's `.fd` mounts |
 | `#a`, `#D` | tls, ssl | | TLS and SSL record layers, for `tlsclient` and friends |
 | `#i`, `#m`, `#b` | draw, mouse, kbd | `/dev`, with `--gfx` | The window, its mouse and cursor, and its keyboard (chapter 17). Masked without `--gfx`. |
 | `#A` | audio | | Present, but there's no sound to drive |

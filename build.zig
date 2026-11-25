@@ -138,6 +138,7 @@ const segattach_fixtures = [_][]const u8{
 const overlay_fixtures = [_][]const u8{ "tmp_own", "tmp_absent", "copyup_reader", "root_own", "root_absent" };
 /// Programs in tests/fixtures/srv, for tests/backends.zig, with the same lib.S.
 const srv_fixtures = [_][]const u8{ "board", "hold", "absent", "orclose" };
+const fdmount_fixtures = [_][]const u8{ "cat", "create" };
 /// Programs in tests/fixtures/htools, for tests/backends.zig, with the same lib.S.
 const htools_fixtures = [_][]const u8{ "tree", "masked" };
 
@@ -1636,12 +1637,13 @@ pub fn build(b: *std.Build) void {
         addSdkPaths(b, backend_tests.root_module);
         backend_tests.root_module.linkFramework("Hypervisor", .{});
     }
-    // The segattach, overlay, srv, htools, sema, net and gfx fixtures, assembled freestanding as the shim is, and
+    // The segattach, overlay, srv, fdmount, htools, sema, net and gfx fixtures, assembled freestanding as the shim is, and
     // embedded as raw text for tests/backends.zig to wrap in an a.out.
     for ([_]struct { dir: []const u8, prefix: []const u8, names: []const []const u8 }{
         .{ .dir = "segattach", .prefix = "seg", .names = &segattach_fixtures },
         .{ .dir = "overlay", .prefix = "ov", .names = &overlay_fixtures },
         .{ .dir = "srv", .prefix = "srv", .names = &srv_fixtures },
+        .{ .dir = "fdmount", .prefix = "fdmount", .names = &fdmount_fixtures },
         .{ .dir = "htools", .prefix = "htools", .names = &htools_fixtures },
         .{ .dir = "sema", .prefix = "sema", .names = &sema_fixtures },
         .{ .dir = "net", .prefix = "net", .names = &net_fixtures },

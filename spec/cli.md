@@ -166,7 +166,7 @@ On Windows the close handler waits out the grace period before returning, since 
 pub const Options = struct {
     backend: vmm.BackendKind = .auto,
     arch: ?vmm.Arch = null,             // null: the host's
-    mounts: []const Mount = &.{},       // the mount flags, in order: .dir, .url, .archive, .builtin, .tmp, or .fd, with dst and options
+    mounts: []const Mount = &.{},       // the mount flags, in order: .dir, .url, .archive, .builtin, .tmp, or .fd (a host descriptor, with fd_write for a pipe pair), with dst and options
     binds: []const Bind = &.{},         // --bind lines, after every mount
     index: IndexMode = .auto,           // .none: no metadata index for any mount
     root_index: ?RootIndex = null,      // .path or .url: the 9P root's index, instead of its .fs/index

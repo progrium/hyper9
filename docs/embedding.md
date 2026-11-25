@@ -133,7 +133,7 @@ Every field but `stdio` has a default:
 | --- | --- | --- | --- |
 | `backend` | `vmm.BackendKind` | `.auto` | `.auto`, `.hvf`, `.kvm`, `.whp`, `.native`, `.emu`, `.v86` (an alias of `.emu`); one not built for this host fails with `BackendNotBuilt`. See [Backends](#backends). |
 | `arch` | `?vmm.Arch` | host's | `.arm64`, `.amd64`, or `.i386`. Read it from an a.out with `h9.aout.parse(bytes).arch`. |
-| `mounts` | `[]const Machine.Mount` | `&.{}` | The mount flags, in order ([mounts](../design/mounts.md)): each a `.kind` (`.dir`, `.url`, `.archive`, `.builtin`, `.tmp`, or `.fd` for a 9P connection you already hold), a `.src`, and a `.dst` (`/` by default), with `.access`, `.order`, `.create`, `.recursive`, and a `.url`'s `.spec`, `.user`, `.headers`, `.ca`, and `.index`. Mounts on `/` stack into the root, and mounts on `#L` into the Linux tree. `Machine.Mount.parse` takes a flag's `SRC:DST[:OPTS]` text. With nothing on `/`, the root is an empty tree in memory, so only `.bytes` programs run. |
+| `mounts` | `[]const Machine.Mount` | `&.{}` | The mount flags, in order ([mounts](../design/mounts.md)): each a `.kind` (`.dir`, `.url`, `.archive`, `.builtin`, `.tmp`, or `.fd` for a 9P connection you already hold), a `.src`, and a `.dst` (`/` by default), with `.access`, `.order`, `.create`, `.recursive`, a `.url`'s `.spec`, `.user`, `.headers`, `.ca`, and `.index`, and an `.fd` mount's `.fd`, a host descriptor (a POSIX fd or a Windows `HANDLE`) that h9 duplicates for each run and you keep, and `.fd_write`, the descriptor written to for a pipe pair ([fd-mounts](../design/fd-mounts.md)). Mounts on `/` stack into the root, and mounts on `#L` into the Linux tree. `Machine.Mount.parse` takes a flag's `SRC:DST[:OPTS]` text. With nothing on `/`, the root is an empty tree in memory, so only `.bytes` programs run. |
 | `binds` | `[]const Machine.Bind` | `&.{}` | `--bind` lines, run after every mount, in order: `.src` and `.dst` guest paths, with `.order`, `.create`, and `.recursive`. `Machine.Bind.parse` takes `SRC:DST[:OPTS]`. |
 | `index` | `Machine.IndexMode` | `.auto` | `.none` turns off metadata indexes ([mount-index](../design/mount-index.md)), as `--index none` does. |
 | `root_index` | `?Machine.RootIndex` | none | The root's index, `.{ .path = ... }` or `.{ .url = ... }`, instead of its server's `.fs/index`. Another `.url` mount's is its `.index`. |
@@ -423,13 +423,52 @@ on `/` or mounted anywhere else ([mounts](../design/mounts.md)):
 
 An `http://` or `https://` URL is a WebSocket if the server upgrades, and
 otherwise a static dotfs tree that h9 serves the machine itself, on a unix
-socket under `tmp_dir`. An `.fd` mount takes a connection you already
-hold, in `.fd`. The machine connects once per run, before the program
-starts. The root's first 9P member is also posted as `/srv/root`, and a
-`.dst` of `/srv/NAME` posts a connection without mounting it. This is the
-way to give a machine files that come from your program rather than from
-disk: serve them with any 9P library, in-process on a thread or in another
-process, and the guest sees them as ordinary files.
+socket under `tmp_dir`. The machine connects once per run, before the
+program starts. The root's first 9P member is also posted as `/srv/root`,
+and a `.dst` of `/srv/NAME` posts a connection without mounting it. This
+is the way to give a machine files that come from your program rather than
+from disk: serve them with any 9P library, in-process on a thread or in
+another process, and the guest sees them as ordinary files.
+
+An `.fd` mount takes a connection you already hold, with no socket on
+disk ([fd-mounts](../design/fd-mounts.md)): `.fd` is a descriptor in your
+process, a socket or a pipe, that a 9P2000 or 9P2000.L server reads and
+writes at the other end, in-process on a thread or in a child you spawned
+with a socketpair:
+
+```zig
+var sv: [2]std.posix.fd_t = undefined;
+_ = std.c.socketpair(std.c.AF.UNIX, std.c.SOCK.STREAM, 0, &sv);
+try myfs.serveOn(sv[1]); // any 9P2000 or 9P2000.L server, on a thread
+var m = try h9.Machine.init(gpa, io, .{
+    .mounts = &.{.{ .kind = .fd, .fd = sv[0], .dst = "/n/ui" }},
+    // ...
+});
+```
+
+On Windows, where unix sockets aren't supported, the server can be on
+the other ends of two anonymous pipes (`CreatePipe` twice), with `.fd` the
+handle h9 reads and `.fd_write` the one it writes; a duplex named pipe is
+one handle and needs no `.fd_write`. A handle must be opened without
+`FILE_FLAG_OVERLAPPED`, and a winsock `SOCKET` is refused with
+`PolicyConflict`:
+
+```zig
+.mounts = &.{.{ .kind = .fd, .fd = from_server_read, .fd_write = to_server_write, .dst = "/n/ui" }},
+```
+
+h9 duplicates the descriptors at the start of each run (close-on-exec,
+and not inheritable), and closes its copies when the run ends, so yours
+stay open, and stay yours to close, after the run and after
+`Machine.deinit`. Each run starts its session over with a `Tversion` on
+the same stream, as 9P allows, and the server doesn't see an end of file
+between runs. An `.fd` mount takes any `.dst` a `.url` one does, with
+`.spec`, `.user`, and `.access`; with `.access = .up` on `/`, your server
+holds the machine's writable layer. `.fd` without `.kind = .fd`, or an
+`.fd` mount without `.fd`, is `PolicyConflict`. It has no address, so
+`--print`'s plan shows it as a comment, `# mount: an embedder's connection
+on /n/ui`, and the rest of the plan still replays. The browser host has
+no host descriptors: a page uses a `MessagePort` there.
 
 **More 9P servers, from a namespace.** `ns` takes namespace text (manual
 chapter 25). Its `mount` lines can name any URL a `.url` mount takes,
