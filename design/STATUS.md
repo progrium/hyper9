@@ -6,7 +6,7 @@ Every proposal at the top of [design/](README.md), in the order they were writte
 
 | Proposal | Issue | Status | State | Title |
 | --- | --- | --- | --- | --- |
-| [hide-host-paths](hide-host-paths.md) |  | draft |  | Hide host paths in /proc/n/ns |
+| [hide-host-paths](hide-host-paths.md) |  | superseded |  | Hide host paths in /proc/n/ns |
 | [host-sandbox](host-sandbox.md) |  | draft |  | Host self-sandboxing |
 | [host-scripts](host-scripts.md) |  | draft |  | Running host scripts as the program |
 | [credential-helpers](credential-helpers.md) | [#119](../../../issues/119) | implemented |  | Credential helpers for WebSocket 9P |
@@ -47,7 +47,7 @@ flowchart LR
   classDef accepted stroke-width: 2px
   classDef implemented fill:#dfd,stroke:#393
   classDef closed fill:#eee,stroke:#999,color:#777
-  p_hide_host_paths["hide-host-paths<br/>draft"]:::draft
+  p_hide_host_paths["hide-host-paths<br/>superseded"]:::closed
   p_host_sandbox["host-sandbox<br/>draft"]:::draft
   p_host_scripts["host-scripts<br/>draft"]:::draft
   p_credential_helpers["credential-helpers<br/>implemented"]:::implemented
@@ -82,8 +82,12 @@ flowchart LR
   p_linux_chroot["linux-chroot<br/>implemented"]:::implemented
   p_virtual_loopback["virtual-loopback<br/>draft"]:::draft
   p_host_cmd --> p_login_shell
+  p_mounts --> p_child_machines
+  p_linux_chroot --> p_kernel_serve
   p_kernel_serve --> p_namespace_kernel
   p_port_streams --> p_namespace_kernel
+  p_mounts --> p_namespace_kernel
+  p_mounts --> p_port_streams
   p_renames --> p_baseline_1
   p_cow_fork --> p_baseline_1
   p_retire_unicorn --> p_baseline_1
