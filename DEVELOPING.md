@@ -100,7 +100,9 @@ zig build mkroot -- --src        # build the root tree from the pinned image (al
 zig build slim     # 9box, 9front's commands as one multi-call binary, and a slim root around it in .local/9front/slim-<release>-<arch>
 zig build web      # the browser host into zig-out/web (h9.wasm, h9-web.js, h9-node, the demo page)
 zig build integration -Dweb   # the integration cases through h9-node on h86 (Node 24 or later); -Darch=arm64 for ha64
-zig build web-test # the demo page, and the canvas cases (tests/web/gfx.mjs), in Chromium with Playwright, and hcpu-web
+zig build web-test # the demo page, the canvas cases (tests/web/gfx.mjs), and the namespace kernel's machine cases (tests/web/nskernel-browser.mjs), in Chromium with Playwright, and hcpu-web
+zig build nskernel # the namespace kernel into zig-out/nskernel (h9ns.wasm, h9ns.js, libh9ns.a, h9ns.h); -Dnskernel-hostfs keeps #U natively
+zig build nskernel-test  # its cases: tests/nskernel.zig on the native library, then tests/web/nskernel.mjs under Node 24 or later (skipped on an older Node)
 zig build hcpu-web # the wasm emitter's suite (tests/jit/suite.mjs) in Chromium
 zig build x86-jit  # h86's [hcpu] cases (tests/x86.zig) on T0 and T1; zig build hcpu runs them too
 zig build x64-jit  # hx64's [hcpu] cases (tests/x64.zig) on T0 and T1; zig build hcpu runs them too
@@ -351,6 +353,8 @@ Each GitHub release has two sets of binaries, built by
 | --- | --- | --- |
 | `h9-<version>-<target>` | MIT | `h9`, with the hypervisor backends and hcpu, for macOS arm64, Linux arm64 and x86_64 (musl, static), and Windows arm64 and x86_64 |
 | `h9-web-<version>.tar.gz` | MIT | the browser host: `h9.wasm`, `h9-web.js`, `h9-node`, the demo page, and its root archive |
+| `h9ns-<version>.tar.gz` | MIT | the namespace kernel for the web: `h9ns.wasm`, `h9ns.js`, `h9ns-worker.js`, and the JS files they import |
+| `h9ns-<version>-<target>.tar.gz` | MIT | the namespace kernel as a static library, `libh9ns.a` and `h9ns.h`, for the targets above but Windows |
 | `SHA256SUMS` | | checksums |
 
 Releases used to include `h9-emu`, a GPLv2 build of h9 for hosts without
@@ -381,13 +385,15 @@ development builds report `git describe` (`-Dversion=V` overrides it).
 | `src/vmm.zig`, `src/vmm/` | hypervisor interface and backends (HVF, KVM, WHP, native, and emu, on h9's own CPUs, which the browser host uses too), with the guest-physical allocator and page tables the hypervisor backends share |
 | `src/hcpu.zig`, `src/jit/`, `src/interp/` | h9's own CPUs for the emulator (hcpu): the JIT's IR and its reference evaluator, the runtime ABI, the emitters (arm64, wasm), the front ends (`a64/`), and the interpreters and software TLB the two tiers share. `src/jit/README.md` has the contracts |
 | `src/web.zig`, `src/web/` | the browser host: coroutines on JSPI, its `std.Io` and console, the JS host (`h9-web.js`, `h9-node`, `worker.js`, `wasi-mem.js`, and `statictree.js` for static dotfs trees) and the demo page |
+| `src/nskernel.zig`, `src/nskernel/`, `src/kern/devns.c`, `src/kern/nstab.c` | the namespace kernel: its Zig root (ctl lines, dials, serving, the native API), `h9ns.h`, the `#N` device, and its device table and stubs; `src/web/h9ns.js` and `h9ns-worker.js` are its JS host |
 | `src/arch/` | per-architecture Ureg/ABI and the guest shims |
 | `third_party/drawterm` | vendored drawterm (git subtree; kern and libraries). Local changes: the sandbox hooks in `kern/devfs-posix.c` and `kern/devfs-win32.c` |
 | `tests/backends.zig` | backend conformance tests |
 | `tests/integration.zig` | real 9front binaries through the h9 CLI |
 | `tests/term.zig` | a pty (ConPTY on Windows) for the interactive integration cases |
 | `tests/fixtures` | test programs and binary generators; `segattach/` holds the arm64 programs for the segattach backend cases and `gfx/` those for the `[gfx]` cases, assembled at build time |
-| `tests/web/` | the browser host's Playwright check |
+| `tests/web/` | the browser host's Playwright check, and the namespace kernel's Node cases with a small 9P2000 client and server (`ninep.mjs`) |
+| `tests/nskernel.zig`, `tests/ninep.zig` | the namespace kernel's native cases, and their 9P2000 client |
 | `tests/jit/` | the wasm emitter's checks: a runtime module standing in for h9.wasm, a random region generator, the suite (`suite.mjs`) and its Node and Chromium drivers, and `bench.mjs`, which times installs and tier-up in V8 |
 | `tools/mkroot.zig` | `zig build mkroot`: builds the 9front root tree from the pinned image |
 | `scripts/release.sh` | builds the release assets (`h9` and `h9-web`) into `dist/` |

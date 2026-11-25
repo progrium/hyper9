@@ -67,7 +67,7 @@ This file is the overview. Each part of h9 is described, as built, in a file und
 | [spec/machine.md](spec/machine.md) | The boot sequence, slim roots, the terminal, and graphics |
 | [spec/sandbox.md](spec/sandbox.md) | The security stance and the sandbox policy |
 | [spec/cli.md](spec/cli.md) | The CLI: parsing, program resolution, flags, the default guest environment, exit codes, signals, and code structure |
-| [spec/host-js.md](spec/host-js.md) | The browser host, and the same build under Node |
+| [spec/host-js.md](spec/host-js.md) | The browser host, the same build under Node, and the namespace kernel |
 | [spec/testing.md](spec/testing.md) | Debugging, testing, and CI |
 
 Proposals and other docs written before the split name sections of this file, such as "SPEC.md, Emulator backend". Those sections are now here:

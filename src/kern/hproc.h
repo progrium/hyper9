@@ -37,6 +37,9 @@ enum
 	Nkilldebug,	/* the same, and print "suicide: note" first */
 };
 
+/* ns.c */
+extern void	pgrpcpy(Pgrp*, Pgrp*, int);
+
 /* devenv.c */
 extern void	*h9_egrpnew(void);
 extern void	*h9_egrpcopy(void*);

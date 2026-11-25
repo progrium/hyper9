@@ -1,12 +1,12 @@
 ---
 slug: namespace-kernel
 title: A namespace-only kernel build
-status: draft
+status: implemented
 created: 2026-11-13
 authors: [progrium]
 depends: [browser-host, kernel-serve, port-streams, dotl, ephemeral-writes, mounts]
 areas: [kern, build, web]
-branch: []
+branch: [main]
 ---
 
 # Proposal: A namespace-only kernel build
@@ -144,10 +144,10 @@ It's for native Wanix hosts and for testing the kernel without a browser. The na
 
 ## Done criteria
 
-- [ ] `zig build nskernel` builds `h9ns.wasm` with none of the left-out objects linked, and its size is recorded here.
-- [ ] Under Node: clone a namespace, `bind '#O' /`, create `/a/b`, `mount port!x /n/x` against a JS 9P server, and read a file through a second attach.
-- [ ] In Chromium, with no COOP or COEP headers, an h9 machine runs `ls /n/x` with its root served by the namespace kernel from another Worker.
-- [ ] Cases tagged `[namespace-kernel]`:
+- [x] `zig build nskernel` builds `h9ns.wasm` with none of the left-out objects linked, and its size is recorded here.
+- [x] Under Node: clone a namespace, `bind '#O' /`, create `/a/b`, `mount port!x /n/x` against a JS 9P server, and read a file through a second attach.
+- [x] In Chromium, with no COOP or COEP headers, an h9 machine runs `ls /n/x` with its root served by the namespace kernel from another Worker.
+- [x] Cases tagged `[namespace-kernel]`:
   - `test "a copied namespace keeps its parent's mounts [namespace-kernel]"`
   - `test "an empty namespace's / is writable and in memory [namespace-kernel]"`
   - `test "ctl lines bind, mount and unmount in that namespace only [namespace-kernel]"`
@@ -174,3 +174,18 @@ It's for native Wanix hosts and for testing the kernel without a browser. The na
 - **Shared boards between chosen namespaces.** Two tasks that should rendezvous (a server task and its clients) each get a private board today, and the host relays by posting to its own. A `board N` line that binds namespace N's board into another would let the host pair them directly.
 - **Persistence.** OPFS and IndexedDB trees are the host's to serve. Should the kernel offer an on-disk format for `#O`'s upper layer, so a namespace's writes survive a reload without a host-side server?
 - **Wanix's `#` names.** Wanix spells devices `#web`, `#task`, and so on, and drawterm's device names are one rune. The host module maps them to paths; whether the kernel should accept longer names is left to Wanix's design.
+
+## Updates
+
+**2026-11-25, implementation.** Built as proposed, with these refinements:
+
+- **Size.** `h9ns.wasm` is 738 KB ReleaseSmall (198 KB gzipped) and 4.6 MB Debug. Its symbols name none of the left-out parts: no vmm, h86, hx64, JIT, loaders, segments, system call tables, personalities, devproc, devenv, or devcons. `libh9ns.a` is about 1.5 MB ReleaseSmall on Linux and macOS.
+- **Namespace 0's root is a bare `#O`**, not devroot, whose directories are fixed: it holds `/ns`, `/srv`, and a bare `#O` at `/tmp`. A copy of 0 has `/ns` and `/srv` unmounted, so a task copied from the control namespace can't reach either.
+- **`bind '#O' PATH` takes creates.** A bare overlay is bound with `MCREATE`, so the host can make mount points in a fresh namespace over 9P.
+- **`post NAME DIAL`** is a ctl line: it posts a dialed server on the namespace's board, which for namespace 0 is the host's. That's how a host posts over 9P alone, with no descriptor to hand the kernel.
+- **Private boards are child boards of the host's** (`#s/clone`), so they appear as numbered directories in namespace 0's `/srv`, and close with their namespace's lease.
+- **`fd!NAME` dials natively**, for descriptors given to `h9ns_addfd`; each mount dials a duplicate. `h9ns_serve` returns once serving has started, not when the connection ends, so one host thread can serve many.
+- **Each ctl line runs on a kernel process of its own**, since the system calls the Zig leaf makes must be a process's outermost kernel call, and a device write isn't.
+- **The attach name rides on the port.** `connect(aname)` hands the Worker a port with its name, `Ports.serve(port, aname)` keeps it, and the kernel reads it with a new `port_aname` import before serving the port's stream.
+- **`memccpy`.** Zig's wasi-libc `memccpy` has the bug its musl one has (`src/kern/memccpy.c`), which left attach names unterminated on the web; the namespace kernel's web build uses h9's.
+- **Cases.** The Node criterion is `tests/web/nskernel.mjs`'s "a port! mount in an empty namespace reads through a second attach", and the Chromium one and "a bind written after a machine starts is seen by it" are in `tests/web/nskernel-browser.mjs`, run by `zig build web-test`. There, the machine's root is root.h9a's 9front tree, served to the kernel by a JS 9P server on the page, with a bare `#O` over `/n`.

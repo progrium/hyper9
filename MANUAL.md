@@ -1653,6 +1653,18 @@ devices in Plan 9.
   token or origin, since the page decided who's on the other end. Ports
   are only on the web host: elsewhere `port://` is a usage error and
   `port!` "unknown network port".
+- **A namespace kernel for the page**
+  ([namespace-kernel](design/namespace-kernel.md)). `zig build nskernel`
+  builds h9's kernel with no machine, as `h9ns.wasm` and `h9ns.js`, for a
+  page that composes namespaces and hands them to machines:
+  `const k = await createNamespaceKernel()`, then `k.addPort(name, port)`
+  for 9P servers it can mount as `port!name`, and `k.connect(id)` for a
+  port served 9P2000 attached to namespace `id`. On a connection to `''`,
+  open `/ns/clone`, read the new namespace's id, and write `bind`,
+  `mount`, `unmount`, `copy N`, `board`, and `post NAME DIAL` lines to it;
+  `createMachine({ mounts: [{ port: k.connect(id), dst: '/' }] })` runs a
+  machine on it, which sees later lines on its next walk. `libh9ns.a` and
+  `h9ns.h` are the same kernel natively, with `fd!NAME` mounts.
 - **Serving the machine** ([serve](design/epoch-0/serve.md)). `--serve ADDR`
   makes h9 a 9P server while the program runs: `unix!/path`,
   `tcp!host!port`, or `ws://host:port/path`, repeatable. h9's kernel

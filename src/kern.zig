@@ -275,6 +275,12 @@ const c_stub = struct {
         return -1;
     }
     fn h9_kserve_close(_: *anyopaque) void {}
+    fn h9_kserve_newnamed(_: *const fn ([*:0]const u8) callconv(.c) ?*anyopaque, _: ?*const fn (?*anyopaque) callconv(.c) void, _: ?*anyopaque) ?*anyopaque {
+        return null;
+    }
+    fn h9_kserve_connas(_: *anyopaque, _: c_int, _: [*:0]const u8) c_int {
+        return -1;
+    }
 };
 
 const c_real = struct {
@@ -385,6 +391,8 @@ const c_real = struct {
     extern fn h9_kserve_new(readonly: c_int, root: [*:0]const u8, ended: ?*const fn (?*anyopaque) callconv(.c) void, arg: ?*anyopaque) ?*anyopaque;
     extern fn h9_kserve_conn(s: *anyopaque, fd: c_int) c_int;
     extern fn h9_kserve_close(s: *anyopaque) void;
+    extern fn h9_kserve_newnamed(lookup: *const fn ([*:0]const u8) callconv(.c) ?*anyopaque, ended: ?*const fn (?*anyopaque) callconv(.c) void, arg: ?*anyopaque) ?*anyopaque;
+    extern fn h9_kserve_connas(s: *anyopaque, fd: c_int, aname: [*:0]const u8) c_int;
 };
 
 const BootState = enum(u8) { idle, booting, up, failed };
@@ -1154,6 +1162,19 @@ pub const Kserve = opaque {
         _ = try check(c.h9_kserve_conn(s, fd));
     }
 
+    /// Serves named namespaces (design/namespace-kernel.md, Serving): each
+    /// attach takes `lookup(aname)`'s namespace, a Kns from
+    /// h9_kserve_kns, or fails for null.
+    pub fn newNamed(lookup: *const fn ([*:0]const u8) callconv(.c) ?*anyopaque, ended: ?*const fn (?*anyopaque) callconv(.c) void, arg: ?*anyopaque) Error!*Kserve {
+        const p = c.h9_kserve_newnamed(lookup, ended, arg) orelse return error.Kern;
+        return @ptrCast(p);
+    }
+
+    /// As `conn`, with every attach on the connection to `aname`.
+    pub fn connAs(s: *Kserve, fd: u31, aname: [*:0]const u8) Error!void {
+        _ = try check(c.h9_kserve_connas(s, fd, aname));
+    }
+
     /// Ends every connection, waits for them, and frees the server.
     pub fn close(s: *Kserve) void {
         c.h9_kserve_close(s);
@@ -1333,10 +1354,25 @@ fn console(id: c_ulong) ?*Console {
 
 // Leaves called from devhcons.c. They never raise kernel errors.
 
+/// Whether this is the namespace kernel's build (design/namespace-kernel.md),
+/// which has no console, policy, guest tools, or built-in root: it
+/// exports only the leaves its devices call.
+pub const nskernel = @hasDecl(build_options, "nskernel") and build_options.nskernel;
+
 comptime {
     // devhstream.c's leaves.
     _ = @import("hstream.zig");
-    if (available) {
+    if (available and nskernel) {
+        @export(&h9_plan_get, .{ .name = "h9_plan_get" });
+        @export(&h9_plan_set, .{ .name = "h9_plan_set" });
+        @export(&h9_overlay_pool, .{ .name = "h9_overlay_pool" });
+        @export(&h9_overlay_alloc, .{ .name = "h9_overlay_alloc" });
+        @export(&h9_overlay_free, .{ .name = "h9_overlay_free" });
+        @export(&h9_overlay_changed, .{ .name = "h9_overlay_changed" });
+        @export(&h9_clock_wall, .{ .name = "h9_clock_wall" });
+        @export(&h9_clock_mono, .{ .name = "h9_clock_mono" });
+        @export(&h9_web_locals, .{ .name = "h9_kern_locals" });
+    } else if (available) {
         @export(&h9_cons_read, .{ .name = "h9_cons_read" });
         @export(&h9_cons_ready, .{ .name = "h9_cons_ready" });
         @export(&h9_cons_write, .{ .name = "h9_cons_write" });
