@@ -4,7 +4,7 @@ title: A namespace-only kernel build
 status: draft
 created: 2026-11-13
 authors: [progrium]
-depends: [browser-host, kernel-serve, port-streams, dotl, ephemeral-writes]
+depends: [browser-host, kernel-serve, port-streams, dotl, ephemeral-writes, mounts]
 areas: [kern, build, web]
 branch: []
 ---
@@ -13,7 +13,7 @@ branch: []
 
 ## Abstract
 
-`zig build nskernel` builds h9's kernel with nothing for running programs: drawterm's channels, mount tables, devmnt, and a handful of devices, with no vmm, CPU, loaders, segments, system call tables, personalities, devproc, or console. It holds any number of namespaces, each a Pgrp, made and composed through a new device, `#N`: open `/ns/clone` to get a namespace, copied from another or empty, and write `bind`, `mount`, and `unmount` lines in newns syntax to its `ctl`. Everything is reached over 9P2000. The host attaches to a namespace by its id as the attach name, through [kernel-serve](kernel-serve.md)'s server, and hands the kernel 9P servers to mount over `MessagePort`s ([port-streams](port-streams.md)), WebSockets, or 9P2000.L through [dotl](epoch-0/dotl.md). On the web it's `h9ns.wasm` and `h9ns.js`, run in a Worker on the browser host's JSPI coroutines; natively it's a static library with a small C API. Its first user is [Wanix](https://github.com/tractordev/wanix), whose host module on the page asks for one namespace per task and hands it to the task's runner: for Linux and 9front executables, an h9 machine, as `createMachine({ root: port })`.
+`zig build nskernel` builds h9's kernel with nothing for running programs: drawterm's channels, mount tables, devmnt, and a handful of devices, with no vmm, CPU, loaders, segments, system call tables, personalities, devproc, or console. It holds any number of namespaces, each a Pgrp, made and composed through a new device, `#N`: open `/ns/clone` to get a namespace, copied from another or empty, and write `bind`, `mount`, and `unmount` lines in newns syntax to its `ctl`. Everything is reached over 9P2000. The host attaches to a namespace by its id as the attach name, through [kernel-serve](kernel-serve.md)'s server, and hands the kernel 9P servers to mount over `MessagePort`s ([port-streams](port-streams.md)), WebSockets, or 9P2000.L through [dotl](epoch-0/dotl.md). On the web it's `h9ns.wasm` and `h9ns.js`, run in a Worker on the browser host's JSPI coroutines; natively it's a static library with a small C API. Its first user is [Wanix](https://github.com/tractordev/wanix), whose host module on the page asks for one namespace per task and hands it to the task's runner: for Linux and 9front executables, an h9 machine, as `createMachine({ mounts: [{ port, dst: '/' }] })`.
 
 ## Background
 
@@ -88,7 +88,7 @@ A task runner hands a namespace to an h9 machine with port-streams:
 const ctl = await nine.open(k.connect(''), '/ns/clone', ORDWR);
 await ctl.write('copy 0\n');           // or build it line by line
 const id = (await ctl.read()).trim();
-const m = await createMachine({ root: k.connect(id) });
+const m = await createMachine({ mounts: [{ port: k.connect(id), dst: '/' }] });
 ```
 
 The machine builds its own namespace over that root (devices, `/tmp`, the Linux view) as over any 9P root. Binds the host later writes to N's `ctl` are seen by the machine on its next walk; binds made inside the machine stay in the machine.
@@ -164,7 +164,7 @@ It's for native Wanix hosts and for testing the kernel without a browser. The na
 2. `#N`: clone, boards and `srv!`, ctl through `newns.zig` (its replay loop moves out of `machine.zig` so both builds run it), ns, lifetime, the control namespace, the device mask.
 3. Serving through [kernel-serve](kernel-serve.md)'s named source; `h9ns.js`'s Worker, `connect`, and `addPort` on [port-streams](port-streams.md)' JS host code.
 4. The native library and its API.
-5. The Node and Chromium cases, release artifacts, and SPEC.md.
+5. The Node and Chromium cases, release artifacts, and [spec/host-js.md](../spec/host-js.md).
 
 ## Open issues
 

@@ -77,7 +77,7 @@ No CLI flags, exit codes, `Machine.Options`, or sandbox defaults change. The Lin
 
 ## Done criteria
 
-Demo: `h9 --gfx --root <alpine root with wine and the driver> wine notepad`, in a prefix with `Graphics=draw`, opens Notepad in the window, and typing and clicking work.
+Demo: `h9 --gfx --dir <alpine root with wine and the driver> wine notepad`, in a prefix with `Graphics=draw`, opens Notepad in the window, and typing and clicking work.
 
 Cases tagged `[wine-draw]`:
 
