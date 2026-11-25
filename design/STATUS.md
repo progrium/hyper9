@@ -20,7 +20,7 @@ Every proposal at the top of [design/](README.md), in the order they were writte
 | [plan-format](plan-format.md) |  | draft | needs baseline-1, child-machines | The plan as a file, and the one way in |
 | [renames](renames.md) |  | draft |  | Rename the parts, to ABI, engine, sud, and hcpu |
 | [scheduler](scheduler.md) |  | draft | needs kernel-port | A scheduler, with processes on per-core executors |
-| [upper-layers](upper-layers.md) |  | draft | in progress on upper-layers | Writable layers on the host |
+| [upper-layers](upper-layers.md) |  | implemented |  | Writable layers on the host |
 | [headless-screen](headless-screen.md) |  | draft | in progress on claude/project-thread-i8dpw1 | Headless screen (--gfx=headless) |
 | [file-watch](file-watch.md) |  | draft |  | Watching files for changes, on the host and in the guest |
 | [virtual-loopback](virtual-loopback.md) |  | draft |  | A loopback network per machine |
@@ -45,7 +45,7 @@ flowchart LR
   p_plan_format["plan-format<br/>draft"]:::draft
   p_renames["renames<br/>draft"]:::draft
   p_scheduler["scheduler<br/>draft"]:::draft
-  p_upper_layers["upper-layers<br/>draft"]:::draft
+  p_upper_layers["upper-layers<br/>implemented"]:::implemented
   p_headless_screen["headless-screen<br/>draft"]:::draft
   p_file_watch["file-watch<br/>draft"]:::draft
   p_virtual_loopback["virtual-loopback<br/>draft"]:::draft
