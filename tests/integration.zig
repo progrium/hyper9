@@ -9443,6 +9443,9 @@ test "Alpine builds in layers that stack again as directories and archives (demo
 
 test "up on a 9P2000.L mount keeps the layer on the server [upper-layers]" {
     const e = try env(@src());
+    // The web host has no TCP; "a port up layer takes the guest's
+    // writes" is this case there.
+    if (onWeb()) return error.SkipZigTest;
     var d: Diod = undefined;
     try d.start("true");
     defer d.stop();
