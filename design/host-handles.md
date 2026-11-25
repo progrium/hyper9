@@ -49,6 +49,12 @@ The host tree device opens every file relative to one of `dirs`, never by absolu
 
 Read-deny patterns, which carve a hole in an allowed tree, stay as a check on the path relative to its handle. They're the one rule a handle can't express alone.
 
+### Handle names in the namespace
+
+Each of `dirs` has a short name the plan gives it: `cwd` for the host cwd, `root` for a `--dir` root, and `d1`, `d2`, and so on for the rest, in the plan's order. The host tree device is attached by that name, `#Ucwd`, and a path under it is relative to the handle, so a binding reads `bind -c '#Ucwd' /mnt/term/cwd`. `/proc/n/ns` prints that, and no host path, under every profile. The guest learns the host's layout only from what the plan chooses to show it, such as the `/mnt/term/<host path>` a `--readable` path is bound at.
+
+`--print` still shows each handle's host path, since the plan is read on the host and has to say what it opens. It names the handle beside it, so the two can be matched. `--ns` replays `/proc/n/ns`'s output in any machine whose plan has handles of the same names, which the same flags give. A namespace file that names `#U` by a host path, as one written by hand can, keeps working: the path is resolved to the handle that holds it, and the binding is shown by that handle's name. A host path under no handle fails as it does now.
+
 ### The policy compiles to handles
 
 The plan is compiled as now. Its last step opens the handles: one per readable or writable tree, the dialer with the plan's `--net` and `--net-allow` rules, and so on. `--print` shows the same plan. A path that can't be opened is the same exit 125, earlier.
@@ -69,6 +75,8 @@ devfs, devip, the console, the clock, and the GUI glue are rewritten to take the
 
 **Why not rely on [host-sandbox](host-sandbox.md) alone.** It's coarser (Landlock has no deny within an allow, and Seatbelt is deprecated API), it isn't available on every host or inside every container, and it does nothing for the web. The two fit together: with handles opened up front, the host sandbox can deny every open by path afterwards.
 
+**Names, not host paths, in `/proc/n/ns`.** A guest reading its own namespace learned the host's layout, the open question [hide-host-paths](hide-host-paths.md) was written for. Its options were to hide host binds, which breaks `--ns` replay and `ns` output a person reads to debug, or to show a placeholder, which `--ns` can't replay. Once devices reach the host only through named handles, the name is what the kernel holds, so showing it costs nothing and still replays. Hiding it only under `--profile=tight`, as hide-host-paths asked, would leave two formats for no benefit.
+
 **Why an embedder interface.** Tests want a kernel with no host at all, and [namespace-kernel](namespace-kernel.md) is already a kernel whose whole outside is handed to it.
 
 ## Compatibility
@@ -76,6 +84,7 @@ devfs, devip, the console, the clock, and the GUI glue are rewritten to take the
 - **CLI, the policy flags, profiles, `--print`, and exit codes.** Unchanged.
 - **Timing of errors.** A readable or writable path that doesn't exist fails when the machine starts, not when the guest first reaches it. Paths the policy marks optional are skipped, as now.
 - **`Machine.Options`.** `host` is new and optional.
+- **`/proc/n/ns`.** `#U` binds show a handle name, `#Ucwd`, where they showed a host path. A guest script that read host paths from it gets names. `--ns` files written from it replay where the same handles exist. `--print`'s caveat that `/proc/n/ns` shows host paths goes.
 - **Paths that change under a running machine.** A handle follows its directory through a rename on the host. Today's path checks would follow the name instead.
 - **`third_party/`.** The policy hooks in `devfs-posix.c`, `devfs-win32.c`, and devip go, since those files are no longer compiled.
 
@@ -90,7 +99,9 @@ This is a security change. The guest can reach nothing new. What changes is how 
 - [ ] `test "a kernel with an empty Host can reach nothing outside [host-handles]"` passes.
 - [ ] `test "an embedder's in-memory dirs handle serves a root [host-handles]"` passes.
 - [ ] `git grep -lE '#include <(unistd|fcntl|sys/|windows)' src/kern/` finds nothing.
-- [ ] `h9 --print` output is the same as before for the policy cases.
+- [ ] `h9 --print` output is the same as before for the policy cases, apart from handle names and the caveat that goes.
+- [ ] `test "/proc/n/ns shows handle names and no host path, in every profile [host-handles]"` passes.
+- [ ] `test "--ns replays /proc/n/ns output in a machine with the same handles [host-handles]"` passes.
 - [ ] [spec/sandbox.md](../spec/sandbox.md) describes handles, and its path resolution section describes what each host does beneath one.
 
 ## Implementation
