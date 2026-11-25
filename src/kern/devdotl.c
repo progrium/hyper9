@@ -517,24 +517,6 @@ redial(Conv *cv, int next)
 	return 1;
 }
 
-/* Puts #/ for the calling kproc's dot and slash. */
-static void
-dropdot(void)
-{
-	Chan *c, *odot, *oslash;
-
-	c = devattach('/', "");
-	incref(&c->ref);
-	odot = up->dot;
-	oslash = up->slash;
-	up->dot = c;
-	up->slash = c;
-	if(odot != nil)
-		cclose(odot);
-	if(oslash != nil)
-		cclose(oslash);
-}
-
 /* The kproc: reads the server connection into the translator. */
 static void
 reader(void *a)
@@ -548,14 +530,11 @@ reader(void *a)
 
 	cv = a;
 	firstnl = lastnl = 0;
-	h9_kprocdetach();
 	/*
-	 * The reader can outlive the machine's namespace, whose dot and slash
-	 * it was made with: a root overlay's channels would be closed after
-	 * the overlay is gone. It names only devices (#I, a host socket, a
-	 * host stream), so it keeps #/ instead.
+	 * It can outlive the machine's namespace, so it drops it, and its dot
+	 * and slash for #/ (h9_kprocdetach).
 	 */
-	dropdot();
+	h9_kprocdetach();
 	/* A dialed conversation redials in a namespace of its own. */
 	lock(&cv->lk);
 	if(cv->pg != nil){
