@@ -11,7 +11,7 @@ areas: [kern, vmm, sandbox, cli, guest]
 
 # Proposal: Child machines
 
-[Sign here by hand once you've reviewed the whole doc and take responsibility for it, as described under Signature in README.md. Tools and agents never add the signature.]
+Nov 25, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
 
 ## Abstract
 

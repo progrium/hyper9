@@ -11,6 +11,8 @@ branch: []
 
 # Proposal: A scheduler, with processes on per-core executors
 
+Nov 25, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
+
 ## Abstract
 
 Today each guest process is a host thread that owns a vCPU. This proposal makes a process a kernel object and runs processes on executors: one host thread per core, each with one vCPU. A process runs on an executor until it blocks in the kernel or its time slice ends, then parks as a continuation, and the executor takes the next runnable process. It removes the cap on processes that the hypervisors' vCPU limits impose, it removes `src/cpupool.zig`, and it makes the web host the same design with one executor instead of a second implementation on coroutines.

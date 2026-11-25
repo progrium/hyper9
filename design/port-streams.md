@@ -11,6 +11,8 @@ branch: []
 
 # Proposal: 9P over a MessagePort
 
+Nov 25, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
+
 ## Abstract
 
 On the web host, a `MessagePort` carries a 9P connection the way a WebSocket does. The page hands ports to a machine when it creates it, by name. A port can be a [mounts](mounts.md) source (`createMachine({ mounts: [{ port, dst: '/' }] })`), on `/` as the root, anywhere else, or as an [upper-layers](upper-layers.md) up layer the page keeps; a mount in a namespace file (`mount port!home /usr/me`) or the guest's, through `/net/port`; or a connection the machine serves (`createMachine({ serve: port })`, and `machine.serve(port)` while it runs). Each message on the port is one 9P message, in an `ArrayBuffer` that's transferred, not copied. Ports become a third kind of host stream in `src/hstream.zig`, beside WebSocket and accepted streams. So devmnt mounts them through a `#ℓ` conversation like any 9P connection, handed over with `fd` as a WebSocket is, and [serve](epoch-0/serve.md)'s per-connection path serves them. The page can connect two Workers directly, so a machine can use another Worker's file server as its root, with the page out of the data path. Under Node, `worker_threads`' `MessagePort` is the same API, so the integration suite tests it.

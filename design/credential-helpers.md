@@ -12,6 +12,8 @@ branch: [main]
 
 # Proposal: Credential helpers for WebSocket 9P
 
+Nov 25, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
+
 ## Abstract
 
 Before each WebSocket handshake it makes, h9 can run a host command, a credential helper, chosen by matching the URL against patterns given with `--cred`, and send the headers it prints with the handshake. The helper runs on every handshake: the root's, a namespace file's mounts, and every reconnect [dotl](epoch-0/dotl.md) makes under `9P2000.L.Z`. So short-lived tokens work for runs of any length, and namespace files hold no secrets. The guest never sees the helper, its output, or the headers. A server can also name the uid it serves files as, and dotl maps that uid to the machine's user without a `--user-map`.

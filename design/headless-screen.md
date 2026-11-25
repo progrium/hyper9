@@ -11,6 +11,8 @@ branch: [claude/project-thread-i8dpw1]
 
 # Proposal: Headless screen (--gfx=headless)
 
+Nov 25, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
+
 ## Abstract
 
 `--gfx=headless` gives a machine a screen in memory instead of a host window, in every native build, with no display and no window-system libraries. Three files that 9front already has, `/dev/screen`, `/dev/mousein`, and `/dev/kbdin`, let programs in the machine read the screen and type and click into it. GUI tests, and agents that drive rio, can then be plain rc scripts run by the `h9` binary, rather than Zig programs that embed h9 to reach the headless backend's test hooks.

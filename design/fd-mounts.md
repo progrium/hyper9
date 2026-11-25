@@ -11,6 +11,8 @@ branch: []
 
 # Proposal: Mounting a 9P connection from a host descriptor
 
+Nov 25, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
+
 ## Abstract
 
 An embedder that serves 9P in its own process, such as uitreefs, should be able to hand h9 the connection directly, rather than listening on a unix socket for h9 to dial. [mounts](mounts.md) gives `Machine.Options.mounts` an `.fd` kind for "a connection the embedder already holds", but h9 passes its number to `#ℓ` as a kernel fd, which an embedder has no way to make. This proposal makes `.fd` what mounts meant: a host descriptor, a POSIX fd or a Windows `HANDLE`, that h9 duplicates and wraps as a kernel channel before the `#ℓ` conversation starts. An optional `.fd_write` takes the other end of a pipe pair, so an embedder on Windows, where unix-socket mounts aren't supported, can serve a machine over two anonymous pipes. The CLI, `--print`, and the browser host don't change.

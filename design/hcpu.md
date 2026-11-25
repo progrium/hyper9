@@ -12,6 +12,8 @@ branch: [main]
 
 # Proposal: hcpu, h9's own CPUs for the emulator
 
+Nov 25, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
+
 ## Abstract
 
 hcpu is h9's family of user-mode CPUs written in Zig: h86 for 386 programs, ha64 for arm64 programs, and hx64 for amd64 programs. Together they make up the emulator backend in place of Unicorn and replace v86 in the browser host. Each has two tiers: an interpreter, T0, which is the fallback and the oracle, and a JIT, T1, which lifts regions of guest code to a small IR shared by every CPU and emits arm64, x86-64, or wasm code from it. Any instruction T1 doesn't lift runs through T0 from inside compiled code, so each CPU runs every instruction it advertises on both tiers. None emulates a system: a system call or a fault is a vmm exit, as on every backend. Guest threads run in parallel, where Unicorn runs one at a time. The code is MIT, so the emulator can ship in `h9` itself, and the browser host becomes one module with no guest kernel. h86 and ha64 were built first, on the `vcpu` branch (#156), and hx64, which is h86 extended to long mode, followed (#168), so with all three, h9 needs no Unicorn for any guest. This proposal records their design; [spec/h86.md](../spec/h86.md), [spec/ha64.md](../spec/ha64.md), [spec/hx64.md](../spec/hx64.md), and [spec/jit.md](../spec/jit.md) describe what was built.

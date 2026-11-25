@@ -11,6 +11,8 @@ branch: []
 
 # Proposal: The plan as a file, and the one way in
 
+Nov 25, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
+
 ## Abstract
 
 Every run of h9 compiles its flags into a plan: a namespace, a policy, and limits. `--print` shows it, and `--ns` replays its namespace. This proposal makes the plan a complete, documented text format, and the one input every way of starting a machine takes. `h9 --plan FILE` runs one. `--print` writes one that `--plan` runs to the same effect. The Zig API, the page's `createMachine`, and a child machine's `ctl` take the same text. Flags stay, as shorthand that compiles to a plan, and a flag given with `--plan` can only narrow it.

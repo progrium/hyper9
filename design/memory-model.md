@@ -11,6 +11,8 @@ branch: []
 
 # Proposal: One memory model under both ABIs
 
+Nov 25, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
+
 ## Abstract
 
 h9 has two models of a process's memory: Plan 9 segments in `src/segment.zig`, and the Linux `Mm` in `src/linux/mm.zig`. [cow-fork](cow-fork.md) gives `Mm` copy-on-write and demand-loaded file pages. This proposal moves 9front processes onto it. A Plan 9 segment becomes a named mapping in an `Mm`, `rfork` shares pages copy-on-write instead of copying them, and an a.out's text is filled from its file when touched. `src/segment.zig` shrinks to the part that's Plan 9's own: segment names, `segattach`, `segbrk`, and `/proc/n/segment`.

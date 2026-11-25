@@ -10,6 +10,8 @@ areas: [cli, kern, build, sandbox, tests]
 
 # Proposal: audio (--audio)
 
+Nov 25, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
+
 ## Abstract
 
 `--audio` gives a machine the host's sound output as `/dev/audio` and `/dev/volume`, served by drawterm's devaudio (`#A`) over a host backend. On Linux and Windows, the backends are drawterm's own: PipeWire or ALSA, and Win32, picked by a build option as `-Dgfx` picks a GUI. drawterm has no Core Audio backend, so macOS gets a small one of h9's own. On the [browser host](epoch-0/browser-host.md), a Web Audio backend sends samples to an AudioWorklet in the page, and a write to `/dev/audio` parks its coroutine until the worklet has room. Playback is all `--audio` grants. Recording needs `--audio=record`. Without either, `#A` is masked, as `#i` is without `--gfx`.

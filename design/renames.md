@@ -11,6 +11,8 @@ branch: []
 
 # Proposal: Rename the parts, to ABI, engine, sud, and hcpu
 
+Nov 25, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
+
 ## Abstract
 
 Four of h9's names no longer say what they name. A personality becomes an ABI. The `vmm` layer and its backends become engines. The `native` backend becomes `sud`. The emulator backend, which is `emu` on the command line, hcpu in the build, and `v86` as an alias, becomes `hcpu` everywhere. The source tree, the CLI, the `Machine` API, the build options, and the spec change to match, and the old CLI spellings stay as aliases for one release. Nothing changes in behaviour. It's the last change of epoch 0, so that `baseline-1` is written in the new words and no later proposal needs a table of old names.

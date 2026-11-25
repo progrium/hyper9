@@ -11,6 +11,8 @@ branch: [main]
 
 # Proposal: Linux symlinks resolved in the guest's namespace
 
+Nov 25, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
+
 ## Abstract
 
 For Linux programs, follow symbolic links in the kernel's walk, from the process's own root, as Linux does, instead of in the device that holds them. An absolute target starts at the Linux view's `/`, whatever tree the link is in, and a relative one from the link's directory as the program walked to it. Devices stop at a link and hand back its target rather than following it, and a directory listing shows a link as a link, with or without a target. 9front programs keep today's behaviour.

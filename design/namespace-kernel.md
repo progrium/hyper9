@@ -11,6 +11,8 @@ branch: []
 
 # Proposal: A namespace-only kernel build
 
+Nov 25, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
+
 ## Abstract
 
 `zig build nskernel` builds h9's kernel with nothing for running programs: drawterm's channels, mount tables, devmnt, and a handful of devices, with no vmm, CPU, loaders, segments, system call tables, personalities, devproc, or console. It holds any number of namespaces, each a Pgrp, made and composed through a new device, `#N`: open `/ns/clone` to get a namespace, copied from another or empty, and write `bind`, `mount`, and `unmount` lines in newns syntax to its `ctl`. Everything is reached over 9P2000. The host attaches to a namespace by its id as the attach name, through [kernel-serve](kernel-serve.md)'s server, and hands the kernel 9P servers to mount over `MessagePort`s ([port-streams](port-streams.md)), WebSockets, or 9P2000.L through [dotl](epoch-0/dotl.md). On the web it's `h9ns.wasm` and `h9ns.js`, run in a Worker on the browser host's JSPI coroutines; natively it's a static library with a small C API. Its first user is [Wanix](https://github.com/tractordev/wanix), whose host module on the page asks for one namespace per task and hands it to the task's runner: for Linux and 9front executables, an h9 machine, as `createMachine({ mounts: [{ port, dst: '/' }] })`.

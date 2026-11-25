@@ -11,6 +11,8 @@ branch: []
 
 # Proposal: Watching files for changes, on the host and in the guest
 
+Nov 25, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
+
 ## Abstract
 
 h9 has no way for a guest to learn that a file changed, so every watcher in it polls. The Linux ABI lists `inotify_init`, `inotify_init1`, `inotify_add_watch`, and `inotify_rm_watch` in its syscall table and implements none of them, so .NET, Node's `fs.watch`, dev servers, and editors either poll or fail to start. This proposal adds one change journal to the kernel, fed by three sources: the changes the machine's own processes make, on any device; changes made on the host to a `--dir` tree, found through the host's own API (inotify on Linux, FSEvents on macOS, `ReadDirectoryChangesW` on Windows) or, where that isn't available or isn't trusted, by polling; and changes on a 9P server that offers [dotfs](https://github.com/progrium/dotfs/blob/main/docs/9p-dotfs.md)'s `.fs/events`. Union and overlay instances pass their members' changes up through their own rules, so a change below an up layer or an in-memory overlay is reported only if the guest can see it. Plan 9 programs read the journal as dotfs event records from a new device, `#ν`, and a machine that serves its namespace serves it as `.fs/events`, so another h9 or a dotfs client can follow it. Linux programs get inotify on the same journal. The work lands in three phases, each useful alone: the journal with the guest's own changes, `#ν`, and inotify; then the host and server sources, with unions passing changes up; then serving.

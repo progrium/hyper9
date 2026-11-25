@@ -11,6 +11,8 @@ branch: []
 
 # Proposal: Port the kernel core to Zig, as an instance
 
+Nov 25, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
+
 ## Abstract
 
 h9's kernel is drawterm's `kern/`, about 7,000 lines of C that h9 vendors, with about 17,000 lines of h9's own C around it. This proposal ports the namespace core (channels, mount tables, the device switch, devmnt, queues, pipes, and the file system calls) to Zig, one file at a time, with the same behaviour. Errors become Zig error unions in place of `waserror` and `longjmp`. drawterm's Proc and h9's own process record become one. And a kernel becomes a value: `Kernel.init` makes one, a machine owns one, and nothing in it is process-global. drawterm stays in `third_party/` for what h9 doesn't port: devdraw, libmemdraw, the GUI backends, libsec, and the auth code. Nothing a guest can observe changes.

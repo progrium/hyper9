@@ -11,6 +11,8 @@ branch: []
 
 # Proposal: A wider file interface inside the kernel, with 9P2000 as a view
 
+Nov 25, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
+
 ## Abstract
 
 The kernel's device interface is 9P2000's operations: attach, walk, stat, open, create, read, write, remove, and wstat. Linux programs need more from a file than those say: whether a read would block, symbolic links, owners and modes and times as Linux has them, atomic rename, hard links, locks, and fsync. Today each is worked around at an edge. This proposal adds them to the device interface as optional operations, each with a default that's today's behaviour, so a device implements only what it has. The Linux ABI calls them directly. 9front processes and 9P2000 clients see the same nine operations as before, and a 9P2000.L server or client maps to the wide form without going through the narrow one. It's delivered in three parts, each of which removes a workaround.

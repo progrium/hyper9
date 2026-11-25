@@ -11,6 +11,8 @@ branch: []
 
 # Proposal: A 9P server in the kernel
 
+Nov 25, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
+
 ## Abstract
 
 h9's kernel gets its own 9P2000 server, `src/kern/kserve.c`, and [serve](epoch-0/serve.md)'s per-connection path uses it in place of running 9front's `exportfs` as a guest process. Each connection is served by kernel coroutines (threads on native hosts) that work on kernel channels directly: a fid holds a `Chan`, walks and opens go through `namec`'s pieces and the devices, and directory reads of unions go through the same code `sysread` uses. So access rules, the policy hooks, and the namespace a client sees are unchanged. Serving no longer forks a guest process per connection or per blocking request, no longer needs `/bin/exportfs` from a root or the built-in box, no longer counts against `--pids`, and works on any build with a kernel, including the web host and [namespace-kernel](namespace-kernel.md), which has no guest processes at all. A connection's attach name can choose which namespace it's served from, which is how namespace-kernel serves one namespace per task.

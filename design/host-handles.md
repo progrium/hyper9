@@ -11,6 +11,8 @@ branch: []
 
 # Proposal: Host access through handles
 
+Nov 25, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
+
 ## Abstract
 
 h9's kernel calls the host OS directly, by path and by address, and the sandbox policy is checks hooked into those calls. This proposal turns that around. The kernel never calls the host. It's given a table of handles when it's made: directory handles, a dialer, a listener, a clock, a console, an entropy source, and a window. A device that reaches outside does it through a handle, and the policy is which handles exist and what each allows. Native hosts open files beneath a directory handle, which the OS confines. The web host already works this way, through WASI preopens and JavaScript imports, so the two become one design. The policy, its flags, and `--print` don't change.

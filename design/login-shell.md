@@ -11,8 +11,6 @@ areas: [cli, kern, sandbox, docs, tests]
 
 # Proposal: h9 as a login shell
 
-[Sign here by hand once you've reviewed the whole doc and take responsibility for it, as described under Signature in README.md. Tools and agents never add the signature.]
-
 ## Abstract
 
 Make rc in h9 usable as the shell a terminal opens on macOS and Linux, without making `h9` itself the account's login shell. h9 gains a second name, `h9sh`, that speaks the POSIX shell contract to the host: `-c`, scripts, and non-interactive runs go to the host's `/bin/sh`, so ssh, scp, rsync, git, and editors keep working, and an interactive login starts `h9 --rc` under a new `shell` profile. Three pieces make that session pleasant: host commands that take over the terminal while they run, so `vim` and `less` work; a `/bin` fallback to the host's `PATH`, so `git` works without typing `hcmd`; and passing chosen host environment variables into the guest. A second Ctrl-C no longer stops a login session's machine.

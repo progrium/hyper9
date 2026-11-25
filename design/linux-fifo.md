@@ -11,6 +11,8 @@ branch: [main]
 
 # Proposal: Linux named pipes
 
+Nov 25, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
+
 ## Abstract
 
 Serve Linux FIFOs. `mkfifo` and `mknod(S_IFIFO)` make a FIFO file that stays in the file system: an overlay node in overlays, and a real FIFO on host trees. `stat` shows it as `S_IFIFO`. An open of one by a Linux program is joined to a pipe kept for that file in a machine-wide table, so every process that opens it reads and writes the same pipe, with Linux's open, block, and EOF rules.

@@ -12,6 +12,8 @@ branch: [main]
 
 # Proposal: Copy-on-write fork and demand-loaded file pages for Linux processes
 
+Nov 25, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
+
 ## Abstract
 
 A Linux process's `fork` copies every allocated page of its parent today, and `exec` and private file mappings copy the whole file into fresh pages up front. Both count against `--memory`, so a toolchain that forks a large process and execs another large one runs out of guest memory long before it uses that much. This proposal makes `fork` share the parent's private chunks read-only and copy a chunk only when either side writes it, and fills private file pages (an executable's segments included) from the file the first time they're touched.

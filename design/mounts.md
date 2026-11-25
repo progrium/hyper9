@@ -11,6 +11,8 @@ branch: [main]
 
 # Proposal: Mounts, binds, and a Plan 9 root
 
+Nov 25, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
+
 ## Abstract
 
 A machine's namespace is set up with one family of flags, each of which becomes one line of the plan. Mount flags bring a tree in from outside the machine: `--dir` for a host directory or file, `--url` for a 9P server over `tcp://`, `unix://`, `ws://`, or `wss://`, or a static tree over `http://` or `https://`, `--archive` for a tar unpacked into memory, `--builtin` for the built-in root, and `--tmp` for an empty tree in memory. `--bind` rearranges what's already inside, and `--ns` takes namespace lines inline, separated by `;`, or a host file as `--ns @FILE`. The mount flags and `--bind` all take `SRC:DST[:OPTS]`, with options such as `ro`, `rw`, `eph`, `b`, `a`, `c`, and `r`. Mounts on `/` stack into one tree merged at every depth, which replaces the proposed `--layer`, and mounts on `#L` (devlinux, renamed from `#λ`) do the same for the Linux tree. `/` is built as on 9front: the kernel's `#/` first, with the root stack unioned behind it and bound at `/root`, so a remote root is never asked for `/dev` or `/proc`. `--root` and its `--root-*` flags are removed, and so is detecting a Linux tree by its contents. `--print` output is exactly what `--ns` replays, Linux trees and 9P options included. This proposal takes in [recursive-unions](epoch-0/recursive-unions.md)' union instances and [host-srv](epoch-0/host-srv.md)'s posting, and both are superseded by it.

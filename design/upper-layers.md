@@ -11,6 +11,8 @@ branch: [upper-layers]
 
 # Proposal: Writable layers on the host
 
+Nov 25, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
+
 ## Abstract
 
 Add `up`, a mount option that makes a writable tree the copy-on-write layer over what's below it, the way overlayfs's `upperdir` is: `--dir ./step1:#L:up` puts `step1` on top of the Linux stack, and every change the guest makes lands there as a layer. A file from below is copied into `step1` on its first write, a removed name leaves a `.wh.<name>` file, and a directory removed and made again gets `.wh..wh..opq`, so `step1` is an [OCI image layer](https://github.com/opencontainers/image-spec/blob/main/layer.md), unpacked. Every stack member reads those whiteouts, so `--dir ./step1:#L` mounts the layer again in a later run, and `tar -C step1 -cf step1.tar .` makes it an archive that `--archive` stacks the same way. Writes go to the host as the guest makes them, never to the trees below, and never to memory, so a build can go step by step as a Dockerfile does, with each step's layer kept on disk. This supersedes [overlay-export](overlay-export.md), which wrote the in-memory overlay to a tar at the end of the run.

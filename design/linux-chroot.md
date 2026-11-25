@@ -11,6 +11,8 @@ branch: [main]
 
 # Proposal: chroot for Linux programs
 
+Nov 25, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
+
 ## Abstract
 
 Let a Linux program's `chroot(2)` narrow its own view to a directory it can already reach, instead of failing with `EPERM`. The directory becomes the process's Linux root: absolute paths, absolute link targets, `..` at the top, and the programs it execs are found from there, and its children keep it. It can never widen a process's view past the Linux view, the machine's own root for Linux programs, which stays the sandbox's boundary. `mount`, `umount2`, `pivot_root`, `unshare`, and `setns` stay refused.

@@ -11,6 +11,8 @@ branch: [main]
 
 # Proposal: Retire Unicorn as an engine
 
+Nov 25, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
+
 ## Abstract
 
 Once [hcpu](hcpu.md) is implemented, h9's own CPUs run every guest on every host, and `h9-emu` is no longer released. Unicorn is still in the tree after that: an engine behind `-Demu=unicorn`, a source build for Windows, patches, a fetch step, and documentation. This proposal removes it as an engine. `-Demu` goes, since there's one emulator and it's always built in. `src/vmm/unicorn.zig`, `build/unicorn.zig`, `third_party/unicorn/`, and the GPLv2 release path go. What stays is Unicorn as a test oracle for `zig build lockstep`, linked only into that test tool from the prebuilt library, and never into anything h9 ships.

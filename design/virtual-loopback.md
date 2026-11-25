@@ -11,6 +11,8 @@ branch: []
 
 # Proposal: A loopback network per machine
 
+Nov 25, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
+
 ## Abstract
 
 Give every machine its own loopback network. An `announce` or `bind` on 127.0.0.0/8 or `::1`, and a `connect` to one, stays inside the machine's kernel: devip joins the two conversations with in-kernel queues and never makes a host socket. Two machines can then listen on the same loopback port, a guest can't reach the host's loopback services by accident, and a loopback listen is allowed under `--net=outbound`, which is what build tools such as Mix need. A new `--net=loopback` gives a machine its loopback and nothing else, and `--net=disable` keeps masking `#I`. It becomes the default on every host and backend, and gives the web host a working loopback for the first time. The host's loopback is reached on purpose through a reserved address, `host.h9.internal` (169.254.0.1), opened port by port with `--net-host`. A guest server is published on a host port with `--publish`, which also remaps ports, in the form the Linux VM draft's `publish` already uses. `--net=enable` keeps its meaning for wildcard listens, which answer on the host and inside the machine.
