@@ -7,7 +7,7 @@ Every proposal at the top of [design/](README.md), in the order they were writte
 | Proposal | Issue | Status | State | Title |
 | --- | --- | --- | --- | --- |
 | [hide-host-paths](hide-host-paths.md) |  | superseded |  | Hide host paths in /proc/n/ns |
-| [host-sandbox](host-sandbox.md) |  | draft |  | Host self-sandboxing |
+| [host-sandbox](host-sandbox.md) |  | draft | needs host-handles | Host self-sandboxing |
 | [host-scripts](host-scripts.md) |  | draft |  | Running host scripts as the program |
 | [credential-helpers](credential-helpers.md) | [#119](../../../issues/119) | implemented |  | Credential helpers for WebSocket 9P |
 | [audio](audio.md) |  | draft |  | Audio (--audio) |
@@ -81,6 +81,8 @@ flowchart LR
   p_file_watch["file-watch<br/>draft"]:::draft
   p_linux_chroot["linux-chroot<br/>implemented"]:::implemented
   p_virtual_loopback["virtual-loopback<br/>draft"]:::draft
+  p_hcpu --> p_host_sandbox
+  p_host_handles --> p_host_sandbox
   p_host_cmd --> p_login_shell
   p_mounts --> p_child_machines
   p_linux_chroot --> p_kernel_serve
