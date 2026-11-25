@@ -37,7 +37,9 @@ Every proposal at the top of [design/](README.md), in the order they were writte
 | [fd-mounts](fd-mounts.md) |  | draft |  | Mounting a 9P connection from a host descriptor |
 | [upper-layers](upper-layers.md) |  | draft | in progress on upper-layers; needs port-streams | Writable layers on the host |
 | [headless-screen](headless-screen.md) |  | draft | in progress on claude/project-thread-i8dpw1 | Headless screen (--gfx=headless) |
+| [file-watch](file-watch.md) |  | draft |  | Watching files for changes, on the host and in the guest |
 | [linux-chroot](linux-chroot.md) |  | implemented |  | chroot for Linux programs |
+| [virtual-loopback](virtual-loopback.md) |  | draft |  | A loopback network per machine |
 
 ```mermaid
 flowchart LR
@@ -76,7 +78,9 @@ flowchart LR
   p_fd_mounts["fd-mounts<br/>draft"]:::draft
   p_upper_layers["upper-layers<br/>draft"]:::draft
   p_headless_screen["headless-screen<br/>draft"]:::draft
+  p_file_watch["file-watch<br/>draft"]:::draft
   p_linux_chroot["linux-chroot<br/>implemented"]:::implemented
+  p_virtual_loopback["virtual-loopback<br/>draft"]:::draft
   p_host_cmd --> p_login_shell
   p_kernel_serve --> p_namespace_kernel
   p_port_streams --> p_namespace_kernel
