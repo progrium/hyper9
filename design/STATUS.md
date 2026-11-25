@@ -34,7 +34,7 @@ Every proposal at the top of [design/](README.md), in the order they were writte
 | [renames](renames.md) |  | draft |  | Rename the parts, to ABI, engine, sud, and hcpu |
 | [retire-unicorn](retire-unicorn.md) |  | implemented |  | Retire Unicorn as an engine |
 | [scheduler](scheduler.md) |  | draft | needs kernel-port | A scheduler, with processes on per-core executors |
-| [fd-mounts](fd-mounts.md) |  | draft |  | Mounting a 9P connection from a host descriptor |
+| [fd-mounts](fd-mounts.md) |  | implemented |  | Mounting a 9P connection from a host descriptor |
 | [upper-layers](upper-layers.md) |  | draft | in progress on upper-layers; needs port-streams | Writable layers on the host |
 | [headless-screen](headless-screen.md) |  | draft | in progress on claude/project-thread-i8dpw1 | Headless screen (--gfx=headless) |
 | [file-watch](file-watch.md) |  | draft |  | Watching files for changes, on the host and in the guest |
@@ -75,7 +75,7 @@ flowchart LR
   p_renames["renames<br/>draft"]:::draft
   p_retire_unicorn["retire-unicorn<br/>implemented"]:::implemented
   p_scheduler["scheduler<br/>draft"]:::draft
-  p_fd_mounts["fd-mounts<br/>draft"]:::draft
+  p_fd_mounts["fd-mounts<br/>implemented"]:::implemented
   p_upper_layers["upper-layers<br/>draft"]:::draft
   p_headless_screen["headless-screen<br/>draft"]:::draft
   p_file_watch["file-watch<br/>draft"]:::draft
