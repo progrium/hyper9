@@ -29,7 +29,7 @@ pub fn Args(comptime Class: type) type {
         native: bool = false,
         keep_going: bool = false,
         trace: bool = false,
-        without: std.EnumSet(Class) = .initEmpty(),
+        without: std.EnumSet(Class) = .empty,
         classes_buf: [std.enums.values(Class).len]Class = undefined,
         nclasses: usize = 0,
 
