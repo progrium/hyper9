@@ -6,39 +6,23 @@ Every proposal at the top of [design/](README.md), in the order they were writte
 
 | Proposal | Issue | Status | State | Title |
 | --- | --- | --- | --- | --- |
-| [hide-host-paths](hide-host-paths.md) |  | superseded |  | Hide host paths in /proc/n/ns |
 | [host-sandbox](host-sandbox.md) |  | draft | needs host-handles | Host self-sandboxing |
-| [host-scripts](host-scripts.md) |  | implemented |  | Running host scripts as the program |
-| [credential-helpers](credential-helpers.md) | [#119](../../../issues/119) | implemented |  | Credential helpers for WebSocket 9P |
 | [audio](audio.md) |  | draft |  | Audio (--audio) |
 | [host-cmd](host-cmd.md) |  | draft | in progress on host-cmd | Rethinking host commands |
-| [overlay-export](overlay-export.md) |  | superseded |  | Exporting a run's overlay changes |
-| [login-shell](login-shell.md) | [#89](../../../issues/89) | declined |  | h9 as a login shell |
 | [child-machines](child-machines.md) | [#109](../../../issues/109) | proposed |  | Child machines |
-| [cow-fork](cow-fork.md) | [#121](../../../issues/121) | implemented |  | Copy-on-write fork and demand-loaded file pages for Linux processes |
 | [wine-draw](wine-draw.md) | [#158](../../../issues/158) | proposed | in progress on wine-draw | Wine windows through draw |
-| [mount-index](mount-index.md) |  | implemented |  | Metadata indexes for 9P roots and mounts |
-| [hcpu](hcpu.md) | [#174](../../../issues/174) | implemented |  | hcpu, h9's own CPUs for the emulator |
-| [kernel-serve](kernel-serve.md) |  | implemented |  | A 9P server in the kernel |
 | [namespace-kernel](namespace-kernel.md) |  | draft |  | A namespace-only kernel build |
-| [port-streams](port-streams.md) |  | implemented |  | 9P over a MessagePort |
-| [linux-fifo](linux-fifo.md) |  | implemented |  | Linux named pipes |
-| [mounts](mounts.md) |  | implemented |  | Mounts, binds, and a Plan 9 root |
 | [baseline-1](baseline-1.md) |  | draft | needs renames | Baseline 1 (h9 at the end of epoch 0) |
 | [file-interface](file-interface.md) |  | draft | needs kernel-port | A wider file interface inside the kernel, with 9P2000 as a view |
 | [host-handles](host-handles.md) |  | draft | needs kernel-port | Host access through handles |
 | [kernel-port](kernel-port.md) |  | draft | needs baseline-1, namespace-kernel | Port the kernel core to Zig, as an instance |
-| [linux-symlinks](linux-symlinks.md) |  | implemented |  | Linux symlinks resolved in the guest's namespace |
 | [memory-model](memory-model.md) |  | draft | needs baseline-1 | One memory model under both ABIs |
 | [plan-format](plan-format.md) |  | draft | needs baseline-1, child-machines | The plan as a file, and the one way in |
 | [renames](renames.md) |  | draft |  | Rename the parts, to ABI, engine, sud, and hcpu |
-| [retire-unicorn](retire-unicorn.md) |  | implemented |  | Retire Unicorn as an engine |
 | [scheduler](scheduler.md) |  | draft | needs kernel-port | A scheduler, with processes on per-core executors |
-| [fd-mounts](fd-mounts.md) |  | implemented |  | Mounting a 9P connection from a host descriptor |
 | [upper-layers](upper-layers.md) |  | draft | in progress on upper-layers | Writable layers on the host |
 | [headless-screen](headless-screen.md) |  | draft | in progress on claude/project-thread-i8dpw1 | Headless screen (--gfx=headless) |
 | [file-watch](file-watch.md) |  | draft |  | Watching files for changes, on the host and in the guest |
-| [linux-chroot](linux-chroot.md) |  | implemented |  | chroot for Linux programs |
 | [virtual-loopback](virtual-loopback.md) |  | draft |  | A loopback network per machine |
 
 ```mermaid
@@ -47,71 +31,34 @@ flowchart LR
   classDef accepted stroke-width: 2px
   classDef implemented fill:#dfd,stroke:#393
   classDef closed fill:#eee,stroke:#999,color:#777
-  p_hide_host_paths["hide-host-paths<br/>superseded"]:::closed
   p_host_sandbox["host-sandbox<br/>draft"]:::draft
-  p_host_scripts["host-scripts<br/>implemented"]:::implemented
-  p_credential_helpers["credential-helpers<br/>implemented"]:::implemented
   p_audio["audio<br/>draft"]:::draft
   p_host_cmd["host-cmd<br/>draft"]:::draft
-  p_overlay_export["overlay-export<br/>superseded"]:::closed
-  p_login_shell["login-shell<br/>declined"]:::closed
   p_child_machines["child-machines<br/>proposed"]:::draft
-  p_cow_fork["cow-fork<br/>implemented"]:::implemented
   p_wine_draw["wine-draw<br/>proposed"]:::draft
-  p_mount_index["mount-index<br/>implemented"]:::implemented
-  p_hcpu["hcpu<br/>implemented"]:::implemented
-  p_kernel_serve["kernel-serve<br/>implemented"]:::implemented
   p_namespace_kernel["namespace-kernel<br/>draft"]:::draft
-  p_port_streams["port-streams<br/>implemented"]:::implemented
-  p_linux_fifo["linux-fifo<br/>implemented"]:::implemented
-  p_mounts["mounts<br/>implemented"]:::implemented
   p_baseline_1["baseline-1<br/>draft"]:::draft
   p_file_interface["file-interface<br/>draft"]:::draft
   p_host_handles["host-handles<br/>draft"]:::draft
   p_kernel_port["kernel-port<br/>draft"]:::draft
-  p_linux_symlinks["linux-symlinks<br/>implemented"]:::implemented
   p_memory_model["memory-model<br/>draft"]:::draft
   p_plan_format["plan-format<br/>draft"]:::draft
   p_renames["renames<br/>draft"]:::draft
-  p_retire_unicorn["retire-unicorn<br/>implemented"]:::implemented
   p_scheduler["scheduler<br/>draft"]:::draft
-  p_fd_mounts["fd-mounts<br/>implemented"]:::implemented
   p_upper_layers["upper-layers<br/>draft"]:::draft
   p_headless_screen["headless-screen<br/>draft"]:::draft
   p_file_watch["file-watch<br/>draft"]:::draft
-  p_linux_chroot["linux-chroot<br/>implemented"]:::implemented
   p_virtual_loopback["virtual-loopback<br/>draft"]:::draft
-  p_hcpu --> p_host_sandbox
   p_host_handles --> p_host_sandbox
-  p_host_cmd --> p_login_shell
-  p_mounts --> p_child_machines
-  p_linux_chroot --> p_kernel_serve
-  p_kernel_serve --> p_namespace_kernel
-  p_port_streams --> p_namespace_kernel
-  p_mounts --> p_namespace_kernel
-  p_mounts --> p_port_streams
   p_renames --> p_baseline_1
-  p_cow_fork --> p_baseline_1
-  p_retire_unicorn --> p_baseline_1
   p_kernel_port --> p_file_interface
   p_kernel_port --> p_host_handles
   p_baseline_1 --> p_kernel_port
   p_namespace_kernel --> p_kernel_port
-  p_kernel_serve --> p_kernel_port
   p_baseline_1 --> p_memory_model
-  p_cow_fork --> p_memory_model
   p_baseline_1 --> p_plan_format
-  p_mounts --> p_plan_format
   p_child_machines --> p_plan_format
-  p_hcpu --> p_renames
-  p_hcpu --> p_retire_unicorn
   p_kernel_port --> p_scheduler
-  p_mounts --> p_fd_mounts
-  p_mounts --> p_upper_layers
-  p_linux_symlinks --> p_upper_layers
-  p_linux_fifo --> p_upper_layers
-  p_port_streams --> p_upper_layers
-  p_linux_symlinks --> p_linux_chroot
 ```
 
 ## Epoch 0
@@ -136,6 +83,7 @@ Archived in [epoch-0/](epoch-0/).
 | [whp](epoch-0/whp.md) | [#17](../../../issues/17) | implemented | WHP backend |
 | [zig-interpreter](epoch-0/zig-interpreter.md) | [#19](../../../issues/19) | superseded | A native Zig interpreter for the emulator |
 | [baseline](epoch-0/baseline.md) |  | implemented | Baseline (h9 before proposals) |
+| [hide-host-paths](epoch-0/hide-host-paths.md) |  | superseded | Hide host paths in /proc/n/ns |
 | [i386](epoch-0/i386.md) | [#9](../../../issues/9) | implemented | 386 binaries |
 | [browser-host](epoch-0/browser-host.md) | [#12](../../../issues/12) | implemented | A browser host on wasm, with v86 |
 | [linux-personality](epoch-0/linux-personality.md) | [#18](../../../issues/18) | implemented | Linux personality |
@@ -150,16 +98,31 @@ Archived in [epoch-0/](epoch-0/).
 | [serve](epoch-0/serve.md) | [#35](../../../issues/35) | implemented | Serving the namespace over 9P |
 | [multicall](epoch-0/multicall.md) | [#64](../../../issues/64) | implemented | A multi-call 9front userland binary |
 | [builtin-root](epoch-0/builtin-root.md) | [#87](../../../issues/87) | implemented | A built-in root |
+| [host-scripts](epoch-0/host-scripts.md) |  | implemented | Running host scripts as the program |
 | [host-srv](epoch-0/host-srv.md) |  | superseded | Posting host connections to /srv |
 | [root-auth](epoch-0/root-auth.md) |  | declined | Authenticated 9P roots |
 | [default-command](epoch-0/default-command.md) | [#81](../../../issues/81) | implemented | A default command from the root |
+| [credential-helpers](epoch-0/credential-helpers.md) | [#119](../../../issues/119) | implemented | Credential helpers for WebSocket 9P |
 | [browser-gfx](epoch-0/browser-gfx.md) | [#120](../../../issues/120) | implemented | Graphics on the browser host |
+| [overlay-export](epoch-0/overlay-export.md) |  | superseded | Exporting a run's overlay changes |
 | [schemeless-roots](epoch-0/schemeless-roots.md) | [#76](../../../issues/76) | implemented | Schemeless roots |
+| [login-shell](epoch-0/login-shell.md) | [#89](../../../issues/89) | declined | h9 as a login shell |
 | [native-backend](epoch-0/native-backend.md) | [#95](../../../issues/95) | implemented | Native backend |
 | [recursive-unions](epoch-0/recursive-unions.md) | [#102](../../../issues/102) | superseded | Recursive unions and root layers |
 | [linux-i386](epoch-0/linux-i386.md) | [#105](../../../issues/105) | implemented | 32-bit x86 Linux programs |
 | [tilde-roots](epoch-0/tilde-roots.md) | [#107](../../../issues/107) | declined | Tilde roots from $H9ROOTPATH |
+| [cow-fork](epoch-0/cow-fork.md) | [#121](../../../issues/121) | implemented | Copy-on-write fork and demand-loaded file pages for Linux processes |
+| [mount-index](epoch-0/mount-index.md) |  | implemented | Metadata indexes for 9P roots and mounts |
+| [hcpu](epoch-0/hcpu.md) | [#174](../../../issues/174) | implemented | hcpu, h9's own CPUs for the emulator |
 | [proposal-flow](epoch-0/proposal-flow.md) |  | implemented | A proposal lifecycle for building first, branches, Done criteria, and easier signing |
+| [kernel-serve](epoch-0/kernel-serve.md) |  | implemented | A 9P server in the kernel |
+| [port-streams](epoch-0/port-streams.md) |  | implemented | 9P over a MessagePort |
+| [linux-fifo](epoch-0/linux-fifo.md) |  | implemented | Linux named pipes |
 | [linux-pty](epoch-0/linux-pty.md) |  | implemented | Linux pseudoterminals |
+| [mounts](epoch-0/mounts.md) |  | implemented | Mounts, binds, and a Plan 9 root |
 | [epochs](epoch-0/epochs.md) |  | implemented | Epochs, and archiving closed proposals |
+| [linux-symlinks](epoch-0/linux-symlinks.md) |  | implemented | Linux symlinks resolved in the guest's namespace |
+| [retire-unicorn](epoch-0/retire-unicorn.md) |  | implemented | Retire Unicorn as an engine |
 | [spec-split](epoch-0/spec-split.md) |  | implemented | Splitting SPEC.md into files under spec/ |
+| [fd-mounts](epoch-0/fd-mounts.md) |  | implemented | Mounting a 9P connection from a host descriptor |
+| [linux-chroot](epoch-0/linux-chroot.md) |  | implemented | chroot for Linux programs |
