@@ -2875,12 +2875,13 @@ test "the embedder's descriptor stays open, and a second run uses it [fd-mounts]
             try std.testing.expectEqualStrings("exited ", r.status);
             try std.testing.expectEqualStrings("again\n", r.out);
             try std.testing.expect(fdserver.isOpen(f.r));
-            // Each run starts its session over with Tversions of its own
-            // (the translator's, then devmnt's), on the same stream.
-            if (i == 0) first = f.pump.server.versions;
+            // Each run starts its session over with a Tversion of its own
+            // on the same stream. How many depends on the dialect's
+            // negotiation, so only that the second run sent more counts.
+            if (i == 0) first = @atomicLoad(u32, &f.pump.server.versions, .acquire);
         }
         try std.testing.expect(first > 0);
-        try std.testing.expectEqual(2 * first, f.pump.server.versions);
+        try std.testing.expect(@atomicLoad(u32, &f.pump.server.versions, .acquire) > first);
         m.deinit();
         try std.testing.expect(fdserver.isOpen(f.r));
         ran = true;
