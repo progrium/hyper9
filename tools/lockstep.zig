@@ -10,7 +10,7 @@
 //! caller serves it once, on T0's memory, then calls `sync` to copy T0's
 //! pages and state into the mirror.
 //!
-//! Unicorn is the oracle here and nowhere else (design/retire-unicorn.md).
+//! Unicorn is the oracle here and nowhere else (design/epoch-0/retire-unicorn.md).
 //! It's GPLv2, so only the test tools link it, from the prebuilt
 //! libunicorn.a that `scripts/fetch.sh unicorn` unpacks: `zig build
 //! lockstep` runs this file's tests, and `zig build fuzz-a64`, `fuzz-x86`,

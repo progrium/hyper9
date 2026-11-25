@@ -1,4 +1,4 @@
-//! Recorded-conversation tests for the index layer (design/mount-index.md):
+//! Recorded-conversation tests for the index layer (design/epoch-0/mount-index.md):
 //! devmnt's requests are fed in by hand, and the server is a 9P2000 tree
 //! in memory that counts what it's sent.
 

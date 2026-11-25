@@ -22,7 +22,7 @@
 //! `h9_ws_*` imports below; each stream's reader is a coroutine parked
 //! in `ws_recv`. ws.zig, TLS, proxies and the keepalive aren't used there.
 //!
-//! Ports (design/port-streams.md) are the web host's third kind: a
+//! Ports (design/epoch-0/port-streams.md) are the web host's third kind: a
 //! `MessagePort` the page handed the machine by name, carrying one 9P
 //! message per message. h9 opens one for a `port!NAME` mount or a
 //! `/net/port` conversation through `js.port_open`, which puts it in the
@@ -92,10 +92,10 @@ const js = struct {
     /// this host's WebSocket can't send them (a browser's). With
     /// `static_tree`, a server that doesn't upgrade is tried as a static
     /// dotfs tree at the URL's `http` form, which the host then serves as
-    /// the socket's 9P server (design/mounts.md, "Static trees").
+    /// the socket's 9P server (design/epoch-0/mounts.md, "Static trees").
     extern "h9" fn ws_open(url: [*]const u8, url_n: u32, protocols: [*]const u8, protocols_n: u32, headers: [*]const u8, headers_n: u32, static_tree: u32) i32;
     /// Asks the embedder's credentials callback for a host-made stream's
-    /// handshake (design/credential-helpers.md, "Browser host"): `failed`
+    /// handshake (design/epoch-0/credential-helpers.md, "Browser host"): `failed`
     /// is empty, or why the last try failed; `argv` is the matching
     /// `--cred` helper's command, one word per line, or empty. Writes
     /// `Name: value` lines to `out`, the first of which may instead be
@@ -116,7 +116,7 @@ const js = struct {
     /// error in `buf` (length in `len`).
     extern "h9" fn ws_status(id: i32, buf: [*]u8, n: u32, len: *u32) u32;
     extern "h9" fn ws_free(id: i32) void;
-    /// Opens the page's port `name` (design/port-streams.md) as an entry
+    /// Opens the page's port `name` (design/epoch-0/port-streams.md) as an entry
     /// in the socket table, which the calls above take: its id, or -1 if
     /// there's no port by that name, -2 if it's in use, -3 if it has been
     /// opened and closed.
@@ -322,7 +322,7 @@ pub const HostOptions = struct {
     /// the host's bundle.
     ca_file: ?[]const u8 = null,
     proxy: ws.ProxyConfig = .{},
-    /// Credential helpers (design/credential-helpers.md): the one whose
+    /// Credential helpers (design/epoch-0/credential-helpers.md): the one whose
     /// pattern matches the URL best runs before each handshake, and its
     /// headers go with it, after `headers`, which win on a name.
     cred: []const cred.Helper = &.{},
@@ -359,7 +359,7 @@ pub const Served = struct {
 
 /// The dialect slot (design/epoch-0/serve.md, "Each connection"): what
 /// serves a connection whose first message has type `typ`. Every
-/// connection goes to the kernel's 9P server (design/kernel-serve.md)
+/// connection goes to the kernel's 9P server (design/epoch-0/kernel-serve.md)
 /// through a `#ℓ` conversation's server side (design/epoch-0/dotl.md),
 /// which translates a 9P2000.L client and passes any other version to
 /// the server to answer.
@@ -381,7 +381,7 @@ pub const Stream = struct {
     announced: bool = false,
     /// The guest's conversation number, or null for a host-made stream.
     conv: ?u8,
-    /// A port (design/port-streams.md): `url` is `port!NAME`, and the JS
+    /// A port (design/epoch-0/port-streams.md): `url` is `port!NAME`, and the JS
     /// host's port_open opens it, with no handshake. A conversation is a
     /// port's from its clone, in `/net/port`.
     port: bool = false,
@@ -426,7 +426,7 @@ pub const Stream = struct {
     /// starts.
     addrs: []net.IpAddress = &.{},
     /// A host-made stream's credential helper, copied from the pattern
-    /// that matched its URL (design/credential-helpers.md).
+    /// that matched its URL (design/epoch-0/credential-helpers.md).
     cred_helper: ?cred.Helper = null,
     /// Why the helper failed, when connect returns error.CredHelper.
     cred_why: cred.Why = .{},
@@ -435,7 +435,7 @@ pub const Stream = struct {
     /// HostOptions.static_tree.
     static_tree: bool = false,
     /// The server's uid and name for the client, from the 101's 9P-Uid
-    /// and 9P-User (design/credential-helpers.md).
+    /// and 9P-User (design/epoch-0/credential-helpers.md).
     ident_uid: ?u32 = null,
     ident_user: [ws.max_user]u8 = undefined,
     ident_len: usize = 0,
@@ -695,7 +695,7 @@ pub fn openHost(owner: usize, url: []const u8, o: HostOptions) OpenError!u32 {
 }
 
 /// Starts opening the page's port `name` for machine `owner`
-/// (design/port-streams.md), as `openHost` starts a connect: its id, with
+/// (design/epoch-0/port-streams.md), as `openHost` starts a connect: its id, with
 /// a reference the caller drops with `release`. Only the web host has
 /// ports; elsewhere it's error.Unsupported.
 pub fn openPort(owner: usize, name: []const u8) (OpenError || error{Unsupported})!u32 {
@@ -746,7 +746,7 @@ pub fn result(id: u32, buf: []u8) ?[]const u8 {
 }
 
 /// The server's identity for the client, from a host-made stream's
-/// handshake (design/credential-helpers.md).
+/// handshake (design/epoch-0/credential-helpers.md).
 pub const Identity = struct { uid: u32, user: []const u8 };
 
 /// Stream `id`'s 9P-Uid and 9P-User, copied into `buf`, or null if the
@@ -762,7 +762,7 @@ pub fn identity(id: u32, buf: *[ws.max_user]u8) ?Identity {
 }
 
 // What each machine's host-made streams are made with, for `#ℓ`'s redials
-// (design/credential-helpers.md): the root's options for its URL, and
+// (design/epoch-0/credential-helpers.md): the root's options for its URL, and
 // the mounts' for the rest.
 
 const HostEntry = struct { owner: usize, root_url: ?[]const u8, root: HostOptions, mounts: HostOptions };
@@ -911,7 +911,7 @@ fn runAccepted(s: *Stream) void {
         unref(s); // the thread's
     }
     if (web.enabled and s.port) {
-        // A served port (design/port-streams.md): no handshake.
+        // A served port (design/epoch-0/port-streams.md): no handshake.
         webReadLoop(s);
         finish(s);
         return;
@@ -973,7 +973,7 @@ fn acceptUpgrade(s: *Stream, pol: ws.ServerPolicy) error{Refused}!void {
 }
 
 /// The next port the page hands the machine to serve
-/// (design/port-streams.md), opened in the JS host's socket table, or null
+/// (design/epoch-0/port-streams.md), opened in the JS host's socket table, or null
 /// once `stopPorts` was called. Web host only.
 pub fn acceptPort() ?i32 {
     if (!web.enabled) return null;
@@ -981,7 +981,7 @@ pub fn acceptPort() ?i32 {
     return if (id < 0) null else id;
 }
 
-/// Whether the embedder serves the machine on ports (design/port-streams.md),
+/// Whether the embedder serves the machine on ports (design/epoch-0/port-streams.md),
 /// and with `/net`.
 pub fn portServing() struct { serve: bool, net: bool } {
     if (!web.enabled) return .{ .serve = false, .net = false };
@@ -1189,7 +1189,7 @@ fn connect(s: *Stream) ConnectError!void {
     const url = ws.Url.parse(s.url) catch unreachable;
     const proxy: ?ws.Proxy = if (s.proxy) |p| ws.Proxy.parse(p) catch return error.BadProxy else null;
     // With a credential helper, a 401 or 403 runs it once more, with the
-    // response on stdin, on a new connection (design/credential-helpers.md).
+    // response on stdin, on a new connection (design/epoch-0/credential-helpers.md).
     var head: ws.Response.Head = .{};
     var prev: []const u8 = "";
     while (true) {
@@ -1326,7 +1326,7 @@ fn webConnect(s: *Stream) ConnectError!void {
     }
     // A host-made stream asks the embedder's credentials callback before
     // each try, and tries once more if one gave a credential and the
-    // open failed (design/credential-helpers.md, "Browser host").
+    // open failed (design/epoch-0/credential-helpers.md, "Browser host").
     var failed: [96]u8 = undefined;
     var failed_len: usize = 0;
     while (true) {
@@ -1379,7 +1379,7 @@ fn webFail(s: *Stream, comptime fmt: []const u8, args: anytype) ConnectError {
     return error.Canceled;
 }
 
-/// `connect` for a port (design/port-streams.md): the JS host opens the
+/// `connect` for a port (design/epoch-0/port-streams.md): the JS host opens the
 /// page's port by name at once, and it's established, with no handshake.
 fn portConnect(s: *Stream) ConnectError!void {
     const name = portName(s.url);
@@ -1815,7 +1815,7 @@ fn putErr(err: [*]u8, msg: []const u8) void {
 }
 
 /// Makes a conversation for `mach`: a WebSocket's (`/net/ws`), or with
-/// `port` set a port's (`/net/port`, design/port-streams.md). The two
+/// `port` set a port's (`/net/port`, design/epoch-0/port-streams.md). The two
 /// share the machine's conversation numbers.
 fn h9_hstream_clone(mach: ?*anyopaque, port: c_int, err: [*]u8) callconv(.c) c_long {
     const owner = @intFromPtr(mach);
@@ -1850,7 +1850,7 @@ fn h9_hstream_convno(id: c_ulong) callconv(.c) c_int {
     return if (s.conv) |cv| cv else -1;
 }
 
-/// Whether stream `id` is a port's (design/port-streams.md).
+/// Whether stream `id` is a port's (design/epoch-0/port-streams.md).
 fn h9_hstream_isport(id: c_ulong) callconv(.c) c_int {
     const s = get(id) orelse return 0;
     defer unref(s);
@@ -2565,7 +2565,7 @@ test "the keepalive pings an idle stream" {
     try testing.expect(echo.pings.load(.acquire) >= 2);
 }
 
-// Fetching an `index=` URL (design/mount-index.md), with the
+// Fetching an `index=` URL (design/epoch-0/mount-index.md), with the
 // connection code WebSocket roots use: the proxy's CONNECT, then TLS for
 // `https`, then one GET.
 
@@ -2694,7 +2694,7 @@ pub const GetOptions = struct {
 
 /// GETs `url_s`, an `https://` or `http://` URL, through the proxy and
 /// TLS as a WebSocket root connects, and returns whatever status the
-/// server answers with (design/mounts.md, "Static trees").
+/// server answers with (design/epoch-0/mounts.md, "Static trees").
 pub fn fetch(alloc: std.mem.Allocator, io: Io, url_s: []const u8, o: GetOptions, req: Request, msg: []u8) anyerror!Response {
     if (web.enabled) return error.Unsupported;
     setIo(io);

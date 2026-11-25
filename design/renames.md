@@ -24,7 +24,7 @@ Each name was right when it was chosen, and h9 has since grown past it.
 - **Personality.** [linux-personality](epoch-0/linux-personality.md) added Linux as a guest inside a Plan 9 runner, and "personality" fit: one native system and a mask. Linux is now the larger consumer of the kernel, and what's picked at exec is a binary format, a system call table, a signal or note frame, and a default view of the namespace. That's an ABI, and the spec already says so: [spec/abi-plan9.md](../spec/abi-plan9.md) and [spec/abi-linux.md](../spec/abi-linux.md) are named for it, while their text, 124 identifiers and comments under `src/`, and the proposal checklist in [README.md](README.md) still say personality.
 - **`vmm` and backend.** `src/vmm.zig` began as a wrapper over three hypervisor APIs. Of the five implementations behind it now, three are hypervisors (HVF, KVM, and WHP). The others are stub processes on Syscall User Dispatch and h9's own interpreter and JIT, and [spec/engines.md](../spec/engines.md) is already named for what they have in common. "Backend" also names drawterm's GUI backends (`--gfx`), so "the backend" needs a qualifier every time.
 - **`native`.** [native-backend](epoch-0/native-backend.md) named it for running guest code on the host CPU. Every hypervisor does that too, so the name doesn't tell it apart, and `hvf`, `kvm`, and `whp` are each named for the host feature they're built on. This one is built on Syscall User Dispatch.
-- **`emu`, hcpu, and `v86`.** The CLI says `--backend emu`, the code says hcpu, and `v86` is still accepted. Since [retire-unicorn](retire-unicorn.md), `emu` means hcpu and nothing else, in every build.
+- **`emu`, hcpu, and `v86`.** The CLI says `--backend emu`, the code says hcpu, and `v86` is still accepted. Since [retire-unicorn](epoch-0/retire-unicorn.md), `emu` means hcpu and nothing else, in every build.
 
 The names appear in these places today:
 
@@ -54,14 +54,14 @@ Machine, kernel, root, plan, policy, shim, and the device names don't change.
 ### CLI
 
 - `--engine auto|hvf|kvm|whp|sud|hcpu` replaces `--backend`.
-- `--backend` is accepted as an alias of `--engine`, and `native`, `emu`, and `v86` as aliases of `sud`, `hcpu`, and `hcpu`, for one release. The usage text and the manual don't mention them. After that release each is a usage error, as [hcpu](hcpu.md) already says of `v86`.
+- `--backend` is accepted as an alias of `--engine`, and `native`, `emu`, and `v86` as aliases of `sud`, `hcpu`, and `hcpu`, for one release. The usage text and the manual don't mention them. After that release each is a usage error, as [hcpu](epoch-0/hcpu.md) already says of `v86`.
 - `--check` and `--version` say "engines" where they say "backends", and name them `sud` and `hcpu`.
 - `--print` and exit codes don't change.
 
 ### The `Machine` API, the build, and the environment
 
 - `Machine.Options.backend` becomes `Machine.Options.engine`. The `vmm` module becomes `engine`, with `engine.Choice` for `vmm.BackendKind`, `engine.Engine` for `vmm.Backend`, `engine.Kind`'s fields `sud` and `hcpu`, and `error.EngineNotBuilt`. There are no aliases: the Zig API isn't stable yet, and a compile error names the fix.
-- `-Dbackends` becomes `-Dengines`, with the new values. There's no `-Demu` to rename: [retire-unicorn](retire-unicorn.md) removed it.
+- `-Dbackends` becomes `-Dengines`, with the new values. There's no `-Demu` to rename: [retire-unicorn](epoch-0/retire-unicorn.md) removed it.
 - `H9_EMU_TIER`, `H9_EMU_DETERMINISTIC`, and `H9_EMU_NO_CODEGEN` become `H9_HCPU_TIER`, `H9_HCPU_DETERMINISTIC`, and `H9_HCPU_NO_CODEGEN`, with no aliases. They're for tests and debugging.
 - The page's `createMachine` doesn't take an engine, and doesn't change.
 
@@ -147,7 +147,7 @@ None. No code path changes, and the guest can reach nothing new. The sud engine 
 
 Each step is one PR that changes names and nothing else, so its diff can be reviewed as a rename. The steps are ordered to keep each one small, and each leaves main passing.
 
-1. Wait for [hcpu](hcpu.md) to be implemented, and for the branches open at the time to land or agree to rebase.
+1. Wait for [hcpu](epoch-0/hcpu.md) to be implemented, and for the branches open at the time to land or agree to rebase.
 2. `native` to `sud`: the three files, `engine.Kind`'s field, the CLI value with its alias, and the prose.
 3. `emu` and `v86` to `hcpu`: the CLI values with their aliases, the `H9_EMU_*` variables, and the prose.
 4. `vmm` and backend to engine: `src/vmm.zig` and `src/vmm/` move, the hcpu files gather under `src/engine/hcpu/`, `--engine` arrives with `--backend` as its alias, and `Machine.Options.backend`, `-Dbackends`, and the identifiers follow.

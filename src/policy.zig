@@ -118,7 +118,7 @@ pub const Bind = struct {
     note: ?[]const u8 = null,
     /// With `console`: bind the console's `cons` file, not its directory.
     cons_file: bool = false,
-    /// `bind -r`: a union merged at every depth (design/mounts.md). On
+    /// `bind -r`: a union merged at every depth (design/epoch-0/mounts.md). On
     /// `#Oroot` or `#Olinux`, optionally with a path below, it adds a
     /// member to that stack.
     recursive: bool = false,
@@ -142,7 +142,7 @@ pub const Bind = struct {
     /// `to` of `/srv/NAME` posts it there without mounting it.
     url: ?NinePRoot = null,
     /// With `url`: a connection the embedder already holds, as host
-    /// descriptors (design/fd-mounts.md): the one read from, and the one
+    /// descriptors (design/epoch-0/fd-mounts.md): the one read from, and the one
     /// written to if it's another.
     fd: ?std.posix.fd_t = null,
     fd_write: ?std.posix.fd_t = null,
@@ -158,7 +158,7 @@ pub const NinePRoot = struct {
     kind: enum { tcp, unix, ws, port },
     /// The dial string, `tcp!host!port` or `unix!path`, a `ws://` or
     /// `wss://` URL (design/epoch-0/websocket-9p.md), or on the web host
-    /// a page's port, `port!NAME` (design/port-streams.md), for the plan
+    /// a page's port, `port!NAME` (design/epoch-0/port-streams.md), for the plan
     /// and errors.
     addr: []const u8,
     /// The attach name.
@@ -173,15 +173,15 @@ pub const NinePRoot = struct {
     /// The proxy it goes through, if any.
     proxy: ?[]const u8 = null,
     /// The credential helper that applies to it, as `PATTERN=COMMAND`
-    /// (design/credential-helpers.md); the plan never shows what it
+    /// (design/epoch-0/credential-helpers.md); the plan never shows what it
     /// prints.
     cred: ?[]const u8 = null,
-    /// Its metadata index (design/mount-index.md), as the plan shows it.
+    /// Its metadata index (design/epoch-0/mount-index.md), as the plan shows it.
     index: Index = .auto,
     /// An `http://` or `https://` URL, or one without a scheme, as that:
     /// `addr` is its WebSocket form, and when the handshake is answered
     /// with anything but a 101, h9 fetches `http/.fs/index` for a static
-    /// tree instead (design/mounts.md, "The probe").
+    /// tree instead (design/epoch-0/mounts.md, "The probe").
     http: ?[]const u8 = null,
 
     pub const Index = union(enum) {
@@ -201,7 +201,7 @@ pub const Serve = struct {
         /// The address as `--serve` takes it.
         addr: []const u8,
         /// `port`: the ports the page hands the machine to serve, on the
-        /// web host (design/port-streams.md).
+        /// web host (design/epoch-0/port-streams.md).
         kind: enum { unix, tcp, ws, port },
     };
     listeners: []const Listener,
@@ -224,7 +224,7 @@ pub const hstream_dev = "ℏ";
 /// (design/epoch-0/dotl.md).
 pub const dotl_dev = "ℓ";
 
-/// The index layer's device, `#ι` (design/mount-index.md), which only
+/// The index layer's device, `#ι` (design/epoch-0/mount-index.md), which only
 /// h9 opens, for the 9P connections it makes.
 pub const hidx_dev = "ι";
 
@@ -337,7 +337,7 @@ pub const Plan = struct {
         if (p.memory) |m| try w.print(" memory={f}", .{fmtSize(m)});
         if (p.timeout_ns) |d| try w.print(" timeout={f}", .{fmtDuration(d)});
         // Serving runs no guest processes, so --pids is the program's
-        // alone (design/kernel-serve.md).
+        // alone (design/epoch-0/kernel-serve.md).
         if (p.pids) |n| try w.print(" pids={d}", .{n});
         if (p.cpus) |n| try w.print(" cpus={d}", .{n});
         try w.writeAll("\n");
@@ -354,7 +354,7 @@ pub const Plan = struct {
         try w.writeAll("namespace:\n");
         for (p.binds) |b| {
             // An embedder's connection has no address to replay
-            // (design/fd-mounts.md), so it's a comment, and the rest of
+            // (design/epoch-0/fd-mounts.md), so it's a comment, and the rest of
             // the plan still replays.
             if (b.fd != null) {
                 try w.print("  # mount: an embedder's connection on {s}\n", .{shownTo(b.to)});
@@ -387,7 +387,7 @@ pub const Plan = struct {
             // the spec from the access column.
             if (b.mount) lw.print(" '{s}'", .{b.spec}) catch return error.WriteFailed;
             // A 9P mount's settings, as namespace files take them
-            // (design/mounts.md, "Namespace files"); a header's value
+            // (design/epoch-0/mounts.md, "Namespace files"); a header's value
             // only when it's from a file.
             if (b.url) |r| {
                 if (r.user) |u| lw.print(" 'user={s}'", .{u}) catch return error.WriteFailed;
@@ -514,7 +514,7 @@ pub const Gfx = struct {
 };
 
 pub const Inputs = struct {
-    /// The mounts, in the order given (design/mounts.md). `.dir` sources
+    /// The mounts, in the order given (design/epoch-0/mounts.md). `.dir` sources
     /// are absolute host paths with symlinks resolved, and `.archive`
     /// ones host paths h9 reads before the machine starts. Mounts on `/`
     /// stack into the root, and on `#L` into the Linux tree; with none on
@@ -548,7 +548,7 @@ fn hostWritable(writable: []const []const u8, path: []const u8, allowed: bool) b
 }
 
 /// The Linux view's device (design/epoch-0/linux-personality.md, "The Linux
-/// view"): `#L`, devlinux, which was `#λ` before design/mounts.md.
+/// view"): `#L`, devlinux, which was `#λ` before design/epoch-0/mounts.md.
 pub const linux_view = "#L";
 
 /// Compiles a policy. Allocations go in `arena`. `err_msg` explains a
@@ -578,7 +578,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
             err_msg.* = "contained needs a host directory";
             return error.Conflict;
         }
-        // design/fd-mounts.md: the descriptors are an .fd mount's, and it
+        // design/epoch-0/fd-mounts.md: the descriptors are an .fd mount's, and it
         // needs the one it reads.
         // The messages are constant: Machine.init frees the arena on
         // a conflict.
@@ -659,7 +659,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         }
     }{ .eph = eph };
 
-    // The stacks (design/mounts.md, "Stacks"): a member marked rw takes
+    // The stacks (design/epoch-0/mounts.md, "Stacks"): a member marked rw takes
     // creates and writes, and the stack then has no overlay. Otherwise
     // the stack is under one with --write=overlay or ephemeral.
     var stack_rw = [2]bool{ false, false };
@@ -683,7 +683,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     const linux_overlay = overlay_mode and !stack_rw[1];
     const has_linux = stack_n[1] > 0;
 
-    // `/` on 9front's pattern (design/mounts.md, "Building /"): the
+    // `/` on 9front's pattern (design/epoch-0/mounts.md, "Building /"): the
     // kernel's `#/` first, so its names never reach the root tree, and
     // the root stack after it and at /root.
     try binds.append(arena, .{ .from = "#/", .to = "/", .note = "the kernel's names: bin dev env fd net proc root srv" });
@@ -742,7 +742,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         // h9's own commands (design/epoch-0/guest-tools.md), after the root's
         // so a root command of the same name wins.
         if (in.guest_tools) try binds.append(arena, .{ .from = "#H/bin", .to = "/bin", .flag = .after, .optional = true, .note = "h9's commands" });
-        // h9's bind(1), with -r for unions (design/mounts.md), before the
+        // h9's bind(1), with -r for unions (design/epoch-0/mounts.md), before the
         // root's.
         if (in.guest_tools) try binds.append(arena, .{ .from = "#H/over", .to = "/bin", .flag = .before, .optional = true, .note = "h9's bind, with -r" });
     }
@@ -904,7 +904,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         if (!(is_root and root_overlay)) try caveats.append(arena, try std.fmt.allocPrint(arena, "writes to {s} go to its server, which decides what can be written", .{what}));
         const plain = switch (r.kind) {
             .tcp => true,
-            // A port never leaves the page (design/port-streams.md).
+            // A port never leaves the page (design/epoch-0/port-streams.md).
             .unix, .port => false,
             .ws => !std.mem.startsWith(u8, r.addr, "wss://"),
         };
@@ -947,7 +947,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         // Unix sockets rely on file permissions, and TCP has nothing, so
         // both are listed, as is a WebSocket listener without a token.
         // A port is the page's, which made it and decided who's on the
-        // other end (design/port-streams.md).
+        // other end (design/epoch-0/port-streams.md).
         for (sv.listeners) |l| if (l.kind != .port and (l.kind != .ws or !sv.token)) {
             try caveats.append(arena, try std.fmt.allocPrint(arena, "served without authentication on {s}", .{l.addr}));
         };
@@ -988,13 +988,13 @@ fn isWs(url: []const u8) bool {
     return !std.mem.eql(u8, s, "tcp") and !std.mem.eql(u8, s, "unix") and !std.mem.eql(u8, s, "port");
 }
 
-/// The 9P connection a `--url` mount makes (design/mounts.md, "URLs"):
+/// The 9P connection a `--url` mount makes (design/epoch-0/mounts.md, "URLs"):
 /// `tcp://HOST:PORT[/SPEC]` dials `tcp!HOST!PORT`, `unix:///PATH` the
 /// socket at PATH, and `ws://` and `wss://` as they are. `http://` and
 /// `https://` probe for a WebSocket, and fall back to a static dotfs
 /// tree; a URL without a scheme is `http://` for a loopback host and
 /// `https://` for any other. `port://NAME[/SPEC]` is the page's port
-/// NAME (design/port-streams.md), `port!NAME`.
+/// NAME (design/epoch-0/port-streams.md), `port!NAME`.
 pub fn ninePConn(arena: std.mem.Allocator, m: mount.Mount) error{OutOfMemory}!NinePRoot {
     var r: NinePRoot = .{ .kind = .ws, .addr = m.src, .user = m.user, .headers = m.headers, .ca = m.ca };
     const s = mount.scheme(m.src);
@@ -1157,7 +1157,7 @@ fn guestPlace(in: Inputs, p: []const u8) Place {
 /// cwd, every readable path, and every `--dir` mount, or a deny rule
 /// hides it. `mounts`, `cwd`, and `pol` are the plan's inputs. The CLI
 /// runs a host `#!` script by this path, so that its interpreter, a
-/// guest program, can open it (design/host-scripts.md).
+/// guest program, can open it (design/epoch-0/host-scripts.md).
 pub fn guestPath(arena: std.mem.Allocator, plan: *const Plan, mounts: []const mount.Mount, cwd: ?[]const u8, pol: Policy, host: []const u8) error{OutOfMemory}!?[]const u8 {
     // Without a root nothing is bound; with one, the cwd always is.
     if (plan.guest_cwd == null) return null;

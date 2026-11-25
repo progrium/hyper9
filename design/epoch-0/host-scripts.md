@@ -20,7 +20,7 @@ Nov 25, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially direct
 ## Background
 
 - **Guest programs** (`h9 man`, `h9 /mnt/term/cwd/greet`) follow `#!` in the first process as exec does, since the fix that shares exec's `#!` handling with `startFirst`.
-- **Host programs** (`./x`, `../x`) are read on the host by the CLI and passed to the machine as `Program.bytes`. [spec/cli.md](../spec/cli.md) promises that such a program "doesn't need to be in the guest namespace". That works for an a.out, which is loaded from its bytes, but not for a script: the interpreter, a guest program, opens the script by a name, and `bytes` has none.
+- **Host programs** (`./x`, `../x`) are read on the host by the CLI and passed to the machine as `Program.bytes`. [spec/cli.md](../../spec/cli.md) promises that such a program "doesn't need to be in the guest namespace". That works for an a.out, which is loaded from its bytes, but not for a script: the interpreter, a guest program, opens the script by a name, and `bytes` has none.
 - **Today's workaround** is `h9 rc ./greet`, which works when the script is under the cwd (or another bound path), since rc opens it at `./greet` relative to the guest cwd `/mnt/term/cwd`.
 
 ## Proposal

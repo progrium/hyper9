@@ -170,7 +170,7 @@ void	h9_fs_syncfs(Chan *c);
 void	h9_fs_sync(void);
 int	h9_fs_renamepath(char *old, char *new);
 /*
- * FIFOs for the Linux personality (design/linux-fifo.md). A Dir marks one
+ * FIFOs for the Linux personality (design/epoch-0/linux-fifo.md). A Dir marks one
  * with H9_DMFIFO, 9P2000.u's DMNAMEDPIPE, since Plan 9 has no file types.
  * h9_fs_mkfifo makes name in the devfs directory c a host FIFO, and
  * h9_fs_isfifo says whether the devfs chan c is one. h9_fs_mkfifopath
@@ -184,7 +184,7 @@ int	h9_fs_isfifo(Chan *c);
 int	h9_fs_mkfifopath(char *path, ulong perm);
 int	h9_fs_chanisfifo(Chan *c);
 /*
- * Linux symlinks (design/linux-symlinks.md). A Linux process's walks
+ * Linux symlinks (design/epoch-0/linux-symlinks.md). A Linux process's walks
  * stop at a link instead of following it: the device ends the walk on
  * the link, with H9_QTSYMLINK in its qid (so its Dir has H9_DMSYMLINK),
  * and the kernel's walk (chan.c) follows it from the process's root or

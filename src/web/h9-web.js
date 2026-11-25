@@ -167,7 +167,7 @@ const nextTask = (() => {
  *   without graphics.
  * - credentials(url, failed, helper): called before each WebSocket
  *   handshake h9 makes, a root's or a namespace file's mount
- *   (design/credential-helpers.md, "Browser host"). `failed` is null, or
+ *   (design/epoch-0/credential-helpers.md, "Browser host"). `failed` is null, or
  *   why the last try failed, for a retry; `helper` is the matching
  *   `--cred` helper's command as an array, or undefined. It returns (or
  *   resolves to) null for no credential, header lines (a string or an
@@ -175,7 +175,7 @@ const nextTask = (() => {
  *   is a URL to connect to instead, such as one with a single-use ticket
  *   in its query. A browser's WebSocket can't send headers, so there only
  *   `url` works. Throwing fails the handshake with the error's message.
- * - ports: the machine's MessagePorts (design/port-streams.md), a Ports
+ * - ports: the machine's MessagePorts (design/epoch-0/port-streams.md), a Ports
  *   or an object from names to ports, which `port!NAME` and
  *   `port://NAME` name; and its served ports, from Ports.serve.
  */
@@ -276,7 +276,7 @@ function credText(r) {
   return lines(r).join('\n');
 }
 
-// Ports (design/port-streams.md): a MessagePort carries one 9P
+// Ports (design/epoch-0/port-streams.md): a MessagePort carries one 9P
 // connection, one 9P message per message, in an ArrayBuffer that's
 // transferred. h9 opens a port by name with port_open, which makes an
 // entry in the WebSockets' table, so ws_recv, ws_send, ws_close,
@@ -735,9 +735,9 @@ export class GfxHost {
 // their CLI names: profile, write, net, memory, timeout, pids, cpus,
 // readable, writable, and readDeny (lists), and env (an object).
 /**
- * A mount for createMachine (design/mounts.md): { kind, src, dst, opts },
+ * A mount for createMachine (design/epoch-0/mounts.md): { kind, src, dst, opts },
  * from a flag's string or an object. An object's `up: true` is the `up`
- * option (design/upper-layers.md). A `port` source (design/port-streams.md)
+ * option (design/upper-layers.md). A `port` source (design/epoch-0/port-streams.md)
  * is a port's name or a MessagePort, which is added to `ports` (an object
  * from names to ports) under the next free `mountN`; either way it's
  * `--url port://NAME`.
@@ -997,7 +997,7 @@ function attachCanvas(canvas, worker, { clipboard, scale, size, events }) {
  * A machine in its own Worker (design/epoch-0/browser-host.md), from the
  * page:
  *
- * - mounts: the machine's mounts (design/mounts.md), in order, each a
+ * - mounts: the machine's mounts (design/epoch-0/mounts.md), in order, each a
  *   flag's string, such as '--archive=linux.h9a:#L' or
  *   '--url wss://fs.example/9p:/n/fs', or an object: { archive: URL },
  *   { url: URL }, { builtin: true }, or { tmp: true }, with dst (default
@@ -1025,7 +1025,7 @@ function attachCanvas(canvas, worker, { clipboard, scale, size, events }) {
  * - env: h9's own environment (an object), not its programs': the
  *   emulator's knobs, such as H9_JIT_HOT (src/jit/wasm_t1.zig)
  * - ports: MessagePorts the machine can mount by name
- *   (design/port-streams.md), an object from names to ports, each
+ *   (design/epoch-0/port-streams.md), an object from names to ports, each
  *   carrying a 9P connection; a mount's source can be { port: NAME } or
  *   { port: MessagePort }, and a namespace file's `mount port!NAME`.
  *   machine.addPort(name, port) adds one while it runs, and
@@ -1037,7 +1037,7 @@ function attachCanvas(canvas, worker, { clipboard, scale, size, events }) {
  *   machine.serve(port) adds one while it runs, to a machine made with
  *   serve. serveNet: true exports /net with it, as --serve-net does
  * - credentials: async (url, failed, helper) => lines, the page's
- *   credential helper (design/credential-helpers.md), called in place
+ *   credential helper (design/epoch-0/credential-helpers.md), called in place
  *   of running a --cred helper, before each WebSocket handshake h9 makes:
  *   url is the URL, failed is null or why the last try failed, and helper
  *   is the matching --cred command's words, if any. It resolves to the

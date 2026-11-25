@@ -16,15 +16,15 @@ Nov 25, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially direct
 
 ## Abstract
 
-Before each WebSocket handshake it makes, h9 can run a host command, a credential helper, chosen by matching the URL against patterns given with `--cred`, and send the headers it prints with the handshake. The helper runs on every handshake: the root's, a namespace file's mounts, and every reconnect [dotl](epoch-0/dotl.md) makes under `9P2000.L.Z`. So short-lived tokens work for runs of any length, and namespace files hold no secrets. The guest never sees the helper, its output, or the headers. A server can also name the uid it serves files as, and dotl maps that uid to the machine's user without a `--user-map`.
+Before each WebSocket handshake it makes, h9 can run a host command, a credential helper, chosen by matching the URL against patterns given with `--cred`, and send the headers it prints with the handshake. The helper runs on every handshake: the root's, a namespace file's mounts, and every reconnect [dotl](dotl.md) makes under `9P2000.L.Z`. So short-lived tokens work for runs of any length, and namespace files hold no secrets. The guest never sees the helper, its output, or the headers. A server can also name the uid it serves files as, and dotl maps that uid to the machine's user without a `--user-map`.
 
 ## Background
 
-- **[websocket-9p](epoch-0/websocket-9p.md)** sends `--root-header 'Name: value'` or `--root-header @FILE` with the root's handshake. Namespace-file `mount` lines send no headers, so a token goes in the URL's query. Guest conversations can set headers through `ctl`.
+- **[websocket-9p](websocket-9p.md)** sends `--root-header 'Name: value'` or `--root-header @FILE` with the root's handshake. Namespace-file `mount` lines send no headers, so a token goes in the URL's query. Guest conversations can set headers through `ctl`.
 - **Tokens are short-lived.** OIDC access tokens usually last minutes; hankoid's default is 5. A static header file works for the first handshake and fails on any later one.
 - **dotl reconnects.** With `9P2000.L.Z`, dotl replays fids on a new connection with `Trebind`, so a dropped WebSocket doesn't fail open files. Each reconnect is a new handshake and needs a credential that's valid when it's made.
 - **Tokens in URLs leak:** into server and proxy logs, into `--print`, and into namespace files the guest can read.
-- **[root-auth](epoch-0/root-auth.md)** sets the rule that the guest never holds a key. It covers p9any for 9front servers; this proposal covers HTTP-layer credentials for WebSocket servers.
+- **[root-auth](root-auth.md)** sets the rule that the guest never holds a key. It covers p9any for 9front servers; this proposal covers HTTP-layer credentials for WebSocket servers.
 - **Users in .L.** dotl names .L uids through `--user-map`. Without one, the machine's user goes out as the host uid, and any other uid N shows as the name "N". A server that serves every client as one fixed uid, as a multi-tenant gateway over ZeroFS does, then shows every file as owned by a number.
 
 ## Prior art

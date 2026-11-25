@@ -21,7 +21,7 @@ GO_VERSION=1.27.3
 
 # Prebuilt static Unicorn, taken from the PyPI wheels: zig build lockstep's
 # oracle (tools/lockstep.zig), linked only into the test tools. GPLv2, so
-# never into h9 (design/retire-unicorn.md).
+# never into h9 (design/epoch-0/retire-unicorn.md).
 UNICORN_VERSION=2.1.4
 UNICORN_WHEEL_URL=https://files.pythonhosted.org/packages/py2/u/unicorn
 # name  wheel-platform-tag  sha256

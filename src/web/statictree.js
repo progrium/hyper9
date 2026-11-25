@@ -1,4 +1,4 @@
-// Static dotfs trees on the browser host (design/mounts.md, "Static
+// Static dotfs trees on the browser host (design/epoch-0/mounts.md, "Static
 // trees"): src/statictree.zig's server, with the page's fetch. h9-web.js
 // puts one behind a WebSocket mount whose URL was http:// or https:// and
 // whose server didn't upgrade, so the kernel speaks 9P2000 to it as to a

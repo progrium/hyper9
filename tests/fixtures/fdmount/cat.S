@@ -1,5 +1,5 @@
 // Copies the file named by argv[1] to fd 1, for the .fd mount cases
-// (tests/backends.zig, design/fd-mounts.md).
+// (tests/backends.zig, design/epoch-0/fd-mounts.md).
 
 #include "lib.S"
 

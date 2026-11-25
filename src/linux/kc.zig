@@ -444,7 +444,7 @@ pub fn atDir(fd: i32, comptime T: type, f: anytype, args: anytype) Error!T {
 }
 
 /// Runs `f(args)` with its lookup acting on a link in the path's last
-/// name instead of following it (design/linux-symlinks.md): lstat,
+/// name instead of following it (design/epoch-0/linux-symlinks.md): lstat,
 /// readlink, O_NOFOLLOW, AT_SYMLINK_NOFOLLOW.
 pub fn noFollow(comptime T: type, f: anytype, args: anytype) Error!T {
     const old = c.h9_fs_nofollow(1);
@@ -476,7 +476,7 @@ pub fn fdInfo(fd: i32) Error!FdInfo {
     return .{ .dc = @intCast(@as(u32, @bitCast(dc)) & 0x1fffff), .dev = dev, .qpath = qp, .dir = qt & 0x80 != 0, .mode = @intCast(mode & 3), .cexec = ce != 0 };
 }
 
-/// Whether fd is open on a FIFO's file (design/linux-fifo.md): an
+/// Whether fd is open on a FIFO's file (design/epoch-0/linux-fifo.md): an
 /// overlay's FIFO node or a host FIFO, which a Linux open joins the pipe
 /// of (`fifoJoin`) instead of keeping.
 pub fn isFifo(fd: i32) bool {
@@ -594,7 +594,7 @@ pub fn fchdir(fd: i32) Error!void {
     _ = try check(c.h9_linux_fchdir(fd));
 }
 
-/// Makes path the calling process's Linux root (design/linux-chroot.md).
+/// Makes path the calling process's Linux root (design/epoch-0/linux-chroot.md).
 pub fn chroot(path: [*:0]const u8) Error!void {
     _ = try check(c.h9_linux_chroot(path));
 }

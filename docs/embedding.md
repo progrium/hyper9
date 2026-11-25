@@ -133,14 +133,14 @@ Every field but `stdio` has a default:
 | --- | --- | --- | --- |
 | `backend` | `vmm.BackendKind` | `.auto` | `.auto`, `.hvf`, `.kvm`, `.whp`, `.native`, `.emu`, `.v86` (an alias of `.emu`); one not built for this host fails with `BackendNotBuilt`. See [Backends](#backends). |
 | `arch` | `?vmm.Arch` | host's | `.arm64`, `.amd64`, or `.i386`. Read it from an a.out with `h9.aout.parse(bytes).arch`. |
-| `mounts` | `[]const Machine.Mount` | `&.{}` | The mount flags, in order ([mounts](../design/mounts.md)): each a `.kind` (`.dir`, `.url`, `.archive`, `.builtin`, `.tmp`, or `.fd` for a 9P connection you already hold), a `.src`, and a `.dst` (`/` by default), with `.access`, `.order`, `.create`, `.recursive`, a `.url`'s `.spec`, `.user`, `.headers`, `.ca`, and `.index`, and an `.fd` mount's `.fd`, a host descriptor (a POSIX fd or a Windows `HANDLE`) that h9 duplicates for each run and you keep, and `.fd_write`, the descriptor written to for a pipe pair ([fd-mounts](../design/fd-mounts.md)). Mounts on `/` stack into the root, and mounts on `#L` into the Linux tree. `Machine.Mount.parse` takes a flag's `SRC:DST[:OPTS]` text. With nothing on `/`, the root is an empty tree in memory, so only `.bytes` programs run. |
+| `mounts` | `[]const Machine.Mount` | `&.{}` | The mount flags, in order ([mounts](../design/epoch-0/mounts.md)): each a `.kind` (`.dir`, `.url`, `.archive`, `.builtin`, `.tmp`, or `.fd` for a 9P connection you already hold), a `.src`, and a `.dst` (`/` by default), with `.access`, `.order`, `.create`, `.recursive`, a `.url`'s `.spec`, `.user`, `.headers`, `.ca`, and `.index`, and an `.fd` mount's `.fd`, a host descriptor (a POSIX fd or a Windows `HANDLE`) that h9 duplicates for each run and you keep, and `.fd_write`, the descriptor written to for a pipe pair ([fd-mounts](../design/epoch-0/fd-mounts.md)). Mounts on `/` stack into the root, and mounts on `#L` into the Linux tree. `Machine.Mount.parse` takes a flag's `SRC:DST[:OPTS]` text. With nothing on `/`, the root is an empty tree in memory, so only `.bytes` programs run. |
 | `binds` | `[]const Machine.Bind` | `&.{}` | `--bind` lines, run after every mount, in order: `.src` and `.dst` guest paths, with `.order`, `.create`, and `.recursive`. `Machine.Bind.parse` takes `SRC:DST[:OPTS]`. |
-| `index` | `Machine.IndexMode` | `.auto` | `.none` turns off metadata indexes ([mount-index](../design/mount-index.md)), as `--index none` does. |
+| `index` | `Machine.IndexMode` | `.auto` | `.none` turns off metadata indexes ([mount-index](../design/epoch-0/mount-index.md)), as `--index none` does. |
 | `root_index` | `?Machine.RootIndex` | none | The root's index, `.{ .path = ... }` or `.{ .url = ... }`, instead of its server's `.fs/index`. Another `.url` mount's is its `.index`. |
 | `index_cache` | `?[]const u8` | none | Where compiled indexes, and static trees' checked files, are cached. Null caches nothing. |
-| `cred_helpers` | `[]const Machine.CredHelper` | `&.{}` | Credential helpers ([credential-helpers](../design/credential-helpers.md)) for the WebSocket handshakes h9 makes, the root's and `ns` mounts': `.{ .pattern = "*.example.com", .argv = &.{ "helper", "arg" } }`. The best match runs as `argv… get URL` before each one, and its `Name: value` lines go with it. A `9P2000.L.Z` reconnect runs it again. The CLI fills it from `--cred` and `$H9CRED`. On the web host, the helper isn't run: `h9-web.js`'s `run` and `createMachine` take `credentials(url, failed, helper)`, which gets the matching entry's argv as `helper` and answers with header lines, or `{ url }` to connect to instead. |
+| `cred_helpers` | `[]const Machine.CredHelper` | `&.{}` | Credential helpers ([credential-helpers](../design/epoch-0/credential-helpers.md)) for the WebSocket handshakes h9 makes, the root's and `ns` mounts': `.{ .pattern = "*.example.com", .argv = &.{ "helper", "arg" } }`. The best match runs as `argv… get URL` before each one, and its `Name: value` lines go with it. A `9P2000.L.Z` reconnect runs it again. The CLI fills it from `--cred` and `$H9CRED`. On the web host, the helper isn't run: `h9-web.js`'s `run` and `createMachine` take `credentials(url, failed, helper)`, which gets the matching entry's argv as `helper` and answers with header lines, or `{ url }` to connect to instead. |
 | `proxy` | `?Machine.Proxy` | direct | Proxies for connections h9 makes itself (`.url` mounts, and mounts in `ns`): `.{ .http = ..., .https = ..., .no_proxy = ... }`. The CLI fills it from `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`; the library never reads the environment. Guest connections always go direct. |
-| `tmp_dir` | `[]const u8` | `/tmp` | A host directory for the unix sockets h9 serves static dotfs trees on ([mounts](../design/mounts.md)), each in a private directory of its own. The CLI uses `$TMPDIR`. |
+| `tmp_dir` | `[]const u8` | `/tmp` | A host directory for the unix sockets h9 serves static dotfs trees on ([mounts](../design/epoch-0/mounts.md)), each in a private directory of its own. The CLI uses `$TMPDIR`. |
 | `cwd` | `?[]const u8` | none | A host directory bound at `/mnt/term/cwd` and made the guest's cwd. |
 | `env` | `[]const EnvVar` | `&.{}` | Guest environment variables, beyond the defaults (`user`, `sysname`, `path`, and so on). |
 | `policy` | `Policy` | `.{}` | The sandbox: binds, write mode, network, limits. See [The sandbox policy](#the-sandbox-policy). |
@@ -310,7 +310,7 @@ such as `write = .none` with `writable` paths or `net = .disable` with
 | `.kvm` | Linux on arm64 or x86\_64, with access to `/dev/kvm` | the host's: arm64 or amd64 | always, on those hosts ([kvm](../design/epoch-0/kvm.md)) |
 | `.native` | Linux x86\_64, 5.11 or later | amd64 | always, on that host ([native-backend](../design/epoch-0/native-backend.md)) |
 | `.whp` | Windows x86\_64, with the Windows Hypervisor Platform feature | amd64 | always, on that host ([whp](../design/epoch-0/whp.md)) |
-| `.emu` | any | arm64, amd64, 386 | on arm64 and x86-64 targets ([hcpu](../design/hcpu.md)) |
+| `.emu` | any | arm64, amd64, 386 | on arm64 and x86-64 targets ([hcpu](../design/epoch-0/hcpu.md)) |
 
 On KVM, h9 blocks `SIGRTMIN + 1` in the threads that run vCPUs and sends it
 to kick them out of the guest. Leave that signal to h9: don't unblock it or
@@ -410,7 +410,7 @@ machine can see comes from these places, all set in `Options`:
 write mode decides whether writes reach the host, stay in memory, or fail.
 
 **9P servers.** A `.url` mount connects to any 9P2000 server, as the root
-on `/` or mounted anywhere else ([mounts](../design/mounts.md)):
+on `/` or mounted anywhere else ([mounts](../design/epoch-0/mounts.md)):
 
 ```zig
 .mounts = &.{
@@ -431,7 +431,7 @@ from disk: serve them with any 9P library, in-process on a thread or in
 another process, and the guest sees them as ordinary files.
 
 An `.fd` mount takes a connection you already hold, with no socket on
-disk ([fd-mounts](../design/fd-mounts.md)): `.fd` is a descriptor in your
+disk ([fd-mounts](../design/epoch-0/fd-mounts.md)): `.fd` is a descriptor in your
 process, a socket or a pipe, that a 9P2000 or 9P2000.L server reads and
 writes at the other end, in-process on a thread or in a child you spawned
 with a socketpair:

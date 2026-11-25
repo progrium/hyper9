@@ -25,7 +25,7 @@
  *	ws/N/remote		the URL
  *	ws/N/status		Idle, Connecting, Established [proto], Closed code reason
  *
- * On the web host it also serves the page's ports (design/port-streams.md),
+ * On the web host it also serves the page's ports (design/epoch-0/port-streams.md),
  * by name, the same way, sharing the conversation numbers:
  *
  *	port/clone		as ws/clone
@@ -273,7 +273,7 @@ hostchan(ulong id)
 }
 
 /*
- * For devdotl's redial (design/credential-helpers.md): connects a
+ * For devdotl's redial (design/epoch-0/credential-helpers.md): connects a
  * host-made stream to url for machine mach, with the handshake options
  * the machine registered (src/hstream.zig), so its credential helper runs
  * again, waits for it, and returns its channel. Raises the connect's

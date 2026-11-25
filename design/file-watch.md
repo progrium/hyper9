@@ -23,9 +23,9 @@ h9 has no way for a guest to learn that a file changed, so every watcher in it p
 
 - **Nothing reports a change.** No device in `src/kern/` or `third_party/drawterm/kern/` tells anyone that a file changed. A Plan 9 program that wants to know stats in a loop. 9front has no change notification either: Plan 9 programs that react to files poll, or are told through the plumber or a file server's own protocol.
 - **inotify is a name in a table.** `src/linux/nr.zig` names the four inotify calls on both architectures, and the Linux ABI answers them `ENOSYS`. [h9x](https://github.com/progrium/h9x) sets `DOTNET_USE_POLLING_FILE_WATCHER=1` for .NET plans because ASP.NET fails to start without inotify. Node's `fs.watch` throws, and libraries built on it (chokidar, webpack, Vite, nodemon, and `tsc --watch`) fall back to stat polling where they have a fallback. Go's fsnotify, Python's watchdog, and Rust's notify do the same or fail.
-- **h9 already reads dotfs events.** [mount-index](mount-index.md)'s `#ι` layer opens a 9P server's `.fs/events` with `coalesce` and uses its records to demote stale index entries ([spec/ninep.md](../spec/ninep.md#metadata-indexes)). The records are used only inside the layer and are never shown to the guest.
+- **h9 already reads dotfs events.** [mount-index](epoch-0/mount-index.md)'s `#ι` layer opens a 9P server's `.fs/events` with `coalesce` and uses its records to demote stale index entries ([spec/ninep.md](../spec/ninep.md#metadata-indexes)). The records are used only inside the layer and are never shown to the guest.
 - **Readiness has a mechanism; change doesn't.** `h9_poll` and `#ε`'s eventfd, epoll, and signalfd instances ([spec/abi-linux.md](../spec/abi-linux.md)) let a Linux process wait on a kernel object. [file-interface](file-interface.md) Part 1 proposes a `watch(chan, events, waker)` device operation, but it's readiness (whether a read would block), not a file's contents or names changing.
-- **Trees come from many places.** A machine's files are host trees through `#U`, `#O` instances (in-memory overlays, `--tmp`, `--archive`, and the `#Oroot` and `#Olinux` stacks, including [upper-layers](upper-layers.md)' up members), 9P servers through devmnt behind `#ℓ` and `#ι`, static dotfs trees, and the built-in root ([mounts](mounts.md)). On the browser host, trees are archives, WebSocket servers, and pages' own servers over a `MessagePort` ([port-streams](port-streams.md)).
+- **Trees come from many places.** A machine's files are host trees through `#U`, `#O` instances (in-memory overlays, `--tmp`, `--archive`, and the `#Oroot` and `#Olinux` stacks, including [upper-layers](upper-layers.md)' up members), 9P servers through devmnt behind `#ℓ` and `#ι`, static dotfs trees, and the built-in root ([mounts](epoch-0/mounts.md)). On the browser host, trees are archives, WebSocket servers, and pages' own servers over a `MessagePort` ([port-streams](epoch-0/port-streams.md)).
 
 ### What people want
 
@@ -46,7 +46,7 @@ The proposal is one design, built in three phases. Each phase ships on its own, 
 | 2: outside changes | Source 2 (host trees, on each host's backend or polling), Source 3 (9P servers' `.fs/events`), unions passing up their members' changes, `--watch auto` and `poll`, `--watch-interval`, and `watch=` | Dev loops: a guest watcher seeing an edit made on the host |
 | 3: serving | `.fs/events` under `--serve` | Watching a machine from outside it |
 
-Until Phase 2, `--watch auto` means `guest`. Phase 3 doesn't need [kernel-serve](kernel-serve.md): with exportfs, `.fs` is a bind on the served root, and kernel-serve later hides it from listings.
+Until Phase 2, `--watch auto` means `guest`. Phase 3 doesn't need [kernel-serve](epoch-0/kernel-serve.md): with exportfs, `.fs` is a bind on the served root, and kernel-serve later hides it from listings.
 
 ### The journal
 
@@ -143,7 +143,7 @@ fsevents -c /src | while(r=`{read}) mk
 
 ### Serving
 
-A machine that serves its namespace (`--serve`) serves `.fs/events` at the served root, scoped to it, with `#ν`'s stream behind it. So `h9 --url ws://host:port/ ...` on another machine follows the served machine's changes in its index, and a dotfs client watches it with no h9 code. `.fs/` holds only `events`: no `index`, `ctl`, or `stage`, so dotfs clients treat the server as the watchable profile without path operations. With exportfs serving, `.fs` is a bind on the served root; [kernel-serve](kernel-serve.md), once built, answers the walk itself, so `.fs` isn't listed, as dotfs asks.
+A machine that serves its namespace (`--serve`) serves `.fs/events` at the served root, scoped to it, with `#ν`'s stream behind it. So `h9 --url ws://host:port/ ...` on another machine follows the served machine's changes in its index, and a dotfs client watches it with no h9 code. `.fs/` holds only `events`: no `index`, `ctl`, or `stage`, so dotfs clients treat the server as the watchable profile without path operations. With exportfs serving, `.fs` is a bind on the served root; [kernel-serve](epoch-0/kernel-serve.md), once built, answers the walk itself, so `.fs` isn't listed, as dotfs asks.
 
 ### Linux inotify
 
@@ -201,7 +201,7 @@ The four inotify calls are implemented on the journal, in the Linux ABI, with th
 
 **Phases, not three proposals.** The parts land at different speeds: Phase 1 is kernel and Linux ABI code that runs anywhere, Phase 2 is a watcher per host OS with testing on each, and Phase 3 is small. But the journal's shape (identity, not paths; hints, then a stat; three sources, two views) only makes sense with all of them in view, so it's one design with Done criteria per phase.
 
-**Not waiting for [kernel-port](kernel-port.md).** The port is a draft behind [baseline-1](baseline-1.md), [namespace-kernel](namespace-kernel.md), and [kernel-serve](kernel-serve.md), and nothing here needs it. The journal, `#ν`, and `#ε`'s inotify are h9's own C and Zig, which the port adapts as it does the other devices h9 wrote. The host watcher is Zig outside the kernel. What touches vendored code is Source 1's hooks, a few marked lines in `chan.c` and `sysfile.c`, both files the port replaces, so the hooks become calls in the ported code. The journal's interface (a directory identity, an operation, and a name) is what the port's device table would carry anyway.
+**Not waiting for [kernel-port](kernel-port.md).** The port is a draft behind [baseline-1](baseline-1.md), [namespace-kernel](namespace-kernel.md), and [kernel-serve](epoch-0/kernel-serve.md), and nothing here needs it. The journal, `#ν`, and `#ε`'s inotify are h9's own C and Zig, which the port adapts as it does the other devices h9 wrote. The host watcher is Zig outside the kernel. What touches vendored code is Source 1's hooks, a few marked lines in `chan.c` and `sysfile.c`, both files the port replaces, so the hooks become calls in the ported code. The journal's interface (a directory identity, an operation, and a name) is what the port's device table would carry anyway.
 
 **Rejected: polling only.** It's the fallback, and it works everywhere, but a second's delay and a stat of every watched directory every interval is what watchers in the guest do now, and the reason they're slow.
 

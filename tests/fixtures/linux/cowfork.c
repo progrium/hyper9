@@ -1,4 +1,4 @@
-/* Copy-on-write fork and demand-loaded file pages (design/cow-fork.md):
+/* Copy-on-write fork and demand-loaded file pages (design/epoch-0/cow-fork.md):
  * each case named on the command line prints "ok NAME" or
  * "FAIL NAME: why", and the exit status is 1 if any failed.
  *

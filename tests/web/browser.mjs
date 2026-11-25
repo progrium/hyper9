@@ -32,7 +32,7 @@ function h9a(entries) {
   return Buffer.concat(parts);
 }
 const stack = h9a([['lib', 0o40775, ''], ['lib/stacked', 0o100644, 'stacked\n']]);
-// A static dotfs tree at /st (design/mounts.md, "Static trees"): /a, /big
+// A static dotfs tree at /st (design/epoch-0/mounts.md, "Static trees"): /a, /big
 // (read by Range), and /sub, with its own index.
 const { blake3 } = await import(path.join(dir, 'statictree.js'));
 const b3 = (s) => Buffer.from(blake3(Buffer.from(s))).toString('hex');
@@ -160,7 +160,7 @@ try {
   }
   if (errors.length) throw new Error(`page errors:\n${errors.join('\n')}`);
 
-  // createMachine's mounts (design/mounts.md): two archives stacked on /,
+  // createMachine's mounts (design/epoch-0/mounts.md): two archives stacked on /,
   // and with H9_TEST_WS_ROOT, a ws:// server mounted beside them.
   const wsRoot = process.env.H9_TEST_WS_ROOT;
   await test('createMachine mounts an archive stack and a ws:// URL [mounts]', async () => {
@@ -211,7 +211,7 @@ try {
     if (!stLog.includes('RANGE /big') || stLog.includes('GET /big')) throw new Error(`static tree requests: ${stLog.join(', ')}`);
   });
 
-  // design/port-streams.md: the page makes a channel between a Worker that
+  // design/epoch-0/port-streams.md: the page makes a channel between a Worker that
   // serves the static tree at /st over 9P (statictree.js's Session) and a
   // machine, which mounts it as its root; the page stays out of the data path.
   await test('createMachine mounts a port to another Worker\'s 9P server [port-streams]', async () => {
@@ -302,7 +302,7 @@ try {
   });
 
   // With linux.h9a, ?linux runs Alpine's arm64 busybox sh, jq and sqlite3  // With linux.h9a, ?linux runs Alpine's arm64 busybox sh, jq and sqlite3
-  // on ha64 (design/hcpu.md).
+  // on ha64 (design/epoch-0/hcpu.md).
   if (await readFile(path.join(dir, 'linux.h9a')).then(() => true, () => false)) {
     await page.goto(`${url}?linux`);
     await step('busybox sh prompts over linux.h9a', () => expect(/# $/, 0, 60_000));
@@ -364,7 +364,7 @@ try {
       if (n < 40) throw new Error(`only ${n} in /bin`);
     });
     // A page's WebSocket sends no headers, so its credentials callback
-    // answers with the URL to connect to (design/credential-helpers.md).
+    // answers with the URL to connect to (design/epoch-0/credential-helpers.md).
     await step("a credentials callback's url replaces the root's", async () => {
       const r = await page.evaluate(async (ws) => {
         const { createMachine } = await import('./h9-web.js');

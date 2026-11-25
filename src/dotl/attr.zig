@@ -353,7 +353,7 @@ fn sec32(s: u64) u32 {
 pub fn dirFromStat(st: *const wire.Stat, name: []const u8, uid: []const u8, gid: []const u8) Dir {
     const dir = st.mode & S_IFMT == S_IFDIR;
     // A link's own attributes, which only a Linux process's walk or
-    // listing gets (design/linux-symlinks.md); its length is its target's.
+    // listing gets (design/epoch-0/linux-symlinks.md); its length is its target's.
     const link = st.mode & S_IFMT == S_IFLNK;
     return .{
         .type = 0,

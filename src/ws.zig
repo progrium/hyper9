@@ -243,7 +243,7 @@ pub const Response = struct {
     protocol: ?[]const u8 = null,
     buf: [128]u8 = undefined,
     /// The server's uid and name for the client, from a 101's 9P-Uid and
-    /// 9P-User headers (design/credential-helpers.md); the name is in
+    /// 9P-User headers (design/epoch-0/credential-helpers.md); the name is in
     /// `user_buf`. Null unless both came and the name fits.
     uid: ?u32 = null,
     user: ?[]const u8 = null,
@@ -251,7 +251,7 @@ pub const Response = struct {
     /// A 9P-User too long for the kernel's 27-byte names.
     user_too_long: bool = false,
     /// If set, gets the status line and every header line as received,
-    /// for a credential helper's retry (design/credential-helpers.md).
+    /// for a credential helper's retry (design/epoch-0/credential-helpers.md).
     head: ?*Head = null,
 
     /// A response's head, as text: the status line and the headers, each
@@ -983,7 +983,7 @@ test "a recorded handshake: request, then the server's 101" {
     try t.expectEqualStrings("rest", r1.buffered());
     try t.expectEqual(@as(?u32, null), ok.uid);
 
-    // 9P-Uid and 9P-User (design/credential-helpers.md): both, or neither.
+    // 9P-Uid and 9P-User (design/epoch-0/credential-helpers.md): both, or neither.
     var who: Response = .{};
     var rw: Reader = .fixed("HTTP/1.1 101 OK\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n9P-Uid: 1000\r\n9p-user: progrium\r\n\r\n");
     try readResponse(&rw, key, &.{subprotocol}, &who);
@@ -1008,7 +1008,7 @@ test "a recorded handshake: request, then the server's 101" {
     var r3: Reader = .fixed("HTTP/1.1 101 OK\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\nSec-WebSocket-Protocol: chat\r\n\r\n");
     try t.expectError(error.BadProtocol, readResponse(&r3, key, &.{subprotocol}, &other));
 
-    // A head, for a credential helper's retry (design/credential-helpers.md).
+    // A head, for a credential helper's retry (design/epoch-0/credential-helpers.md).
     var head: Response.Head = .{};
     var denied: Response = .{ .head = &head };
     var r4: Reader = .fixed("HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer error=\"invalid_token\"\nContent-Length: 0\r\n\r\n");

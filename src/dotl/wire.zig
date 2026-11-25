@@ -63,10 +63,10 @@ pub const DMAPPEND: u32 = 0x40000000;
 pub const DMEXCL: u32 = 0x20000000;
 pub const DMTMP: u32 = 0x04000000;
 /// 9P2000.u's DMNAMEDPIPE: h9 marks a FIFO's Dir with it, since Plan 9
-/// has no file types (design/linux-fifo.md).
+/// has no file types (design/epoch-0/linux-fifo.md).
 pub const DMNAMEDPIPE: u32 = 0x00200000;
 /// 9P2000.u's DMSYMLINK: a link's Dir has it, for a Linux process that
-/// stops at links (design/linux-symlinks.md).
+/// stops at links (design/epoch-0/linux-symlinks.md).
 pub const DMSYMLINK: u32 = 0x02000000;
 
 /// .L's open flags (Linux's generic values, which the protocol fixes

@@ -71,7 +71,7 @@ pub const CheckOptions = struct {
     /// The guest architecture (--arch), or null for the host's.
     arch: ?vmm.Arch = null,
     memory: ?u64 = null,
-    /// The mounts the CLI resolved (design/mounts.md), the root's among
+    /// The mounts the CLI resolved (design/epoch-0/mounts.md), the root's among
     /// them: with only the built-in root on `/`, it's checked.
     mounts: []const h9.policy.mount.Mount = &.{},
     /// The root as given, for messages: a path or URL, or null for the
@@ -80,9 +80,9 @@ pub const CheckOptions = struct {
     /// Why the root couldn't be resolved, if it couldn't.
     root_err: ?[]const u8 = null,
     proxy: h9.Machine.Proxy = .{},
-    /// --cred and $H9CRED (design/credential-helpers.md).
+    /// --cred and $H9CRED (design/epoch-0/credential-helpers.md).
     cred_helpers: []const h9.Machine.CredHelper = &.{},
-    /// --index, `index=`, and the index cache (design/mount-index.md).
+    /// --index, `index=`, and the index cache (design/epoch-0/mount-index.md).
     index: h9.Machine.IndexMode = .auto,
     root_index: ?h9.Machine.RootIndex = null,
     index_cache: ?[]const u8 = null,

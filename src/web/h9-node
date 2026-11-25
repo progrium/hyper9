@@ -59,7 +59,7 @@ const host = {
   setRaw: (on) => { if (stdin.isTTY) stdin.setRawMode(on); },
 };
 
-// --cred helpers (design/credential-helpers.md): Node runs the helper the
+// --cred helpers (design/epoch-0/credential-helpers.md): Node runs the helper the
 // native h9 would, as `argv... get URL`, with why the last try failed on
 // stdin for a retry, and its stderr passed through. A browser's WebSocket
 // only says that a handshake failed, so that's all a retry's stdin has.
@@ -92,7 +92,7 @@ const credentials = (url, failed, helper) => !helper ? null : new Promise((resol
   p.stdin.end(failed ? `${failed}\n` : '');
 });
 
-// Ports (design/port-streams.md): H9_NODE_PORTS names an ES module whose
+// Ports (design/epoch-0/port-streams.md): H9_NODE_PORTS names an ES module whose
 // default export is called with the machine's Ports before it starts, to
 // add ports by name (ports.add), set ports.serving and ports.serveNet and
 // hand it ports to serve (ports.serve), from worker_threads' MessageChannels.

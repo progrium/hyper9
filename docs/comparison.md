@@ -174,7 +174,7 @@ differences:
   credentials. h9 filters `/net` dials by dial string with `--net-allow`, and
   resolves only names a pattern covers ([net-policy](../design/epoch-0/net-policy.md)).
   h9 injects credentials only into WebSocket 9P handshakes, and that's a draft
-  ([credential-helpers](../design/credential-helpers.md), *planned*).
+  ([credential-helpers](../design/epoch-0/credential-helpers.md), *planned*).
 - **Images.** sbx starts from agent templates, with an image cache per
   sandbox. h9 starts from a root tree or a 9P server, and
   [h9reg](https://github.com/progrium/h9reg) serves OCI images as 9P roots.

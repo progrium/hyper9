@@ -938,7 +938,7 @@ const DMDIR: u32 = 0x80000000;
 /// 9P2000.u's DMNAMEDPIPE), since Plan 9 has no file types.
 const DMFIFO: u32 = 0x00200000;
 /// 9P2000.u's DMSYMLINK: a link a Linux process's walk stopped at
-/// (design/linux-symlinks.md, src/kern/fscheck.h).
+/// (design/epoch-0/linux-symlinks.md, src/kern/fscheck.h).
 const DMSYMLINK: u32 = 0x02000000;
 
 fn serve(p: *Process, s: Sys, c: Call, u: *const vmm.Ureg) Err!Outcome {
@@ -1377,7 +1377,7 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const vmm.Ureg) Err!Outcome {
         .futex => return ret(try futex(p, c.a[0], c.uint(1), c.uint(2), c.a[3], c.a[4], c.uint(5))),
         .chroot => {
             // Narrows the process's view to a directory it can already
-            // reach (design/linux-chroot.md); mount, pivot_root and new
+            // reach (design/epoch-0/linux-chroot.md); mount, pivot_root and new
             // namespaces stay refused.
             const path = try pathArg(p, c.a[0], &p.name_buf);
             if (path.len == 0) return ret(-E.NOENT);
@@ -1821,7 +1821,7 @@ fn at(dirfd: i32, path: [:0]const u8, comptime T: type, f: anytype, args: anytyp
 }
 
 /// `at`, acting on a link in the path's last name instead of following
-/// it (design/linux-symlinks.md).
+/// it (design/epoch-0/linux-symlinks.md).
 fn atNoFollow(dirfd: i32, path: [:0]const u8, comptime T: type, f: anytype, args: anytype) kern.Error!T {
     if (dirfd == AT_FDCWD or (path.len > 0 and path[0] == '/')) return kc.noFollow(T, f, args);
     return kc.atDir(dirfd, T, kc.noFollow, .{ T, f, args });
@@ -1856,7 +1856,7 @@ fn openAt(p: *Process, dirfd: i32, path_va: u64, flags: u32, mode: u32) Err!i64 
     };
     // /proc/self/fd/N is the file fd N has, which may be gone from its
     // directory or a pipe: it opens as fd N's dup (#d), as /dev/fd/N
-    // does, not by walking its target's name (design/linux-symlinks.md).
+    // does, not by walking its target's name (design/epoch-0/linux-symlinks.md).
     if (dirfd == AT_FDCWD or path[0] == '/') if (procFd(p, path)) |n| {
         path = std.fmt.bufPrintSentinel(&tty_buf, "#d/{d}", .{n}, 0) catch unreachable;
     };
@@ -1930,7 +1930,7 @@ fn openAt(p: *Process, dirfd: i32, path_va: u64, flags: u32, mode: u32) Err!i64 
         }
     }
     // A FIFO's file is never kept open: the fd joins the FIFO's pipe
-    // instead, waiting for the other end (design/linux-fifo.md).
+    // instead, waiting for the other end (design/epoch-0/linux-fifo.md).
     if (flags & O_PATH == 0 and kc.isFifo(fd)) {
         const m: c_int = switch (flags & O_ACCMODE) {
             0 => kern.OREAD,
@@ -2826,7 +2826,7 @@ fn statAt(p: *Process, dirfd: i32, path_va: u64, buf: u64, flags: u32, fmt: Stat
         return -E.NOENT;
     }
     // A link is its own Dir when the walk stops at it (DMSYMLINK,
-    // design/linux-symlinks.md), which kindOfDir makes S_IFLNK. /proc's
+    // design/epoch-0/linux-symlinks.md), which kindOfDir makes S_IFLNK. /proc's
     // links are the Linux layer's (procLink), so they're made here.
     var b: [1024]u8 = undefined;
     if (flags & AT_SYMLINK_NOFOLLOW != 0 and path[0] == '/') if (procLink(p, path)) |target| {
@@ -3098,7 +3098,7 @@ fn link(p: *Process, olddir: i32, old_va: u64, newdir: i32, new_va: u64, flags: 
     return 0;
 }
 
-/// mknod and mknodat (design/linux-fifo.md): S_IFIFO makes a FIFO, a
+/// mknod and mknodat (design/epoch-0/linux-fifo.md): S_IFIFO makes a FIFO, a
 /// node in an overlay or a host FIFO in a host tree, and S_IFREG (or no
 /// type) an empty file, as on Linux. Devices and sockets can't be made.
 fn mknod(p: *Process, dirfd: i32, path_va: u64, mode: u32) Err!i64 {

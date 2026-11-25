@@ -27,7 +27,7 @@
 
 enum
 {
-	Devc = 'L',	/* #λ before design/mounts.md */
+	Devc = 'L',	/* #λ before design/epoch-0/mounts.md */
 
 	Qroot = 0,
 	Q9, Qtmp, Qmnt, Qterm, Qtermcwd, Qdev, Qproc, Qsys,

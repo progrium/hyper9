@@ -22,7 +22,7 @@ A command's override of a libc function (ed's `mktemp`) is renamed too, unless l
 
 `9box.c` picks the command from the last element of `argv[0]` (hard links), from `argv[2]` when `argv[1]` is `-!` and `argv[2]` is a `#!/bin/9box -!` file (stubs, so nested interpreters keep the outer script's name), from the interpreter a `#!` script names when `argv[0]` isn't a command (a script such as `/rc/bin/lc` whose `#!/bin/rc` is a hard link to `9box` starts it with the script's name in `argv[0]`), or from its first argument when run as `9box`, and sets `argv0` to nil before running it.
 
-The tree is `9box`, a hard link or stub per command, `rcmain`, `/rc/bin/lc`, the time zone, and the mount points h9 binds onto. Its 44 commands are a 789 KB amd64 `9box` against 3.5 MB for the same binaries copied, as measured with 43, before `walk` joined ([mount-index](../design/mount-index.md)).
+The tree is `9box`, a hard link or stub per command, `rcmain`, `/rc/bin/lc`, the time zone, and the mount points h9 binds onto. Its 44 commands are a 789 KB amd64 `9box` against 3.5 MB for the same binaries copied, as measured with 43, before `walk` joined ([mount-index](../design/epoch-0/mount-index.md)).
 
 Each exec allocates and copies the box's text and data, so on the emulator rc's exec loop runs 9% slower from the box than from separate binaries; an exec image cache would remove most of that (the proposal's Updates have the measurements).
 
@@ -30,7 +30,7 @@ Each exec allocates and copies the box's text and data, so on the emulator rc's 
 
 1. The kernel boots once per host process, on its own thread (see Process model).
 
-2. For each machine, the namespace builder gives the first Proc a fresh Pgrp. It binds the kernel's `#/` at `/`, then adds each mount on `/` to the root stack, `#Oroot`, in order: a host tree from `#U`, a 9P server it connects to (the first one also posted as `#s/root`), an unpacked archive, the built-in root `#Hroot`, or an empty `#O` (also what a machine with nothing on `/` gets). It unions the stack after `#/` at `/`, binds it alone at `/root`, and does the same for mounts on `#L` with `#Olinux` ([mounts](../design/mounts.md)).
+2. For each machine, the namespace builder gives the first Proc a fresh Pgrp. It binds the kernel's `#/` at `/`, then adds each mount on `/` to the root stack, `#Oroot`, in order: a host tree from `#U`, a 9P server it connects to (the first one also posted as `#s/root`), an unpacked archive, the built-in root `#Hroot`, or an empty `#O` (also what a machine with nothing on `/` gets). It unions the stack after `#/` at `/`, binds it alone at `/root`, and does the same for mounts on `#L` with `#Olinux` ([mounts](../design/epoch-0/mounts.md)).
 
    Under `--write=overlay` (the default) and `--write=ephemeral` a `#O` overlay goes over the root stack next, before every other bind, so everything else is bound onto directories reached through it; a directory the overlay hasn't copied keeps its lower qid, so the mount table matches it.
 

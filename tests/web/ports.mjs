@@ -1,4 +1,4 @@
-// Ports for the [port-streams] integration cases (design/port-streams.md),
+// Ports for the [port-streams] integration cases (design/epoch-0/port-streams.md),
 // loaded by h9-node through H9_NODE_PORTS. H9_TEST_PORTS lists them,
 // separated by `;`:
 //

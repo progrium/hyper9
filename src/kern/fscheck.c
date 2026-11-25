@@ -1143,7 +1143,7 @@ h9_fs_readlinkpath(char *path, char *buf, int nbuf)
 		up->errstr = p;
 		return -1;
 	}
-	/* A Linux process's walk stops on the link (design/linux-symlinks.md). */
+	/* A Linux process's walk stops on the link (design/epoch-0/linux-symlinks.md). */
 	c = namec(path, Aaccess, 0, 0);
 	h9_fs_nofollow(nf);
 	n = h9_fs_chanreadlink(c, buf, nbuf);
@@ -1156,7 +1156,7 @@ h9_fs_readlinkpath(char *path, char *buf, int nbuf)
 
 /*
  * The target of the link c is on: an overlay's own, or one in the tree
- * that holds the name, down through overlays and unions (design/mounts.md).
+ * that holds the name, down through overlays and unions (design/epoch-0/mounts.md).
  * Its length, with it in buf, or -1 if c isn't on a link.
  */
 /*
@@ -1384,7 +1384,7 @@ h9_fs_mntsymlink(Chan *dir, char *name, char *target)
 
 /*
  * Makes path a FIFO, for the Linux personality's mknodat
- * (design/linux-fifo.md): a node in memory in an overlay, or a host FIFO
+ * (design/epoch-0/linux-fifo.md): a node in memory in an overlay, or a host FIFO
  * in a devfs tree, where the new name is checked like a create. Anywhere
  * else, such as a plain 9P root, it's "operation not permitted". On a
  * 9P2000.L root it's a Tmknod (src/dotl/client.zig). Returns 0, or

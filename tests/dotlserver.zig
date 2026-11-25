@@ -77,7 +77,7 @@ pub const DotlServer = struct {
         return std.fmt.bufPrint(&d.dial_buf, "tcp!127.0.0.1!{d}", .{d.port()}) catch unreachable;
     }
 
-    /// The server as a --url (design/mounts.md).
+    /// The server as a --url (design/epoch-0/mounts.md).
     pub fn url(d: *DotlServer) []const u8 {
         return std.fmt.bufPrint(&d.url_buf, "tcp://127.0.0.1:{d}", .{d.port()}) catch unreachable;
     }

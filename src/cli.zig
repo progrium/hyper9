@@ -53,7 +53,7 @@ pub const Mode = enum {
     help,
 };
 
-/// --index (design/mount-index.md).
+/// --index (design/epoch-0/mount-index.md).
 pub const IndexMode = enum { auto, none };
 
 pub const Config = struct {
@@ -64,14 +64,14 @@ pub const Config = struct {
     arch: ?vmm.Arch = null,
     /// --trace: null for none, "" for stderr, else a file.
     trace: ?[]const u8 = null,
-    /// The mount flags in order (design/mounts.md): --dir, --url,
+    /// The mount flags in order (design/epoch-0/mounts.md): --dir, --url,
     /// --archive, --builtin, and --tmp. A --dir's path is as given; the
     /// caller resolves it.
     mounts: []const mount.Mount = &.{},
     /// --bind values in order.
     binds: []const mount.Bind = &.{},
     /// --cred values, `PATTERN=COMMAND`, checked
-    /// (design/credential-helpers.md).
+    /// (design/epoch-0/credential-helpers.md).
     cred: []const []const u8 = &.{},
     /// --index: whether indexes are used.
     index: IndexMode = .auto,
@@ -103,7 +103,7 @@ pub const Config = struct {
     pids: ?u32 = null,
     cpus: ?u32 = null,
     /// --ns values in order: namespace lines inline, with `;` between
-    /// them, or `@FILE` for a host file (design/mounts.md).
+    /// them, or `@FILE` for a host file (design/epoch-0/mounts.md).
     ns: []const []const u8 = &.{},
     host_fs: bool = false,
     /// --no-guest-tools: leave out `#H/bin` and mask `#H`
@@ -350,7 +350,7 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
     return c;
 }
 
-/// The flags design/mounts.md removed, and what replaces each, for the
+/// The flags design/epoch-0/mounts.md removed, and what replaces each, for the
 /// usage error (exit 2) that names it.
 fn removed(a: []const u8) ?[]const u8 {
     const list = [_]struct { []const u8, []const u8 }{

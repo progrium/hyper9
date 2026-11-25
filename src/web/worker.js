@@ -10,13 +10,13 @@
 // { type: 'exit', code } or { type: 'error', message }.
 //
 // With start's `credentials` set, the page has a credentials callback
-// (design/credential-helpers.md, "Browser host"): the Worker sends
+// (design/epoch-0/credential-helpers.md, "Browser host"): the Worker sends
 // { type: 'cred', id, url, failed, helper } before each handshake h9
 // makes, and the page answers { type: 'cred-reply', id, result } or
 // { type: 'cred-reply', id, error }.
 //
 // Start's `ports` is an object from names to MessagePorts, and `serve` a
-// list of ports to serve the machine on (design/port-streams.md); the
+// list of ports to serve the machine on (design/epoch-0/port-streams.md); the
 // page sends { type: 'add-port', name, port }, { type: 'remove-port',
 // name }, and { type: 'serve', port } at any time.
 //
@@ -64,7 +64,7 @@ const host = {
 
 let gfx = null;
 
-// The machine's ports (design/port-streams.md).
+// The machine's ports (design/epoch-0/port-streams.md).
 const ports = new Ports();
 const portOp = (f) => { try { f(); } catch (e) { console.error(`h9: ${e.message}`); } };
 
@@ -108,7 +108,7 @@ async function start({ argv, env = {}, mounts = [], tty = false, gfx: canvas, cr
     return new Uint8Array(await r.arrayBuffer());
   };
   // Each archive is unpacked into the tree WASI serves, under /.mnt/N, and
-  // mounted from there as a --dir (design/mounts.md), so archives on one
+  // mounted from there as a --dir (design/epoch-0/mounts.md), so archives on one
   // destination stack as the CLI's do.
   const archives = mounts.map((m, i) => ({ m, at: `/.mnt/${i}` })).filter(({ m }) => m.kind === 'archive');
   const [h9, ...bytes] = await Promise.all([

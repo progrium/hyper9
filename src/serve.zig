@@ -4,7 +4,7 @@
 //! accepted streams. Once a stream's first 9P message has passed the
 //! dialect slot it's queued here, and the machine's server Proc takes it
 //! from the queue (`next`) and hands it to the kernel's 9P server
-//! (src/kern/kserve.c, design/kernel-serve.md).
+//! (src/kern/kserve.c, design/epoch-0/kernel-serve.md).
 //!
 //! The listeners are bound before the program starts, so a listen that
 //! fails ends the run before anything runs, and they're closed when it
@@ -146,7 +146,7 @@ pub const Config = struct {
     trace: ?*Io.Writer = null,
     trace_lock: ?*std.atomic.Mutex = null,
     /// On the web host, serve the ports the page hands the machine
-    /// (design/port-streams.md): each is an accepted stream, with no
+    /// (design/epoch-0/port-streams.md): each is an accepted stream, with no
     /// listener, origin, or token.
     ports: bool = false,
 };
@@ -491,7 +491,7 @@ fn unixAnswers(p: []const u8) bool {
 }
 
 /// Takes each port the page hands the machine to serve
-/// (design/port-streams.md), under the same cap as a listener's
+/// (design/epoch-0/port-streams.md), under the same cap as a listener's
 /// connections, until the server stops.
 fn portLoop(s: *Server) void {
     defer s.unref();

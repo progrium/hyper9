@@ -11,7 +11,7 @@
  *	dotl/clone	opening it makes a conversation and opens its ctl
  *	dotl/N/ctl	fd N: the caller's fd N is the server connection;
  *			fd R W: read the server from fd R, write it to fd W
- *			(a pipe pair, design/fd-mounts.md);
+ *			(a pipe pair, design/epoch-0/fd-mounts.md);
  *			dial ADDR[,ADDR...]: dial the first that answers
  *			(tcp!, or unix! for h9's own root dials), and
  *			again on a drop if the server speaks 9P2000.L.Z;
@@ -48,7 +48,7 @@
  * descriptor through devlfd can't be interrupted in its read, so the
  * kproc waits for it to be readable first, in a wait the close wakes
  * (h9_hostwait, src/kern/rootdial.c): an embedder's descriptor
- * (design/fd-mounts.md) stays open after the run, and a reader left in
+ * (design/epoch-0/fd-mounts.md) stays open after the run, and a reader left in
  * its read would take the next run's replies.
  */
 
@@ -83,7 +83,7 @@ extern int	h9_dotl_wantreconnect(void *t);
 extern int	h9_dotl_reconnect(void *t, char *err);
 extern void	h9_dotl_free(void *t);
 extern int	h9_dotl_frommount(void *t, void *buf, long n, int linkwalk, char *err);
-/* linux.c: whether up's walks stop at links (design/linux-symlinks.md) */
+/* linux.c: whether up's walks stop at links (design/epoch-0/linux-symlinks.md) */
 extern int	h9_fs_linkwalk(void);
 extern int	h9_dotl_fromserver(void *t, void *buf, long n, char *err);
 extern long	h9_dotl_takeserver(void *t, void *buf, long n);
@@ -378,7 +378,7 @@ dialaddr(void *mach, char *addr)
 	/*
 	 * A WebSocket h9 makes itself (a root's or a namespace file's mount),
 	 * through hstream with the machine's handshake options, so a
-	 * credential helper runs again (design/credential-helpers.md).
+	 * credential helper runs again (design/epoch-0/credential-helpers.md).
 	 */
 	if(strncmp(addr, "ws://", 5) == 0 || strncmp(addr, "wss://", 6) == 0){
 		if(h9_plan_get() != nil)

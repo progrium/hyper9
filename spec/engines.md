@@ -171,7 +171,7 @@ On a 4-CPU cloud VM without KVM, an awk loop that takes 10.7 s on emu takes 0.24
 
 The emulator lets the system run anywhere, including VMs without nested virtualization, at reduced speed. It implements the same Backend, AddressSpace, Vcpu, and Exit contract, so everything above the vmm layer runs unchanged.
 
-It's hcpu, h9's own CPUs: ha64 for arm64 binaries, h86 for 386 binaries, and hx64 for amd64 binaries, picked by the binary's architecture when the backend is created ([hcpu](../design/hcpu.md)). [spec/jit.md](jit.md) describes the backend and what the CPUs share, and [spec/ha64.md](ha64.md), [spec/h86.md](h86.md), and [spec/hx64.md](hx64.md) each CPU. It's MIT, and it's built into every `h9` for an arm64 or x86-64 target and into the web host; there's no build option to leave it out or to pick another emulator.
+It's hcpu, h9's own CPUs: ha64 for arm64 binaries, h86 for 386 binaries, and hx64 for amd64 binaries, picked by the binary's architecture when the backend is created ([hcpu](../design/epoch-0/hcpu.md)). [spec/jit.md](jit.md) describes the backend and what the CPUs share, and [spec/ha64.md](ha64.md), [spec/h86.md](h86.md), and [spec/hx64.md](hx64.md) each CPU. It's MIT, and it's built into every `h9` for an arm64 or x86-64 target and into the web host; there's no build option to leave it out or to pick another emulator.
 
 ### Scope
 
@@ -191,7 +191,7 @@ Its pages are zero and stay unbacked until touched, and rfork's eager copy skips
 
 ### Limits and selection
 
-Measured with `zig build bench` ([tests/bench.zig](../tests/bench.zig); [hcpu](../design/hcpu.md#updates) has the table): on GitHub's macOS runner, an Apple silicon VM, a 2-instruction loop of 10⁹ iterations takes 1.09 s for arm64, 2.17 s for amd64, and 2.29 s for 386 on T1; on an x86-64 Linux VM, 0.60, 3.39, and 3.88 s. T0 runs it in about 12 to 28 s. A `pwrite` round trip costs 0.5 to 1 µs, and a bare exit and re-entry 56 to 110 ns, since the emulator never leaves the process. Four busy amd64 threads run 3.3 to 4 times as fast as one on 4-core Linux hosts.
+Measured with `zig build bench` ([tests/bench.zig](../tests/bench.zig); [hcpu](../design/epoch-0/hcpu.md#updates) has the table): on GitHub's macOS runner, an Apple silicon VM, a 2-instruction loop of 10⁹ iterations takes 1.09 s for arm64, 2.17 s for amd64, and 2.29 s for 386 on T1; on an x86-64 Linux VM, 0.60, 3.39, and 3.88 s. T0 runs it in about 12 to 28 s. A `pwrite` round trip costs 0.5 to 1 µs, and a bare exit and re-entry 56 to 110 ns, since the emulator never leaves the process. Four busy amd64 threads run 3.3 to 4 times as fast as one on 4-core Linux hosts.
 
 On HVF on an M3 Max, the same loop takes 0.27 s, a `pwrite` round trip about 1.1 µs, and a bare exit and re-entry about 0.8 µs, which goes through the shim, EL2, and the macOS kernel each way. On KVM in a nested x86\_64 VM (an exe.dev VM on Intel VT-x, Linux 6.12), the loop takes 0.35 s for amd64, and a `pwrite` round trip about 28 µs, of which about 19 µs is the bare `OUT` exit and re-entry, each going through both hypervisors; KVM on bare metal is far cheaper.
 

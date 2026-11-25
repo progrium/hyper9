@@ -101,8 +101,8 @@ the agent's ordinary tools run too.
 [net-policy](../design/epoch-0/net-policy.md),
 [linux-personality](../design/epoch-0/linux-personality.md). Would pull forward
 [host-srv](../design/epoch-0/host-srv.md) (hand the broker's connection in
-pre-dialed), [overlay-export](../design/overlay-export.md) (harvest the
-changes), [credential-helpers](../design/credential-helpers.md) and
+pre-dialed), [overlay-export](../design/epoch-0/overlay-export.md) (harvest the
+changes), [credential-helpers](../design/epoch-0/credential-helpers.md) and
 [child-machines](../design/child-machines.md).
 
 ### 2. Compute-to-data rooms
@@ -137,7 +137,7 @@ code.
 [host-srv](../design/epoch-0/host-srv.md) (post `/out`),
 [root-auth](../design/epoch-0/root-auth.md) (per-analyst attaches),
 [host-sandbox](../design/host-sandbox.md) and
-[hide-host-paths](../design/hide-host-paths.md).
+[hide-host-paths](../design/epoch-0/hide-host-paths.md).
 
 ### 3. Namespaces instead of a VPN
 
@@ -171,7 +171,7 @@ access is unmounting, and auditing is logging 9P messages at the gateway.
 **Builds on:** [websocket-9p](../design/epoch-0/websocket-9p.md),
 [net-policy](../design/epoch-0/net-policy.md),
 [browser-host](../design/epoch-0/browser-host.md). Would pull forward
-[credential-helpers](../design/credential-helpers.md) (short-lived tokens,
+[credential-helpers](../design/epoch-0/credential-helpers.md) (short-lived tokens,
 none in the namespace file) and [root-auth](../design/epoch-0/root-auth.md).
 
 ### 4. A dependency firewall
@@ -207,7 +207,7 @@ namespace is identical on every run.
 [linux-net](../design/epoch-0/linux-net.md),
 [linux-threads](../design/epoch-0/linux-threads.md),
 [net-policy](../design/epoch-0/net-policy.md), [ninep-roots](../design/epoch-0/ninep-roots.md).
-Would pull forward [cow-fork](../design/cow-fork.md), since package managers
+Would pull forward [cow-fork](../design/epoch-0/cow-fork.md), since package managers
 fork large processes.
 
 ## Builds and execution
@@ -245,8 +245,8 @@ step runs on a Mac laptop, a Linux worker or the emulator.
 [websocket-9p](../design/epoch-0/websocket-9p.md),
 [overlay](../design/epoch-0/overlay.md), [kvm](../design/epoch-0/kvm.md),
 [serve](../design/epoch-0/serve.md). Would pull forward
-[overlay-export](../design/overlay-export.md) and
-[mount-index](../design/mount-index.md) (answer walks and stats without a
+[overlay-export](../design/epoch-0/overlay-export.md) and
+[mount-index](../design/epoch-0/mount-index.md) (answer walks and stats without a
 round trip each).
 
 ### 6. Speculative fan-out
@@ -280,7 +280,7 @@ loops, autotuners and property-based tests all want.
 **Builds on:** [ephemeral-writes](../design/epoch-0/ephemeral-writes.md),
 [overlay](../design/epoch-0/overlay.md), [serve](../design/epoch-0/serve.md),
 [embedding](embedding.md). Would pull forward
-[overlay-export](../design/overlay-export.md) and
+[overlay-export](../design/epoch-0/overlay-export.md) and
 [child-machines](../design/child-machines.md) (a variant fans out from
 inside its own machine).
 
@@ -345,7 +345,7 @@ replay means serving them back instead of making the real call.
   program.
 
 **Builds on:** the [baseline](../design/epoch-0/baseline.md)'s syscall dispatch and
-`--trace`, and the emulator. [hcpu](../design/hcpu.md)'s interpreter tier
+`--trace`, and the emulator. [hcpu](../design/epoch-0/hcpu.md)'s interpreter tier
 is a natural place for single-stepping and reverse execution. Needs a
 proposal of its own.
 
@@ -385,7 +385,7 @@ so there's nothing to uninstall.
 [linux-personality](../design/epoch-0/linux-personality.md),
 [symlinks-in-root](../design/epoch-0/symlinks-in-root.md). Would pull forward
 [recursive-unions](../design/epoch-0/recursive-unions.md) (merge package trees at
-every depth, not only `/bin`), [mount-index](../design/mount-index.md)
+every depth, not only `/bin`), [mount-index](../design/epoch-0/mount-index.md)
 (fast lazy fetch) and [host-srv](../design/epoch-0/host-srv.md) (post the cache).
 
 ### 10. Executable archives
@@ -416,7 +416,7 @@ states the program's entire world in a few lines anyone can read.
 **Builds on:** [ninep-roots](../design/epoch-0/ninep-roots.md),
 [i386](../design/epoch-0/i386.md), [browser-host](../design/epoch-0/browser-host.md),
 [builtin-root](../design/epoch-0/builtin-root.md). Would pull forward
-[hcpu](../design/hcpu.md), the dependency-free emulator.
+[hcpu](../design/epoch-0/hcpu.md), the dependency-free emulator.
 
 ## Personal and distributed computing
 
@@ -450,7 +450,7 @@ and the browser host makes it zero-install.
 [devsrv](../design/epoch-0/devsrv.md), [gfx](../design/epoch-0/gfx.md),
 [browser-host](../design/epoch-0/browser-host.md),
 [browser-gfx](../design/epoch-0/browser-gfx.md). Would pull forward
-[credential-helpers](../design/credential-helpers.md) and
+[credential-helpers](../design/epoch-0/credential-helpers.md) and
 [root-auth](../design/epoch-0/root-auth.md).
 
 ### 12. Borrow compute, keep your files
@@ -483,7 +483,7 @@ too, because listeners also speak 9P2000.L.
 **Builds on:** [serve](../design/epoch-0/serve.md),
 [websocket-9p](../design/epoch-0/websocket-9p.md), [kvm](../design/epoch-0/kvm.md),
 [browser-host](../design/epoch-0/browser-host.md), [dotl](../design/epoch-0/dotl.md).
-Would pull forward [mount-index](../design/mount-index.md) to make remote
+Would pull forward [mount-index](../design/epoch-0/mount-index.md) to make remote
 walks cheap.
 
 ### 13. Browser workspaces with no backend
@@ -516,7 +516,7 @@ and "works in the page" are one claim.
 **Builds on:** [browser-host](../design/epoch-0/browser-host.md),
 [browser-gfx](../design/epoch-0/browser-gfx.md), [i386](../design/epoch-0/i386.md),
 [websocket-9p](../design/epoch-0/websocket-9p.md), [overlay](../design/epoch-0/overlay.md).
-Would pull forward [hcpu](../design/hcpu.md) for faster guest code in the
+Would pull forward [hcpu](../design/epoch-0/hcpu.md) for faster guest code in the
 page.
 
 ## Extending applications
@@ -563,7 +563,7 @@ Agent workspaces, read-keyed builds and fan-out share most of their parts
 (a daemon that embeds h9, a broker or content-addressed 9P server, and a
 way to harvest overlays), so building one makes the others cheaper.
 [host-srv](../design/epoch-0/host-srv.md) and
-[overlay-export](../design/overlay-export.md) are the two open proposals
+[overlay-export](../design/epoch-0/overlay-export.md) are the two open proposals
 that would help the most ideas.
 
 | Idea | Prototype today? | Smallest useful demo | Open proposals it would pull forward |

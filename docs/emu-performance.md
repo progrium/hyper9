@@ -4,7 +4,7 @@
 > h86 for 386 guests, and hx64 for amd64 guests. Each runs on its JIT (T1)
 > and on its interpreter alone (T0), natively and in WebAssembly. These
 > numbers are measured snapshots, not targets, and they change as the CPUs
-> do. [hcpu](../design/hcpu.md) is the design, and
+> do. [hcpu](../design/epoch-0/hcpu.md) is the design, and
 > [tools/workloads](../tools/workloads/README.md) has the workloads.
 
 With the JIT, an arm64 guest on an arm64 Mac runs 5 to 10 times slower than

@@ -91,10 +91,10 @@ const Fid = struct {
     /// `ahead_gen` then).
     stat: ?wire.Stat = null,
     stat_gen: u64 = 0,
-    /// A FIFO, opened without the server (design/linux-fifo.md): a Linux
+    /// A FIFO, opened without the server (design/epoch-0/linux-fifo.md): a Linux
     /// open joins h9's pipe for it, and anything else reads it as empty.
     fifo: bool = false,
-    /// A link a Linux process's walk stopped at (design/linux-symlinks.md):
+    /// A link a Linux process's walk stopped at (design/epoch-0/linux-symlinks.md):
     /// it opens without the server, to read, and reads as its target.
     link: bool = false,
     /// A link being made (a create with DMSYMLINK): the fid is still the
@@ -232,7 +232,7 @@ const Resolve = struct {
     compound: bool = false,
     stat: ?wire.Stat = null,
     /// A Linux process's walk: it stops at the first link, which is its
-    /// last qid, and doesn't follow it (design/linux-symlinks.md).
+    /// last qid, and doesn't follow it (design/epoch-0/linux-symlinks.md).
     linkwalk: bool = false,
     /// It ended on a link, with a fid there.
     at_link: bool = false,
@@ -299,7 +299,7 @@ pub const Client = struct {
     ahead_gen: u64 = 0,
     /// Whether the requests `fromMount` takes next come from a Linux
     /// process, whose walks stop at links and whose directory reads list
-    /// them (design/linux-symlinks.md). devmnt writes a request in the
+    /// them (design/epoch-0/linux-symlinks.md). devmnt writes a request in the
     /// process that makes it, so the caller sets it per write.
     linkwalk: bool = false,
 
@@ -1237,7 +1237,7 @@ pub const Client = struct {
             try c.send(op, l.Tmkdir{ .dfid = f.sfid, .name = op.name, .mode = mode, .gid = gid }, .{ .main = 0 });
         } else if (op.perm & wire.DMNAMEDPIPE != 0) {
             // A FIFO, for the Linux personality's mknod: made, and walked
-            // to, but not opened (design/linux-fifo.md).
+            // to, but not opened (design/epoch-0/linux-fifo.md).
             try c.send(op, l.Tmknod{ .dfid = f.sfid, .name = op.name, .mode = attr.S_IFIFO | (mode & 0o777), .major = 0, .minor = 0, .gid = gid }, .{ .main = 30 });
         } else if (c.dialect == .@"9P2000.L.Z") {
             // Created on a new server fid, with its attributes.
@@ -1918,7 +1918,7 @@ fn pq(q: wire.Qid) wire.Qid {
 }
 
 /// A .L qid as a Linux process's walk sees it, with QTSYMLINK on a link
-/// (design/linux-symlinks.md).
+/// (design/epoch-0/linux-symlinks.md).
 fn pqLink(q: wire.Qid) wire.Qid {
     return .{ .type = q.type & (wire.QTDIR | wire.QTSYMLINK), .vers = q.vers, .path = q.path };
 }
@@ -2339,7 +2339,7 @@ test "directory reads" {
     dirs = try h.ls(&.{"d"}, 8192);
     try testing.expectEqual(@as(usize, 44), dirs.items.len);
 
-    // A FIFO opens without the server (design/linux-fifo.md), reads as
+    // A FIFO opens without the server (design/epoch-0/linux-fifo.md), reads as
     // empty, and can't be written; its Dir says it's one.
     try testing.expect(hasName(dirs.items, "fifo").?.mode & wire.DMNAMEDPIPE != 0);
     _ = try h.ok(p9.Twalk{ .fid = 0, .newfid = 5, .wnames = .init(&.{ "d", "fifo" }) });

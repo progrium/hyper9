@@ -7,7 +7,7 @@
  * Windows has AF_UNIX, but a winsock handle doesn't go through
  * devlfd-win32's ReadFile and WriteFile, so it isn't supported there.
  *
- * An embedder's descriptors (design/fd-mounts.md) come in already
+ * An embedder's descriptors (design/epoch-0/fd-mounts.md) come in already
  * duplicated by h9 (Machine.connectUrl), and are wrapped the same way.
  */
 
@@ -145,7 +145,7 @@ h9_hostfddial(void *rd, void *wr, int *rfd, int *wfd)
 /*
  * A wait for a host descriptor to be readable that can be woken, so a
  * #ℓ conversation's reader on a descriptor h9 doesn't own the other end
- * of (an embedder's, design/fd-mounts.md) ends with the conversation,
+ * of (an embedder's, design/epoch-0/fd-mounts.md) ends with the conversation,
  * rather than blocking in the host's read until the other end writes or
  * closes. Closing h9's copy wouldn't wake that read, and shutting the
  * stream down would end the embedder's too.
