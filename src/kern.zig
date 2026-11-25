@@ -251,6 +251,9 @@ const c_stub = struct {
     fn h9_unixdial(_: [*:0]const u8) c_int {
         return -1;
     }
+    fn h9_hostfddial(_: ?*anyopaque, _: ?*anyopaque, _: *c_int, _: *c_int) c_int {
+        return -1;
+    }
     fn h9_kern_upuser() [*:0]const u8 {
         return "none";
     }
@@ -361,6 +364,7 @@ const c_real = struct {
     extern fn h9_overlay_track(id: c_int, track: ?*anyopaque) void;
     extern fn h9_kern_release() void;
     extern fn h9_unixdial(path: [*:0]const u8) c_int;
+    extern fn h9_hostfddial(rd: ?*anyopaque, wr: ?*anyopaque, rfd: *c_int, wfd: *c_int) c_int;
     extern fn h9_hidx_convstatus(n: c_int, buf: [*]u8, len: c_int) c_int;
     extern fn h9_kern_upuser() [*:0]const u8;
     extern fn h9_kern_setuser(name: [*:0]const u8) void;
@@ -1072,6 +1076,25 @@ pub fn hidxStatus(n: u32, buf: []u8) ?[]u8 {
 
 pub fn unixDial(path: [*:0]const u8) Error!u31 {
     return try check(c.h9_unixdial(path));
+}
+
+/// Wraps host descriptors `rd` and `wr` (design/fd-mounts.md), which the
+/// kernel takes and closes, as channels, and returns fds on them: the
+/// one read from and, when `wr` isn't `rd`, the one written to. On
+/// failure both are closed. Fails on the browser host.
+pub fn hostFdDial(rd: std.posix.fd_t, wr: std.posix.fd_t) Error!struct { u31, ?u31 } {
+    var rfd: c_int = -1;
+    var wfd: c_int = -1;
+    const r = c.h9_hostfddial(fdPtr(rd), fdPtr(wr), &rfd, &wfd);
+    if (r < 0) return error.Kern;
+    return .{ @intCast(rfd), if (wfd < 0) null else @intCast(wfd) };
+}
+
+/// A host descriptor as devlfd's `void *`: a `HANDLE` on Windows, an int
+/// on POSIX.
+fn fdPtr(fd: std.posix.fd_t) ?*anyopaque {
+    if (@typeInfo(std.posix.fd_t) == .pointer) return @ptrCast(fd);
+    return @ptrFromInt(@as(usize, @intCast(fd)));
 }
 
 /// Wakes guest reads and connects waiting on host stream `id`

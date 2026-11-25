@@ -6,7 +6,7 @@ created: 2026-11-22
 authors: [progrium]
 depends: [mounts, dotl]
 areas: [api, kern, tests]
-branch: []
+branch: [fd-mounts]
 ---
 
 # Proposal: Mounting a 9P connection from a host descriptor
@@ -113,16 +113,16 @@ The guest reaches nothing new: an `.fd` mount is a 9P tree, as an `.url` mount i
 
 Integration cases, in `tests/backends.zig`, with a test 9P server on the other end of the stream (`tests/dotlserver.zig`'s, for 9P2000.L):
 
-- [ ] `test "an .fd mount serves / from a socketpair the embedder holds [fd-mounts]"`
-- [ ] `test "an .fd mount at /n/x and at /srv/x, with spec and user [fd-mounts]"`
-- [ ] `test "an .fd mount with fd_write serves 9P over a pipe pair [fd-mounts]"`
-- [ ] `test "an .fd mount with up on / keeps the guest's writes in the embedder's server [fd-mounts, upper-layers]"`
-- [ ] `test "the embedder's descriptor stays open, and a second run uses it [fd-mounts]"`
-- [ ] `test "an .fd mount without fd, or fd_write on another kind, is PolicyConflict [fd-mounts]"`
-- [ ] `test "a 9P2000.L server works through an .fd mount [fd-mounts]"`
+- [x] `test "an .fd mount serves / from a socketpair the embedder holds [fd-mounts]"`
+- [x] `test "an .fd mount at /n/x and at /srv/x, with spec and user [fd-mounts]"`
+- [x] `test "an .fd mount with fd_write serves 9P over a pipe pair [fd-mounts]"`
+- [x] `test "an .fd mount with up on / keeps the guest's writes in the embedder's server [fd-mounts, upper-layers]"`
+- [x] `test "the embedder's descriptor stays open, and a second run uses it [fd-mounts]"`
+- [x] `test "an .fd mount without fd, or fd_write on another kind, is PolicyConflict [fd-mounts]"`
+- [x] `test "a 9P2000.L server works through an .fd mount [fd-mounts]"`
 - [ ] `test "an .fd mount on Windows serves 9P over two anonymous pipes [fd-mounts]"`
 - [ ] `test "an .fd mount on Windows refuses a SOCKET [fd-mounts]"`
-- [ ] `test "--print writes an .fd mount as a comment, and the rest replays [fd-mounts]"`
+- [x] `test "--print writes an .fd mount as a comment, and the rest replays [fd-mounts]"`
 
 ## Implementation
 
@@ -131,6 +131,10 @@ Integration cases, in `tests/backends.zig`, with a test 9P server on the other e
 3. `Mount.fd` and `Mount.fd_write`, their checks in `policy.zig`, `connectUrl`'s `given` path, and the `--print` comment.
 4. The Windows socket check.
 5. The cases above, and the embedding guide.
+
+## Updates
+
+- 2026-11-25: Built on the `fd-mounts` branch, as Implementation describes, with the cases in `tests/backends.zig` against a small 9P2000 server in memory (`tests/fdserver.zig`) and, for 9P2000.L, src/dotl/testserver.zig's, both on the test's end of a socketpair or of two pipes. They pass on the emulator, T1 and T0, on Linux x86\_64. The Windows cases are written and build for `x86_64-windows-gnu`, and wait on CI's Windows runner. The first open issue was real: a reader left in the host's `read` on a run's duplicate took the next run's replies. A conversation over a devlfd channel now waits for the descriptor to be readable first, in a wait that the conversation's last close wakes (`h9_hostwait` in `src/kern/rootdial.c`): `poll` with a wake pipe on POSIX, and on Windows, where a pipe handle can't be polled, `PeekNamedPipe` with a sleep of up to 8 ms when it's empty. That covers a unix socket root whose path has a comma too. The conflicts say which field: `fd: an .fd mount needs one`, and `fd: only an .fd mount takes it` or the same for `fd_write`.
 
 ## Open issues
 

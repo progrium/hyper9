@@ -2644,3 +2644,326 @@ inline fn rep(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
         return &final;
     }
 }
+
+// An `.fd` mount (design/fd-mounts.md): a 9P server on a host descriptor
+// the test holds, as an embedder's in-process server would, mounted from
+// Machine.Options without a socket on disk. The fixtures run on the
+// emulator, which runs everywhere, and on HVF where it's here.
+
+const fdserver = @import("fdserver.zig");
+const Mem9p = fdserver.Mem9p;
+const DotlServer = h9.dotl_test_server;
+
+const FdRun = struct {
+    status: []const u8,
+    out: []const u8,
+    err: []const u8,
+};
+
+/// Runs fixture `text` with `argv` in a machine with `mounts` (and `ns`)
+/// on the first backend of `fd_backends` that runs here, or returns null.
+fn runFd(arena: std.mem.Allocator, mounts: []const h9.Machine.Mount, ns: []const []const u8, text: []const u8, argv: []const []const u8) !?FdRun {
+    for (fd_backends) |kind| {
+        var m = h9.Machine.init(arena, std.testing.io, fdOptions(kind, mounts, ns)) catch |e| switch (e) {
+            error.HypervisorUnavailable, error.BackendNotBuilt, error.WrongArch => continue,
+            else => return e,
+        };
+        defer m.deinit();
+        return try runFdOn(arena, &m, text, argv);
+    }
+    return null;
+}
+
+const fd_backends = [_]vmm.BackendKind{ .hvf, .emu };
+
+/// The writers a machine is made with, before `runFdOn` gives it its own.
+var fd_sink: std.Io.Writer.Discarding = .init(&.{});
+
+fn fdOptions(kind: vmm.BackendKind, mounts: []const h9.Machine.Mount, ns: []const []const u8) h9.Machine.Options {
+    return .{
+        .backend = kind,
+        .arch = .arm64,
+        .mounts = mounts,
+        .ns = ns,
+        .guest_tools = false,
+        .policy = .{ .timeout_ns = 20 * std.time.ns_per_s },
+        .stdio = .{ .out = &fd_sink.writer, .err = &fd_sink.writer },
+    };
+}
+
+/// One run of `text` in `m`, with its output caught.
+fn runFdOn(arena: std.mem.Allocator, m: *h9.Machine, text: []const u8, argv: []const []const u8) !FdRun {
+    const bytes = try image(arena, .arm64, text);
+    var out: std.Io.Writer.Allocating = .init(arena);
+    var err: std.Io.Writer.Allocating = .init(arena);
+    m.opts.stdio.out = &out.writer;
+    m.opts.stdio.err = &err.writer;
+    const status = try m.run(.{ .bytes = bytes }, argv);
+    return .{
+        .status = switch (status) {
+            .exited => |t| try std.fmt.allocPrint(arena, "exited {s}", .{t}),
+            .killed => |t| try std.fmt.allocPrint(arena, "killed {s}", .{t}),
+        },
+        .out = out.written(),
+        .err = err.written(),
+    };
+}
+
+/// A server of type `S` on one end of a socketpair, and the other end
+/// for the machine; or on two pipes with `pair`.
+fn FdServer(comptime S: type) type {
+    return struct {
+        pump: fdserver.Pump(S),
+        /// The machine's: read from, and written to unless `w` is set.
+        r: fdserver.fd_t,
+        w: ?fdserver.fd_t = null,
+
+        const Self = @This();
+
+        fn start(f: *Self, server: *S, pair: bool) !void {
+            if (pair) {
+                const to_h9 = try fdserver.pipe();
+                const to_srv = try fdserver.pipe();
+                f.* = .{ .pump = .{ .server = server, .rd = to_srv[0], .wr = to_h9[1] }, .r = to_h9[0], .w = to_srv[1] };
+            } else {
+                const sv = try fdserver.socketPair();
+                f.* = .{ .pump = .{ .server = server, .rd = sv[1], .wr = sv[1] }, .r = sv[0] };
+            }
+            try f.pump.start();
+        }
+
+        fn mount(f: *const Self, dst: []const u8) h9.Machine.Mount {
+            return .{ .kind = .fd, .fd = f.r, .fd_write = f.w, .dst = dst };
+        }
+
+        /// Closes the machine's ends, which ends the server's thread once
+        /// h9 has closed its copies too.
+        fn stop(f: *Self) !void {
+            fdserver.closeFd(f.r);
+            if (f.w) |w| fdserver.closeFd(w);
+            f.pump.join();
+            fdserver.closeFd(f.pump.rd);
+            if (f.pump.wr != f.pump.rd) fdserver.closeFd(f.pump.wr);
+            if (f.pump.err) |e| {
+                std.debug.print("the server's thread: {t}\n", .{e});
+                return e;
+            }
+        }
+    };
+}
+
+fn posixOnly() !void {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+}
+
+test "an .fd mount serves / from a socketpair the embedder holds [fd-mounts]" {
+    try posixOnly();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const s = try Mem9p.init(std.testing.allocator);
+    defer s.deinit();
+    try s.add("hello", "hi from the embedder\n");
+    var f: FdServer(Mem9p) = undefined;
+    try f.start(s, false);
+    const got = runFd(arena.allocator(), &.{f.mount("/")}, &.{}, @embedFile("fdmount_cat"), &.{ "cat", "/hello" });
+    try f.stop();
+    const r = try got orelse return error.SkipZigTest;
+    errdefer std.debug.print("err: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("exited ", r.status);
+    try std.testing.expectEqualStrings("hi from the embedder\n", r.out);
+}
+
+test "an .fd mount at /n/x and at /srv/x, with spec and user [fd-mounts]" {
+    try posixOnly();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    {
+        const s = try Mem9p.init(std.testing.allocator);
+        defer s.deinit();
+        try s.add("f", "at /n/x\n");
+        var f: FdServer(Mem9p) = undefined;
+        try f.start(s, false);
+        var mt = f.mount("/n/x");
+        mt.spec = "sub";
+        mt.user = "embedder";
+        const got = runFd(a, &.{ .{ .kind = .tmp, .dst = "/" }, mt }, &.{}, @embedFile("fdmount_cat"), &.{ "cat", "/n/x/f" });
+        try f.stop();
+        const r = try got orelse return error.SkipZigTest;
+        errdefer std.debug.print("err: {s}\n", .{r.err});
+        try std.testing.expectEqualStrings("exited ", r.status);
+        try std.testing.expectEqualStrings("at /n/x\n", r.out);
+        try std.testing.expectEqualStrings("sub", s.aname[0..s.aname_len]);
+        try std.testing.expectEqualStrings("embedder", s.uname[0..s.uname_len]);
+    }
+    {
+        // Posted, not mounted: the namespace file mounts it.
+        const s = try Mem9p.init(std.testing.allocator);
+        defer s.deinit();
+        try s.add("f", "from /srv/x\n");
+        var f: FdServer(Mem9p) = undefined;
+        try f.start(s, false);
+        const got = runFd(a, &.{ .{ .kind = .tmp, .dst = "/" }, f.mount("/srv/x") }, &.{"mount -c /srv/x /n/y"}, @embedFile("fdmount_cat"), &.{ "cat", "/n/y/f" });
+        try f.stop();
+        const r = try got orelse return error.SkipZigTest;
+        errdefer std.debug.print("err: {s}\n", .{r.err});
+        try std.testing.expectEqualStrings("exited ", r.status);
+        try std.testing.expectEqualStrings("from /srv/x\n", r.out);
+    }
+}
+
+/// The pipe-pair case, on any host: two pipes, one each way.
+fn expectPipePair() !void {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const s = try Mem9p.init(std.testing.allocator);
+    defer s.deinit();
+    try s.add("hello", "over two pipes\n");
+    var f: FdServer(Mem9p) = undefined;
+    try f.start(s, true);
+    const got = runFd(arena.allocator(), &.{f.mount("/")}, &.{}, @embedFile("fdmount_cat"), &.{ "cat", "/hello" });
+    try f.stop();
+    const r = try got orelse return error.SkipZigTest;
+    errdefer std.debug.print("err: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("exited ", r.status);
+    try std.testing.expectEqualStrings("over two pipes\n", r.out);
+}
+
+test "an .fd mount with fd_write serves 9P over a pipe pair [fd-mounts]" {
+    try expectPipePair();
+}
+
+test "an .fd mount with up on / keeps the guest's writes in the embedder's server [fd-mounts, upper-layers]" {
+    try posixOnly();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const s = try Mem9p.init(std.testing.allocator);
+    defer s.deinit();
+    var f: FdServer(Mem9p) = undefined;
+    try f.start(s, false);
+    var mt = f.mount("/");
+    mt.access = .up;
+    const got = runFd(arena.allocator(), &.{ .{ .kind = .tmp, .dst = "/" }, mt }, &.{}, @embedFile("fdmount_create"), &.{ "create", "/f" });
+    try f.stop();
+    const r = try got orelse return error.SkipZigTest;
+    errdefer std.debug.print("err: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("exited ", r.status);
+    try std.testing.expectEqualStrings("up\n", s.read("f") orelse return error.NotInServer);
+}
+
+test "the embedder's descriptor stays open, and a second run uses it [fd-mounts]" {
+    try posixOnly();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const s = try Mem9p.init(std.testing.allocator);
+    defer s.deinit();
+    try s.add("hello", "again\n");
+    var f: FdServer(Mem9p) = undefined;
+    try f.start(s, false);
+    const mounts = [_]h9.Machine.Mount{f.mount("/")};
+    var ran = false;
+    for (fd_backends) |kind| {
+        var m = h9.Machine.init(a, std.testing.io, fdOptions(kind, &mounts, &.{})) catch |e| switch (e) {
+            error.HypervisorUnavailable, error.BackendNotBuilt, error.WrongArch => continue,
+            else => return e,
+        };
+        var first: u32 = 0;
+        for (0..2) |i| {
+            const r = try runFdOn(a, &m, @embedFile("fdmount_cat"), &.{ "cat", "/hello" });
+            errdefer std.debug.print("err: {s}\n", .{r.err});
+            try std.testing.expectEqualStrings("exited ", r.status);
+            try std.testing.expectEqualStrings("again\n", r.out);
+            try std.testing.expect(fdserver.isOpen(f.r));
+            // Each run starts its session over with Tversions of its own
+            // (the translator's, then devmnt's), on the same stream.
+            if (i == 0) first = f.pump.server.versions;
+        }
+        try std.testing.expect(first > 0);
+        try std.testing.expectEqual(2 * first, f.pump.server.versions);
+        m.deinit();
+        try std.testing.expect(fdserver.isOpen(f.r));
+        ran = true;
+        break;
+    }
+    try f.stop();
+    if (!ran) return error.SkipZigTest;
+}
+
+test "an .fd mount without fd, or fd_write on another kind, is PolicyConflict [fd-mounts]" {
+    var why: []const u8 = "";
+    try std.testing.expectError(error.PolicyConflict, h9.Machine.initExplained(std.testing.allocator, std.testing.io, .{
+        .mounts = &.{.{ .kind = .fd, .dst = "/n/x" }},
+        .stdio = .{ .out = &fd_sink.writer, .err = &fd_sink.writer },
+    }, &why));
+    try std.testing.expectEqualStrings("fd: an .fd mount needs one", why);
+    why = "";
+    try std.testing.expectError(error.PolicyConflict, h9.Machine.initExplained(std.testing.allocator, std.testing.io, .{
+        .mounts = &.{.{ .kind = .url, .src = "tcp://127.0.0.1:1", .fd_write = fdserver.std_out, .dst = "/n/x" }},
+        .stdio = .{ .out = &fd_sink.writer, .err = &fd_sink.writer },
+    }, &why));
+    try std.testing.expectEqualStrings("fd_write: only an .fd mount takes it", why);
+}
+
+test "a 9P2000.L server works through an .fd mount [fd-mounts]" {
+    try posixOnly();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const s = try DotlServer.init(std.testing.allocator);
+    defer s.deinit();
+    _ = try s.add("hello", .file, "hi in 9P2000.L\n");
+    var f: FdServer(DotlServer) = undefined;
+    try f.start(s, false);
+    const got = runFd(arena.allocator(), &.{f.mount("/")}, &.{}, @embedFile("fdmount_cat"), &.{ "cat", "/hello" });
+    try f.stop();
+    const r = try got orelse return error.SkipZigTest;
+    errdefer std.debug.print("err: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("exited ", r.status);
+    try std.testing.expectEqualStrings("hi in 9P2000.L\n", r.out);
+}
+
+test "an .fd mount on Windows serves 9P over two anonymous pipes [fd-mounts]" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try expectPipePair();
+}
+
+test "an .fd mount on Windows refuses a SOCKET [fd-mounts]" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const sock = try fdserver.winSocket();
+    defer fdserver.winCloseSocket(sock);
+    var why: []const u8 = "";
+    try std.testing.expectError(error.PolicyConflict, h9.Machine.initExplained(std.testing.allocator, std.testing.io, .{
+        .mounts = &.{.{ .kind = .fd, .fd = sock, .dst = "/n/x" }},
+        .stdio = .{ .out = &fd_sink.writer, .err = &fd_sink.writer },
+    }, &why));
+    try std.testing.expectEqualStrings("an .fd mount on Windows takes pipe handles, not a socket", why);
+}
+
+test "--print writes an .fd mount as a comment, and the rest replays [fd-mounts]" {
+    try posixOnly();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const sv = try fdserver.socketPair();
+    defer fdserver.closeFd(sv[0]);
+    defer fdserver.closeFd(sv[1]);
+    const base = [_]h9.Machine.Mount{.{ .kind = .tmp, .dst = "/" }};
+    const with_fd = base ++ [_]h9.Machine.Mount{.{ .kind = .fd, .fd = sv[0], .dst = "/n/ui" }};
+    var plan_m = try h9.Machine.init(a, std.testing.io, fdOptions(.emu, &with_fd, &.{}));
+    var pw: std.Io.Writer.Allocating = .init(a);
+    try plan_m.plan.print(&pw.writer);
+    plan_m.deinit();
+    const p = pw.written();
+    errdefer std.debug.print("plan:\n{s}\n", .{p});
+    try std.testing.expect(std.mem.indexOf(u8, p, "  # mount: an embedder's connection on /n/ui\n") != null);
+    // The namespace section replays, comment and all (a line newns didn't
+    // know would fail the run), in a machine without the descriptor; the
+    // fixture writes to the /tmp it binds.
+    const start = (std.mem.indexOf(u8, p, "namespace:\n") orelse return error.NoNamespace) + "namespace:\n".len;
+    const end = std.mem.indexOfPos(u8, p, start, "\naccess:") orelse std.mem.indexOfPos(u8, p, start, "\ncaveats:") orelse p.len - 1;
+    const ns = p[start .. end + 1];
+    try std.testing.expect(std.mem.indexOf(u8, ns, "/n/ui") != null);
+    const r = try runFd(a, &base, &.{ns}, @embedFile("fdmount_create"), &.{ "create", "/tmp/f" }) orelse return error.SkipZigTest;
+    errdefer std.debug.print("err: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("exited ", r.status);
+}

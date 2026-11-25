@@ -28,6 +28,9 @@ pub const serve = @import("serve.zig");
 pub const gfx = @import("gfx.zig");
 pub const rootindex = @import("rootindex.zig");
 pub const web = @import("web.zig");
+/// The 9P2000.L server over a tree in memory that the dotl tests use,
+/// for tests/backends.zig's [fd-mounts] cases; only in tests.
+pub const dotl_test_server = if (@import("builtin").is_test) @import("dotl/testserver.zig").Server else void;
 
 /// What this h9 was built from, for `--version`.
 pub const build_info = struct {

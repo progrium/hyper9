@@ -19,7 +19,8 @@ pub const Kind = enum {
     builtin,
     /// An empty tree in memory.
     tmp,
-    /// A 9P connection the embedder already holds (Machine.Options only).
+    /// A 9P connection the embedder already holds, as a host descriptor
+    /// (Machine.Options only, design/fd-mounts.md).
     fd,
 
     pub fn flag(k: Kind) []const u8 {
@@ -68,8 +69,14 @@ pub const Mount = struct {
     /// The host path (resolved by the CLI for `--dir`), URL, or archive
     /// file. Empty for `--builtin` and `--tmp`.
     src: []const u8 = "",
-    /// An `.fd` mount's connection.
-    fd: i32 = -1,
+    /// An `.fd` mount's connection (design/fd-mounts.md): a descriptor
+    /// in the host process, a POSIX fd or a Windows `HANDLE`, read from
+    /// and, without `fd_write`, written to. h9 duplicates it for each run,
+    /// and the embedder keeps it.
+    fd: ?std.posix.fd_t = null,
+    /// The descriptor written to, for a pipe pair. Null for a socket or a
+    /// duplex pipe.
+    fd_write: ?std.posix.fd_t = null,
     /// A guest path, `#L`, or a path under `#L`.
     dst: []const u8 = "/",
     access: ?Access = null,

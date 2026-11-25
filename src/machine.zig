@@ -424,6 +424,14 @@ pub const Machine = struct {
                 return error.Conflict;
             }
         }
+        // A winsock SOCKET isn't a handle ReadFile and WriteFile work on
+        // (design/fd-mounts.md, "Windows handles").
+        if (builtin.os.tag == .windows) for (opts.mounts) |mt| if (mt.kind == .fd) {
+            for ([_]?std.posix.fd_t{ mt.fd, mt.fd_write }) |h| if (h) |hd| if (isSocket(hd)) {
+                err_msg.* = "an .fd mount on Windows takes pipe handles, not a socket";
+                return error.Conflict;
+            };
+        };
         var plan = try policy.compile(arena, in, opts.policy, err_msg);
         // A WebSocket mount's credential helper, and the root's index,
         // for the plan and the connection.
@@ -457,6 +465,33 @@ pub const Machine = struct {
         }
         return plan;
     }
+
+    /// Whether Windows handle `h` is a winsock SOCKET: `getsockopt`
+    /// succeeds only on one.
+    fn isSocket(h: std.posix.fd_t) bool {
+        if (builtin.os.tag != .windows) return false;
+        // WSAStartup's data, which isn't looked at: 400 bytes is more
+        // than either layout of WSADATA.
+        var data: [400]u8 align(8) = undefined;
+        if (win.WSAStartup(0x0202, &data) != 0) return false;
+        defer _ = win.WSACleanup();
+        var v: i32 = 0;
+        var len: i32 = @sizeOf(i32);
+        const ws2 = std.os.windows.ws2_32;
+        return win.getsockopt(h, ws2.SOL.SOCKET, ws2.SO.TYPE, @ptrCast(&v), &len) == 0;
+    }
+
+    /// The Windows calls `.fd` mounts make (design/fd-mounts.md).
+    const win = struct {
+        const w = std.os.windows;
+        extern "ws2_32" fn WSAStartup(version: u16, data: *anyopaque) callconv(.winapi) i32;
+        extern "ws2_32" fn WSACleanup() callconv(.winapi) i32;
+        extern "ws2_32" fn getsockopt(s: w.HANDLE, level: i32, name: i32, val: [*]u8, len: *i32) callconv(.winapi) i32;
+        extern "kernel32" fn DuplicateHandle(src_proc: w.HANDLE, src: w.HANDLE, dst_proc: w.HANDLE, dst: *w.HANDLE, access: w.DWORD, inherit: w.BOOL, options: w.DWORD) callconv(.winapi) w.BOOL;
+        extern "kernel32" fn CloseHandle(h: w.HANDLE) callconv(.winapi) w.BOOL;
+        extern "kernel32" fn GetCurrentProcess() callconv(.winapi) w.HANDLE;
+        const DUPLICATE_SAME_ACCESS: w.DWORD = 2;
+    };
 
     /// Whether the options put a tree on `#L`.
     pub fn hasLinux(opts: Options) bool {
@@ -3607,7 +3642,9 @@ pub const Machine = struct {
         var ib: [ws.max_user]u8 = undefined;
         var ident: ?hstream.Identity = null;
         m.conn_static = false;
-        const conn = if (is_root) try m.connectUrl(r, b.fd, host, "root", &ib, &ident) else try m.connectUrl(r, b.fd, host, "mount", &ib, &ident);
+        const conn = if (b.fd) |rd|
+            try m.connectFd(rd, b.fd_write, b.to)
+        else if (is_root) try m.connectUrl(r, host, "root", &ib, &ident) else try m.connectUrl(r, host, "mount", &ib, &ident);
         // A static tree answers walks from its index already.
         const static = m.conn_static;
         // Through #ι (design/mount-index.md): the root's first 9P member
@@ -3711,11 +3748,10 @@ pub const Machine = struct {
     /// not the guest, so the network policy doesn't apply to it, and a
     /// TCP server is dialed through devip by device path whether or not
     /// `#I` is bound or masked later.
-    fn connectUrl(m: *Machine, r: policy.NinePRoot, given: i32, host: bool, comptime what: []const u8, ib: *[ws.max_user]u8, ident: *?hstream.Identity) RunError!u31 {
+    fn connectUrl(m: *Machine, r: policy.NinePRoot, host: bool, comptime what: []const u8, ib: *[ws.max_user]u8, ident: *?hstream.Identity) RunError!u31 {
         const shown = ws.Url.elide(r.addr);
         if (host) kern.setPlan(null);
         defer if (host) kern.setPlan(&m.plan);
-        if (given >= 0) return dotlConv("fd {d}", given) catch return m.fail(what ++ " {f}: {s}", .{ shown, kern.errstr() });
         var buf: [std.fs.max_path_bytes + 8]u8 = undefined;
         switch (r.kind) {
             .ws => {
@@ -3754,6 +3790,67 @@ pub const Machine = struct {
                 defer kern.close(conn) catch {};
                 return dotlConv("fd {d}", conn) catch return m.fail(what ++ " {s}: {s}", .{ r.addr, kern.errstr() });
             },
+        }
+    }
+
+    /// An `.fd` mount's connection (design/fd-mounts.md): duplicates the
+    /// embedder's descriptors, `rd` and `wr` if it's given, so the run's
+    /// channels own the copies and the embedder keeps its own, wraps the
+    /// copies as kernel channels, and returns an fd on a `#ℓ` conversation
+    /// over them. `to` is the mount's destination, for errors.
+    fn connectFd(m: *Machine, rd: std.posix.fd_t, wr: ?std.posix.fd_t, to: []const u8) RunError!u31 {
+        const on = shownDst(to);
+        if (comptime no_threads) return m.fail("mount on {s}: host descriptors need a native host", .{on});
+        const r2 = dupFd(rd) catch |e| return m.fail("mount on {s}: duplicating fd: {t}", .{ on, e });
+        const w2 = if (wr) |w| dupFd(w) catch |e| {
+            closeFd(r2);
+            return m.fail("mount on {s}: duplicating fd_write: {t}", .{ on, e });
+        } else r2;
+        // The kernel takes the copies, and closes them on failure.
+        const fds = kern.hostFdDial(r2, w2) catch return m.fail("mount on {s}: {s}", .{ on, kern.errstr() });
+        defer kern.close(fds[0]) catch {};
+        defer if (fds[1]) |f| kern.close(f) catch {};
+        var cmd: [32]u8 = undefined;
+        const ctl = if (fds[1]) |wf|
+            std.fmt.bufPrint(&cmd, "fd {d} {d}", .{ fds[0], wf }) catch unreachable
+        else
+            std.fmt.bufPrint(&cmd, "fd {d}", .{fds[0]}) catch unreachable;
+        return dotlConv("{s}", ctl) catch return m.fail("mount on {s}: {s}", .{ on, kern.errstr() });
+    }
+
+    /// A destination as the mount was given it: `/` and `#L` for the
+    /// stacks.
+    fn shownDst(to: []const u8) []const u8 {
+        if (std.mem.eql(u8, to, policy.mount.Stack.root.dev())) return "/";
+        if (std.mem.startsWith(u8, to, policy.mount.Stack.linux.dev())) return "#L";
+        return to;
+    }
+
+    /// A close-on-exec duplicate of host descriptor `fd`, which the caller
+    /// owns: `fcntl(F_DUPFD_CLOEXEC)` on POSIX, `DuplicateHandle`, not
+    /// inheritable, on Windows.
+    fn dupFd(fd: std.posix.fd_t) error{ DupFailed, Unsupported }!std.posix.fd_t {
+        switch (builtin.os.tag) {
+            .windows => {
+                const proc = win.GetCurrentProcess();
+                var out: std.os.windows.HANDLE = undefined;
+                if (!win.DuplicateHandle(proc, fd, proc, &out, 0, .FALSE, win.DUPLICATE_SAME_ACCESS).toBool()) return error.DupFailed;
+                return out;
+            },
+            .wasi, .freestanding => return error.Unsupported,
+            else => {
+                const r = std.c.fcntl(fd, std.c.F.DUPFD_CLOEXEC, @as(c_int, 0));
+                if (r < 0) return error.DupFailed;
+                return @intCast(r);
+            },
+        }
+    }
+
+    fn closeFd(fd: std.posix.fd_t) void {
+        switch (builtin.os.tag) {
+            .windows => _ = win.CloseHandle(fd),
+            .wasi, .freestanding => {},
+            else => _ = std.c.close(fd),
         }
     }
 

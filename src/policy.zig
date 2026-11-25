@@ -141,8 +141,11 @@ pub const Bind = struct {
     /// With `mount`: the 9P connection h9 makes, `from` being its URL. A
     /// `to` of `/srv/NAME` posts it there without mounting it.
     url: ?NinePRoot = null,
-    /// With `url`: a connection the embedder already holds, or -1.
-    fd: i32 = -1,
+    /// With `url`: a connection the embedder already holds, as host
+    /// descriptors (design/fd-mounts.md): the one read from, and the one
+    /// written to if it's another.
+    fd: ?std.posix.fd_t = null,
+    fd_write: ?std.posix.fd_t = null,
     /// The flag this line came from, for errors (`--dir ./x:/app`).
     what: ?[]const u8 = null,
 
@@ -352,6 +355,13 @@ pub const Plan = struct {
         }
         try w.writeAll("namespace:\n");
         for (p.binds) |b| {
+            // An embedder's connection has no address to replay
+            // (design/fd-mounts.md), so it's a comment, and the rest of
+            // the plan still replays.
+            if (b.fd != null) {
+                try w.print("  # mount: an embedder's connection on {s}\n", .{shownTo(b.to)});
+                continue;
+            }
             var line: std.Io.Writer.Allocating = .init(std.heap.page_allocator);
             defer line.deinit();
             const lw = &line.writer;
@@ -433,6 +443,13 @@ pub const CompileError = error{ OutOfMemory, Conflict };
 
 /// A 9P root's comment in the plan: the dial string or URL, with a URL's
 /// query elided, header names, the proxy and `ca=`, and the user.
+/// A bind's target as a mount gives it: `/` and `#L` for the stacks.
+fn shownTo(to: []const u8) []const u8 {
+    if (std.mem.eql(u8, to, mount.Stack.root.dev())) return "/";
+    if (std.mem.eql(u8, to, mount.Stack.linux.dev())) return "#L";
+    return to;
+}
+
 pub fn rootNoteOf(arena: std.mem.Allocator, r: NinePRoot) error{OutOfMemory}![]const u8 {
     var out: std.Io.Writer.Allocating = .init(arena);
     const w = &out.writer;
@@ -561,6 +578,18 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         }
         if (m.contained and m.kind != .dir) {
             err_msg.* = "contained needs a host directory";
+            return error.Conflict;
+        }
+        // design/fd-mounts.md: the descriptors are an .fd mount's, and it
+        // needs the one it reads.
+        // The messages are constant: Machine.init frees the arena on
+        // a conflict.
+        if (m.kind == .fd and m.fd == null) {
+            err_msg.* = "fd: an .fd mount needs one";
+            return error.Conflict;
+        }
+        if (m.kind != .fd and (m.fd != null or m.fd_write != null)) {
+            err_msg.* = if (m.fd_write != null) "fd_write: only an .fd mount takes it" else "fd: only an .fd mount takes it";
             return error.Conflict;
         }
         // A layer writes the host, which ephemeral never does.
@@ -1043,6 +1072,7 @@ fn memberBind(arena: std.mem.Allocator, in: Inputs, pol: Policy, m: mount.Mount,
                 .access = .@"9p",
                 .url = r,
                 .fd = m.fd,
+                .fd_write = m.fd_write,
                 .note = try rootNoteOf(arena, r),
             };
         },
@@ -1075,6 +1105,7 @@ fn upperBind(arena: std.mem.Allocator, m: mount.Mount, to: []const u8, linux: bo
                 .access = .up,
                 .url = r,
                 .fd = m.fd,
+                .fd_write = m.fd_write,
                 .note = try rootNoteOf(arena, r),
             };
         },

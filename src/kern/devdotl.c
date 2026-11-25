@@ -10,6 +10,8 @@
  *
  *	dotl/clone	opening it makes a conversation and opens its ctl
  *	dotl/N/ctl	fd N: the caller's fd N is the server connection;
+ *			fd R W: read the server from fd R, write it to fd W
+ *			(a pipe pair, design/fd-mounts.md);
  *			dial ADDR[,ADDR...]: dial the first that answers
  *			(tcp!, or unix! for h9's own root dials), and
  *			again on a drop if the server speaks 9P2000.L.Z;
@@ -42,9 +44,12 @@
  * since one shared with the guest's would hold its own mount.
  *
  * The conversation ends when the last of its ctl and data is closed: the
- * kproc is interrupted, and the server connection closed. A server
- * connection whose read can't be interrupted (a host fd through devlfd)
- * keeps the kproc until the server closes it.
+ * kproc is interrupted, and the server connection closed. A host
+ * descriptor through devlfd can't be interrupted in its read, so the
+ * kproc waits for it to be readable first, in a wait the close wakes
+ * (h9_hostwait, src/kern/rootdial.c): an embedder's descriptor
+ * (design/fd-mounts.md) stays open after the run, and a reader left in
+ * its read would take the next run's replies.
  */
 
 #include "u.h"
@@ -65,6 +70,10 @@ extern Chan	*h9_hstream_dial(void *mach, char *url);
 /* src/kern.zig: the calling thread's sandbox plan. */
 extern void	*h9_plan_get(void);
 extern Chan	*h9_unixchan(char *path);
+extern void	*h9_hostwait_new(void *fd);
+extern int	h9_hostwait(void *w);
+extern void	h9_hostwait_wake(void *w);
+extern void	h9_hostwait_free(void *w);
 extern void	h9_plan_set(void *plan);
 
 /* Implemented in Zig (src/dotl/kern.zig). */
@@ -115,6 +124,8 @@ struct Conv
 	char	err[ERRMAX];
 
 	Chan	*srv;		/* the server connection */
+	Chan	*srvw;		/* fd R W's: the one written to, or nil for srv */
+	void	*hw;		/* the reader's wait on a host descriptor, or nil */
 	void	*tr;		/* the translator */
 	Proc	*kp;		/* the reader, until it exits; under lk */
 	int	kpgone;		/* the reader has exited; under lk */
@@ -181,6 +192,8 @@ newconv(void)
 			cv->closing = 0;
 			cv->err[0] = 0;
 			cv->srv = nil;
+			cv->srvw = nil;
+			cv->hw = nil;
 			cv->tr = nil;
 			cv->kp = nil;
 			cv->kpgone = 0;
@@ -224,10 +237,10 @@ trunlock(Conv *cv)
 static void
 convdecref(Conv *cv)
 {
-	Chan *srv;
+	Chan *srv, *srvw;
 	Pgrp *pg;
 	char *addrs;
-	void *tr;
+	void *tr, *hw;
 
 	lock(&cv->lk);
 	if(--cv->refs > 0){
@@ -235,10 +248,14 @@ convdecref(Conv *cv)
 		return;
 	}
 	srv = cv->srv;
+	srvw = cv->srvw;
+	hw = cv->hw;
 	tr = cv->tr;
 	addrs = cv->addrs;
 	pg = cv->pg;
 	cv->srv = nil;
+	cv->srvw = nil;
+	cv->hw = nil;
 	cv->tr = nil;
 	cv->kp = nil;
 	cv->addrs = nil;
@@ -252,6 +269,9 @@ convdecref(Conv *cv)
 		h9_dotl_free(tr);
 	if(srv != nil)
 		cclose(srv);
+	if(srvw != nil)
+		cclose(srvw);
+	h9_hostwait_free(hw);
 }
 
 static int
@@ -280,6 +300,7 @@ hangup(Conv *cv, char *err)
 static void
 flushserver(Conv *cv)
 {
+	Chan *w;
 	uchar *buf;
 	long n;
 
@@ -297,7 +318,8 @@ flushserver(Conv *cv)
 		trunlock(cv);
 		if(n <= 0)
 			break;
-		devtab[cv->srv->type]->write(cv->srv, buf, n, 0);
+		w = cv->srvw != nil ? cv->srvw : cv->srv;
+		devtab[w->type]->write(w, buf, n, 0);
 	}
 	poperror();
 	qunlock(&cv->wl);
@@ -580,6 +602,9 @@ reader(void *a)
 			hangup(cv, err);
 			break;
 		}
+		/* woken only by the last close */
+		if(cv->hw != nil && !h9_hostwait(cv->hw))
+			error(Ehungup);
 		n = devtab[cv->srv->type]->read(cv->srv, buf, Bufsize, 0);
 		poperror();
 		if(n <= 0){
@@ -685,21 +710,35 @@ datawrite(Conv *cv, void *va, long n)
 	return n;
 }
 
-/* Starts the conversation on server connection c, which it takes. */
+/*
+ * Starts the conversation on server connection c, which it takes, and
+ * w, if not nil, for writes to the server, which it also takes.
+ */
 static void
-start(Conv *cv, Chan *c)
+start2(Conv *cv, Chan *c, Chan *w)
 {
 	char err[ERRMAX];
 	Proc *kp;
-	void *tr;
+	void *tr, *hw;
 
 	tr = h9_dotl_new(cv->mach, cv->serving ? 2 : !cv->nolz, cv->iduid, cv->iduid >= 0 ? cv->iduser : nil, err);
 	if(tr == nil){
 		cclose(c);
+		if(w != nil)
+			cclose(w);
 		error(err);
 	}
+	/*
+	 * A host descriptor's read can't be interrupted, so the reader
+	 * waits where a close can wake it.
+	 */
+	hw = nil;
+	if(devtab[c->type]->dc == 0x3C6)
+		hw = h9_hostwait_new(c->aux);
 	lock(&cv->lk);
 	cv->srv = c;
+	cv->srvw = w;
+	cv->hw = hw;
 	cv->tr = tr;
 	cv->started = 1;
 	cv->refs++;	/* the kproc's */
@@ -710,10 +749,18 @@ start(Conv *cv, Chan *c)
 	lock(&cv->lk);
 	if(!cv->kpgone){
 		cv->kp = kp;
-		if(cv->closing)
+		if(cv->closing){
 			procinterrupt(kp);
+			h9_hostwait_wake(cv->hw);
+		}
 	}
 	unlock(&cv->lk);
+}
+
+static void
+start(Conv *cv, Chan *c)
+{
+	start2(cv, c, nil);
 }
 
 static void
@@ -722,7 +769,7 @@ ctlwrite(Conv *cv, char *a, long n)
 	Cmdbuf *cb;
 	char *addrs;
 	Pgrp *pg;
-	Chan *c;
+	Chan *c, *w;
 
 	cb = parsecmd(a, n);
 	if(waserror()){
@@ -733,6 +780,17 @@ ctlwrite(Conv *cv, char *a, long n)
 		if(cv->started)
 			error("already connected");
 		start(cv, fdtochan(atoi(cb->f[1]), ORDWR, 1, 1));
+	}else if(cb->nf == 3 && strcmp(cb->f[0], "fd") == 0){
+		if(cv->started)
+			error("already connected");
+		c = fdtochan(atoi(cb->f[1]), OREAD, 1, 1);
+		if(waserror()){
+			cclose(c);
+			nexterror();
+		}
+		w = fdtochan(atoi(cb->f[2]), OWRITE, 1, 1);
+		poperror();
+		start2(cv, c, w);
 	}else if(cb->nf == 2 && strcmp(cb->f[0], "serve") == 0){
 		if(cv->started)
 			error("already connected");
@@ -995,6 +1053,7 @@ dotlclose(Chan *c)
 			cv->inuse = 0;
 			if((kp = cv->kp) != nil)
 				procinterrupt(kp);
+			h9_hostwait_wake(cv->hw);
 		}
 		unlock(&cv->lk);
 		convdecref(cv);
