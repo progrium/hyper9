@@ -32,8 +32,8 @@ The names appear in these places today:
 | --- | --- |
 | CLI | `--backend auto\|hvf\|kvm\|whp\|native\|emu`, with `v86` as an alias of `emu`; `--check` and `--version` list "backends" |
 | `Machine` API | `Machine.Options.backend`, `vmm.BackendKind`, `vmm.Backend`, and `error.BackendNotBuilt` |
-| Build | `-Dbackends` for `zig build integration` |
-| Environment | `H9_EMU_TIER`, `H9_EMU_DETERMINISTIC`, and `H9_EMU_NO_CODEGEN` |
+| Build | `-Dbackends` for `zig build integration`, which picks the engines the cases run on, not the ones built, and hands the first to `scripts/workloads.sh` as `H9_WL_BACKEND` |
+| Environment | `H9_EMU_TIER`, `H9_EMU_DETERMINISTIC`, `H9_EMU_NO_CODEGEN`, and `H9_EMU_CACHE`; `H9_WL_BACKEND` for the workloads script |
 | Source | `src/vmm.zig` and `src/vmm/`; `src/vmm/native.zig`, `native_abi.zig`, and `native_stub.zig`; `src/hcpu.zig`, `src/interp/`, `src/jit/`, and the CPUs in `src/vmm/`; `src/linux/`; `src/aout.zig`, `src/loader.zig`, and `src/syscall.zig` |
 | Prose | SPEC.md, `spec/`, README.md, MANUAL.md, DEVELOPING.md, AGENTS.md, `docs/`, the site, and comments |
 
@@ -45,7 +45,7 @@ The names appear in these places today:
 | --- | --- | --- |
 | personality | ABI | "The Linux ABI" and "the 9front ABI". A process has one, picked at exec. |
 | `vmm`, backend | engine | What runs a process's code and turns its system calls and faults into exits. "Backend" is kept for the GUI backends. |
-| `native` | `sud` | For Syscall User Dispatch, as `kvm` is for KVM. Prose says "the sud engine". |
+| `native` | `sud` | For Syscall User Dispatch, as `kvm` is for KVM. Prose says "the sud engine". Only the engine is renamed: "native" meaning "not the web host", as in the native namespace kernel, `-Dnskernel-hostfs`'s help, and native h9 next to `h9-node`, stays. |
 | `emu`, `v86` | `hcpu` | h9's own CPUs. h86, ha64, hx64, T0, and T1 keep their names. |
 | browser host, web host | web host | One term for the wasm32-wasi build, under Node or in a page. "Browser" is for what only a page has. |
 
@@ -61,8 +61,8 @@ Machine, kernel, root, plan, policy, shim, and the device names don't change.
 ### The `Machine` API, the build, and the environment
 
 - `Machine.Options.backend` becomes `Machine.Options.engine`. The `vmm` module becomes `engine`, with `engine.Choice` for `vmm.BackendKind`, `engine.Engine` for `vmm.Backend`, `engine.Kind`'s fields `sud` and `hcpu`, and `error.EngineNotBuilt`. There are no aliases: the Zig API isn't stable yet, and a compile error names the fix.
-- `-Dbackends` becomes `-Dengines`, with the new values. There's no `-Demu` to rename: [retire-unicorn](epoch-0/retire-unicorn.md) removed it.
-- `H9_EMU_TIER`, `H9_EMU_DETERMINISTIC`, and `H9_EMU_NO_CODEGEN` become `H9_HCPU_TIER`, `H9_HCPU_DETERMINISTIC`, and `H9_HCPU_NO_CODEGEN`, with no aliases. They're for tests and debugging.
+- `-Dbackends` becomes `-Dengines`, with the new values. It still only picks the engines `zig build integration` runs its cases on; which engines are built doesn't change. `scripts/workloads.sh`'s `H9_WL_BACKEND` becomes `H9_WL_ENGINE`, and its `--backend` becomes `--engine`. There's no `-Demu` to rename: [retire-unicorn](epoch-0/retire-unicorn.md) removed it.
+- `H9_EMU_TIER`, `H9_EMU_DETERMINISTIC`, `H9_EMU_NO_CODEGEN`, and `H9_EMU_CACHE` become `H9_HCPU_TIER`, `H9_HCPU_DETERMINISTIC`, `H9_HCPU_NO_CODEGEN`, and `H9_HCPU_CACHE`, with no aliases. They're for tests and debugging.
 - The page's `createMachine` doesn't take an engine, and doesn't change.
 
 ### The source tree
@@ -87,7 +87,7 @@ Identifiers and comments follow: `Backend` types and `backend` fields that mean 
 ### The spec and the docs
 
 - SPEC.md, `spec/`, README.md, MANUAL.md, DEVELOPING.md, AGENTS.md, `docs/`, and the site use the new names. SPEC.md's title, "Plan 9 executables on host hypervisors", stays until `baseline-1` restates what h9 is.
-- [spec/cli.md](../spec/cli.md) documents `--engine` and its aliases. `spec/host-js.md` becomes `spec/host-web.md`, and SPEC.md's index follows.
+- [spec/cli.md](../spec/cli.md) documents `--engine` and its aliases. `spec/host-js.md` becomes `spec/host-web.md`, and SPEC.md's index follows. The namespace kernel's part of it, which covers the native `libh9ns.a` and `h9ns.h` as well as the web build, moves to a file of its own, `spec/nskernel.md`, so the web host's file describes only the web host.
 - [README.md](README.md)'s list of what needs a proposal says "the engine interface" and "new engines, ABIs, devices, or root types".
 - [README.md](README.md) gains a short table of old names, so a reader of an epoch-0 proposal can find what "the native backend" or "the Linux personality" is called now.
 
@@ -112,7 +112,7 @@ Identifiers and comments follow: `Backend` types and `backend` fields that mean 
 
 **Why now, and why in one proposal.** A rename conflicts with every open branch, so it wants to land when the fewest are open, and it wants to land once. Doing it before `baseline-1` means the new baseline, and every proposal in epoch 1, is written in one vocabulary. Doing it at the start of epoch 1 instead would put the first proposals of the epoch in the old words, or make them wait.
 
-**Why not move the whole tree.** The larger layout (`kern/dev/`, `kern/ninep/`, `host/`, `machine/`, and `cmd/`) depends on where [namespace-kernel](namespace-kernel.md) draws the kernel's edge, which isn't decided. Moving files twice is worse than moving them once, later.
+**Why not move the whole tree.** The larger layout (`kern/dev/`, `kern/ninep/`, `host/`, `machine/`, and `cmd/`) is a reorganization with design questions of its own. [namespace-kernel](namespace-kernel.md) drew the kernel's edge for a namespace-only build (`src/nskernel.zig` and `src/kern/nstab.c`), but how the rest of the tree is cut along it isn't decided, and moving files twice is worse than moving them once, later.
 
 **Why not edit old proposals.** They're a record, and their slugs can't change anyway, so they'd be half-renamed at best. A table of old names in README.md costs less and doesn't touch an accepted body.
 
@@ -121,9 +121,9 @@ Identifiers and comments follow: `Backend` types and `backend` fields that mean 
 - **CLI.** `--engine` is new. `--backend`, `native`, `emu`, and `v86` keep working for one release and are then usage errors (exit 2). The `--check` and `--version` text changes, which matters to anything that parses it.
 - **Exit codes, `--print`, sandbox defaults, and the root tree.** Unchanged.
 - **`Machine.Options` and the Zig API.** `backend` becomes `engine`, and the `vmm` module becomes `engine`, with no aliases. [docs/embedding.md](../docs/embedding.md) is updated.
-- **Build.** `-Dbackends` becomes `-Dengines`. The `H9_EMU_*` variables become `H9_HCPU_*`.
+- **Build.** `-Dbackends` becomes `-Dengines`. The `H9_EMU_*` variables become `H9_HCPU_*`, and `H9_WL_BACKEND` becomes `H9_WL_ENGINE`.
 - **Open branches.** Every branch that touches `src/vmm/`, `src/linux/`, or the loaders needs a rebase. Git follows the renames, so the conflicts are in lines that say backend or personality.
-- **Links.** `spec/host-js.md` moves, and `check` doesn't cover links to `spec/`, so the PR that moves it greps for them.
+- **Links.** `spec/host-js.md` moves, and is split, and `check` doesn't cover links to `spec/`, so the PR that moves it greps for them.
 - **`third_party/`.** Unchanged.
 
 ## Security
@@ -152,7 +152,7 @@ Each step is one PR that changes names and nothing else, so its diff can be revi
 3. `emu` and `v86` to `hcpu`: the CLI values with their aliases, the `H9_EMU_*` variables, and the prose.
 4. `vmm` and backend to engine: `src/vmm.zig` and `src/vmm/` move, the hcpu files gather under `src/engine/hcpu/`, `--engine` arrives with `--backend` as its alias, and `Machine.Options.backend`, `-Dbackends`, and the identifiers follow.
 5. Personality to ABI: `src/abi/plan9/` and `src/abi/linux/`, the identifiers and comments, and the prose.
-6. The docs: `spec/host-js.md` to `spec/host-web.md`, "web host" throughout, the process list and the table of old names in [README.md](README.md), and the `areas` tag.
+6. The docs: `spec/host-js.md` to `spec/host-web.md`, with the namespace kernel split out to `spec/nskernel.md`, "web host" throughout, the process list and the table of old names in [README.md](README.md), and the `areas` tag.
 7. Check off Done criteria, and set `status: implemented` and `branch: [main]`.
 8. A release later, make `--backend`, `native`, `emu`, and `v86` usage errors.
 
