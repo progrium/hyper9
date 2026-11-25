@@ -1,6 +1,8 @@
 //! The server side of the 9P2000.L translator (design/epoch-0/dotl.md,
 //! "Serving 9P2000.L"): 9P2000.L from a Linux client on one side, 9P2000
-//! to the connection's exportfs on the other.
+//! to the connection's server on the other: the kernel's
+//! (src/kern/kserve.c, design/kernel-serve.md), which replaced exportfs,
+//! whose name the fields below keep.
 //!
 //! Like the client side it's a state machine over bytes, with no I/O of
 //! its own: the caller feeds it what the client sends (`fromClient`) and

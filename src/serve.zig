@@ -3,7 +3,8 @@
 //! thread that accepts connections and hands them to src/hstream.zig as
 //! accepted streams. Once a stream's first 9P message has passed the
 //! dialect slot it's queued here, and the machine's server Proc takes it
-//! from the queue (`next`) and runs an exportfs on it (src/machine.zig).
+//! from the queue (`next`) and hands it to the kernel's 9P server
+//! (src/kern/kserve.c, design/kernel-serve.md).
 //!
 //! The listeners are bound before the program starts, so a listen that
 //! fails ends the run before anything runs, and they're closed when it
@@ -26,8 +27,6 @@ const posix = builtin.os.tag != .windows and !web.enabled;
 
 /// Connections a machine serves at once, across its listeners.
 pub const max_conns = 32;
-/// Live processes one connection's exportfs and its children may have.
-pub const conn_procs = 8;
 
 /// A `--serve` address (`Machine.Options.serve`).
 pub const Listen = union(enum) {
@@ -176,7 +175,7 @@ pub const Server = struct {
     /// Connections: accepted, and not yet ended (`connEnded`, or a stream
     /// that ended before it was handed over).
     active: std.atomic.Value(u32) = .init(0),
-    /// Streams ready for an exportfs, oldest first.
+    /// Streams ready to serve, oldest first.
     lock: std.atomic.Mutex = .unlocked,
     ready: std.ArrayList(u32) = .empty,
     /// Bumped when `ready` grows or the server stops, for `next`.
@@ -226,7 +225,7 @@ pub const Server = struct {
         }
     }
 
-    /// The next stream ready for an exportfs, with its maker's reference
+    /// The next stream ready to serve, with its maker's reference
     /// (hstream.release drops it), or null once the server is stopping.
     /// Waits on the host, in short steps, so `stop` ends it.
     pub fn next(s: *Server) ?u32 {
@@ -241,7 +240,7 @@ pub const Server = struct {
         }
     }
 
-    /// A connection's processes have all exited, or it never got one.
+    /// A connection has ended, or never started.
     pub fn connEnded(s: *Server) void {
         _ = s.active.fetchSub(1, .acq_rel);
     }

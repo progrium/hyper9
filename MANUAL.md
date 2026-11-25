@@ -1636,12 +1636,12 @@ devices in Plan 9.
   it. Guest connections don't use the host's proxies.
 - **Serving the machine** ([serve](design/epoch-0/serve.md)). `--serve ADDR`
   makes h9 a 9P server while the program runs: `unix!/path`,
-  `tcp!host!port`, or `ws://host:port/path`, repeatable. Each connection
-  gets its own `exportfs` of the machine's namespace as the plan built it,
+  `tcp!host!port`, or `ws://host:port/path`, repeatable. h9's kernel
+  serves each connection the machine's namespace as the plan built it,
   so a client sees what the guest sees, under the same rules, but not binds
   the program makes later, and not `/net` unless `--serve-net` is given.
   `--serve-root PATH` exports a subtree instead of `/`, and `--write=none`
-  makes the export read-only (`exportfs -R`). With no program, h9 only
+  makes the export read-only. With no program, h9 only
   serves, until Ctrl-C, SIGTERM, a hangup, or `--timeout`, and then exits
   0. Port 0 picks a free port, and h9 prints it (`serve:
   tcp!127.0.0.1!53122`) before the program starts; the program finds every
@@ -1653,8 +1653,8 @@ devices in Plan 9.
   TOKEN` or `?token=TOKEN` (a browser can only use the query). Unix and TCP
   listeners don't authenticate, so every client acts as your user: keep TCP
   on loopback or a trusted network. A machine serves up to 32 connections,
-  each with up to 8 exportfs processes; serving's processes count against
-  `--pids` separately from the program's. Every listener also speaks
+  each with up to 32 requests running at once and 4096 open files; serving
+  runs no guest processes, so it doesn't count against `--pids`. Every listener also speaks
   9P2000.L ([dotl](design/epoch-0/dotl.md)), so Linux mounts it: `mount -t 9p
   -o trans=unix,version=9p2000.L /path/h9.sock /mnt`. A .L client sees
   regular files and directories only, with every file owned by your host

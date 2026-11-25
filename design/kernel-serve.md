@@ -1,12 +1,12 @@
 ---
 slug: kernel-serve
 title: A 9P server in the kernel
-status: draft
+status: implemented
 created: 2026-11-13
 authors: [progrium]
 depends: [serve, dotl, linux-chroot]
 areas: [kern, sandbox, web]
-branch: []
+branch: [main]
 ---
 
 # Proposal: A 9P server in the kernel
@@ -102,9 +102,9 @@ Step 3 of serve's Each connection becomes: the server Proc starts a kserve conne
 
 ## Done criteria
 
-- [ ] `h9 --serve unix!/tmp/h9.sock` serves with no `/bin/exportfs` anywhere in the namespace, and 9front's `mount` lists `/bin` through it.
-- [ ] The serve and dotl integration cases pass on kserve, as [virtual-loopback](virtual-loopback.md) leaves them.
-- [ ] Cases tagged `[kernel-serve]`:
+- [x] `h9 --serve unix!/tmp/h9.sock` serves with no `/bin/exportfs` anywhere in the namespace, and 9front's `mount` lists `/bin` through it.
+- [x] The serve and dotl integration cases pass on kserve, as [virtual-loopback](virtual-loopback.md) leaves them.
+- [x] Cases tagged `[kernel-serve]`:
   - `test "serving runs no guest process [kernel-serve]"`
   - `test "a blocking read doesn't hold up the connection [kernel-serve]"`
   - `test "Tflush interrupts a blocked read and answers after its reply [kernel-serve]"`
@@ -117,9 +117,9 @@ Step 3 of serve's Each connection becomes: the server Proc starts a kserve conne
   - `test "a union directory reads the same as through exportfs [kernel-serve]"`
   - `test "a fuzzed 9P stream fails the connection, not the machine [kernel-serve]"`
   - `test "--pids no longer counts serving [kernel-serve]"`
-  - `test "a served client's write reaches the machine's journal [kernel-serve, file-watch]"`
-  - `test ".fs/events is served at the attach root and isn't listed [kernel-serve, file-watch]"`
-- [ ] spec/ninep.md and spec/kernel.md describe kserve, and serve has an Updates note.
+  - [~] `test "a served client's write reaches the machine's journal [kernel-serve, file-watch]"`. Waived: file-watch's journal isn't built, so there are no Source 1 calls to make yet; file-watch adds them to kserve (see Updates).
+  - [~] `test ".fs/events is served at the attach root and isn't listed [kernel-serve, file-watch]"`. Waived: file-watch's serving isn't built (Implementation, step 5); it lands with file-watch.
+- [x] spec/ninep.md and spec/kernel.md describe kserve, and serve has an Updates note.
 
 ## Implementation
 
@@ -134,3 +134,17 @@ Step 3 of serve's Each connection becomes: the server Proc starts a kserve conne
 
 - **Serving `9P2000.L.Z`.** dotl answers `.L.Z` with `.L` because `Trebind` needs open by inode. kserve's channel-held fids may be enough to rebind by the qid a fid had, at least within a run. Its compounds (`Twalkgetattr`, `Treaddirattr`, `Tlopenatread`) are easy once the server is ours. A proposal of its own, after this one.
 - **Live namespaces in h9 machines.** serve's Open issues ask for exporting the program's live namespace, or one task's. With a source interface, that's a second source, not a second server.
+
+## Updates
+
+**2026-11-25, implementation.** Built as proposed, with these refinements:
+
+- **Workers.** A connection runs up to 32 requests at once, not 8, and queues up to 64 more before the reader stops reading. With 8, a client with 8 reads blocked on pipes stalled everything else on its connection, including the walks of its own root, which is worse than exportfs's failing the ninth. 32 keeps a connection usable with that many blocked readers, and each worker is a kernel thread (a coroutine on the web host), not a guest process. Past 32, requests still wait rather than fail.
+- **The read-only error** is exportfs `-R`'s "file system read only", not "permission denied", so dotl's translator still maps it to `EROFS` and clients see the same errors as before.
+- **Walks from an open fid.** 9P2000 doesn't walk an open fid, but dotl's translator does, as Linux's v9fs does with a directory fid it has read, and exportfs allowed it. A fid keeps the unopened channel it was walked to beside the opened one, and walks start there.
+- **namec's special cases** are reused through chan.c's own pieces, not through `up->dot` and `namec`: `Topen`, `Tstat`, `Tremove`, and `Twstat` cross a mount point with `findmount`, as namec's `domount` does, and `Tcreate` finds a union's `MCREATE` member with `createdir`, as `Acreate` does. namec with a relative name would read a first name starting with `#` as a device, and a fid has no name to give it for an open.
+- **Directory reads and stats** go through sysfile.c's own code, split so it takes a channel: `h9_chanread` is `kread`'s body and `h9_chanstat` is `fstat`'s, so a union reads and a mount point is named as through `read(2)` and `fstat(2)`.
+- **The workers' records.** A worker acts for the server Proc through a record of its own in the server Proc's machine (`h9_kprocshare`), with pid 0, so `/proc` doesn't list it and no note to a group reaches it, and the server Proc's plan, pages, and CPUs (`h9_kern_locals`).
+- **The root mark.** The served root's mark is its own flag beside linux-chroot's (`h9_fs_markroot` in `src/kern/linux.c`), since a chroot's mark also makes the process's root the Linux view, which turns on Linux link-following in walks.
+- **Two serve cases are replaced.** `clients exporting at the --pids cap don't stop the program's rfork [serve]` and `a connection past 8 blocking requests fails them without affecting another [serve]` tested what this proposal removes; `--pids no longer counts serving [kernel-serve]` and `a blocking read doesn't hold up the connection [kernel-serve]` take their places.
+- **file-watch.** The journal calls (Source 1) and `.fs/events` at the attach root wait for [file-watch](file-watch.md), which isn't built: kserve has no journal to call. file-watch's PR adds the calls at kserve's create, remove, `wstat`, write, and close-after-write, and the `.fs` walk at the attach root, with the two waived cases.

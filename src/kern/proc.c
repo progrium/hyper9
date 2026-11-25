@@ -1915,3 +1915,76 @@ h9_kern_closeexec(void)
 			sysclose(i);
 	}
 }
+
+/*
+ * kserve's kernel processes (kserve.c, design/kernel-serve.md) act for
+ * the process that started serving: each gets a record of its own in
+ * that process's machine, sharing its environment, so devices that look
+ * up the caller's machine (#ℓ, #s, #p) see the server's. Its pid is 0,
+ * so /proc doesn't list it and no pid finds it, and its note group is its
+ * own, so a note to a group never reaches it.
+ *
+ * h9_kprocsrc returns the calling process's record, referenced, for
+ * h9_kprocshare in the new kproc; h9_kprocput drops that reference.
+ */
+void*
+h9_kprocsrc(void)
+{
+	Hproc *h;
+
+	if(up == nil || (h = lookup(up)) == nil)
+		return nil;
+	incref(&h->ref);
+	return h;
+}
+
+void
+h9_kprocput(void *v)
+{
+	putproc(v);
+}
+
+int
+h9_kprocshare(void *v, char *text)
+{
+	Hproc *src, *h;
+
+	src = v;
+	if(src == nil || lookup(up) != nil)
+		return -1;
+	h = newhproc(up, text);
+	if(h == nil)
+		return -1;
+	h->mach = src->mach;
+	incref(&h->mach->ref);
+	h->ppid = src->pid;
+	if(src->egrp != nil){
+		h9_egrpincref(src->egrp);
+		h->egrp = src->egrp;
+	}
+	h->noteid = newnoteid(h->mach);
+	h->released = 1;	/* never counted among the machine's live processes */
+	enter(h);
+	return 0;
+}
+
+/* Ends what h9_kprocshare began, before the kproc's pexit. */
+void
+h9_kprocunshare(void)
+{
+	Hproc *h;
+	void *e;
+
+	if(up == nil || (h = lookup(up)) == nil)
+		return;
+	leave(h);
+	lock(&h->nlk);
+	h->p = nil;
+	freenotes(h);
+	unlock(&h->nlk);
+	e = h->egrp;
+	h->egrp = nil;
+	if(e != nil)
+		h9_egrpclose(e);
+	putproc(h);
+}

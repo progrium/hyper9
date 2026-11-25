@@ -77,7 +77,7 @@ A host program that starts with `#!` runs as a guest program by its guest path (
 | `--write none\|scope\|ephemeral\|overlay` | Deny writes; persist only writable paths (`scope`); `scope` plus a copy-on-write overlay over the root, discarded at exit (`overlay`, the default); or make the root and writable paths overlays in memory, discarded at exit (`ephemeral`) |
 | `--net disable\|outbound\|enable` | Network policy: mask `#I`, refuse `announce` (the default profile's default), or allow it |
 | `--net-allow PATTERN` (repeatable) | Allows `connect` only to matching addresses, and `cs` lookups only of matching names (`proto!host!port`) |
-| `--serve unix!PATH\|tcp!HOST!PORT\|ws://HOST:PORT[/PATH]` (repeatable) | Serves the machine's namespace over 9P while the program runs, one `exportfs` per connection (see Serving). Port 0 picks a free port, printed as `serve: ADDR`. With no program, the run only serves. On the browser host, exit 2; an address that can't be listened on is exit 125 |
+| `--serve unix!PATH\|tcp!HOST!PORT\|ws://HOST:PORT[/PATH]` (repeatable) | Serves the machine's namespace over 9P while the program runs, from the kernel's 9P server (see Serving). Port 0 picks a free port, printed as `serve: ADDR`. With no program, the run only serves. On the browser host, exit 2; an address that can't be listened on is exit 125 |
 | `--serve-root PATH` | The guest path each connection exports, absolute. `/` by default |
 | `--serve-token @FILE` | A token, the file's one word, that WebSocket listeners require as `Authorization: Bearer TOKEN` or `?token=TOKEN`. A missing file is exit 125 |
 | `--serve-origin ORIGIN` (repeatable) | An `Origin` WebSocket listeners accept; `*` for any, which needs `--serve-token`. A request with no `Origin` is accepted |
