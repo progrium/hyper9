@@ -15,13 +15,18 @@
 // makes, and the page answers { type: 'cred-reply', id, result } or
 // { type: 'cred-reply', id, error }.
 //
+// Start's `ports` is an object from names to MessagePorts, and `serve` a
+// list of ports to serve the machine on (design/port-streams.md); the
+// page sends { type: 'add-port', name, port }, { type: 'remove-port',
+// name }, and { type: 'serve', port } at any time.
+//
 // With a canvas (design/epoch-0/browser-gfx.md), start's gfx is { canvas,
 // width, height }, the OffscreenCanvas and the screen's size, and the page
 // sends { type: 'gfx', ev }, { type: 'gfx-paste', text } and
 // { type: 'gfx-size', width, height }; the Worker sends { type: 'cursor',
 // data } and { type: 'snarf', text }.
 
-import { run, Panic, GfxHost, canDrawInWorker, mountFlag } from './h9-web.js';
+import { run, Panic, GfxHost, canDrawInWorker, mountFlag, Ports } from './h9-web.js';
 import { parseRoot, putNode, wasiImports } from './wasi-mem.js';
 
 const post = (m, t) => self.postMessage(m, t);
@@ -59,6 +64,10 @@ const host = {
 
 let gfx = null;
 
+// The machine's ports (design/port-streams.md).
+const ports = new Ports();
+const portOp = (f) => { try { f(); } catch (e) { console.error(`h9: ${e.message}`); } };
+
 // The tree WASI serves, once loaded, and puts that came before it, which
 // go under the first archive's directory, putAt.
 let tree = null;
@@ -81,7 +90,11 @@ const askPage = (url, failed, helper) => new Promise((resolve, reject) => {
   post({ type: 'cred', id, url, failed, helper });
 });
 
-async function start({ argv, env = {}, mounts = [], tty = false, gfx: canvas, credentials = false }) {
+async function start({ argv, env = {}, mounts = [], tty = false, gfx: canvas, credentials = false, ports: given = {}, serve = [], serving = false, serveNet = false }) {
+  ports.serving = serving;
+  ports.serveNet = serveNet;
+  for (const [name, port] of Object.entries(given)) portOp(() => ports.add(name, port));
+  for (const port of serve) ports.serve(port);
   if (canvas) {
     if (!canDrawInWorker()) throw new Error("this browser can't draw from a Worker");
     gfx = new GfxHost({ ...canvas, post });
@@ -120,6 +133,7 @@ async function start({ argv, env = {}, mounts = [], tty = false, gfx: canvas, cr
     host,
     gfx,
     credentials: credentials ? askPage : undefined,
+    ports,
     log: (m) => console.log(m),
   });
 }
@@ -143,6 +157,9 @@ self.onmessage = ({ data: m }) => {
       if (m.error != null) w?.reject(new Error(m.error)); else w?.resolve(m.result);
       break;
     }
+    case 'add-port': portOp(() => ports.add(m.name, m.port)); break;
+    case 'remove-port': ports.remove(m.name); break;
+    case 'serve': ports.serve(m.port); break;
     case 'interrupt': raise(1); break;
     case 'hangup': raise(2); break;
     case 'gfx': gfx?.input(m.ev); break;

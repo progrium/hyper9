@@ -6,7 +6,9 @@
 import fs from 'node:fs';
 import { spawn } from 'node:child_process';
 import { WASI } from 'node:wasi';
-import { run, haveJSPI, Panic } from './h9-web.js';
+import { pathToFileURL } from 'node:url';
+import { resolve } from 'node:path';
+import { run, haveJSPI, Panic, Ports } from './h9-web.js';
 
 const dir = new URL('.', import.meta.url);
 if (!haveJSPI) {
@@ -90,6 +92,24 @@ const credentials = (url, failed, helper) => !helper ? null : new Promise((resol
   p.stdin.end(failed ? `${failed}\n` : '');
 });
 
+// Ports (design/port-streams.md): H9_NODE_PORTS names an ES module whose
+// default export is called with the machine's Ports before it starts, to
+// add ports by name (ports.add), set ports.serving and ports.serveNet and
+// hand it ports to serve (ports.serve), from worker_threads' MessageChannels.
+// It may return a function, called once the machine ends. The integration
+// cases' is tests/web/ports.mjs.
+const ports = new Ports();
+let portsDone = null;
+if (process.env.H9_NODE_PORTS) {
+  try {
+    const mod = await import(pathToFileURL(resolve(process.env.H9_NODE_PORTS)).href);
+    portsDone = (await mod.default(ports)) ?? null;
+  } catch (e) {
+    console.error(`h9: H9_NODE_PORTS: ${e?.message ?? e}`);
+    process.exit(125);
+  }
+}
+
 const env = { ...process.env, PWD: process.cwd() };
 const wasi = new WASI({
   version: 'preview1',
@@ -117,6 +137,7 @@ try {
     },
     host,
     credentials,
+    ports,
     // The integration suite's stack depths, for the default stack size.
     stats: process.env.H9_TEST_STACK_LOG ? ({ maxStack }) => fs.appendFileSync(process.env.H9_TEST_STACK_LOG, `${maxStack}\n`) : undefined,
   });
@@ -124,6 +145,7 @@ try {
   console.error(e instanceof Panic ? `h9: panic: ${e.message}` : e);
   code = 125;
 }
+try { await portsDone?.(); } catch {}
 if (stdin.isTTY) stdin.setRawMode(false);
 // Ends by letting the event loop run out rather than by process.exit,
 // which can deadlock in V8 when a background compile is waiting for a GC

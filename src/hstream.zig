@@ -22,6 +22,14 @@
 //! `h9_ws_*` imports below; each stream's reader is a coroutine parked
 //! in `ws_recv`. ws.zig, TLS, proxies and the keepalive aren't used there.
 //!
+//! Ports (design/port-streams.md) are the web host's third kind: a
+//! `MessagePort` the page handed the machine by name, carrying one 9P
+//! message per message. h9 opens one for a `port!NAME` mount or a
+//! `/net/port` conversation through `js.port_open`, which puts it in the
+//! JS host's socket table, so it's read and written as a WebSocket is,
+//! with no handshake. A port the page serves the machine on comes from
+//! `js.port_accept` as an accepted stream.
+//!
 //! Accepted streams (design/epoch-0/serve.md) are the other direction: a
 //! connection a `--serve` listener accepted, handed to the kernel the same
 //! way. A WebSocket one (`server`) does the server's side of the
@@ -108,6 +116,18 @@ const js = struct {
     /// error in `buf` (length in `len`).
     extern "h9" fn ws_status(id: i32, buf: [*]u8, n: u32, len: *u32) u32;
     extern "h9" fn ws_free(id: i32) void;
+    /// Opens the page's port `name` (design/port-streams.md) as an entry
+    /// in the socket table, which the calls above take: its id, or -1 if
+    /// there's no port by that name, -2 if it's in use, -3 if it has been
+    /// opened and closed.
+    extern "h9" fn port_open(name: [*]const u8, n: u32) i32;
+    /// Waits for the next port the page serves the machine on, opened:
+    /// its id, or -1 once `port_stop` was called. Suspending.
+    extern "h9" fn port_accept() i32;
+    extern "h9" fn port_stop() void;
+    /// What the embedder serves on ports: bit 0 set to serve the machine
+    /// on the ports it hands over, bit 1 to export `/net` with it.
+    extern "h9" fn port_serving() u32;
 };
 
 pub const State = enum(u8) { idle, connecting, established, closed };
@@ -361,6 +381,10 @@ pub const Stream = struct {
     announced: bool = false,
     /// The guest's conversation number, or null for a host-made stream.
     conv: ?u8,
+    /// A port (design/port-streams.md): `url` is `port!NAME`, and the JS
+    /// host's port_open opens it, with no handshake. A conversation is a
+    /// port's from its clone, in `/net/port`.
+    port: bool = false,
     /// Under the table lock: references (leaf calls in progress, the
     /// thread, the maker) and C opens. A conversation is listed while it
     /// has opens.
@@ -670,6 +694,21 @@ pub fn openHost(owner: usize, url: []const u8, o: HostOptions) OpenError!u32 {
     return s.id;
 }
 
+/// Starts opening the page's port `name` for machine `owner`
+/// (design/port-streams.md), as `openHost` starts a connect: its id, with
+/// a reference the caller drops with `release`. Only the web host has
+/// ports; elsewhere it's error.Unsupported.
+pub fn openPort(owner: usize, name: []const u8) (OpenError || error{Unsupported})!u32 {
+    if (!web.enabled) return error.Unsupported;
+    if (!validPortName(name)) return error.BadUrl;
+    const s = newStream(owner, null) orelse return error.TooManyStreams;
+    errdefer unref(s);
+    s.port = true;
+    s.url = try std.fmt.allocPrint(gpa, port_prefix ++ "{s}", .{name});
+    try start(s);
+    return s.id;
+}
+
 fn dupeHelper(h: cred.Helper) error{OutOfMemory}!cred.Helper {
     const pattern = try gpa.dupe(u8, h.pattern);
     errdefer gpa.free(pattern);
@@ -871,6 +910,12 @@ fn runAccepted(s: *Stream) void {
         if (!handed) unref(s); // the maker's
         unref(s); // the thread's
     }
+    if (web.enabled and s.port) {
+        // A served port (design/port-streams.md): no handshake.
+        webReadLoop(s);
+        finish(s);
+        return;
+    }
     if (s.mode == .server) acceptUpgrade(s, sv.ws.?) catch {
         finish(s);
         return;
@@ -925,6 +970,64 @@ fn acceptUpgrade(s: *Stream, pol: ws.ServerPolicy) error{Refused}!void {
             }
         },
     }
+}
+
+/// The next port the page hands the machine to serve
+/// (design/port-streams.md), opened in the JS host's socket table, or null
+/// once `stopPorts` was called. Web host only.
+pub fn acceptPort() ?i32 {
+    if (!web.enabled) return null;
+    const id = web.coro.blocking(js.port_accept, .{});
+    return if (id < 0) null else id;
+}
+
+/// Whether the embedder serves the machine on ports (design/port-streams.md),
+/// and with `/net`.
+pub fn portServing() struct { serve: bool, net: bool } {
+    if (!web.enabled) return .{ .serve = false, .net = false };
+    const b = js.port_serving();
+    return .{ .serve = b & 1 != 0, .net = b & 2 != 0 };
+}
+
+/// Ends `acceptPort`'s wait, as the machine stops serving.
+pub fn stopPorts() void {
+    if (web.enabled) js.port_stop();
+}
+
+/// Hangs up and frees a port `acceptPort` gave that won't be served.
+pub fn dropPort(id: i32) void {
+    if (web.enabled) js.ws_free(id);
+}
+
+/// Takes a port `acceptPort` gave, `sock`, for the machine `owner`, as
+/// `openAccepted` takes a connection: its thread waits for the first 9P
+/// message and calls `served.ready` if the dialect slot takes it. The
+/// stream holds the port from here, even on error.
+pub fn openAcceptedPort(owner: usize, pages: ?*const kern.Pages, sock: i32, served: *const Served) OpenError!void {
+    const s = newStreamPages(owner, null, pages) orelse {
+        dropPort(sock);
+        return error.TooManyStreams;
+    };
+    s.port = true;
+    s.served = served;
+    s.sock = sock;
+    s.url = gpa.dupe(u8, "port") catch {
+        finish(s);
+        unref(s);
+        return error.OutOfMemory;
+    };
+    s.opened = true;
+    s.state.store(.established, .release);
+    lockTable();
+    s.refs += 1;
+    table_lock.unlock();
+    s.thread = web.Thread.spawn(.{}, runAccepted, .{s}) catch {
+        finish(s);
+        unref(s); // the thread's
+        unref(s); // the maker's
+        return error.SystemResources;
+    };
+    s.thread.?.detach();
 }
 
 /// Reads an accepted unix or TCP connection's bytes until it ends.
@@ -1081,6 +1184,7 @@ fn adopt(s: *Stream, c: *Conn) error{Canceled}!void {
 }
 
 fn connect(s: *Stream) ConnectError!void {
+    if (web.enabled and s.port) return portConnect(s);
     if (web.enabled) return webConnect(s);
     const url = ws.Url.parse(s.url) catch unreachable;
     const proxy: ?ws.Proxy = if (s.proxy) |p| ws.Proxy.parse(p) catch return error.BadProxy else null;
@@ -1275,6 +1379,46 @@ fn webFail(s: *Stream, comptime fmt: []const u8, args: anytype) ConnectError {
     return error.Canceled;
 }
 
+/// `connect` for a port (design/port-streams.md): the JS host opens the
+/// page's port by name at once, and it's established, with no handshake.
+fn portConnect(s: *Stream) ConnectError!void {
+    const name = portName(s.url);
+    const id = js.port_open(name.ptr, @intCast(name.len));
+    if (id < 0) return webFail(s, "{s}", .{switch (id) {
+        -2 => "port in use",
+        -3 => "port closed",
+        else => "no such port",
+    }});
+    const io = theIo();
+    s.wlock.lockUncancelable(io);
+    defer s.wlock.unlock(io);
+    s.lockS();
+    defer s.lock.unlock();
+    if (s.cancel) {
+        js.ws_free(id);
+        return error.Canceled;
+    }
+    // From here `finish` frees it.
+    s.sock = id;
+    s.opened = true;
+    s.state.store(.established, .release);
+    wake(s.id);
+}
+
+/// The name in a port's `port!NAME`.
+fn portName(url: []const u8) []const u8 {
+    return if (std.mem.startsWith(u8, url, port_prefix)) url[port_prefix.len..] else url;
+}
+
+const port_prefix = "port!";
+
+/// Whether `name` is a port's name: letters, digits, `-`, `_`, and `.`.
+pub fn validPortName(name: []const u8) bool {
+    if (name.len == 0 or name.len > 64) return false;
+    for (name) |c| if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '_' and c != '.') return false;
+    return true;
+}
+
 /// Asks the JS host for a host-made stream's credential (`js.ws_cred`).
 fn webCred(s: *Stream, failed: []const u8, out: *[8192]u8) ConnectError!i32 {
     var argv: std.ArrayList(u8) = .empty;
@@ -1387,9 +1531,12 @@ fn webReadLoop(s: *Stream) void {
         if (info & 1 == 0) {
             s.lockS();
             const ok = s.queueLocked(&s.data, chunk);
+            // A served port's first message goes through the dialect slot.
+            const first = ok and s.firstLocked();
             s.lock.unlock();
             wake(s.id);
             if (!ok) return;
+            if (first) s.announce();
             continue;
         }
         if (s.conv == null) return protocolError(s, ws.Close.invalid_data, "text message on a 9P stream");
@@ -1667,7 +1814,10 @@ fn putErr(err: [*]u8, msg: []const u8) void {
     err[n] = 0;
 }
 
-fn h9_hstream_clone(mach: ?*anyopaque, err: [*]u8) callconv(.c) c_long {
+/// Makes a conversation for `mach`: a WebSocket's (`/net/ws`), or with
+/// `port` set a port's (`/net/port`, design/port-streams.md). The two
+/// share the machine's conversation numbers.
+fn h9_hstream_clone(mach: ?*anyopaque, port: c_int, err: [*]u8) callconv(.c) c_long {
     const owner = @intFromPtr(mach);
     var used: [max_convs]bool = @splat(false);
     var n: u8 = 0;
@@ -1687,6 +1837,7 @@ fn h9_hstream_clone(mach: ?*anyopaque, err: [*]u8) callconv(.c) c_long {
         putErr(err, "no free devices");
         return -1;
     };
+    s.port = port != 0;
     lockTable();
     s.opens = 1;
     table_lock.unlock();
@@ -1699,6 +1850,13 @@ fn h9_hstream_convno(id: c_ulong) callconv(.c) c_int {
     return if (s.conv) |cv| cv else -1;
 }
 
+/// Whether stream `id` is a port's (design/port-streams.md).
+fn h9_hstream_isport(id: c_ulong) callconv(.c) c_int {
+    const s = get(id) orelse return 0;
+    defer unref(s);
+    return @intFromBool(s.port);
+}
+
 fn h9_hstream_conv(mach: ?*anyopaque, n: c_int) callconv(.c) c_long {
     const owner = @intFromPtr(mach);
     lockTable();
@@ -1707,14 +1865,15 @@ fn h9_hstream_conv(mach: ?*anyopaque, n: c_int) callconv(.c) c_long {
     return -1;
 }
 
-/// Writes the conversation numbers `mach` has, in order; returns how many.
-fn h9_hstream_convs(mach: ?*anyopaque, out: [*]c_int, max: c_int) callconv(.c) c_int {
+/// Writes the numbers of the WebSocket conversations `mach` has, or with
+/// `port` set its ports', in order; returns how many.
+fn h9_hstream_convs(mach: ?*anyopaque, port: c_int, out: [*]c_int, max: c_int) callconv(.c) c_int {
     const owner = @intFromPtr(mach);
     var have: [max_convs]bool = @splat(false);
     {
         lockTable();
         defer table_lock.unlock();
-        for (table) |slot| if (slot) |s| if (s.owner == owner and s.listed) if (s.conv) |cv| {
+        for (table) |slot| if (slot) |s| if (s.owner == owner and s.listed and s.port == (port != 0)) if (s.conv) |cv| {
             have[cv] = true;
         };
     }
@@ -1750,8 +1909,9 @@ fn h9_hstream_decref(id: c_ulong) callconv(.c) void {
 }
 
 /// A `ctl` message: `header Name: value`, `connect url [subprotocol...]`
-/// or `hangup`. Returns 0, 1 when a connect has started (the caller waits
-/// for it), or -1 with the error.
+/// or `hangup`, or on a port's conversation `open NAME` or `hangup`.
+/// Returns 0, 1 when a connect has started (the caller waits for it), or
+/// -1 with the error.
 fn h9_hstream_ctl(id: c_ulong, buf: [*]const u8, n: c_long, err: [*]u8) callconv(.c) c_long {
     const s = get(id) orelse {
         putErr(err, "i/o on hungup channel");
@@ -1769,6 +1929,25 @@ fn h9_hstream_ctl(id: c_ulong, buf: [*]const u8, n: c_long, err: [*]u8) callconv
     if (s.state.load(.acquire) != .idle) {
         putErr(err, "already connected");
         return -1;
+    }
+    if (s.port) {
+        if (!std.mem.eql(u8, verb, "open")) {
+            putErr(err, "bad process or channel control request");
+            return -1;
+        }
+        if (!validPortName(arg)) {
+            putErr(err, "bad port name");
+            return -1;
+        }
+        s.url = std.fmt.allocPrint(gpa, port_prefix ++ "{s}", .{arg}) catch {
+            putErr(err, "no memory");
+            return -1;
+        };
+        start(s) catch {
+            putErr(err, "can't start a thread");
+            return -1;
+        };
+        return 1;
     }
     if (std.mem.eql(u8, verb, "header")) {
         if (web.enabled) {
@@ -2062,6 +2241,7 @@ comptime {
     if (kern.available) {
         @export(&h9_hstream_clone, .{ .name = "h9_hstream_clone" });
         @export(&h9_hstream_convno, .{ .name = "h9_hstream_convno" });
+        @export(&h9_hstream_isport, .{ .name = "h9_hstream_isport" });
         @export(&h9_hstream_conv, .{ .name = "h9_hstream_conv" });
         @export(&h9_hstream_convs, .{ .name = "h9_hstream_convs" });
         @export(&h9_hstream_incref, .{ .name = "h9_hstream_incref" });

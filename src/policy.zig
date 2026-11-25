@@ -155,9 +155,11 @@ pub const Bind = struct {
 /// A 9P server as the root (design/epoch-0/ninep-roots.md): the machine
 /// connects to it, posts the connection as `#s/root` and mounts that at /.
 pub const NinePRoot = struct {
-    kind: enum { tcp, unix, ws },
-    /// The dial string, `tcp!host!port` or `unix!path`, or a `ws://` or
-    /// `wss://` URL (design/epoch-0/websocket-9p.md), for the plan and errors.
+    kind: enum { tcp, unix, ws, port },
+    /// The dial string, `tcp!host!port` or `unix!path`, a `ws://` or
+    /// `wss://` URL (design/epoch-0/websocket-9p.md), or on the web host
+    /// a page's port, `port!NAME` (design/port-streams.md), for the plan
+    /// and errors.
     addr: []const u8,
     /// The attach name.
     spec: []const u8 = "",
@@ -198,7 +200,9 @@ pub const Serve = struct {
     pub const Listener = struct {
         /// The address as `--serve` takes it.
         addr: []const u8,
-        kind: enum { unix, tcp, ws },
+        /// `port`: the ports the page hands the machine to serve, on the
+        /// web host (design/port-streams.md).
+        kind: enum { unix, tcp, ws, port },
     };
     listeners: []const Listener,
     /// The guest path each connection exports.
@@ -900,7 +904,8 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         if (!(is_root and root_overlay)) try caveats.append(arena, try std.fmt.allocPrint(arena, "writes to {s} go to its server, which decides what can be written", .{what}));
         const plain = switch (r.kind) {
             .tcp => true,
-            .unix => false,
+            // A port never leaves the page (design/port-streams.md).
+            .unix, .port => false,
             .ws => !std.mem.startsWith(u8, r.addr, "wss://"),
         };
         if (plain) try caveats.append(arena, try std.fmt.allocPrint(arena, "{s}'s connection isn't encrypted", .{what}));
@@ -941,7 +946,9 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     if (serve_plan) |*sv| {
         // Unix sockets rely on file permissions, and TCP has nothing, so
         // both are listed, as is a WebSocket listener without a token.
-        for (sv.listeners) |l| if (l.kind != .ws or !sv.token) {
+        // A port is the page's, which made it and decided who's on the
+        // other end (design/port-streams.md).
+        for (sv.listeners) |l| if (l.kind != .port and (l.kind != .ws or !sv.token)) {
             try caveats.append(arena, try std.fmt.allocPrint(arena, "served without authentication on {s}", .{l.addr}));
         };
         if (sv.net) for (sv.listeners) |l| {
@@ -978,7 +985,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
 /// Whether a URL is a WebSocket's, or will probe for one.
 fn isWs(url: []const u8) bool {
     const s = mount.scheme(url) orelse return true;
-    return !std.mem.eql(u8, s, "tcp") and !std.mem.eql(u8, s, "unix");
+    return !std.mem.eql(u8, s, "tcp") and !std.mem.eql(u8, s, "unix") and !std.mem.eql(u8, s, "port");
 }
 
 /// The 9P connection a `--url` mount makes (design/mounts.md, "URLs"):
@@ -986,7 +993,8 @@ fn isWs(url: []const u8) bool {
 /// socket at PATH, and `ws://` and `wss://` as they are. `http://` and
 /// `https://` probe for a WebSocket, and fall back to a static dotfs
 /// tree; a URL without a scheme is `http://` for a loopback host and
-/// `https://` for any other.
+/// `https://` for any other. `port://NAME[/SPEC]` is the page's port
+/// NAME (design/port-streams.md), `port!NAME`.
 pub fn ninePConn(arena: std.mem.Allocator, m: mount.Mount) error{OutOfMemory}!NinePRoot {
     var r: NinePRoot = .{ .kind = .ws, .addr = m.src, .user = m.user, .headers = m.headers, .ca = m.ca };
     const s = mount.scheme(m.src);
@@ -1005,6 +1013,11 @@ pub fn ninePConn(arena: std.mem.Allocator, m: mount.Mount) error{OutOfMemory}!Ni
         } else if (std.mem.eql(u8, sc, "unix")) {
             r.kind = .unix;
             r.addr = try std.fmt.allocPrint(arena, "unix!{s}", .{rest});
+        } else if (std.mem.eql(u8, sc, "port")) {
+            const slash = std.mem.indexOfScalar(u8, rest, '/') orelse rest.len;
+            r.kind = .port;
+            r.addr = try std.fmt.allocPrint(arena, "port!{s}", .{rest[0..slash]});
+            if (slash < rest.len) r.spec = rest[slash + 1 ..];
         } else if (std.mem.eql(u8, sc, "http")) {
             r.addr = try std.fmt.allocPrint(arena, "ws://{s}", .{rest});
             r.http = m.src;
@@ -1055,7 +1068,8 @@ fn memberBind(arena: std.mem.Allocator, in: Inputs, pol: Policy, m: mount.Mount,
             return .{
                 // The URL h9 connects to, so a replay needs no scheme
                 // rule: an `http` one probes again.
-                .from = if (r.kind == .ws) r.http orelse r.addr else m.src,
+                // A port by its dial string, which a replay mounts.
+                .from = if (r.kind == .ws) r.http orelse r.addr else if (r.kind == .port) r.addr else m.src,
                 .to = to,
                 .flag = flag,
                 .mount = true,
@@ -1089,7 +1103,7 @@ fn upperBind(arena: std.mem.Allocator, m: mount.Mount, to: []const u8, linux: bo
             var r = if (m.kind == .url) try ninePConn(arena, m) else NinePRoot{ .kind = .unix, .addr = "fd", .spec = m.spec orelse "", .user = m.user };
             if (m.index) |ix| r.index = .{ .given = .{ .from = ix } };
             return .{
-                .from = if (r.kind == .ws) r.http orelse r.addr else m.src,
+                .from = if (r.kind == .ws) r.http orelse r.addr else if (r.kind == .port) r.addr else m.src,
                 .to = to,
                 .mount = true,
                 .upper = true,

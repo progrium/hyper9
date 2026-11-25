@@ -175,8 +175,11 @@ const nextTask = (() => {
  *   is a URL to connect to instead, such as one with a single-use ticket
  *   in its query. A browser's WebSocket can't send headers, so there only
  *   `url` works. Throwing fails the handshake with the error's message.
+ * - ports: the machine's MessagePorts (design/port-streams.md), a Ports
+ *   or an object from names to ports, which `port!NAME` and
+ *   `port://NAME` name; and its served ports, from Ports.serve.
  */
-export async function run({ h9, wasi, host, log = console.error, stats, gfx, credentials }) {
+export async function run({ h9, wasi, host, log = console.error, stats, gfx, credentials, ports }) {
   if (!haveJSPI) throw new Error('this browser lacks JavaScript Promise Integration');
   const h9mod = h9 instanceof WebAssembly.Module ? h9 : new WebAssembly.Module(h9);
   const h9pages = importedMemoryPages(h9 instanceof WebAssembly.Module ? new Uint8Array(0) : h9);
@@ -235,7 +238,7 @@ export async function run({ h9, wasi, host, log = console.error, stats, gfx, cre
     wait_signal: new WebAssembly.Suspending(() => host.waitSignal()),
     stop_signals: () => host.stopSignals(),
     set_raw: (on) => host.setRaw(!!on),
-    ...wsImports(() => mem, str, credentials),
+    ...wsImports(() => mem, str, credentials, ports instanceof Ports ? ports : new Ports(ports)),
     ...(jit ? { jit_compile: jit.jit_compile, jit_drop: jit.jit_drop } : {}),
     ...(gfx ?? noGfx).imports(() => mem),
   };
@@ -273,7 +276,112 @@ function credText(r) {
   return lines(r).join('\n');
 }
 
-function wsImports(memory, str, credentials) {
+// Ports (design/port-streams.md): a MessagePort carries one 9P
+// connection, one 9P message per message, in an ArrayBuffer that's
+// transferred. h9 opens a port by name with port_open, which makes an
+// entry in the WebSockets' table, so ws_recv, ws_send, ws_close,
+// ws_status, and ws_free work on it as on a socket; port_accept hands
+// h9 the next port the page serves the machine on.
+const portName = /^[A-Za-z0-9._-]+$/;
+const maxPortMessage = 16 << 20;
+
+/**
+ * A machine's ports, by name. A name is letters, digits, `-`, `_`, and
+ * `.`. A port h9 hasn't opened can be replaced; one it has can't, and is
+ * opened once: a closed one stays spent until it's removed or replaced.
+ */
+export class Ports {
+  constructor(init) {
+    this.map = new Map();
+    this.served = [];
+    this.serveWait = null;
+    this.stopped = false;
+    // Whether the machine serves on ports, and with /net: set before it
+    // starts (createMachine's serve and serveNet).
+    this.serving = false;
+    this.serveNet = false;
+    if (init instanceof Map) for (const [k, v] of init) this.add(k, v);
+    else for (const [k, v] of Object.entries(init ?? {})) this.add(k, v);
+  }
+
+  /** Adds `port` as `name`, replacing a port h9 hasn't opened. */
+  add(name, port) {
+    if (typeof name !== 'string' || !portName.test(name)) throw new Error(`port ${JSON.stringify(name)}: a name is letters, digits, -, _, and .`);
+    if (!port || typeof port.postMessage !== 'function') throw new Error(`port ${name}: not a MessagePort`);
+    if (this.map.get(name)?.state === 'open') throw new Error(`port ${name}: in use`);
+    this.map.set(name, { port, state: 'ready', sock: null });
+  }
+
+  /** The first free name of the form `mountN`. */
+  freeName(prefix = 'mount') {
+    for (let i = 0; ; i++) if (!this.map.has(`${prefix}${i}`)) return `${prefix}${i}`;
+  }
+
+  /** Removes `name`, hanging up whatever uses it. */
+  remove(name) {
+    const e = this.map.get(name);
+    if (!e) return false;
+    this.map.delete(name);
+    if (e.sock) e.sock.end(1001, 'port removed', true);
+    else try { e.port.close(); } catch {}
+    return true;
+  }
+
+  /** Hands `port` to the machine to serve (port_accept). */
+  serve(port) {
+    if (!port || typeof port.postMessage !== 'function') throw new Error('serve: not a MessagePort');
+    this.served.push(port);
+    const w = this.serveWait;
+    this.serveWait = null;
+    w?.();
+  }
+
+  /** Ends port_accept's wait, as the machine ends. */
+  stop() {
+    this.stopped = true;
+    const w = this.serveWait;
+    this.serveWait = null;
+    w?.();
+  }
+}
+
+// A socket-table entry for an opened port.
+function portSock(port, poke, onEnd) {
+  const s = { port, q: [], cur: null, off: 0, open: 1, closed: false, code: 0, reason: '', err: '', waiter: null, session: null, protocol: '' };
+  // Ends the stream: posts the hangup (null) to the far end unless it
+  // ended it, and closes the port, which can't be opened again.
+  s.end = (code, reason, hangup) => {
+    if (s.closed) return;
+    s.closed = true;
+    s.code = code;
+    s.reason = reason;
+    if (hangup) try { port.postMessage(null); } catch {}
+    port.onmessage = null;
+    try { port.close(); } catch {}
+    onEnd?.();
+    poke(s);
+  };
+  port.onmessage = ({ data }) => {
+    if (s.closed) return;
+    if (data === null) return s.end(1000, '', false);
+    const b = data instanceof ArrayBuffer ? new Uint8Array(data)
+      : ArrayBuffer.isView(data) ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+        : null;
+    // As a WebSocket text frame on a 9P stream: the stream closes.
+    if (!b) return s.end(1003, "a message that isn't binary", true);
+    if (b.length > maxPortMessage) return s.end(1009, 'a message over 16 MiB', true);
+    s.q.push({ text: false, b });
+    poke(s);
+  };
+  // Node fires close when the other end closes, is collected, or its
+  // Worker ends; browsers that have it do too.
+  const gone = () => s.end(1006, "the port's other end closed", false);
+  if (typeof port.on === 'function') port.on('close', gone);
+  else port.addEventListener?.('close', gone);
+  return s;
+}
+
+function wsImports(memory, str, credentials, ports) {
   const socks = new Map();
   let next = 1;
   const enc = new TextEncoder();
@@ -282,7 +390,37 @@ function wsImports(memory, str, credentials) {
   // Resolves the socket's waiter, if a coroutine is parked on it.
   const poke = (s) => { const w = s.waiter; s.waiter = null; w?.(); };
   const until = (s, ready) => (ready() ? null : new Promise((res) => { s.waiter = res; }));
+  const addSock = (s) => {
+    const id = next++;
+    socks.set(id, s);
+    return id;
+  };
   return {
+    // A port's id in the table; -1 if there's no port by that name, -2
+    // if it's in use, -3 if it has been opened and closed.
+    port_open: (np, nn) => {
+      const name = str(np, nn);
+      const e = ports.map.get(name);
+      if (!e) return -1;
+      if (e.state === 'open') return -2;
+      if (e.state === 'done') return -3;
+      e.state = 'open';
+      const s = portSock(e.port, poke, () => { e.state = 'done'; e.sock = null; });
+      e.sock = s;
+      return addSock(s);
+    },
+    // The next port the page serves the machine on, opened; -1 once the
+    // machine stops serving.
+    port_accept: new WebAssembly.Suspending(async () => {
+      for (;;) {
+        if (ports.stopped) return -1;
+        const port = ports.served.shift();
+        if (port) return addSock(portSock(port, poke));
+        await new Promise((res) => { ports.serveWait = res; });
+      }
+    }),
+    port_stop: () => ports.stop(),
+    port_serving: () => (ports.serving ? 1 : 0) | (ports.serveNet ? 2 : 0),
     ws_cred: new WebAssembly.Suspending(async (up, un, fp, fn, ap, an, op, on) => {
       const helper = an ? str(ap, an).split('\n') : undefined;
       const put = (t) => {
@@ -402,6 +540,13 @@ function wsImports(memory, str, credentials) {
     }),
     ws_send: (id, kind, p, n) => {
       const s = socks.get(id);
+      if (s?.port) {
+        if (s.closed || kind) return -1;
+        // Its own buffer, transferred: one 9P message per message.
+        const b = u8(p, n).slice();
+        try { s.port.postMessage(b.buffer, [b.buffer]); } catch { return -1; }
+        return 0;
+      }
       if (s?.session instanceof Session) {
         if (s.closed) return -1;
         s.session.feed(u8(p, n).slice(), (r) => { s.q.push({ text: false, b: r }); poke(s); });
@@ -414,6 +559,7 @@ function wsImports(memory, str, credentials) {
     },
     ws_close: (id, code, p, n) => {
       const s = socks.get(id);
+      if (s?.port) { s.end(1000, '', true); return; }
       if (s?.session instanceof Session) {
         s.closed = true;
         s.code = 1000;
@@ -435,6 +581,7 @@ function wsImports(memory, str, credentials) {
     ws_free: (id) => {
       const s = socks.get(id);
       if (!s) return;
+      if (s.port) { s.end(1000, '', true); socks.delete(id); return; }
       if (s.w.readyState < 2) s.w.close();
       socks.delete(id);
     },
@@ -590,9 +737,23 @@ export class GfxHost {
 /**
  * A mount for createMachine (design/mounts.md): { kind, src, dst, opts },
  * from a flag's string or an object. An object's `up: true` is the `up`
- * option (design/upper-layers.md).
+ * option (design/upper-layers.md). A `port` source (design/port-streams.md)
+ * is a port's name or a MessagePort, which is added to `ports` (an object
+ * from names to ports) under the next free `mountN`; either way it's
+ * `--url port://NAME`.
  */
-export function mountOf(m) {
+export function mountOf(m, ports = {}) {
+  if (m && typeof m === 'object' && !(m instanceof URL) && m.port !== undefined && m.port !== false) {
+    let name = m.port;
+    if (typeof name !== 'string') {
+      if (typeof name?.postMessage !== 'function') throw new Error('mount: port is a name or a MessagePort');
+      let i = 0;
+      while (`mount${i}` in ports) i++;
+      ports[`mount${i}`] = name;
+      name = `mount${i}`;
+    }
+    return mountOf({ ...m, port: undefined, url: `port://${name}` });
+  }
   const kinds = ['archive', 'url', 'dir', 'builtin', 'tmp'];
   if (typeof m === 'string') {
     const f = m.match(/^--(archive|url|dir|builtin|tmp)(?:[ =](.*))?$/s);
@@ -863,6 +1024,18 @@ function attachCanvas(canvas, worker, { clipboard, scale, size, events }) {
  *   divided by N. The canvas moves into the Worker at run.
  * - env: h9's own environment (an object), not its programs': the
  *   emulator's knobs, such as H9_JIT_HOT (src/jit/wasm_t1.zig)
+ * - ports: MessagePorts the machine can mount by name
+ *   (design/port-streams.md), an object from names to ports, each
+ *   carrying a 9P connection; a mount's source can be { port: NAME } or
+ *   { port: MessagePort }, and a namespace file's `mount port!NAME`.
+ *   machine.addPort(name, port) adds one while it runs, and
+ *   machine.removePort(name) hangs up whatever uses one. The page makes
+ *   the channels, so a port's other end can be another Worker's server
+ * - serve: true, a MessagePort, or a list of them: the machine serves its
+ *   namespace over 9P on each port, as --serve's connections are served
+ *   (design/epoch-0/serve.md), with no listener, origin, or token;
+ *   machine.serve(port) adds one while it runs, to a machine made with
+ *   serve. serveNet: true exports /net with it, as --serve-net does
  * - credentials: async (url, failed, helper) => lines, the page's
  *   credential helper (design/credential-helpers.md), called in place
  *   of running a --cred helper, before each WebSocket handshake h9 makes:
@@ -885,7 +1058,7 @@ function attachCanvas(canvas, worker, { clipboard, scale, size, events }) {
  * /dev/snarf that the page's clipboard refuses fires a `snarf` event
  * whose `text` is what was written.
  */
-export async function createMachine({ mounts, binds = [], memory, backend, arch, policy, terminal, tty = false, gfx, env, credentials } = {}) {
+export async function createMachine({ mounts, binds = [], memory, backend, arch, policy, terminal, tty = false, gfx, env, credentials, ports = {}, serve, serveNet = false } = {}) {
   if (!haveJSPI) throw new Error('this browser lacks JavaScript Promise Integration');
   if (gfx && typeof gfx.canvas?.transferControlToOffscreen !== 'function') throw new Error("this browser can't draw from a Worker");
   const clipboard = (gfx?.clipboard ?? 'page') !== 'private';
@@ -894,11 +1067,16 @@ export async function createMachine({ mounts, binds = [], memory, backend, arch,
   const enc = new TextEncoder();
   const events = new EventTarget();
   let started = false;
+  // The ports the Worker gets with start, by name, and the served ones.
+  const portMap = { ...ports };
+  for (const name of Object.keys(portMap)) if (!/^[A-Za-z0-9._-]+$/.test(name)) throw new Error(`port ${JSON.stringify(name)}: a name is letters, digits, -, _, and .`);
+  const serving = serve != null && serve !== false;
+  const served = !serving || serve === true ? [] : Array.isArray(serve) ? [...serve] : [serve];
   return Object.assign(events, {
     run(argv) {
       if (started) return Promise.reject(new Error('a machine runs once'));
       started = true;
-      const ms = (mounts ?? [{ archive: new URL('root.h9a', import.meta.url) }]).map(mountOf);
+      const ms = (mounts ?? [{ archive: new URL('root.h9a', import.meta.url) }]).map((m) => mountOf(m, portMap));
       const flags = [...(backend ? ['--backend', backend] : []), ...(arch ? ['--arch', arch] : []), ...(memory ? [`--memory=${memory}`] : []), ...policyFlags(policy)];
       let onGfx = () => false;
       let start = {}, transfer = [];
@@ -932,8 +1110,23 @@ export async function createMachine({ mounts, binds = [], memory, backend, arch,
         const url = (u) => String(new URL(u, location.href));
         for (const m of ms) if (m.kind === 'archive' || (m.kind === 'url' && /^https?:/i.test(m.src))) m.src = url(m.src);
         const bindFlags = binds.flatMap((b) => ['--bind', b]);
-        worker.postMessage({ type: 'start', argv: [...flags, ...bindFlags, ...argv], mounts: ms, tty, env, credentials: typeof credentials === 'function', ...start }, transfer);
+        const portList = [...Object.values(portMap), ...served];
+        worker.postMessage({ type: 'start', argv: [...flags, ...bindFlags, ...argv], mounts: ms, tty, env, credentials: typeof credentials === 'function', ports: portMap, serve: served, serving, serveNet: !!serveNet, ...start }, [...transfer, ...portList]);
       });
+    },
+    addPort(name, port) {
+      if (typeof name !== 'string' || !/^[A-Za-z0-9._-]+$/.test(name)) throw new Error(`port ${JSON.stringify(name)}: a name is letters, digits, -, _, and .`);
+      if (!started) { portMap[name] = port; return; }
+      worker.postMessage({ type: 'add-port', name, port }, [port]);
+    },
+    removePort(name) {
+      if (!started) { delete portMap[name]; return; }
+      worker.postMessage({ type: 'remove-port', name });
+    },
+    serve(port) {
+      if (!serving) throw new Error('serve: the machine was made without serve');
+      if (!started) { served.push(port); return; }
+      worker.postMessage({ type: 'serve', port }, [port]);
     },
     input(data) {
       if (data === null) { worker.postMessage({ type: 'input', data: null }); return; }
