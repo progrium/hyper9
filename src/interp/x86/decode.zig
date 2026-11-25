@@ -446,7 +446,7 @@ fn decode64(code: []const u8) Error!Inst64 {
             return v;
         }
         fn sext(r: @This(), comptime T: type) Error!u64 {
-            const S = std.meta.Int(.signed, @bitSizeOf(T));
+            const S = @Int(.signed, @bitSizeOf(T));
             return @bitCast(@as(i64, @as(S, @bitCast(try r.get(T)))));
         }
     };
@@ -1038,7 +1038,7 @@ test "decode64: addressing" {
     // Truncated and too long.
     try t.expectError(error.Truncated, d64(&.{ 0x48, 0xb8, 1, 2, 3, 4 }));
     try t.expectError(error.Truncated, d64(&.{0x48}));
-    try t.expectError(error.TooLong, d64(&([_]u8{0x48} ** 15)));
+    try t.expectError(error.TooLong, d64(&(@as([15]u8, @splat(0x48)))));
 }
 
 test "decode64: long-mode-only and removed encodings" {
@@ -1216,7 +1216,7 @@ test "decode prefixes, ModRM, SIB, and immediates" {
     try std.testing.expectEqual(Seg.ss, i.seg);
     // Truncated and too long.
     try std.testing.expectError(error.Truncated, d(&.{ 0x81, 0x44 }));
-    try std.testing.expectError(error.TooLong, d(&([_]u8{0x66} ** 15)));
+    try std.testing.expectError(error.TooLong, d(&(@as([15]u8, @splat(0x66)))));
     // gcc's long NOP: 66 2e 0f 1f 84 00 00 00 00 00.
     i = try d(&.{ 0x66, 0x2e, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00 });
     try std.testing.expectEqual(Op.nop, i.op);

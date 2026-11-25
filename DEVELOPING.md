@@ -7,7 +7,7 @@ works, and [design/](design/README.md) is how changes to it are proposed.
 
 ## Setup (macOS arm64)
 
-Requires Zig 0.16.x and Xcode (for the macOS SDK and `codesign`).
+Requires Zig 0.17.x and Xcode (for the macOS SDK and `codesign`).
 
 ```sh
 . scripts/env.sh               # Zig cache and tools live in .local/ (gitignored); puts zig-out/bin (h9) on PATH

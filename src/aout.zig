@@ -231,7 +231,7 @@ test "header round trip" {
 }
 
 test "rejects bad input" {
-    var buf = [_]u8{0} ** header_size;
+    var buf = @as([header_size]u8, @splat(0));
     try std.testing.expectError(error.BadMagic, parse(&buf));
     try std.testing.expectError(error.Truncated, parse(buf[0..10]));
 }

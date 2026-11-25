@@ -49,7 +49,7 @@ pub const Ram = struct {
     lock: std.Io.Mutex = .init,
     /// ASIDs in use, for formats that tag TLB entries with one
     /// (pt_arm64.zig's `asids`); 0 is never handed out.
-    asid_used: std.bit_set.StaticBitSet(max_asids) = .initEmpty(),
+    asid_used: std.bit_set.StaticBitSet(max_asids) = .empty,
     /// Where the next ASID search starts: ASIDs go round, so a freed one
     /// is handed out again only after the others have been.
     asid_next: usize = 1,

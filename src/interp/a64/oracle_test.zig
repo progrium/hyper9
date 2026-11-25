@@ -207,10 +207,9 @@ test "T0 matches the host CPU on random data-processing instructions" {
     }
     // Every data-processing kind got some coverage.
     var missing: usize = 0;
-    inline for (@typeInfo(dec.Kind).@"enum".fields) |f| {
-        const k: dec.Kind = @enumFromInt(f.value);
+    inline for (comptime std.enums.values(dec.Kind)) |k| {
         const isdp = @intFromEnum(k) >= @intFromEnum(dec.Kind.movi) and @intFromEnum(k) <= @intFromEnum(dec.Kind.umulh);
-        if (isdp and kinds[f.value] == 0) {
+        if (isdp and kinds[@intFromEnum(k)] == 0) {
             std.debug.print("no coverage: {t}\n", .{k});
             missing += 1;
         }
@@ -309,10 +308,9 @@ test "T0 matches the host CPU on random loads and stores" {
         }
     }
     var missing: usize = 0;
-    inline for (@typeInfo(dec.Kind).@"enum".fields) |f| {
-        const k: dec.Kind = @enumFromInt(f.value);
+    inline for (comptime std.enums.values(dec.Kind)) |k| {
         const ldst = @intFromEnum(k) >= @intFromEnum(dec.Kind.ldr_x_o) and @intFromEnum(k) <= @intFromEnum(dec.Kind.stp_vq);
-        if (ldst and kinds[f.value] == 0) {
+        if (ldst and kinds[@intFromEnum(k)] == 0) {
             std.debug.print("no coverage: {t}\n", .{k});
             missing += 1;
         }

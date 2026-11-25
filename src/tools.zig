@@ -19,10 +19,9 @@ pub fn version(w: *std.Io.Writer) std.Io.Writer.Error!void {
     try w.print("drawterm {s}\n", .{short(build_options.drawterm_rev)});
     try w.writeAll("backends:");
     var any = false;
-    inline for (@typeInfo(vmm.Kind).@"enum".fields) |f| {
-        const k: vmm.Kind = @enumFromInt(f.value);
+    inline for (comptime std.enums.values(vmm.Kind)) |k| {
         if (k.built()) {
-            try w.print(" {s}", .{f.name});
+            try w.print(" {t}", .{k});
             if (k == .emu) {
                 var buf: [32]u8 = undefined;
                 try w.print(" ({s})", .{vmm.emuVersion(&buf) orelse "?"});

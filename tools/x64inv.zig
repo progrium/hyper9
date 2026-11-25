@@ -33,7 +33,7 @@ const Cpu = x86.cpu.Cpu64;
 const Inst = dec.Inst64;
 const Op = table.Op;
 
-const nops = @typeInfo(Op).@"enum".fields.len;
+const nops = @typeInfo(Op).@"enum".field_names.len;
 
 const Text = struct { va: u64, bytes: []const u8 };
 const Sym = struct { va: u64, name: []const u8 };
@@ -431,15 +431,22 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(gpa);
     var top: usize = 40;
     var paths: std.ArrayList([]const u8) = .empty;
+    var default: ?[]const u8 = null;
     var a: usize = 1;
     while (a < args.len) : (a += 1) {
         if (std.mem.eql(u8, args[a], "--top") and a + 1 < args.len) {
             a += 1;
             top = try std.fmt.parseInt(usize, args[a], 10);
+        } else if (std.mem.eql(u8, args[a], "--default") and a + 1 < args.len) {
+            a += 1;
+            default = args[a];
         } else try paths.append(gpa, args[a]);
     }
+    // zig build passes the root tree's binaries as --default, for when no
+    // paths are given.
+    if (paths.items.len == 0) if (default) |d| try paths.append(gpa, d);
     if (paths.items.len == 0) {
-        std.debug.print("usage: x64inv [--top N] PATH...\n", .{});
+        std.debug.print("usage: x64inv [--top N] [--default PATH] PATH...\n", .{});
         std.process.exit(2);
     }
     var st: Stats = .{};

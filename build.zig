@@ -161,13 +161,13 @@ const gfx_fixtures = [_][]const u8{ "binds", "drawnew", "draw", "kbd", "mouse", 
 /// The h9 the integration cases run: the native binary, or h9-node for
 /// the web host (-Dweb). `step` builds it.
 const Integration = struct {
-    bin: []const u8,
+    bin: std.Build.LazyPath,
     arch: ?[]const u8,
     web: bool,
     step: *std.Build.Step,
     /// With `web`: a native h9 that runs the root's 386 binaries, for the
     /// cases' 9P servers (H9_TEST_SERVER), since the web host can't listen.
-    server: ?[]const u8 = null,
+    server: ?std.Build.LazyPath = null,
     server_step: *std.Build.Step = undefined,
 };
 
@@ -181,8 +181,16 @@ const Integration = struct {
 /// run of the same binary for each, which the build runner runs side by
 /// side: the cases mostly wait on h9, terminals, and sockets, so one run
 /// leaves most cores idle. `step` depends on every run.
-fn addIntegration(b: *std.Build, step: *std.Build.Step, shards: u32, optimize: std.builtin.OptimizeMode, filters: []const []const u8, it: Integration, root: []const u8, backends: []const u8, pending: bool, go: ?GoFixtures, guest_test: bool, src: ?[]const u8) []*std.Build.Step.Run {
-    const tests = integrationTests(b, b.graph.host, optimize, filters);
+fn addIntegration(b: *std.Build, step: *std.Build.Step, shards: u32, optimize: std.lang.Optimize, filters: []const []const u8, it: Integration, root: []const u8, backends: []const u8, pending: bool, go: ?GoFixtures, guest_test: bool, src: ?[]const u8) []*std.Build.Step.Run {
+    // The paths the cases find by default: the install prefix isn't known
+    // until the build runs, so they're build options, not environment
+    // variables (tests/integration.zig's getenv).
+    const paths = b.addOptions();
+    paths.addOptionPathUntracked("H9_TEST_BIN", it.bin);
+    paths.addOptionPathUntracked("H9_TEST_LINUX", b.graph.path(.install_prefix, "fixtures/linux"));
+    if (it.server) |sv| paths.addOptionPathUntracked("H9_TEST_SERVER", sv);
+    if (go) |g| paths.addOptionPathUntracked("H9_TEST_GO", g.dir);
+    const tests = integrationTests(b, b.graph.host, optimize, filters, paths);
     const n = @max(shards, 1);
     const runs = b.allocator.alloc(*std.Build.Step.Run, n) catch @panic("OOM");
     for (runs, 0..) |*r, i| {
@@ -204,35 +212,30 @@ fn addIntegrationRun(b: *std.Build, tests: *std.Build.Step.Compile, it: Integrat
     if (src) |dir| run.setEnvironmentVariable("H9_TEST_SRC", dir);
     run.step.dependOn(it.step);
     if (it.server != null) run.step.dependOn(it.server_step);
-    const h9_bin = it.bin;
     // h9 serves tests/fixtures/guest in #H (design/epoch-0/guest-tools.md).
     if (guest_test) run.setEnvironmentVariable("H9_TEST_GUEST_TOOLS", "1");
     if (it.arch) |a| run.setEnvironmentVariable("H9_TEST_ARCH", a);
     if (it.web) run.setEnvironmentVariable("H9_TEST_WEB", "1");
-    if (it.server) |sv| run.setEnvironmentVariable("H9_TEST_SERVER", sv);
     if (go) |g| {
-        run.setEnvironmentVariable("H9_TEST_GO", g.dir);
         run.step.dependOn(g.step);
         // On the native backend when it's in the list, else the emulator.
         if (std.mem.indexOf(u8, backends, "native") != null) run.setEnvironmentVariable("H9_TEST_GO_BACKEND", "native");
     }
-    run.setEnvironmentVariable("H9_TEST_BIN", h9_bin);
     run.setEnvironmentVariable("H9_TEST_ROOT", root);
     run.setEnvironmentVariable("H9_TEST_BACKENDS", backends);
     // The Linux fixtures and the Alpine roots from scripts/fetch.sh
     // (design/epoch-0/linux-personality.md).
-    run.setEnvironmentVariable("H9_TEST_LINUX", b.getInstallPath(.prefix, "fixtures/linux"));
-    run.setEnvironmentVariable("H9_TEST_LINUX_ROOT", b.pathFromRoot(".local/linux"));
+    run.setEnvironmentVariable("H9_TEST_LINUX_ROOT", pathFromRoot(b, ".local/linux"));
     // diod, for the [dotl] cases against a real 9P2000.L server
     // (scripts/fetch.sh diod); they skip without it.
-    run.setEnvironmentVariable("H9_TEST_DIOD", b.pathFromRoot(".local/bin/diod"));
+    run.setEnvironmentVariable("H9_TEST_DIOD", pathFromRoot(b, ".local/bin/diod"));
     // ZeroFS, for the [dotl] cases against a 9P2000.L.Z server
     // (scripts/fetch.sh zerofs); they skip without it.
-    run.setEnvironmentVariable("H9_TEST_ZEROFS", b.pathFromRoot(".local/bin/zerofs"));
+    run.setEnvironmentVariable("H9_TEST_ZEROFS", pathFromRoot(b, ".local/bin/zerofs"));
     // The tree `zig build slim` makes, for the multicall cases, which skip
     // without it (design/epoch-0/multicall.md).
-    const release = pin(b.build_root.handle.readFileAlloc(b.graph.io, "scripts/pins.sh", b.allocator, .limited(1 << 16)) catch "", "NINEFRONT_RELEASE");
-    run.setEnvironmentVariable("H9_TEST_SLIM_ROOT", b.pathFromRoot(b.fmt(".local/9front/slim-{s}-{s}", .{ release, it.arch orelse "arm64" })));
+    const release = pin(b.root.root_dir.handle.readFileAlloc(b.graph.io, "scripts/pins.sh", b.allocator, .limited(1 << 16)) catch "", "NINEFRONT_RELEASE");
+    run.setEnvironmentVariable("H9_TEST_SLIM_ROOT", pathFromRoot(b, b.fmt(".local/9front/slim-{s}-{s}", .{ release, it.arch orelse "arm64" })));
     if (pending) run.setEnvironmentVariable("H9_TEST_PENDING", "1");
     run.has_side_effects = true;
     return run;
@@ -240,7 +243,7 @@ fn addIntegrationRun(b: *std.Build, tests: *std.Build.Step.Compile, it: Integrat
 
 /// The Go fixtures (tests/fixtures/go, design/epoch-0/go-compat.md): plan9/amd64
 /// binaries built with the pinned Go toolchain into `dir` by `step`.
-const GoFixtures = struct { dir: []const u8, step: *std.Build.Step };
+const GoFixtures = struct { dir: std.Build.LazyPath, step: *std.Build.Step };
 
 /// The environment for building plan9/amd64 binaries with Go at the
 /// pinned version: GOTOOLCHAIN makes any installed Go fetch that exact
@@ -255,8 +258,10 @@ fn goEnv(run: *std.Build.Step.Run, version: []const u8) void {
 /// `go build` of every program in tests/fixtures/go into zig-out/fixtures/go.
 /// Go's own cache decides what to rebuild, so the step always runs.
 fn addGoFixtures(b: *std.Build, go: []const u8, version: []const u8) GoFixtures {
-    const dir = b.getInstallPath(.prefix, "fixtures/go");
-    const run = b.addSystemCommand(&.{ go, "-C", "tests/fixtures/go", "build", "-trimpath", "-o", b.fmt("{s}{s}", .{ dir, std.fs.path.sep_str }), "./..." });
+    const dir = b.graph.path(.install_prefix, "fixtures/go");
+    const run = b.addSystemCommand(&.{ go, "-C", "tests/fixtures/go", "build", "-trimpath", "-o" });
+    run.addDirectoryArg2(dir, .{ .suffix = std.fs.path.sep_str, .make_absolute = true });
+    run.addArg("./...");
     run.setCwd(b.path("."));
     goEnv(run, version);
     run.has_side_effects = true;
@@ -265,7 +270,7 @@ fn addGoFixtures(b: *std.Build, go: []const u8, version: []const u8) GoFixtures 
 
 /// tests/integration.zig as a test binary. It links libc for the pty in
 /// tests/term.zig.
-fn integrationTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, filters: []const []const u8) *std.Build.Step.Compile {
+fn integrationTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, filters: []const []const u8, paths: *std.Build.Step.Options) *std.Build.Step.Compile {
     return b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/integration.zig"),
@@ -276,6 +281,7 @@ fn integrationTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
                 .{ .name = "design", .module = designModule(b) },
                 .{ .name = "ws", .module = b.createModule(.{ .root_source_file = b.path("src/ws.zig") }) },
                 .{ .name = "dotltest", .module = b.createModule(.{ .root_source_file = b.path("src/dotl/testserver.zig") }) },
+                .{ .name = "test_paths", .module = paths.createModule() },
             },
         }),
         .filters = filters,
@@ -291,7 +297,7 @@ fn proposals(b: *std.Build) []const frontmatter.Proposal {
     if (S.ps) |ps| return ps;
     const io = b.graph.io;
     var diags: frontmatter.Diags = .{ .gpa = b.allocator };
-    var dir = b.build_root.handle.openDir(io, "design", .{ .iterate = true }) catch {
+    var dir = b.root.root_dir.handle.openDir(io, "design", .{ .iterate = true }) catch {
         S.ps = &.{};
         return S.ps.?;
     };
@@ -325,7 +331,7 @@ fn tagFilters(b: *std.Build, p: frontmatter.Proposal) []const []const u8 {
 /// tagged with, so `zig build proposal -Dp=...` runs the file. The file's
 /// cases run together; they aren't filtered by tag.
 fn addWebCases(b: *std.Build, demos: *std.StringHashMapUnmanaged(std.ArrayList(*std.Build.Step)), file: []const u8, step: *std.Build.Step) void {
-    const text = b.build_root.handle.readFileAlloc(b.graph.io, file, b.allocator, .limited(1 << 24)) catch return;
+    const text = b.root.root_dir.handle.readFileAlloc(b.graph.io, file, b.allocator, .limited(1 << 24)) catch return;
     for (proposals(b)) |p| if (p.slug.len > 0 and frontmatter.tagsCase(text, p.slug)) addDemo(b, demos, p.slug, step);
 }
 
@@ -403,7 +409,7 @@ fn unicornDir(t: std.Target) ?[]const u8 {
 
 /// The lockstep oracle for `target`, or why there isn't one: a hint for
 /// the steps that need it to fail with.
-fn addOracle(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) union(enum) { ok: Oracle, missing: []const u8 } {
+fn addOracle(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) union(enum) { ok: Oracle, missing: []const u8 } {
     const t = target.result;
     const oracle_target = if (t.os.tag == .linux and !t.abi.isMusl())
         b.resolveTargetQuery(.{ .cpu_arch = t.cpu.arch, .os_tag = .linux, .abi = .musl })
@@ -413,7 +419,7 @@ fn addOracle(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         return .{ .missing = "Unicorn's prebuilt library is for macOS arm64 and Linux arm64 and x86_64 only" };
     const dir = b.pathJoin(&.{ ".local/unicorn", name });
     const lib = b.pathJoin(&.{ dir, "lib/libunicorn.a" });
-    b.build_root.handle.access(b.graph.io, lib, .{}) catch
+    b.root.root_dir.handle.access(b.graph.io, lib, .{}) catch
         return .{ .missing = b.fmt("{s} is missing; run scripts/fetch.sh unicorn", .{lib}) };
     const wf = b.addWriteFiles();
     const h = wf.add("unicorn.h", "#include <unicorn/unicorn.h>\n");
@@ -446,7 +452,7 @@ fn linkOracle(c: *std.Build.Step.Compile, o: Oracle) void {
 /// build.zig.zon's version when that fails (a source tarball).
 fn gitVersion(b: *std.Build) []const u8 {
     var code: u8 = 0;
-    const out = b.runAllowFail(&.{ "git", "-C", b.build_root.path orelse ".", "describe", "--tags", "--always", "--dirty" }, &code, .ignore) catch
+    const out = b.runAllowFail(&.{ "git", "-C", b.root.root_dir.path orelse ".", "describe", "--tags", "--always", "--dirty" }, &code, .ignore) catch
         return zonVersion(b);
     const v = std.mem.trim(u8, out, " \r\n");
     return if (v.len > 0) v else zonVersion(b);
@@ -454,7 +460,7 @@ fn gitVersion(b: *std.Build) []const u8 {
 
 /// build.zig.zon's `.version`, read as text so the manifest needs no type.
 fn zonVersion(b: *std.Build) []const u8 {
-    const zon = b.build_root.handle.readFileAlloc(b.graph.io, "build.zig.zon", b.allocator, .limited(1 << 16)) catch return "unknown";
+    const zon = b.root.root_dir.handle.readFileAlloc(b.graph.io, "build.zig.zon", b.allocator, .limited(1 << 16)) catch return "unknown";
     const key = ".version = \"";
     const i = std.mem.indexOf(u8, zon, key) orelse return "unknown";
     const rest = zon[i + key.len ..];
@@ -470,7 +476,7 @@ fn guestTree(b: *std.Build, with_test: bool) struct { file: std.Build.LazyPath, 
     var inputs: std.ArrayList(guesttree.Input) = .empty;
     for ([_][]const u8{ "src/guest", "tests/fixtures/guest" }, [_]bool{ true, with_test }) |sub, want| {
         if (!want) continue;
-        var dir = b.build_root.handle.openDir(io, sub, .{ .iterate = true }) catch continue;
+        var dir = b.root.root_dir.handle.openDir(io, sub, .{ .iterate = true }) catch continue;
         defer dir.close(io);
         const found = guesttree.scan(b.allocator, io, dir) catch |err| {
             wf.step.dependOn(&b.addFail(b.fmt("{s}: {t}", .{ sub, err })).step);
@@ -580,7 +586,7 @@ fn builtinArches(target: std.Target, emu: Emu) []const []const u8 {
 /// (design/epoch-0/browser-host.md): wasm32-wasi, with src/kern/os-wasm.c in
 /// place of posix.c, the coroutines it runs on (src/web/coro.c), and
 /// setjmp/longjmp on wasm exception handling.
-fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, web: bool, gfx: Gfx, exported: bool) *std.Build.Step.Compile {
+fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, web: bool, gfx: Gfx, exported: bool) *std.Build.Step.Compile {
     const os = target.result.os.tag;
     const kern = b.addLibrary(.{
         .name = if (gfx == .headless and !exported) "kern-headless" else "kern",
@@ -641,10 +647,11 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
         kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{ "os-wasm.c", "devip-wasm.c" }, .flags = flags });
         kern.root_module.addCSourceFiles(.{ .root = b.path("src/web"), .files = &.{"coro.c"}, .flags = flags });
         kern.root_module.addAssemblyFile(b.path("src/web/stack.S"));
+        kern.root_module.addAssemblyFile(b.path("src/web/sjlj_tag.S"));
         // wasi-libc's setjmp/longjmp runtime for wasm exception handling,
         // which Zig's wasi-libc doesn't build.
         kern.root_module.addCSourceFile(.{
-            .file = .{ .cwd_relative = b.pathJoin(&.{ b.graph.zig_lib_directory.path orelse ".", "libc/wasi/libc-top-half/musl/src/setjmp/wasm32/rt.c" }) },
+            .file = b.graph.path(.zig_lib, "libc/wasi/libc-top-half/musl/src/setjmp/wasm32/rt.c"),
             .flags = &.{ "-mllvm", "-wasm-enable-sjlj" },
         });
         for ([_][]const u8{ "wasi-emulated-signal", "wasi-emulated-process-clocks", "wasi-emulated-mman", "wasi-emulated-getpid" }) |l|
@@ -675,7 +682,7 @@ const Web = struct {
 
 /// h9.wasm, the JS host and the demo page, installed in
 /// zig-out/web.
-fn addWeb(b: *std.Build, optimize: std.builtin.OptimizeMode, parts: ModuleParts, gfx: Gfx) Web {
+fn addWeb(b: *std.Build, optimize: std.lang.Optimize, parts: ModuleParts, gfx: Gfx) Web {
     const target = webTarget(b, false);
     var p = parts;
     p.target = target;
@@ -736,7 +743,7 @@ fn addComputeBenches(b: *std.Build, bench: *std.Build.Step.Compile) void {
                 .name = b.fmt("bench-{s}-{s}", .{ name, a.name }),
                 .root_module = b.createModule(.{
                     .target = b.resolveTargetQuery(a.query),
-                    .optimize = .ReleaseFast,
+                    .optimize = .fast,
                     .pic = false,
                     .strip = true,
                 }),
@@ -747,7 +754,7 @@ fn addComputeBenches(b: *std.Build, bench: *std.Build.Step.Compile) void {
             exe.pie = false;
             exe.bundle_compiler_rt = true;
             // The whole image: the linker scripts keep only text.
-            const bin = b.addObjCopy(exe.getEmittedBin(), .{ .format = .bin }).getOutput();
+            const bin = b.addObjCopy(exe.getEmittedBin(), .{ .format = .binary }).getOutput();
             bench.root_module.addAnonymousImport(b.fmt("bench_{s}_{s}", .{ name, a.name }), .{ .root_source_file = bin });
         }
         bench.root_module.addCSourceFile(.{ .file = b.path(b.fmt("tests/bench/{s}.c", .{name})), .flags = &.{ "-O2", "-ffp-contract=off", b.fmt("-Dcompute=bench_{s}", .{name}) } });
@@ -807,7 +814,7 @@ pub const Gfx = enum {
 /// What every h9 module shares; `addH9Module` makes one per GUI backend.
 const ModuleParts = struct {
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     emu: Emu,
     /// With hcpu: build the JIT tier, not just the interpreter.
     jit: bool,
@@ -818,7 +825,7 @@ const ModuleParts = struct {
     /// (opt.verify), even where the hcpu module has no runtime safety.
     jit_verify: bool,
     /// How src/interp/ and src/jit/ (the hcpu module) are optimized.
-    hcpu_optimize: std.builtin.OptimizeMode,
+    hcpu_optimize: std.lang.Optimize,
     shim: std.Build.LazyPath,
     shim_amd64: std.Build.LazyPath,
     /// The native backend's stub, for Linux x86_64 hosts.
@@ -899,7 +906,7 @@ fn addGfxSources(b: *std.Build, kern: *std.Build.Step.Compile, gfx: Gfx, flags: 
         return;
     }
     m.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"gfx.c"}, .flags = flags });
-    const gui = std.mem.concat(b.allocator, []const u8, &.{ flags, &.{ "-include", b.pathFromRoot("src/kern/gfx-gui.h") } }) catch @panic("OOM");
+    const gui = std.mem.concat(b.allocator, []const u8, &.{ flags, &.{ "-include", pathFromRoot(b, "src/kern/gfx-gui.h") } }) catch @panic("OOM");
     const gui_exit = std.mem.concat(b.allocator, []const u8, &.{ gui, &.{"-DH9_GUI_EXIT"} }) catch @panic("OOM");
     switch (gfx) {
         .none => unreachable,
@@ -928,6 +935,11 @@ fn addGfxSources(b: *std.Build, kern: *std.Build.Step.Compile, gfx: Gfx, flags: 
 }
 
 pub fn build(b: *std.Build) void {
+    // This file reads what's on disk while it configures: the pins, the
+    // proposals, the roots and tools under .local, and which programs are
+    // on PATH. Zig can't track all of that, so the configuration isn't
+    // cached between runs.
+    b.graph.poisonCache();
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const os = target.result.os.tag;
@@ -943,10 +955,10 @@ pub fn build(b: *std.Build) void {
     // T0 in a Debug build runs several times slower than in a release one,
     // enough for long integration cases to time out.
     const hcpu_debug = b.option(bool, "hcpu-debug", "Build src/interp and src/jit with -Doptimize too, not ReleaseFast, in Debug builds (for debugging the emulator's CPUs)") orelse false;
-    const hcpu_optimize: std.builtin.OptimizeMode = if (optimize == .Debug and !hcpu_debug) .ReleaseFast else optimize;
+    const hcpu_optimize: std.lang.Optimize = if (optimize == .debug and !hcpu_debug) .fast else optimize;
     const jit_check = b.option(bool, "jit-check", "Check every region against T0 as it runs (slow; for zig build integration)") orelse false;
     const jit_verify = b.option(bool, "jit-verify", "Verify every region after lifting and after opt, panicking on a bad one (default: on in Debug and ReleaseSafe builds)") orelse
-        (optimize == .Debug or optimize == .ReleaseSafe);
+        (optimize == .debug or optimize == .safe);
     const no_jit = b.option(bool, "no-jit", "The emulator's interpreter tier only, as on hosts that forbid generated code") orelse false;
 
     const gfx_opt = b.option(Gfx, "gfx", "GUI backend for --gfx (design/epoch-0/gfx.md): cocoa, win32, x11, web, headless (tests) or none (default: cocoa on macOS, win32 on Windows, web for zig build web, none elsewhere)");
@@ -961,21 +973,21 @@ pub fn build(b: *std.Build) void {
         .name = "shim_arm64",
         .root_module = b.createModule(.{
             .target = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .freestanding }),
-            .optimize = .ReleaseSmall,
+            .optimize = .small,
         }),
     });
     shim_obj.root_module.addAssemblyFile(b.path("src/arch/arm64/shim.S"));
-    const shim_bin = b.addObjCopy(shim_obj.getEmittedBin(), .{ .format = .bin, .only_section = ".text" });
+    const shim_bin = b.addObjCopy(shim_obj.getEmittedBin(), .{ .format = .binary, .only_section = ".text" });
     // The amd64 shim, for KVM on x86_64 (design/epoch-0/kvm.md).
     const shim_amd64_obj = b.addObject(.{
         .name = "shim_amd64",
         .root_module = b.createModule(.{
             .target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .freestanding }),
-            .optimize = .ReleaseSmall,
+            .optimize = .small,
         }),
     });
     shim_amd64_obj.root_module.addAssemblyFile(b.path("src/arch/amd64/shim.S"));
-    const shim_amd64_bin = b.addObjCopy(shim_amd64_obj.getEmittedBin(), .{ .format = .bin, .only_section = ".text" });
+    const shim_amd64_bin = b.addObjCopy(shim_amd64_obj.getEmittedBin(), .{ .format = .binary, .only_section = ".text" });
 
     // The native backend's stub (design/epoch-0/native-backend.md): a freestanding
     // static program, linked high so the guest's whole layout is free, and
@@ -985,7 +997,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/vmm/native_stub.zig"),
             .target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .none }),
-            .optimize = .ReleaseSmall,
+            .optimize = .small,
             .single_threaded = true,
             .strip = true,
             .pic = false,
@@ -996,24 +1008,24 @@ pub fn build(b: *std.Build) void {
     native_stub.image_base = 0x6000_0000_0000; // native_abi.stub_base
 
     const kern_step = b.step("kern", "Compile drawterm's kern");
-    const have_drawterm = if (b.build_root.handle.access(b.graph.io, drawterm ++ "/kern/sysfile.c", .{})) true else |_| false;
+    const have_drawterm = if (b.root.root_dir.handle.access(b.graph.io, drawterm ++ "/kern/sysfile.c", .{})) true else |_| false;
 
     // h9's own guest commands, served by #H (design/epoch-0/guest-tools.md).
     // Debug builds also serve tests/fixtures/guest, for the integration
     // cases; release builds leave it out.
-    const guest_test = b.option(bool, "guest-test", "Serve tests/fixtures/guest in #H too, for the integration cases (default: in Debug builds)") orelse (optimize == .Debug);
+    const guest_test = b.option(bool, "guest-test", "Serve tests/fixtures/guest in #H too, for the integration cases (default: in Debug builds)") orelse (optimize == .debug);
     const guest_tree = guestTree(b, guest_test);
 
     // For --version: scripts/release.sh passes -Dversion; otherwise git
     // describe, or build.zig.zon's version where there's no git checkout.
     const version = b.option([]const u8, "version", "Version h9 --version reports (default: git describe, else build.zig.zon's)") orelse gitVersion(b);
-    const pins = b.build_root.handle.readFileAlloc(b.graph.io, "scripts/pins.sh", b.allocator, .limited(1 << 16)) catch "";
+    const pins = b.root.root_dir.handle.readFileAlloc(b.graph.io, "scripts/pins.sh", b.allocator, .limited(1 << 16)) catch "";
 
     // The built-in root (design/epoch-0/builtin-root.md): multicall's trees for
     // the architectures this build runs, from `zig build slim`. A release
     // fails without them; a development build gets the skeleton only.
     const builtin_dir = b.option([]const u8, "builtin-root", "Directory of zig build slim's trees for the built-in root (default .local/9front)") orelse
-        b.pathFromRoot(".local/9front");
+        pathFromRoot(b, ".local/9front");
     const release_build = b.option(bool, "release", "A release build: fail if the built-in root is missing an architecture's commands (design/epoch-0/builtin-root.md)") orelse false;
     const builtin_root = builtinRoot(b, builtin_dir, pin(pins, "NINEFRONT_RELEASE"), builtinArches(target.result, emu), if (release_build) .required else .warn);
 
@@ -1049,11 +1061,11 @@ pub fn build(b: *std.Build) void {
     // The demo page's root archive, from a 386 root tree and the paths
     // src/web/root.list names; left out without one.
     const web_root = b.option([]const u8, "web-root", "386 root tree for the browser host's root archive (default .local/9front/root386)") orelse
-        b.pathFromRoot(".local/9front/root386");
+        pathFromRoot(b, ".local/9front/root386");
     if (std.Io.Dir.cwd().access(b.graph.io, b.pathJoin(&.{ web_root, "386/bin/rc" }), .{})) {
         const webroot = b.addExecutable(.{
             .name = "webroot",
-            .root_module = b.createModule(.{ .root_source_file = b.path("tools/webroot.zig"), .target = b.graph.host, .optimize = .ReleaseSafe }),
+            .root_module = b.createModule(.{ .root_source_file = b.path("tools/webroot.zig"), .target = b.graph.host, .optimize = .safe }),
         });
         const mk = b.addRunArtifact(webroot);
         mk.addArg(web_root);
@@ -1065,11 +1077,11 @@ pub fn build(b: *std.Build) void {
     // root `scripts/fetch.sh alpinearm64web` makes and src/web/linux.list;
     // left out without one.
     const web_linux_root = b.option([]const u8, "web-linux-root", "arm64 Linux root tree for the browser host's Linux archive (default .local/linux/alpine-arm64-web)") orelse
-        b.pathFromRoot(".local/linux/alpine-arm64-web");
+        pathFromRoot(b, ".local/linux/alpine-arm64-web");
     if (std.Io.Dir.cwd().access(b.graph.io, b.pathJoin(&.{ web_linux_root, "bin/busybox" }), .{})) {
         const webroot = b.addExecutable(.{
             .name = "webroot",
-            .root_module = b.createModule(.{ .root_source_file = b.path("tools/webroot.zig"), .target = b.graph.host, .optimize = .ReleaseSafe }),
+            .root_module = b.createModule(.{ .root_source_file = b.path("tools/webroot.zig"), .target = b.graph.host, .optimize = .safe }),
         });
         const mk = b.addRunArtifact(webroot);
         mk.addArg(web_linux_root);
@@ -1082,11 +1094,11 @@ pub fn build(b: *std.Build) void {
     // src/web/nine-arm64.list, so a Linux program there has rc and
     // wsmount; left out without one.
     const web_nine_root = b.option([]const u8, "web-nine-arm64-root", "arm64 9front root tree for ?linux's 9front layer (default .local/9front/slim-<release>-arm64)") orelse
-        b.pathFromRoot(b.fmt(".local/9front/slim-{s}-arm64", .{pin(pins, "NINEFRONT_RELEASE")}));
+        pathFromRoot(b, b.fmt(".local/9front/slim-{s}-arm64", .{pin(pins, "NINEFRONT_RELEASE")}));
     if (std.Io.Dir.cwd().access(b.graph.io, b.pathJoin(&.{ web_nine_root, "arm64/bin/rc" }), .{})) {
         const webroot = b.addExecutable(.{
             .name = "webroot",
-            .root_module = b.createModule(.{ .root_source_file = b.path("tools/webroot.zig"), .target = b.graph.host, .optimize = .ReleaseSafe }),
+            .root_module = b.createModule(.{ .root_source_file = b.path("tools/webroot.zig"), .target = b.graph.host, .optimize = .safe }),
         });
         const mk = b.addRunArtifact(webroot);
         mk.addArg(web_nine_root);
@@ -1095,13 +1107,15 @@ pub fn build(b: *std.Build) void {
         web.install.dependOn(&b.addInstallFileWithDir(archive, .{ .custom = "web" }, "nine-arm64.h9a").step);
     } else |_| {}
     // The demo page in Chromium through Playwright (tests/web/browser.mjs).
-    const web_test = b.addSystemCommand(&.{ "node", "tests/web/browser.mjs", b.getInstallPath(.{ .custom = "web" }, "") });
+    const web_test = b.addSystemCommand(&.{ "node", "tests/web/browser.mjs" });
+    web_test.addDirectoryArg2(b.graph.path(.install_prefix, "web"), .{ .make_absolute = true });
     web_test.setCwd(b.path("."));
     web_test.has_side_effects = true;
     web_test.expectExitCode(0);
     web_test.step.dependOn(web.install);
     // Graphics on the canvas (tests/web/gfx.mjs, design/epoch-0/browser-gfx.md).
-    const web_gfx_test = b.addSystemCommand(&.{ "node", "tests/web/gfx.mjs", b.getInstallPath(.{ .custom = "web" }, "") });
+    const web_gfx_test = b.addSystemCommand(&.{ "node", "tests/web/gfx.mjs" });
+    web_gfx_test.addDirectoryArg2(b.graph.path(.install_prefix, "web"), .{ .make_absolute = true });
     web_gfx_test.setCwd(b.path("."));
     web_gfx_test.has_side_effects = true;
     web_gfx_test.expectExitCode(0);
@@ -1129,6 +1143,8 @@ pub fn build(b: *std.Build) void {
     }
 
     const install_exe = b.addInstallArtifact(exe, .{});
+    // The installed h9, which the demos, cases, and tools run.
+    const h9 = b.graph.path(.install_bin, exe.out_filename);
     b.getInstallStep().dependOn(&install_exe.step);
 
     // HVF refuses hv_vm_create without the hypervisor entitlement.
@@ -1136,19 +1152,18 @@ pub fn build(b: *std.Build) void {
     if (os == .macos and b.graph.host.result.os.tag == .macos) {
         const sign = b.addSystemCommand(&.{ "codesign", "--force", "--sign", "-", "--entitlements" });
         sign.addFileArg(b.path("h9.entitlements"));
-        sign.addArg(b.getInstallPath(.bin, exe.out_filename));
+        sign.addFileArg(h9);
         sign.step.dependOn(&install_exe.step);
         b.getInstallStep().dependOn(&sign.step);
         signed_step = &sign.step;
     }
 
-    const run_cmd = b.addSystemCommand(&.{b.getInstallPath(.bin, exe.out_filename)});
-    run_cmd.step.dependOn(signed_step);
-    if (b.args) |args| run_cmd.addArgs(args);
+    const run_cmd = runH9(b, h9, signed_step, &.{});
+    run_cmd.addPassthruArgs();
     b.step("run", "Run h9").dependOn(&run_cmd.step);
 
     // Fixed paths, not the install prefix, so `--prefix /usr/local clean` can't remove it.
-    const clean_cmd = b.addSystemCommand(&.{ "rm", "-rf", b.pathFromRoot("zig-out"), b.pathFromRoot(".zig-cache") });
+    const clean_cmd = b.addSystemCommand(&.{ "rm", "-rf", pathFromRoot(b, "zig-out"), pathFromRoot(b, ".zig-cache") });
     b.step("clean", "Remove zig-out and .zig-cache").dependOn(&clean_cmd.step);
 
     // Fixtures: hand-assembled hello a.outs for arm64 and amd64.
@@ -1177,7 +1192,7 @@ pub fn build(b: *std.Build) void {
     for ([_][]const u8{ "arm64", "amd64", "386" }, [_]std.Target.Cpu.Arch{ .aarch64, .x86_64, .x86 }) |arch, cpu| {
         const lt = b.resolveTargetQuery(.{ .cpu_arch = cpu, .os_tag = .linux, .abi = .musl });
         for (linux_fixture_names) |name| {
-            const m = b.createModule(.{ .target = lt, .optimize = .ReleaseSmall, .link_libc = true });
+            const m = b.createModule(.{ .target = lt, .optimize = .small, .link_libc = true });
             m.addCSourceFile(.{ .file = b.path(b.fmt("tests/fixtures/linux/{s}.c", .{name})), .flags = &.{ "-std=c11", "-D_GNU_SOURCE" } });
             const fx = b.addExecutable(.{ .name = name, .root_module = m, .linkage = .static });
             // Segments aligned to 64K on every architecture, as arm64's
@@ -1200,19 +1215,19 @@ pub fn build(b: *std.Build) void {
     // Baseline demos: the host architecture's hello on the default backend,
     // and on the emulator when it's built in.
     const host_hello = if (target.result.cpu.arch == .x86_64) hellos[1] else hellos[0];
-    const hello_demo = b.addSystemCommand(&.{b.getInstallPath(.bin, exe.out_filename)});
+    const hello_demo = runH9(b, h9, signed_step, &.{});
     hello_demo.addFileArg(host_hello);
     hello_demo.expectStdOutEqual("hello\n");
     hello_demo.step.dependOn(signed_step);
     addDemo(b, &demos, "baseline", &hello_demo.step);
     if (emu != .none) {
-        const emu_demo = b.addSystemCommand(&.{ b.getInstallPath(.bin, exe.out_filename), "--backend", "emu" });
+        const emu_demo = runH9(b, h9, signed_step, &.{ "--backend", "emu" });
         emu_demo.addFileArg(host_hello);
         emu_demo.expectStdOutEqual("hello\n");
         emu_demo.step.dependOn(signed_step);
         addDemo(b, &demos, "baseline", &emu_demo.step);
         // 386 runs on the emulator on every host.
-        const i386_demo = b.addSystemCommand(&.{ b.getInstallPath(.bin, exe.out_filename), "--backend", "emu" });
+        const i386_demo = runH9(b, h9, signed_step, &.{ "--backend", "emu" });
         i386_demo.addFileArg(hellos[2]);
         i386_demo.expectStdOutEqual("hello\n");
         i386_demo.step.dependOn(signed_step);
@@ -1222,19 +1237,18 @@ pub fn build(b: *std.Build) void {
     // The rest run real 9front binaries from a host root tree, so they're
     // left out without one, as the integration cases skip.
     const root = b.option([]const u8, "root", "9front root tree for the demos and integration tests (default .local/9front/root)") orelse
-        b.pathFromRoot(".local/9front/root");
-    const h9_bin = b.getInstallPath(.bin, exe.out_filename);
+        pathFromRoot(b, ".local/9front/root");
     // The self-host demos and cases need /sys/src: the root's (zig build
     // mkroot -- --src), or else this checkout's, which scripts/fetch.sh makes at the
     // root's revision.
     const src_dir: ?[]const u8 = b.option([]const u8, "src", "9front source's sys directory for the self-host cases when the root has no /sys/src (default .local/src/9front/sys)") orelse blk: {
-        const d = b.pathFromRoot(".local/src/9front/sys");
-        b.build_root.handle.access(b.graph.io, ".local/src/9front/sys/src", .{}) catch break :blk null;
+        const d = pathFromRoot(b, ".local/src/9front/sys");
+        b.root.root_dir.handle.access(b.graph.io, ".local/src/9front/sys/src", .{}) catch break :blk null;
         break :blk d;
     };
 
-    if (b.build_root.handle.readFileAlloc(b.graph.io, b.pathJoin(&.{ root, "lib/namespace" }), b.allocator, .limited(1 << 20))) |namespace| {
-        const cat_demo = b.addSystemCommand(&.{ h9_bin, "--dir", root, "/bin/cat", "/lib/namespace" });
+    if (b.root.root_dir.handle.readFileAlloc(b.graph.io, b.pathJoin(&.{ root, "lib/namespace" }), b.allocator, .limited(1 << 20))) |namespace| {
+        const cat_demo = runH9(b, h9, signed_step, &.{ "--dir", root, "/bin/cat", "/lib/namespace" });
         cat_demo.expectStdOutEqual(namespace);
         cat_demo.step.dependOn(signed_step);
         addDemo(b, &demos, "baseline", &cat_demo.step);
@@ -1242,7 +1256,7 @@ pub fn build(b: *std.Build) void {
         // cwd is a fresh directory, so nothing is left behind if it doesn't.
         const tight_cwd = b.addWriteFiles();
         _ = tight_cwd.add(".keep", "");
-        const tight_demo = b.addSystemCommand(&.{ h9_bin, "--dir", root, "--profile=tight", "--cwd" });
+        const tight_demo = runH9(b, h9, signed_step, &.{ "--dir", root, "--profile=tight", "--cwd" });
         tight_demo.addDirectoryArg(tight_cwd.getDirectory());
         tight_demo.addArgs(&.{ "--rc", "echo x > /mnt/term/cwd/f" });
         tight_demo.expectExitCode(1);
@@ -1255,7 +1269,7 @@ pub fn build(b: *std.Build) void {
     // count is the root's two directories' entries and #H/bin's added
     // together (design/epoch-0/guest-tools.md).
     if (countBin(b, root)) |n| {
-        const ls_demo = b.addSystemCommand(&.{ h9_bin, "--dir", root, "--rc", "ls /bin | wc -l" });
+        const ls_demo = runH9(b, h9, signed_step, &.{ "--dir", root, "--rc", "ls /bin | wc -l" });
         ls_demo.expectStdOutEqual(b.fmt("{d: >7}\n", .{n + guest_tree.bin}));
         ls_demo.step.dependOn(signed_step);
         addDemo(b, &demos, "baseline", &ls_demo.step);
@@ -1264,7 +1278,7 @@ pub fn build(b: *std.Build) void {
     // Self-host demos (design/epoch-0/self-host.md), with the root's arm64
     // binaries: they need /sys/src, the root's or `src_dir` bound over
     // /sys.
-    const root_src = if (b.build_root.handle.access(b.graph.io, b.pathJoin(&.{ root, "sys/src/cmd/ls.c" }), .{})) |_| true else |_| false;
+    const root_src = if (b.root.root_dir.handle.access(b.graph.io, b.pathJoin(&.{ root, "sys/src/cmd/ls.c" }), .{})) |_| true else |_| false;
     if (root_src or src_dir != null) {
         // A scratch cwd unioned before /sys/src/cmd, so mk reads the stock
         // mkfile and source there and writes into the scratch directory,
@@ -1272,7 +1286,7 @@ pub fn build(b: *std.Build) void {
         const bind_src = if (root_src) "" else b.fmt("bind -a /mnt/term{s} /sys && ", .{src_dir.?});
         const ls_cwd = b.addWriteFiles();
         _ = ls_cwd.add(".keep", "");
-        const ls_build = b.addSystemCommand(&.{ h9_bin, "--dir", root, "--arch", "arm64", "--timeout", "600s" });
+        const ls_build = runH9(b, h9, signed_step, &.{ "--dir", root, "--arch", "arm64", "--timeout", "600s" });
         if (!root_src) ls_build.addArgs(&.{ "--readable", src_dir.? });
         ls_build.addArg("--cwd");
         ls_build.addDirectoryArg(ls_cwd.getDirectory());
@@ -1284,7 +1298,7 @@ pub fn build(b: *std.Build) void {
     }
     if (countBin(b, root) != null) {
         // acid attaches to a sleeping process and prints its stack.
-        const acid_demo = b.addSystemCommand(&.{ h9_bin, "--dir", root, "--arch", "arm64", "--timeout", "60s", "--rc", "sleep 5 & sleep 1; acid $apid; echo kill >/proc/$apid/ctl" });
+        const acid_demo = runH9(b, h9, signed_step, &.{ "--dir", root, "--arch", "arm64", "--timeout", "60s", "--rc", "sleep 5 & sleep 1; acid $apid; echo kill >/proc/$apid/ctl" });
         acid_demo.setStdIn(.{ .bytes = "stk()\n" });
         acid_demo.expectStdOutMatch("main(argv=");
         acid_demo.expectStdOutMatch("/sys/src/cmd/sleep.c:");
@@ -1341,15 +1355,15 @@ pub fn build(b: *std.Build) void {
     const test_web = b.option(bool, "web", "Run the integration cases on the web host under Node (386, or arm64 with -Darch=arm64)") orelse false;
     const backend_list = if (test_web) want_backends orelse "emu" else if (want_backends) |w| w else if (backends.items.len > 0) backends.items else "auto";
     const it: Integration = if (test_web) .{
-        .bin = b.getInstallPath(.{ .custom = "web" }, "h9-node"),
+        .bin = b.graph.path(.install_prefix, "web/h9-node"),
         .arch = test_arch orelse "386",
         .web = true,
         .step = web.install,
         // The native h9 serves the WebSocket cases' roots on the
         // emulator.
-        .server = if (emu != .none) h9_bin else null,
+        .server = if (emu != .none) h9 else null,
         .server_step = signed_step,
-    } else .{ .bin = h9_bin, .arch = test_arch, .web = false, .step = signed_step };
+    } else .{ .bin = h9, .arch = test_arch, .web = false, .step = signed_step };
 
     // Runs real binaries through the h9 CLI; skipped without a root tree.
     // Cases tagged with a proposal that isn't implemented skip unless
@@ -1357,7 +1371,7 @@ pub fn build(b: *std.Build) void {
     const run_pending = b.option(bool, "pending", "Also run integration cases of proposals that aren't implemented yet") orelse false;
     // The Go fixtures run on the emulator, so they're built only with it.
     const go_version = pin(pins, "GO_VERSION");
-    const go_bin = b.findProgram(&.{"go"}, &.{}) catch null;
+    const go_bin = b.findProgram(.{ .names = &.{"go"} });
     const go_fixtures: ?GoFixtures = if (go_bin) |g| addGoFixtures(b, g, go_version) else null;
     const go_fixtures_step = b.step("go-fixtures", "Build the Go fixtures in tests/fixtures/go (plan9/amd64, GO_VERSION from scripts/pins.sh)");
     if (go_fixtures) |g| go_fixtures_step.dependOn(g.step) else go_fixtures_step.dependOn(&b.addFail("go-fixtures: no go on PATH").step);
@@ -1365,8 +1379,9 @@ pub fn build(b: *std.Build) void {
     // The Linux Go fixtures (design/epoch-0/linux-threads.md), with the same
     // toolchain, into fixtures/linux/<arch>/go.
     if (go_bin) |g| for ([_][]const u8{ "arm64", "amd64", "386" }) |arch| {
-        const dir = b.getInstallPath(.prefix, b.fmt("fixtures/linux/{s}/go", .{arch}));
-        const run = b.addSystemCommand(&.{ g, "-C", "tests/fixtures/linux/go", "build", "-trimpath", "-o", b.fmt("{s}{s}", .{ dir, std.fs.path.sep_str }), "./..." });
+        const run = b.addSystemCommand(&.{ g, "-C", "tests/fixtures/linux/go", "build", "-trimpath", "-o" });
+        run.addDirectoryArg2(b.graph.path(.install_prefix, b.fmt("fixtures/linux/{s}/go", .{arch})), .{ .suffix = std.fs.path.sep_str, .make_absolute = true });
+        run.addArg("./...");
         run.setCwd(b.path("."));
         goEnv(run, go_version);
         run.setEnvironmentVariable("GOOS", "linux");
@@ -1380,9 +1395,11 @@ pub fn build(b: *std.Build) void {
     if (emu == .none) {
         go_stdtest.dependOn(&b.addFail("go-stdtest: needs the emulator, which this target doesn't have").step);
     } else {
-        const run_stdtest = b.addSystemCommand(&.{ "bash", "scripts/go-stdtest.sh", h9_bin, b.getInstallPath(.prefix, "go-stdtest") });
+        const run_stdtest = b.addSystemCommand(&.{ "bash", "scripts/go-stdtest.sh" });
+        run_stdtest.addFileArg2(h9, .{ .make_absolute = true });
+        run_stdtest.addDirectoryArg2(b.graph.path(.install_prefix, "go-stdtest"), .{ .make_absolute = true });
         run_stdtest.setCwd(b.path("."));
-        if (b.args) |args| run_stdtest.addArgs(args);
+        run_stdtest.addPassthruArgs();
         run_stdtest.has_side_effects = true;
         run_stdtest.stdio = .inherit;
         run_stdtest.step.dependOn(signed_step);
@@ -1405,9 +1422,11 @@ pub fn build(b: *std.Build) void {
     // -Darch and -Dbackends pick the roots' architecture and the backend
     // (the first one listed), and arguments after -- pick cases by name.
     const workloads_step = b.step("workloads", "Run the workloads in tests/workloads: real programs on real roots, timed (scripts/fetch.sh workloads for the Linux root)");
-    const run_workloads = b.addSystemCommand(&.{ "bash", "scripts/workloads.sh", h9_bin, b.getInstallPath(.prefix, "workloads") });
+    const run_workloads = b.addSystemCommand(&.{ "bash", "scripts/workloads.sh" });
+    run_workloads.addFileArg2(h9, .{ .make_absolute = true });
+    run_workloads.addDirectoryArg2(b.graph.path(.install_prefix, "workloads"), .{ .make_absolute = true });
     run_workloads.setCwd(b.path("."));
-    if (b.args) |args| run_workloads.addArgs(args);
+    run_workloads.addPassthruArgs();
     run_workloads.setEnvironmentVariable("H9_WL_ARCH", test_arch orelse switch (target.result.cpu.arch) {
         .x86_64 => "amd64",
         .x86 => "386",
@@ -1435,7 +1454,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/a64inv.zig"),
             .target = b.graph.host,
-            .optimize = .ReleaseSafe,
+            .optimize = .safe,
             .imports = &.{
                 .{ .name = "a64decode", .module = b.createModule(.{ .root_source_file = b.path("src/interp/a64/decode.zig") }) },
                 .{ .name = "aout", .module = b.createModule(.{ .root_source_file = b.path("src/aout.zig") }) },
@@ -1444,7 +1463,10 @@ pub fn build(b: *std.Build) void {
     });
     const run_a64inv = b.addRunArtifact(a64inv);
     run_a64inv.has_side_effects = true;
-    if (b.args) |args| run_a64inv.addArgs(args) else run_a64inv.addArg(b.pathJoin(&.{ root, "arm64" }));
+    // The root's binaries unless paths are given after --: the tool
+    // decides, since build.zig can't see those arguments.
+    run_a64inv.addArgs(&.{ "--default", b.pathJoin(&.{ root, "arm64" }) });
+    run_a64inv.addPassthruArgs();
     b.step("a64-inventory", "Report the arm64 instructions in binaries (default: the root tree's arm64): zig build a64-inventory -- PATH...").dependOn(&run_a64inv.step);
 
     // The 386 instruction inventory over h86's decoder and T0
@@ -1454,7 +1476,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/x86inv.zig"),
             .target = b.graph.host,
-            .optimize = .ReleaseSafe,
+            .optimize = .safe,
             .imports = &.{
                 .{ .name = "hcpu", .module = b.createModule(.{ .root_source_file = b.path("src/hcpu.zig") }) },
                 .{ .name = "aout", .module = b.createModule(.{ .root_source_file = b.path("src/aout.zig") }) },
@@ -1463,7 +1485,10 @@ pub fn build(b: *std.Build) void {
     });
     const run_x86inv = b.addRunArtifact(x86inv);
     run_x86inv.has_side_effects = true;
-    if (b.args) |args| run_x86inv.addArgs(args) else run_x86inv.addArg(b.pathJoin(&.{ root, "386" }));
+    // The root's binaries unless paths are given after --: the tool
+    // decides, since build.zig can't see those arguments.
+    run_x86inv.addArgs(&.{ "--default", b.pathJoin(&.{ root, "386" }) });
+    run_x86inv.addPassthruArgs();
     b.step("x86-inventory", "Report the 386 instructions in binaries (default: the root tree's 386): zig build x86-inventory -- PATH...").dependOn(&run_x86inv.step);
 
     // The amd64 instruction inventory over hx64's decoder and T0
@@ -1473,7 +1498,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/x64inv.zig"),
             .target = b.graph.host,
-            .optimize = .ReleaseSafe,
+            .optimize = .safe,
             .imports = &.{
                 .{ .name = "hcpu", .module = b.createModule(.{ .root_source_file = b.path("src/hcpu.zig") }) },
                 .{ .name = "aout", .module = b.createModule(.{ .root_source_file = b.path("src/aout.zig") }) },
@@ -1482,7 +1507,10 @@ pub fn build(b: *std.Build) void {
     });
     const run_x64inv = b.addRunArtifact(x64inv);
     run_x64inv.has_side_effects = true;
-    if (b.args) |args| run_x64inv.addArgs(args) else run_x64inv.addArg(b.pathJoin(&.{ root, "amd64" }));
+    // The root's binaries unless paths are given after --: the tool
+    // decides, since build.zig can't see those arguments.
+    run_x64inv.addArgs(&.{ "--default", b.pathJoin(&.{ root, "amd64" }) });
+    run_x64inv.addPassthruArgs();
     b.step("x64-inventory", "Report the amd64 instructions in binaries (default: the root tree's amd64): zig build x64-inventory -- PATH...").dependOn(&run_x64inv.step);
 
     const slim_tool = b.addExecutable(.{
@@ -1494,17 +1522,17 @@ pub fn build(b: *std.Build) void {
     run_slim.stdio = .inherit;
     run_slim.setCwd(b.path("."));
     const release = pin(pins, "NINEFRONT_RELEASE");
+    run_slim.addFileArg2(h9, .{ .make_absolute = true });
     run_slim.addArgs(&.{
-        h9_bin,
         root,
-        b.pathFromRoot("src/9box"),
-        b.pathFromRoot(".local/src/9front/sys/src"),
+        pathFromRoot(b, "src/9box"),
+        pathFromRoot(b, ".local/src/9front/sys/src"),
         slim_arch,
         slim_links,
-        b.pathFromRoot(b.fmt(".local/build/9box/{s}", .{slim_arch})),
+        pathFromRoot(b, b.fmt(".local/build/9box/{s}", .{slim_arch})),
         // -Dslim-links=copy is the separate binaries the box is measured
         // against, in a tree of its own.
-        b.pathFromRoot(b.fmt(".local/9front/slim{s}-{s}-{s}", .{ if (std.mem.eql(u8, slim_links, "copy")) "-copy" else "", release, slim_arch })),
+        pathFromRoot(b, b.fmt(".local/9front/slim{s}-{s}-{s}", .{ if (std.mem.eql(u8, slim_links, "copy")) "-copy" else "", release, slim_arch })),
     });
     run_slim.step.dependOn(signed_step);
     b.step("slim", "Build 9box and a slim root in .local/9front/slim-<release>-<arch>: -Dslim-links=hard|stub|copy, -Darch").dependOn(&run_slim.step);
@@ -1521,7 +1549,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_wsrelay = b.addRunArtifact(wsrelay);
-    if (b.args) |args| run_wsrelay.addArgs(args);
+    run_wsrelay.addPassthruArgs();
     b.step("wsrelay", "Relay WebSockets to a TCP 9P server: zig build wsrelay -- LISTEN_PORT TARGET_PORT").dependOn(&run_wsrelay.step);
 
     // One proposal's demos, web cases, and integration cases (design/),
@@ -1555,7 +1583,7 @@ pub fn build(b: *std.Build) void {
     run_design.has_side_effects = true;
     // `sign` and `propose` ask questions on the terminal.
     run_design.stdio = .inherit;
-    if (b.args) |args| run_design.addArgs(args);
+    run_design.addPassthruArgs();
     b.step("design", "Run the design tool: zig build design -- <command> (help lists them)").dependOn(&run_design.step);
 
     // Builds the 9front root tree from the pinned image (tools/mkroot.zig),
@@ -1572,7 +1600,7 @@ pub fn build(b: *std.Build) void {
     run_mkroot.setCwd(b.path("."));
     run_mkroot.has_side_effects = true;
     run_mkroot.stdio = .inherit;
-    if (b.args) |args| run_mkroot.addArgs(args);
+    run_mkroot.addPassthruArgs();
     b.step("mkroot", "Build the 9front root tree in .local/9front/root: zig build mkroot -- [--force] [--src] [--arch arm64,386,amd64]").dependOn(&run_mkroot.step);
 
     // Unpacks a 9front release ISO into a root tree (tools/isoroot.zig),
@@ -1582,14 +1610,14 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/isoroot.zig"),
             .target = b.graph.host,
-            .optimize = .ReleaseSafe,
+            .optimize = .safe,
         }),
     });
     const run_isoroot = b.addRunArtifact(isoroot_tool);
     run_isoroot.setCwd(b.path("."));
     run_isoroot.has_side_effects = true;
     run_isoroot.stdio = .inherit;
-    if (b.args) |args| run_isoroot.addArgs(args);
+    run_isoroot.addPassthruArgs();
     b.step("isoroot", "Unpack a 9front release ISO into a root tree: zig build isoroot -- ISO DIR").dependOn(&run_isoroot.step);
 
     const mod_tests = b.addTest(.{ .root_module = test_mod.mod });
@@ -1623,12 +1651,12 @@ pub fn build(b: *std.Build) void {
             .name = name,
             .root_module = b.createModule(.{
                 .target = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .freestanding }),
-                .optimize = .ReleaseSmall,
+                .optimize = .small,
             }),
         });
         obj.root_module.addAssemblyFile(b.path(b.fmt("tests/fixtures/{s}/{s}.S", .{ set.dir, name })));
         obj.root_module.addIncludePath(b.path("tests/fixtures/segattach"));
-        const bin = b.addObjCopy(obj.getEmittedBin(), .{ .format = .bin, .only_section = ".text" });
+        const bin = b.addObjCopy(obj.getEmittedBin(), .{ .format = .binary, .only_section = ".text" });
         backend_tests.root_module.addAnonymousImport(b.fmt("{s}_{s}", .{ set.prefix, name }), .{ .root_source_file = bin.getOutput() });
     };
     const test_step = b.step("test", "Run unit tests and the backend tests (not the integration cases)");
@@ -1662,7 +1690,7 @@ pub fn build(b: *std.Build) void {
     run_backend_tests.setEnvironmentVariable("H9_TEST_ROOT", root);
     // The Alpine roots from scripts/fetch.sh, for the [linux-fifo] case that
     // runs two Linux machines in one process.
-    run_backend_tests.setEnvironmentVariable("H9_TEST_LINUX_ROOT", b.pathFromRoot(".local/linux"));
+    run_backend_tests.setEnvironmentVariable("H9_TEST_LINUX_ROOT", pathFromRoot(b, ".local/linux"));
     if (os == .macos and b.graph.host.result.os.tag == .macos) {
         const sign = b.addSystemCommand(&.{ "codesign", "--force", "--sign", "-", "--entitlements" });
         sign.addFileArg(b.path("h9.entitlements"));
@@ -1749,7 +1777,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/bench.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
             .imports = &.{.{ .name = "h9", .module = mod.mod }},
         }),
     });
@@ -1760,7 +1788,7 @@ pub fn build(b: *std.Build) void {
     addComputeBenches(b, bench);
     const run_bench = b.addRunArtifact(bench);
     run_bench.has_side_effects = true;
-    if (b.args) |a| run_bench.addArgs(a);
+    run_bench.addPassthruArgs();
     if (os == .macos and b.graph.host.result.os.tag == .macos) {
         const sign = b.addSystemCommand(&.{ "codesign", "--force", "--sign", "-", "--entitlements" });
         sign.addFileArg(b.path("h9.entitlements"));
@@ -1773,7 +1801,7 @@ pub fn build(b: *std.Build) void {
     // tests and the integration tests, built for the target.
     const install_tests_step = b.step("install-tests", "Install the backend and integration tests as zig-out/bin/backend-tests and integration-tests");
     install_tests_step.dependOn(&b.addInstallArtifact(backend_tests, .{ .dest_sub_path = b.fmt("backend-tests{s}", .{target.result.exeFileExt()}) }).step);
-    install_tests_step.dependOn(&b.addInstallArtifact(integrationTests(b, target, optimize, &.{}), .{ .dest_sub_path = b.fmt("integration-tests{s}", .{target.result.exeFileExt()}) }).step);
+    install_tests_step.dependOn(&b.addInstallArtifact(integrationTests(b, target, optimize, &.{}, b.addOptions()), .{ .dest_sub_path = b.fmt("integration-tests{s}", .{target.result.exeFileExt()}) }).step);
 }
 
 /// Whether this Mac can run HVF: a macOS VM reports kern.hv_support 0.
@@ -1786,11 +1814,14 @@ fn hostHasHvf(b: *std.Build) bool {
     return ok and std.mem.eql(u8, std.mem.trim(u8, r.stdout, " \t\r\n"), "1");
 }
 
-/// zig build x64check [-- n [seed [int|x87|sse|v2]]]: hx64's T0 against the
-/// host CPU in long mode (tools/x86check): n random instructions (default
-/// 100000) run natively by oracle64.c and on T0. x86-64 Linux hosts only.
+/// zig build x64check [-Dcheck-n=N] [-Dcheck-seed=S] [-Dcheck-mode=int|x87|sse|v2]:
+/// hx64's T0 against the host CPU in long mode (tools/x86check): N random
+/// instructions (default 100000) run natively by oracle64.c and on T0.
+/// x86-64 Linux hosts only. They're options, not arguments after `--`,
+/// because the build wires them into three steps, and build.zig can't
+/// see those arguments.
 fn addX64check(b: *std.Build, hcpu: *std.Build.Module) void {
-    const step = b.step("x64check", "Check hx64's T0 against the host CPU in long mode (-- [n [seed [int|x87|sse|v2]]]; x86-64 Linux)");
+    const step = b.step("x64check", "Check hx64's T0 against the host CPU in long mode (-Dcheck-n, -Dcheck-seed, -Dcheck-mode=int|x87|sse|v2; x86-64 Linux)");
     const host = b.graph.host.result;
     if (host.cpu.arch != .x86_64 or host.os.tag != .linux) {
         step.dependOn(&b.addFail("x64check: needs an x86-64 Linux host, where the CPU is the oracle").step);
@@ -1800,7 +1831,7 @@ fn addX64check(b: *std.Build, hcpu: *std.Build.Module) void {
         .name = "oracle64",
         .root_module = b.createModule(.{
             .target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .musl }),
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
             .link_libc = true,
         }),
     });
@@ -1812,15 +1843,14 @@ fn addX64check(b: *std.Build, hcpu: *std.Build.Module) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/x86check/x86check.zig"),
             .target = b.graph.host,
-            .optimize = .ReleaseSafe,
+            .optimize = .safe,
             .link_libc = true,
             .imports = &.{.{ .name = "hcpu", .module = hcpu }},
         }),
     });
-    const a = b.args orelse &.{};
-    const n = if (a.len > 0) a[0] else "100000";
-    const seed = if (a.len > 1) a[1] else "1";
-    const mode = if (a.len > 2) a[2] else "int";
+    const n = b.option([]const u8, "check-n", "x64check: how many random instructions (default 100000)") orelse "100000";
+    const seed = b.option([]const u8, "check-seed", "x64check: the random seed (default 1)") orelse "1";
+    const mode = b.option([]const u8, "check-mode", "x64check: int, x87, sse, or v2 (default int)") orelse "int";
     const gen = b.addRunArtifact(check);
     gen.addArgs(&.{ "gen64", n, seed });
     const cases = gen.addOutputFileArg("cases.bin");
@@ -1840,11 +1870,11 @@ fn addX64check(b: *std.Build, hcpu: *std.Build.Module) void {
 /// The JIT's test tools (src/jit/README.md, "Test tools"): lockstep against
 /// Unicorn (tools/lockstep.zig, with the prebuilt library fetched), the
 /// fuzzers, and the litmus tests.
-fn addJitTestTools(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
+fn addJitTestTools(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) void {
     // The fuzzers: the region check always, and lockstep against Unicorn
     // when the oracle's library has been fetched.
     // ReleaseSafe unless -Doptimize says otherwise: fast, and still checked.
-    const fuzz_optimize: std.builtin.OptimizeMode = if (optimize == .Debug) .ReleaseSafe else optimize;
+    const fuzz_optimize: std.lang.Optimize = if (optimize == .debug) .safe else optimize;
     const oracle: ?Oracle, const oracle_missing: []const u8 = switch (addOracle(b, target, fuzz_optimize)) {
         .ok => |o| .{ o, "" },
         .missing => |why| .{ null, why },
@@ -1903,7 +1933,7 @@ fn addJitTestTools(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
         }
         const run = b.addRunArtifact(exe);
         run.has_side_effects = true;
-        if (b.args) |a| run.addArgs(a);
+        run.addPassthruArgs();
         b.step(b.fmt("fuzz-{s}", .{arch}), b.fmt("Fuzz the {s} T0 and lifter with random programs (-- --help for options; lockstep needs scripts/fetch.sh unicorn)", .{arch})).dependOn(&run.step);
         fuzz_exes[fuzz_i] = exe;
         fuzz_i += 1;
@@ -1913,7 +1943,7 @@ fn addJitTestTools(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/jit/fuzz_long.zig"),
             .target = b.graph.host,
-            .optimize = .ReleaseSafe,
+            .optimize = .safe,
         }),
     });
     const long = b.addRunArtifact(fuzz_long_exe);
@@ -1935,7 +1965,7 @@ fn addJitTestTools(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
     });
     const litmus_run = b.addRunArtifact(litmus);
     litmus_run.has_side_effects = true;
-    if (b.args) |a| litmus_run.addArgs(a);
+    litmus_run.addPassthruArgs();
     b.step("litmus", "Run the threading litmus tests on every tier, with their outcome tallies (-- --iters N --tier T --only NAME)").dependOn(&litmus_run.step);
 }
 
@@ -1952,7 +1982,7 @@ fn hcpuTestParts(b: *std.Build) []const []const []const u8 {
     var rest: std.ArrayList([]const u8) = .empty;
     rest.appendSlice(b.allocator, &.{ "hcpu.", "interp." }) catch @panic("OOM");
     const io = b.graph.io;
-    var dir = b.build_root.handle.openDir(io, "src/jit", .{ .iterate = true }) catch |err|
+    var dir = b.root.root_dir.handle.openDir(io, "src/jit", .{ .iterate = true }) catch |err|
         std.debug.panic("build.zig: can't list src/jit: {t}", .{err});
     defer dir.close(io);
     var it = dir.iterate();
@@ -1976,7 +2006,7 @@ fn hcpuTestParts(b: *std.Build) []const []const []const u8 {
 /// natively, and the wasm emitter's under Node when Node is installed
 /// (tests/jit/run.mjs). `zig build hcpu` runs just these. `zig build
 /// hcpu-web`, and `web-test` with it, runs the wasm emitter's in Chromium.
-fn addHcpuTests(b: *std.Build, test_step: *std.Build.Step, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
+fn addHcpuTests(b: *std.Build, test_step: *std.Build.Step, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) void {
     const step = b.step("hcpu", "Run the emulator CPU and JIT tests (src/hcpu.zig), natively and under Node");
     // A test binary runs its tests one at a time, and these take about a
     // minute, so they're split by name into a few binaries the build
@@ -2030,11 +2060,11 @@ fn addHcpuTests(b: *std.Build, test_step: *std.Build.Step, target: std.Build.Res
     const litmus = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("tests/jit/litmus_x86.zig"),
         .target = target,
-        .optimize = if (optimize == .Debug) .ReleaseSafe else optimize,
+        .optimize = if (optimize == .debug) .safe else optimize,
         .imports = &.{.{ .name = "hcpu", .module = b.createModule(.{
             .root_source_file = b.path("src/hcpu.zig"),
             .target = target,
-            .optimize = if (optimize == .Debug) .ReleaseSafe else optimize,
+            .optimize = if (optimize == .debug) .safe else optimize,
         }) }},
     }) });
     const litmus_run = b.addRunArtifact(litmus);
@@ -2047,25 +2077,25 @@ fn addHcpuTests(b: *std.Build, test_step: *std.Build.Step, target: std.Build.Res
     const litmus_a64 = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("tests/jit/litmus_a64.zig"),
         .target = target,
-        .optimize = if (optimize == .Debug) .ReleaseSafe else optimize,
+        .optimize = if (optimize == .debug) .safe else optimize,
         .imports = &.{.{ .name = "hcpu", .module = b.createModule(.{
             .root_source_file = b.path("src/hcpu.zig"),
             .target = target,
-            .optimize = if (optimize == .Debug) .ReleaseSafe else optimize,
+            .optimize = if (optimize == .debug) .safe else optimize,
         }) }},
     }) });
     const litmus_a64_run = b.addRunArtifact(litmus_a64);
     step.dependOn(&litmus_a64_run.step);
     b.step("litmus-a64", "Run ha64's memory-model litmus tests on every tier").dependOn(&litmus_a64_run.step);
 
-    const node = b.findProgram(&.{"node"}, &.{}) catch return;
+    const node = b.findProgram(.{ .names = &.{"node"} }) orelse return;
     const runtime = b.addExecutable(.{
         .name = "jit-runtime",
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/jit/wasm_runtime.zig"),
             .target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding }),
             // Debug: optimizing the stand-in T0's dispatch for wasm takes minutes.
-            .optimize = .Debug,
+            .optimize = .debug,
             .imports = &.{.{ .name = "hcpu", .module = b.createModule(.{ .root_source_file = b.path("src/hcpu.zig") }) }},
         }),
     });
@@ -2086,4 +2116,20 @@ fn addHcpuTests(b: *std.Build, test_step: *std.Build.Step, target: std.Build.Res
     browser_run.expectExitCode(0);
     b.step("hcpu-web", "Run the wasm emitter's tests in Chromium with Playwright").dependOn(&browser_run.step);
     if (b.top_level_steps.get("web-test")) |web_test| web_test.step.dependOn(&browser_run.step);
+}
+
+/// `sub` under the build root, for paths outside the build graph: roots
+/// and tools in .local, which the build reads or hands to programs as is.
+fn pathFromRoot(b: *std.Build, sub: []const u8) []const u8 {
+    return b.pathJoin(&.{ b.root.root_dir.path orelse ".", b.root.sub_path, sub });
+}
+
+/// A run of the installed h9 (`h9`) with `args`, once `signed` has
+/// installed (and on macOS signed) it.
+fn runH9(b: *std.Build, h9: std.Build.LazyPath, signed: *std.Build.Step, args: []const []const u8) *std.Build.Step.Run {
+    const run = std.Build.Step.Run.create(b, b.fmt("run h9 {s}", .{if (args.len > 0) args[0] else ""}));
+    run.addFileArg(h9);
+    run.addArgs(args);
+    run.step.dependOn(signed);
+    return run;
 }

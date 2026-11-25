@@ -2207,24 +2207,24 @@ test "the guest's /net/ws: connect, data, text, status, and the last close hangs
             const c = try std.fmt.bufPrint(&cmd, "connect ws://127.0.0.1:{d}/x?k=v 9p", .{t.port});
             _ = try kern.pwrite(ctl, c, 0);
             t.what = "status";
-            const sfd = try kern.open(try std.fmt.bufPrintZ(&path, "#ℏ/ws/{s}/status", .{conv}), kern.OREAD);
+            const sfd = try kern.open(try std.fmt.bufPrintSentinel(&path, "#ℏ/ws/{s}/status", .{conv}, 0), kern.OREAD);
             const sn = try kern.pread(sfd, &buf, 0);
             try kern.close(sfd);
             try testing.expectEqualStrings("Established 9p\n", buf[0..sn]);
-            const rfd = try kern.open(try std.fmt.bufPrintZ(&path, "#ℏ/ws/{s}/remote", .{conv}), kern.OREAD);
+            const rfd = try kern.open(try std.fmt.bufPrintSentinel(&path, "#ℏ/ws/{s}/remote", .{conv}, 0), kern.OREAD);
             const rn = try kern.pread(rfd, &buf, 0);
             try kern.close(rfd);
             try testing.expect(std.mem.startsWith(u8, buf[0..rn], "ws://127.0.0.1:"));
 
             t.what = "data";
-            const data = try kern.open(try std.fmt.bufPrintZ(&path, "#ℏ/ws/{s}/data", .{conv}), kern.ORDWR);
+            const data = try kern.open(try std.fmt.bufPrintSentinel(&path, "#ℏ/ws/{s}/data", .{conv}, 0), kern.ORDWR);
             _ = try kern.pwrite(data, "hello, ", 0);
             _ = try kern.pwrite(data, "world", 0);
             try testing.expectEqual(@as(usize, 12), try readAll(data, &buf, 12));
             try testing.expectEqualStrings("hello, world", buf[0..12]);
 
             t.what = "text";
-            const text = try kern.open(try std.fmt.bufPrintZ(&path, "#ℏ/ws/{s}/text", .{conv}), kern.ORDWR);
+            const text = try kern.open(try std.fmt.bufPrintSentinel(&path, "#ℏ/ws/{s}/text", .{conv}, 0), kern.ORDWR);
             _ = try kern.pwrite(text, "{\"ħ\":1}", 0);
             _ = try kern.pwrite(text, "", 0);
             var small: [3]u8 = undefined;
@@ -2260,7 +2260,7 @@ test "the guest's /net/ws: connect, data, text, status, and the last close hangs
             try kern.close(dir2);
             // Only clone is left.
             try testing.expect(std.mem.indexOf(u8, dbuf[0..dn2], "clone") != null);
-            if (kern.open(try std.fmt.bufPrintZ(&path, "#ℏ/ws/{s}/data", .{conv}), kern.ORDWR)) |_| return error.StillThere else |_| {}
+            if (kern.open(try std.fmt.bufPrintSentinel(&path, "#ℏ/ws/{s}/data", .{conv}, 0), kern.ORDWR)) |_| return error.StillThere else |_| {}
 
             t.what = "attach spec";
             if (kern.open("#ℏ1", kern.OREAD)) |_| return error.SpecAccepted else |_| {}
@@ -2466,7 +2466,7 @@ fn httpGet(alloc: std.mem.Allocator, io: Io, url: ws.Url, o: FetchOptions, etag:
     if (r.status != 200) {
         if (r.etag) |e| alloc.free(e);
         alloc.free(r.body);
-        _ = std.fmt.bufPrintZ(msg, "{d} {s}", .{ r.status, r.reason() }) catch {};
+        _ = std.fmt.bufPrintSentinel(msg, "{d} {s}", .{ r.status, r.reason() }, 0) catch {};
         return error.Status;
     }
     return .{ .body = .{ .bytes = r.body, .etag = r.etag } };
@@ -2540,7 +2540,7 @@ fn httpDo(alloc: std.mem.Allocator, io: Io, url: ws.Url, o: GetOptions, req: Req
         try ws.writeConnect(&c.sw.interface, p, url);
         var resp: ws.Response = .{};
         ws.readConnect(&c.sr.interface, &resp) catch |e| {
-            if (e == error.Status) _ = std.fmt.bufPrintZ(msg, "proxy: {d} {s}", .{ resp.status, resp.reason }) catch {};
+            if (e == error.Status) _ = std.fmt.bufPrintSentinel(msg, "proxy: {d} {s}", .{ resp.status, resp.reason }, 0) catch {};
             return e;
         };
     }
@@ -2574,9 +2574,9 @@ fn httpDo(alloc: std.mem.Allocator, io: Io, url: ws.Url, o: GetOptions, req: Req
         if (std.ascii.eqlIgnoreCase(name, "content-length")) {
             length = std.fmt.parseInt(u64, value, 10) catch return error.BadResponse;
         } else if (std.ascii.eqlIgnoreCase(name, "transfer-encoding")) {
-            chunked = std.ascii.indexOfIgnoreCase(value, "chunked") != null;
+            chunked = std.ascii.findIgnoreCase(value, "chunked") != null;
         } else if (std.ascii.eqlIgnoreCase(name, "content-encoding")) {
-            out.zstd = std.ascii.indexOfIgnoreCase(value, "zstd") != null;
+            out.zstd = std.ascii.findIgnoreCase(value, "zstd") != null;
         } else if (std.ascii.eqlIgnoreCase(name, "etag") and out.etag == null and value.len <= 256) {
             out.etag = try alloc.dupe(u8, value);
         }

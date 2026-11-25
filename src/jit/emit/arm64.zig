@@ -2740,7 +2740,7 @@ fn hasLrcpc() bool {
             var len: usize = @sizeOf(u32);
             break :blk sysctlbyname("hw.optional.arm.FEAT_LRCPC", &v, &len, null, 0) == 0 and v != 0;
         },
-        .linux => std.os.linux.getauxval(std.elf.AT_HWCAP) & (1 << 15) != 0,
+        .linux => std.os.linux.getauxval(std.elf.AT.HWCAP) & (1 << 15) != 0,
         else => false,
     };
     lrcpc_known.store(if (yes) 2 else 1, .monotonic);

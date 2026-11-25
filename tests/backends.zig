@@ -167,14 +167,14 @@ test "a guest syscall with any value in AX traps to h9 [native-backend]" {
     comptime std.debug.assert(code.len == 96);
     var text: [code.len + 8 + 8 * ax.len]u8 = undefined;
     @memcpy(text[0..code.len], &code);
-    @memcpy(text[code.len..][0..8], "x" ++ "\x00" ** 7);
+    @memcpy(text[code.len..][0..8], "x" ++ &@as([7]u8, @splat('\x00')));
     for (ax, 0..) |v, i| std.mem.writeInt(u64, text[code.len + 8 + 8 * i ..][0..8], v, .little);
     const bytes = try image(std.testing.allocator, .amd64, &text);
     defer std.testing.allocator.free(bytes);
     try expectAll(.amd64, bytes, .{
         .status = "exited \"\"",
-        .out = "x" ** ax.len,
-        .trace = "1 pwrite 1 1 = 1\n" ** ax.len ++ "1 exits \"\"\n",
+        .out = &@as([ax.len]u8, @splat('x')),
+        .trace = rep("1 pwrite 1 1 = 1\n", ax.len) ++ "1 exits \"\"\n",
     });
 }
 
@@ -2633,4 +2633,14 @@ test "acme starts inside rio [gfx]" {
         ran += 1;
     }
     if (ran == 0) return error.SkipZigTest;
+}
+
+/// `s` repeated `n` times, at compile time.
+inline fn rep(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    comptime {
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const final = out;
+        return &final;
+    }
 }

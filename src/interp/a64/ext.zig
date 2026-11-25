@@ -357,11 +357,11 @@ pub fn clmul64(a: u64, b: u64) u128 {
 // ---------------------------------------------------------------- handlers
 
 pub const handlers = blk: {
-    const fields = @typeInfo(Kind).@"enum".fields;
-    var h: [fields.len]exec.Handler = undefined;
-    for (fields, 0..) |f, i| {
-        std.debug.assert(f.value == i);
-        h[i] = handlerFor(@enumFromInt(f.value));
+    const values = @typeInfo(Kind).@"enum".field_values;
+    var h: [values.len]exec.Handler = undefined;
+    for (values, 0..) |v, i| {
+        std.debug.assert(v == i);
+        h[i] = handlerFor(@enumFromInt(v));
     }
     break :blk h;
 };

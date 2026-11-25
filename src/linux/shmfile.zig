@@ -61,7 +61,7 @@ var post_seq: std.atomic.Value(u32) = .init(0);
 /// Posts the file open as `fd` for e's write-back, if it isn't yet.
 fn postFile(e: *Entry, fd: u31) void {
     if (e.post_len != 0) return;
-    const name = std.fmt.bufPrintZ(&e.post, "#s/lxm.{d}", .{post_seq.fetchAdd(1, .monotonic)}) catch return;
+    const name = std.fmt.bufPrintSentinel(&e.post, "#s/lxm.{d}", .{post_seq.fetchAdd(1, .monotonic)}, 0) catch return;
     const sfd = kern.create(name, kern.OWRITE, 0o600) catch return;
     defer kern.close(sfd) catch {};
     var nb: [16]u8 = undefined;
@@ -124,7 +124,7 @@ pub fn pagesFor(backend: vmm.Backend, file: locks.Key, index: u64, fd: u31, path
     errdefer gpa.destroy(e);
     const p = try gpa.create(mm.Pages);
     errdefer gpa.destroy(p);
-    const pz = try gpa.dupeZ(u8, path);
+    const pz = try gpa.dupeSentinel(u8, path, 0);
     errdefer gpa.free(pz);
     // The table's reference and the caller's.
     p.* = .{ .mem = mem, .refs = .init(2), .file = e, .release = released };

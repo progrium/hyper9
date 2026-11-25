@@ -43,7 +43,7 @@ pub const simd_base: u16 = 0x100;
 pub const ext_base: u16 = 0x400;
 
 comptime {
-    std.debug.assert(@typeInfo(simd.Kind).@"enum".fields.len <= ext_base - simd_base);
+    std.debug.assert(@typeInfo(simd.Kind).@"enum".field_names.len <= ext_base - simd_base);
 }
 
 pub const Kind = enum(u16) {
@@ -332,9 +332,9 @@ pub const Kind = enum(u16) {
 
 /// How many kinds decode.zig has (the handler table's size).
 pub const nkinds = blk: {
-    const fields = @typeInfo(Kind).@"enum".fields;
-    std.debug.assert(fields.len < simd_base);
-    break :blk fields.len;
+    const n = @typeInfo(Kind).@"enum".field_names.len;
+    std.debug.assert(n < simd_base);
+    break :blk n;
 };
 
 pub const Op = extern struct {

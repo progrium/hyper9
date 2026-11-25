@@ -248,7 +248,7 @@ pub fn a64Exception(esr: u64) ?Exception {
 /// The note for a signal sent to one thread (tgkill), which isn't
 /// passed on to another thread that doesn't block it.
 pub fn threadNote(signo: u32, buf: []u8) [:0]const u8 {
-    return std.fmt.bufPrintZ(buf, "linux: signal {d} thread", .{signo}) catch "linux: signal 15 thread";
+    return std.fmt.bufPrintSentinel(buf, "linux: signal {d} thread", .{signo}, 0) catch "linux: signal 15 thread";
 }
 
 pub fn isThreadNote(msg: []const u8) bool {
@@ -260,7 +260,7 @@ pub fn signalNote(signo: u32, buf: []u8) [:0]const u8 {
         SIGINT => "interrupt",
         SIGHUP => "hangup",
         SIGALRM => "alarm",
-        else => std.fmt.bufPrintZ(buf, "linux: signal {d}", .{signo}) catch "linux: signal 15",
+        else => std.fmt.bufPrintSentinel(buf, "linux: signal {d}", .{signo}, 0) catch "linux: signal 15",
     };
 }
 

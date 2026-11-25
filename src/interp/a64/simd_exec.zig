@@ -30,11 +30,11 @@ comptime {
 
 pub const handlers = blk: {
     @setEvalBranchQuota(200000);
-    const fields = @typeInfo(K).@"enum".fields;
-    var h: [fields.len]exec.Handler = undefined;
-    for (fields, 0..) |f, i| {
-        std.debug.assert(f.value == i);
-        h[i] = handlerFor(@enumFromInt(f.value));
+    const values = @typeInfo(K).@"enum".field_values;
+    var h: [values.len]exec.Handler = undefined;
+    for (values, 0..) |v, i| {
+        std.debug.assert(v == i);
+        h[i] = handlerFor(@enumFromInt(v));
     }
     break :blk h;
 };
@@ -53,15 +53,15 @@ const QC: u32 = 1 << 27;
 // ---------------------------------------------------------------- lanes
 
 fn UInt(comptime s: comptime_int) type {
-    return std.meta.Int(.unsigned, 8 << s);
+    return @Int(.unsigned, 8 << s);
 }
 
 fn Signed(comptime T: type) type {
-    return std.meta.Int(.signed, @bitSizeOf(T));
+    return @Int(.signed, @bitSizeOf(T));
 }
 
 fn Wide(comptime T: type) type {
-    return std.meta.Int(.unsigned, 2 * @bitSizeOf(T));
+    return @Int(.unsigned, 2 * @bitSizeOf(T));
 }
 
 inline fn lane(v: u128, comptime T: type, i: usize) T {

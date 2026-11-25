@@ -210,7 +210,7 @@ test "T0 matches the host CPU on random FP and AdvSIMD instructions" {
     var ctx: Ctx = .{ .tlb = @intFromPtr(&tlb), .space = @intFromPtr(&view) };
     var m: exec.Machine = .init(&cpu, &ctx, &cache, null);
 
-    const nk = @typeInfo(sd.Kind).@"enum".fields.len;
+    const nk = @typeInfo(sd.Kind).@"enum".field_names.len;
     var kinds: [nk]u32 = @splat(0);
     var per_class: [classes.len]u32 = @splat(0);
     var tried: usize = 0;
@@ -258,9 +258,9 @@ test "T0 matches the host CPU on random FP and AdvSIMD instructions" {
     if (failures > 0) std.debug.print("{d} of {d} differ\n", .{ failures, tried });
     for (classes, per_class) |c, n| if (n == 0) std.debug.print("no coverage: class {s}\n", .{c.name});
     var missing: usize = 0;
-    inline for (@typeInfo(sd.Kind).@"enum".fields) |f| {
-        if (kinds[f.value] == 0 and !isMem(@enumFromInt(f.value))) {
-            std.debug.print("no coverage: {s}\n", .{f.name});
+    inline for (comptime std.enums.values(sd.Kind)) |k| {
+        if (kinds[@intFromEnum(k)] == 0 and !isMem(k)) {
+            std.debug.print("no coverage: {t}\n", .{k});
             missing += 1;
         }
     }
@@ -311,7 +311,7 @@ test "T0 matches the host CPU on random structure loads and stores" {
     var ctx: Ctx = .{ .tlb = @intFromPtr(&tlb), .space = @intFromPtr(&view) };
     var m: exec.Machine = .init(&cpu, &ctx, &cache, null);
 
-    const nk = @typeInfo(sd.Kind).@"enum".fields.len;
+    const nk = @typeInfo(sd.Kind).@"enum".field_names.len;
     var kinds: [nk]u32 = @splat(0);
     var tried: usize = 0;
     const n = @max(cfg.n / 6, 1000);
@@ -351,9 +351,9 @@ test "T0 matches the host CPU on random structure loads and stores" {
         }
     }
     var missing: usize = 0;
-    inline for (@typeInfo(sd.Kind).@"enum".fields) |f| {
-        if (kinds[f.value] == 0 and isMem(@enumFromInt(f.value))) {
-            std.debug.print("no coverage: {s}\n", .{f.name});
+    inline for (comptime std.enums.values(sd.Kind)) |k| {
+        if (kinds[@intFromEnum(k)] == 0 and isMem(k)) {
+            std.debug.print("no coverage: {t}\n", .{k});
             missing += 1;
         }
     }

@@ -558,7 +558,7 @@ fn listCmd(r: Repo, w: *std.Io.Writer, status: ?Status, area: ?[]const u8, ready
             .title = p.title,
         });
     }
-    var widths = [_]usize{0} ** 4;
+    var widths = @as([4]usize, @splat(0));
     for (rows.items) |row| {
         for ([_][]const u8{ row.slug, row.id, row.status, row.state }, 0..) |cell, k| widths[k] = @max(widths[k], cell.len);
     }

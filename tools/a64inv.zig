@@ -275,15 +275,22 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(gpa);
     var top: usize = 60;
     var paths: std.ArrayList([]const u8) = .empty;
+    var default: ?[]const u8 = null;
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--top") and i + 1 < args.len) {
             i += 1;
             top = try std.fmt.parseInt(usize, args[i], 10);
+        } else if (std.mem.eql(u8, args[i], "--default") and i + 1 < args.len) {
+            i += 1;
+            default = args[i];
         } else try paths.append(gpa, args[i]);
     }
+    // zig build passes the root tree's binaries as --default, for when no
+    // paths are given.
+    if (paths.items.len == 0) if (default) |d| try paths.append(gpa, d);
     if (paths.items.len == 0) {
-        std.debug.print("usage: a64inv [--top N] PATH...\n", .{});
+        std.debug.print("usage: a64inv [--top N] [--default PATH] PATH...\n", .{});
         std.process.exit(2);
     }
     var st: Stats = .{};
