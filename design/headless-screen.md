@@ -1,12 +1,12 @@
 ---
 slug: headless-screen
 title: Headless screen (--gfx=headless)
-status: draft
+status: implemented
 created: 2026-11-23
 authors: [progrium]
 depends: []
 areas: [cli, kern, build, tests]
-branch: [headless-screen]
+branch: [main]
 ---
 
 # Proposal: Headless screen (--gfx=headless)
@@ -143,3 +143,4 @@ Demos, by hand: `h9 --gfx=headless rio -i 'window rc'` with a script that types 
 ## Updates
 
 - 2026-11-25: Built on the `headless-screen` branch, steps 1 to 5. The integration cases pass on the native backend (amd64, the release ISO's root), the rio case included, and the backend cases on the emulator. The exit code for the flag conflicts is 2, as for h9's other usage errors, rather than the 125 this proposal first said; that case is renamed to match. `/dev/mousein` takes 9front's `A` (absolute), `a` (scaled), and other letters (relative), and `/dev/kbdin` kbdfs's text and NUL-terminated messages. The screen opens once per process, so a machine that asks for a window after another opened the headless screen (or the other way around, or the headless screen at another size) gets `GfxInUse`. The backend tests now use the `-Dgfx` build's headless screen when it has one, so `zig build test -Dgfx=x11` runs the windowed-build case. Not yet done: the demos by hand on macOS and Windows, and a build of the Cocoa and Win32 backends with the wider renaming in `gfx-gui.h`, which this branch's CI runs; the status stays `draft` until they pass.
+- 2026-11-25: Implemented. CI's dispatched run built the Cocoa and Win32 backends with the headless screen linked in beside them. On macOS (Cocoa, arm64) the backend cases pass, the two `[headless-screen]` ones and the `[gfx]` rio and acme cases among them, and so do the integration runs on the emulator. On Windows the build links and the `[headless-screen]` backend cases pass. The `[gfx]` rio and acme cases fail there on the emulator, as they already did on main with the headless-only test build. That run also found a bug in the GfxInUse case: on macOS a window claim beside the headless screen is `GfxUnavailable`, and the case left the screen claimed when it failed. It now accepts that and gives the screen up. The demos haven't been run by hand on macOS or Windows; CI's rio cases are the stand-in for them.
