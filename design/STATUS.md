@@ -20,8 +20,8 @@ Every proposal at the top of [design/](README.md), in the order they were writte
 | [mount-index](mount-index.md) |  | implemented |  | Metadata indexes for 9P roots and mounts |
 | [hcpu](hcpu.md) | [#174](../../../issues/174) | implemented |  | hcpu, h9's own CPUs for the emulator |
 | [kernel-serve](kernel-serve.md) |  | implemented |  | A 9P server in the kernel |
-| [namespace-kernel](namespace-kernel.md) |  | draft | needs port-streams | A namespace-only kernel build |
-| [port-streams](port-streams.md) |  | draft |  | 9P over a MessagePort |
+| [namespace-kernel](namespace-kernel.md) |  | draft |  | A namespace-only kernel build |
+| [port-streams](port-streams.md) |  | implemented |  | 9P over a MessagePort |
 | [linux-fifo](linux-fifo.md) |  | implemented |  | Linux named pipes |
 | [mounts](mounts.md) |  | implemented |  | Mounts, binds, and a Plan 9 root |
 | [baseline-1](baseline-1.md) |  | draft | needs renames | Baseline 1 (h9 at the end of epoch 0) |
@@ -35,7 +35,7 @@ Every proposal at the top of [design/](README.md), in the order they were writte
 | [retire-unicorn](retire-unicorn.md) |  | implemented |  | Retire Unicorn as an engine |
 | [scheduler](scheduler.md) |  | draft | needs kernel-port | A scheduler, with processes on per-core executors |
 | [fd-mounts](fd-mounts.md) |  | implemented |  | Mounting a 9P connection from a host descriptor |
-| [upper-layers](upper-layers.md) |  | draft | in progress on upper-layers; needs port-streams | Writable layers on the host |
+| [upper-layers](upper-layers.md) |  | draft | in progress on upper-layers | Writable layers on the host |
 | [headless-screen](headless-screen.md) |  | draft | in progress on claude/project-thread-i8dpw1 | Headless screen (--gfx=headless) |
 | [file-watch](file-watch.md) |  | draft |  | Watching files for changes, on the host and in the guest |
 | [linux-chroot](linux-chroot.md) |  | implemented |  | chroot for Linux programs |
@@ -62,7 +62,7 @@ flowchart LR
   p_hcpu["hcpu<br/>implemented"]:::implemented
   p_kernel_serve["kernel-serve<br/>implemented"]:::implemented
   p_namespace_kernel["namespace-kernel<br/>draft"]:::draft
-  p_port_streams["port-streams<br/>draft"]:::draft
+  p_port_streams["port-streams<br/>implemented"]:::implemented
   p_linux_fifo["linux-fifo<br/>implemented"]:::implemented
   p_mounts["mounts<br/>implemented"]:::implemented
   p_baseline_1["baseline-1<br/>draft"]:::draft
