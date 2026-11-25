@@ -299,7 +299,7 @@ neighbours. See [spec/abi-linux.md](../spec/abi-linux.md).
   `rename(2)` within host trees, `symlink` makes host links in `#U` trees
   (checked as a create), `mkfifo` makes host FIFOs, record and `flock` locks
   are one table per h9 process, `fsync` reaches the host.
-- **Symlinks** ([linux-symlinks](../design/linux-symlinks.md)): a Linux
+- **Symlinks** ([linux-symlinks](../design/epoch-0/linux-symlinks.md)): a Linux
   process's walk stops at a link, and the kernel follows it from the
   process's root, so a link in a bound host tree to a host path the guest
   doesn't see is `ENOENT`. The host open is `openat2` with
@@ -497,7 +497,7 @@ in-memory archive.
 
 ### 7.1 Narrow chroot (merged, #289)
 
-[linux-chroot](../design/linux-chroot.md) lets a Linux process's `chroot(2)`
+[linux-chroot](../design/epoch-0/linux-chroot.md) lets a Linux process's `chroot(2)`
 narrow its own root to a directory it can already reach, instead of
 returning `EPERM`. The directory is walked as any Linux path, through the
 policy, and kept in the process's record (`Hproc.lroot`, its chan marked
@@ -568,7 +568,7 @@ and queue code in the Linux personality.
   and narrowing (see 5).
 - [host-sandbox](../design/host-sandbox.md): apply the policy to the h9
   process itself (Seatbelt, Landlock and seccomp, AppContainer). Not built.
-- [hide-host-paths](../design/hide-host-paths.md): hide host paths in
+- [hide-host-paths](../design/epoch-0/hide-host-paths.md): hide host paths in
   `/proc/n/ns` under the stricter profiles. Not built.
 - [child-machines](../design/child-machines.md), [host-handles](../design/host-handles.md),
   [kernel-port](../design/kernel-port.md), and [host-cmd](../design/host-cmd.md)
@@ -676,7 +676,7 @@ Grouped by boundary, with where each is described.
 5. **Hardlinks** under writable paths can modify files outside them.
 6. **No disk cap** on writable paths.
 7. **Information disclosure.** `/proc/n/ns` shows the host paths of bound
-   trees ([hide-host-paths](../design/hide-host-paths.md)); the user name is
+   trees ([hide-host-paths](../design/epoch-0/hide-host-paths.md)); the user name is
    the host user's; `ls -l` shows host owners and modes; Linux netlink
    answers with the host's interfaces; `cpuinfo` and `sysstat` show the
    host's CPUs; on native, CPUID shows the host's.
