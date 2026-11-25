@@ -27,7 +27,9 @@
  * The layer is called through leaves (src/rootindex/kern.zig, SPEC.md
  * seam rule 3) that take and return bytes and never raise. A QLock per
  * conversation serializes them; another keeps writes to the server in
- * the order the layer queued them.
+ * the order the layer queued them, and a write from devmnt holds it
+ * until its own requests are written, so they go to the server in the
+ * writer's process.
  *
  * The conversation ends when the last of its ctl and data is closed: the
  * kproc is interrupted, and the server connection closed.
@@ -247,19 +249,17 @@ hangup(Conv *cv, char *err)
 }
 
 /*
- * Writes what the layer has for the server, in order. A failed write
- * hangs the conversation up.
+ * Writes what the layer has for the server, in order, with cv->wl
+ * held. A failed write hangs the conversation up.
  */
 static void
-flushserver(Conv *cv)
+flushlocked(Conv *cv)
 {
 	uchar *buf;
 	long n;
 
 	buf = smalloc(Bufsize);
-	qlock(&cv->wl);
 	if(waserror()){
-		qunlock(&cv->wl);
 		free(buf);
 		hangup(cv, up->errstr);
 		return;
@@ -273,8 +273,15 @@ flushserver(Conv *cv)
 		devtab[cv->srv->type]->write(cv->srv, buf, n, 0);
 	}
 	poperror();
-	qunlock(&cv->wl);
 	free(buf);
+}
+
+static void
+flushserver(Conv *cv)
+{
+	qlock(&cv->wl);
+	flushlocked(cv);
+	qunlock(&cv->wl);
 }
 
 static int
@@ -418,12 +425,23 @@ datawrite(Conv *cv, void *va, long n)
 		error("no server connection");
 	if(cv->hungup)
 		error(cv->err);
+	/*
+	 * The caller writes its own requests to the server, so a 9P2000.L
+	 * server's translator (#ℓ) sees whether they're a Linux process's,
+	 * whose walks stop at links (h9_fs_linkwalk): holding wl from the
+	 * queueing to the write keeps the reader kproc from sending them
+	 * first, as its own, which made a walk to a link follow it.
+	 */
+	qlock(&cv->wl);
 	trlock(cv);
 	r = h9_hidx_frommount(cv->tr, va, n, err);
 	trunlock(cv);
-	if(r < 0)
+	if(r < 0){
+		qunlock(&cv->wl);
 		error(err);
-	flushserver(cv);
+	}
+	flushlocked(cv);
+	qunlock(&cv->wl);
 	/* the layer may have answered itself */
 	wakeup(&cv->r);
 	return n;

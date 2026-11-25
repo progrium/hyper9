@@ -17,6 +17,7 @@ This describes, as built, h9's security stance and the sandbox policy: what a gu
   - [The root overlay's cost](#the-root-overlays-cost)
   - [Plan output](#plan-output)
   - [Ephemeral writes](#ephemeral-writes)
+  - [Up layers](#up-layers)
   - [Examples](#examples)
 
 ## Security stance
@@ -71,7 +72,7 @@ Connections h9 makes itself (a root, a namespace-file mount) are outside the pol
 
 ### Access rules
 
-The plan's rules are the root, the cwd, each `--readable` and `--writable` path, and each `--read-deny` path, all as resolved host paths. Overlaid paths (`eph`) are read-only rules, since the overlay never writes its lower tree. A deny rule covering a path wins. Otherwise the longest allow rule covering the path decides between read-only and read-write. Ancestors of allowed paths can be walked and listed but not changed, so `/mnt/term/<path>` works when the host's `/` is unioned after the tree's `/mnt/term`. Anything else is hidden. Bind-level read-only (no `MCREATE`) is a second, coarser check.
+The plan's rules are the root, the cwd, each `--readable` and `--writable` path, and each `--read-deny` path, all as resolved host paths. Overlaid paths (`eph`) are read-only rules, since the overlay never writes its lower tree. An `up` `--dir` is a read-write rule, as `rw` is, and the trees beneath it are only read. A deny rule covering a path wins. Otherwise the longest allow rule covering the path decides between read-only and read-write. Ancestors of allowed paths can be walked and listed but not changed, so `/mnt/term/<path>` works when the host's `/` is unioned after the tree's `/mnt/term`. Anything else is hidden. Bind-level read-only (no `MCREATE`) is a second, coarser check.
 
 ### Path resolution
 
@@ -134,7 +135,7 @@ With no sandbox flags the guest can work in the host cwd and nothing else:
 
 ### Discarded root changes
 
-The root overlay reports each create, copy-up, remove, and wstat to the machine once the namespace is built, so the `$home` the builder makes isn't counted. After a run, `Machine.root_changes` (a `RootChanges` value) says whether the guest changed the root outside `$home`, which top-level directories it changed, and whether it changed `$home`. When it changed the root outside `$home` and stderr is a terminal, the CLI prints `h9: changes to the root under /386, /lib were discarded (rerun with --writable "$H9ROOT" to keep them)` (for a 9P root, `--write=scope`). Scripts, whose stderr is rarely a terminal, don't see it.
+The root overlay reports each create, copy-up, remove, and wstat to the machine once the namespace is built, so the `$home` the builder makes isn't counted. After a run, `Machine.root_changes` (a `RootChanges` value) says whether the guest changed the root outside `$home`, which top-level directories it changed, and whether it changed `$home`. When it changed the root outside `$home` and stderr is a terminal, the CLI prints `h9: changes to the root under /386, /lib were discarded (--dir DIR:/:up keeps them in DIR)` (for a 9P root, `(rerun with --write=scope to keep them)`). Scripts, whose stderr is rarely a terminal, don't see it.
 
 ### The root overlay's cost
 
@@ -212,6 +213,12 @@ A lower file is copied up whole the first time it's opened for writing, or not r
 Copies' data is page-sized blocks and the nodes, names, and `Dir` strings come from a small allocator on the same pages, all from the machine's guest-physical page allocator through Zig leaves (`h9_overlay_alloc` in `src/kern.zig`), so ephemeral files count against `--memory` and running out fails the operation with "file system full", changing nothing.
 
 Instances are made by the namespace builder (`h9_overlay_newpath`) and attached as `#O<n>`; attaching checks the instance belongs to the caller's machine, and the last close of its last chan frees it. In a namespace file, a bind from a bare `#O` makes a fresh instance over what its target is at that point in the replay. Ephemeral changes can't be exported yet.
+
+### Up layers
+
+The `up` mount option ([upper-layers](../design/upper-layers.md)) makes a writable tree, a `--dir`, a `--url` to a writable 9P server (a port on the browser host too), or a `--tmp`, the layer that takes every change over what's beneath it: on `/` or `#L`, every other member of the stack, with the layer on top whatever its order; elsewhere, what's at DST when the mount is made. It's printed as `bind -u NEW OLD` with `up` in the access column, and `--ns` replays it. The layer is the stack's up member (see the overlay device in [kernel.md](kernel.md)), so the changes land in it as an unpacked OCI layer, with copies of the files the guest changed, `.wh.NAME` for names it removed, and `.wh..wh..opq` in directories it removed and made again, and none of it in memory. A stack with an up member has no overlay. `up` with `ro`, `rw`, or `eph`, a second `up` member on one stack, `up` on `--archive` or `--builtin`, and `up` under `--write=none` or `--write=ephemeral` are exit 2. A layer on a host directory owns its files as the user h9 runs as. A layer is written as the guest goes, so a run that fails leaves part of one.
+
+Every stack reads whiteouts in every member, so a layer mounts again, without `up`, as it was, under a new layer or by itself. `--archive` unpacks an archive's `.wh.` entries as files, which a stack then reads as whiteouts; off a stack they're plain files, as is a `.wh.` file in any tree that isn't a stack member.
 
 ### Examples
 

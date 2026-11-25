@@ -31,7 +31,7 @@ function h9a(entries) {
   }
   return Buffer.concat(parts);
 }
-const stack = h9a([['lib', 0o40775, ''], ['lib/stacked', 0o100644, 'stacked\n']]);
+const stack = h9a([['lib', 0o40775, ''], ['lib/stacked', 0o100644, 'stacked\n'], ['lib/gone', 0o100644, 'gone\n']]);
 // A static dotfs tree at /st (design/epoch-0/mounts.md, "Static trees"): /a, /big
 // (read by Range), and /sub, with its own index.
 const { blake3 } = await import(path.join(dir, 'statictree.js'));
@@ -47,6 +47,7 @@ const st = {
 const stLog = [];
 const server = createServer(async (req, res) => {
   if (req.url === '/stack.h9a') return res.writeHead(200, { 'content-type': 'application/octet-stream' }).end(stack);
+  if (req.url === '/memtree.js') return res.writeHead(200, { 'content-type': 'text/javascript' }).end(await readFile(new URL('memtree.js', import.meta.url)));
   if (req.url.startsWith('/st/') || req.url === '/st') {
     const body = st[req.url.slice(3) || '/'];
     if (body === undefined) return res.writeHead(404).end();
@@ -194,6 +195,34 @@ try {
     });
     r.out = r.out.replace(/^h9: warning: .*\n/m, '');
     if (r.code !== 0 || r.out !== 'x\n1\n') throw new Error(`up: ${JSON.stringify(r)}`);
+  });
+
+  // design/upper-layers.md: a layer the page keeps, here a writable 9P
+  // tree in memory (memtree.js) that the page serves on a port. One machine
+  // writes through it as the up member of /, over stack.h9a; the tree then
+  // holds only the changes, whiteout and all, and a second machine mounts
+  // it again on / as a plain member and sees the same files.
+  await test('createMachine takes up on a port mount, and the layer mounts again [upper-layers]', async () => {
+    const r = await page.evaluate(async () => {
+      const { createMachine } = await import('./h9-web.js');
+      const { MemTree } = await import('./memtree.js');
+      const tree = new MemTree();
+      const once = async (up, cmd) => {
+        const ch = new MessageChannel();
+        tree.serve(ch.port2);
+        const out = [];
+        const terminal = { write: (b) => out.push(new TextDecoder().decode(b)), setRaw() {} };
+        const m = await createMachine({ mounts: [{ archive: 'root.h9a' }, '--archive=stack.h9a:/', { port: ch.port1, dst: '/', up }], terminal });
+        const code = await m.run(['/bin/rc', '-c', cmd]);
+        return { code, out: out.join('').replace(/^h9: warning: .*\n/m, '') };
+      };
+      const w = await once(true, 'echo w >>/lib/stacked && echo new >/lib/fresh && rm /lib/gone && ls /lib/gone >[2]/dev/null || echo removed');
+      const layer = tree.list().filter((n) => n.startsWith('lib'));
+      const again = await once(false, 'cat /lib/stacked /lib/fresh; test -e /lib/gone || echo gone; ls /lib | grep -s wh || echo hidden');
+      return { w, layer, again };
+    });
+    const want = { w: { code: 0, out: 'removed\n' }, layer: ['lib/', 'lib/.wh.gone=', 'lib/fresh=new\n', 'lib/stacked=stacked\nw\n'], again: { code: 0, out: 'stacked\nw\nnew\ngone\nhidden\n' } };
+    if (JSON.stringify(r) !== JSON.stringify(want)) throw new Error(`port up layer: ${JSON.stringify(r)}`);
   });
 
   await test('createMachine mounts a static tree over fetch [mounts]', async () => {
