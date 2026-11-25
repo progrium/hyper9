@@ -8,6 +8,7 @@ pub const loader = @import("loader.zig");
 pub const segment = @import("segment.zig");
 pub const kern = @import("kern.zig");
 pub const Machine = @import("machine.zig").Machine;
+pub const hostpty = @import("hostpty.zig");
 pub const Mount = Machine.Mount;
 pub const Status = @import("machine.zig").Status;
 pub const RootChanges = @import("machine.zig").RootChanges;
@@ -58,6 +59,7 @@ test {
     _ = consin;
     _ = ws;
     _ = hstream;
+    _ = hostpty;
     _ = cred;
     _ = serve;
     _ = gfx;

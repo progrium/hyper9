@@ -39,6 +39,7 @@ const elf = @import("linux/elf.zig");
 const kc = @import("linux/kc.zig");
 const attr = @import("dotl/attr.zig");
 const gfx = @import("gfx.zig");
+const hostpty = @import("hostpty.zig");
 
 pub const Status = union(enum) {
     /// The `exits` string; empty means success.
@@ -286,8 +287,16 @@ pub const Machine = struct {
         serve_origins: []const []const u8 = &.{},
         /// Export `/net` too; without it, clients don't see it.
         serve_net: bool = false,
+        /// Pseudoterminals the embedder holds the master of, opened with
+        /// `Ptys.open` while a run is in progress (src/hostpty.zig). Not
+        /// on the browser host.
+        ptys: ?*Ptys = null,
         stdio: Stdio,
     };
+
+    /// Host-held pseudoterminals (src/hostpty.zig).
+    pub const Ptys = hostpty.Ptys;
+    pub const Pty = hostpty.Pty;
 
     pub const Gfx = gfx.Options;
 
@@ -607,6 +616,12 @@ pub const Machine = struct {
             return e;
         };
         job.* = .{ .m = undefined, .mc = m.*, .prog = prog, .argv = argv, .con = .{ .in = null, .out = m.opts.stdio.out, .err = m.opts.stdio.err, .raw = m.opts.stdio.raw }, .pool = pool, .srv = srv };
+        // Host ptys can be asked for from here; the pty server takes them
+        // once the namespace is built. Every process has exited (or is
+        // stuck) by the time `end` fails the rest.
+        const ptys: ?*Ptys = if (comptime no_threads) null else m.opts.ptys;
+        if (ptys) |ps| ps.begin();
+        defer if (ptys) |ps| ps.end();
         if (srv) |s| s.cfg.trace_lock = &job.trace_lock;
         job.pool.gpa = m.gpa;
         job.ncpu = m.cpuCount();
@@ -993,6 +1008,10 @@ pub const Machine = struct {
         /// For a connection's first process: its stream's fd, which
         /// becomes fds 0 and 1 before exportfs runs.
         serve_fd: ?u31 = null,
+        /// For a host pty's control and reader processes: the pair, and
+        /// (for the reader) the master's fd.
+        pty: ?*Pty = null,
+        pty_fd: u31 = 0,
         /// Set on the process's own thread; guarded by `job.lock`.
         kproc: ?*kern.Proc = null,
         /// How it runs guest code, while it does.
@@ -1396,6 +1415,7 @@ pub const Machine = struct {
             try m.startServer(p);
             if (j.argv.len == 0) return serveOnly(j);
         }
+        if (comptime !no_threads) if (m.opts.ptys != null) try m.startPtyServer(p);
 
         var arena: std.heap.ArenaAllocator = .init(m.gpa);
         defer arena.deinit();
@@ -1520,6 +1540,165 @@ pub const Machine = struct {
         while (srv.next()) |id| {
             m.serveConn(p, id);
             if (j.stopping.load(.acquire)) break;
+        }
+    }
+
+    /// Forks the pty server (src/hostpty.zig), a kernel-only process that
+    /// starts a control process for each pair the host asks for.
+    fn startPtyServer(m: *Machine, first: *Proc) RunError!void {
+        const j = first.job;
+        const p = j.newProc(.{ .serving = null }) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.TooManyProcs => unreachable, // the cap is at least 1
+        };
+        const flags = kern.RF.PROC | kern.RF.NAMEG | kern.RF.FDG | kern.RF.ENVG | kern.RF.NOTEG | kern.RF.NOWAIT;
+        kern.fork(flags, p.pid, Proc, ptyServerMain, p) catch {
+            j.dropProc(p);
+            return m.fail("ptys: can't start the pty server: {s}", .{kern.errstr()});
+        };
+    }
+
+    fn ptyServerMain(p: *Proc) void {
+        const j = p.job;
+        const m = j.m;
+        kern.setPlan(&m.plan);
+        kern.setPages(&j.pages);
+        kern.setCpus(j.ncpu);
+        p.setKproc();
+        kern.setText("ptys");
+        defer p.exit();
+        const ps = m.opts.ptys.?;
+        while (ps.next(&j.stopping)) |pty| {
+            const c = j.newProc(.{ .serving = null }) catch {
+                pty.finish(.failed);
+                pty.unref();
+                continue;
+            };
+            // The server's reference becomes the control process's.
+            c.pty = pty;
+            kern.fork(kern.RF.PROC | kern.RF.FDG | kern.RF.NOWAIT, c.pid, Proc, ptyCtlMain, c) catch {
+                j.dropProc(c);
+                pty.finish(.failed);
+                pty.unref();
+            };
+        }
+    }
+
+    fn interruptKproc(k: *anyopaque) void {
+        kern.interrupt(@ptrCast(k));
+    }
+
+    /// A host pty's control process: opens the pair, starts its reader,
+    /// then writes what the host queues and applies its window sizes
+    /// until the host closes it or the machine stops.
+    fn ptyCtlMain(p: *Proc) void {
+        const j = p.job;
+        const m = j.m;
+        kern.setPlan(&m.plan);
+        kern.setPages(&j.pages);
+        kern.setCpus(j.ncpu);
+        p.setKproc();
+        kern.setText("pty");
+        defer p.exit();
+        const pty = p.pty.?;
+        defer pty.unref();
+        defer pty.finish(.gone);
+        if (!pty.setProc(.ctl, kern.self(), interruptKproc)) return pty.finish(.failed);
+        defer _ = pty.setProc(.ctl, null, interruptKproc);
+        const S = kc.PtyState;
+        const fd = kern.open("#τ/ptmx", kern.ORDWR) catch return pty.finish(.failed);
+        defer kern.close(fd) catch {};
+        var st = kc.ptyGet(fd) orelse return pty.finish(.failed);
+        // Unlocked, at the host's size, before the host hears its number.
+        st.locked = 0;
+        st.winsz = .{ pty.size.rows, pty.size.cols, pty.size.xpixel, pty.size.ypixel };
+        _ = kc.ptySet(fd, &st, S.lock_bit | S.winsz_bit, .set) catch return pty.finish(.failed);
+        pty.n = @intCast(st.n);
+        const r = j.newProc(.{ .serving = null }) catch return pty.finish(.failed);
+        r.pty = pty.ref();
+        r.pty_fd = fd;
+        // The reader shares this process's fds: closing the master here
+        // is closing it for both.
+        kern.fork(kern.RF.PROC | kern.RF.NOWAIT, r.pid, Proc, ptyReaderMain, r) catch {
+            j.dropProc(r);
+            pty.unref();
+            return pty.finish(.failed);
+        };
+        pty.finish(.open);
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(m.gpa);
+        while (!j.stopping.load(.acquire)) {
+            const w = pty.take(&buf) catch break;
+            if (w.size) |sz| ptyResize(j, fd, sz);
+            var rest = w.bytes;
+            while (rest.len > 0) {
+                const n = kern.pwrite(fd, rest, -1) catch break;
+                rest = rest[n..];
+            }
+            // A write that failed was interrupted by `close` or the stop,
+            // or the slave hung up: what's left is dropped.
+            if (w.closing or pty.isClosing()) break;
+        }
+    }
+
+    /// TIOCSWINSZ from the host: a new size sends SIGWINCH to the pair's
+    /// foreground group.
+    fn ptyResize(j: *Job, fd: u31, sz: hostpty.Winsize) void {
+        var st = kc.ptyGet(fd) orelse return;
+        const new: [4]u16 = .{ sz.rows, sz.cols, sz.xpixel, sz.ypixel };
+        if (std.mem.eql(u16, &st.winsz, &new)) return;
+        st.winsz = new;
+        _ = kc.ptySet(fd, &st, kc.PtyState.winsz_bit, .set) catch return;
+        if (st.fg != 0) _ = postSignal(j, null, -@as(i64, st.fg), lsig.SIGWINCH, null);
+    }
+
+    /// A host pty's reader: hands what the master reads to the host until
+    /// the host closes the pair or the machine stops. Each time the
+    /// slave's last open closes it tells the host, and it reads again once
+    /// a program opens the slave.
+    fn ptyReaderMain(p: *Proc) void {
+        const j = p.job;
+        const m = j.m;
+        kern.setPlan(&m.plan);
+        kern.setPages(&j.pages);
+        kern.setCpus(j.ncpu);
+        p.setKproc();
+        kern.setText("pty");
+        defer p.exit();
+        const pty = p.pty.?;
+        defer pty.unref();
+        if (!pty.setProc(.reader, kern.self(), interruptKproc)) return;
+        defer _ = pty.setProc(.reader, null, interruptKproc);
+        var buf: [8192]u8 = undefined;
+        var hung = false;
+        while (true) {
+            if (hung) {
+                // The master reads EIO until a program opens the slave
+                // again (devpty's qreopen): look every 50 ms.
+                kern.sleep(50) catch return;
+                if (pty.isClosing() or j.stopping.load(.acquire)) return;
+                const st = kc.ptyGet(p.pty_fd) orelse return;
+                if (st.slaveopen == 0) continue;
+                hung = false;
+            }
+            // An end of file, or EIO (devpty's Eptyio), is the slave's
+            // last close; any other error is an interrupt from `close` or
+            // the machine's stop.
+            var gone = true;
+            const n = kern.pread(p.pty_fd, &buf, -1) catch blk: {
+                gone = std.mem.eql(u8, kern.errstr(), "errno 5");
+                break :blk 0;
+            };
+            if (n == 0) {
+                if (pty.isClosing()) return;
+                // A program that closes its side as the machine ends
+                // still hung up.
+                if (gone) pty.out.hangup(pty.out.ctx);
+                if (j.stopping.load(.acquire)) return;
+                hung = true;
+                continue;
+            }
+            pty.out.data(pty.out.ctx, buf[0..n]);
         }
     }
 

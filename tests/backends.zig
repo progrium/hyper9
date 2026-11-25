@@ -2006,9 +2006,12 @@ const LinuxSh = struct {
     err: std.Io.Writer.Allocating = .init(std.testing.allocator),
     sb: [300]u8 = undefined,
     got: anyerror!?[]const u8 = null,
+    ptys: ?*h9.Machine.Ptys = null,
+    finished: std.atomic.Value(bool) = .init(false),
 
     fn run(l: *LinuxSh, kind: vmm.BackendKind, root: []const u8, dir: []const u8, script: []const u8) void {
         l.got = l.runIt(kind, root, dir, script);
+        l.finished.store(true, .release);
     }
 
     fn runIt(l: *LinuxSh, kind: vmm.BackendKind, root: []const u8, dir: []const u8, script: []const u8) !?[]const u8 {
@@ -2025,6 +2028,7 @@ const LinuxSh = struct {
             .cwd = dir,
             .policy = .{ .writable = &.{dir}, .timeout_ns = 20 * std.time.ns_per_s },
             .stdio = .{ .out = &l.out.writer, .err = &l.err.writer },
+            .ptys = l.ptys,
         }) catch |e| switch (e) {
             error.HypervisorUnavailable, error.BackendNotBuilt, error.WrongArch => return null,
             else => return e,
@@ -2122,6 +2126,111 @@ test "a guest can't attach another machine's union [mounts]" {
         try std.testing.expectEqualStrings("exited ", got_a);
         try std.testing.expectEqualStrings("exited ", got_b);
         try std.testing.expectEqualStrings("mine\n", b.out.written());
+        ran += 1;
+    }
+    if (ran == 0) return error.SkipZigTest;
+}
+
+// Host-held ptys (src/hostpty.zig).
+
+/// What a host pty's reader hands the host, kept for the test to look at.
+const PtySink = struct {
+    mu: std.Io.Mutex = .init,
+    out: std.ArrayList(u8) = .empty,
+    hangups: u32 = 0,
+    released: bool = false,
+
+    fn data(ctx: *anyopaque, bytes: []const u8) void {
+        const k: *PtySink = @ptrCast(@alignCast(ctx));
+        k.mu.lockUncancelable(std.testing.io);
+        defer k.mu.unlock(std.testing.io);
+        k.out.appendSlice(std.testing.allocator, bytes) catch {};
+    }
+    fn hangup(ctx: *anyopaque) void {
+        const k: *PtySink = @ptrCast(@alignCast(ctx));
+        k.mu.lockUncancelable(std.testing.io);
+        defer k.mu.unlock(std.testing.io);
+        k.hangups += 1;
+    }
+    fn release(ctx: *anyopaque) void {
+        const k: *PtySink = @ptrCast(@alignCast(ctx));
+        k.mu.lockUncancelable(std.testing.io);
+        defer k.mu.unlock(std.testing.io);
+        k.released = true;
+    }
+    fn output(k: *PtySink) h9.hostpty.Output {
+        return .{ .ctx = k, .data = data, .hangup = hangup, .release = release };
+    }
+    /// Waits up to 10 s for `want` in what was read, or for a hangup.
+    fn waitFor(k: *PtySink, want: ?[]const u8) bool {
+        for (0..1000) |_| {
+            k.mu.lockUncancelable(std.testing.io);
+            const ok = if (want) |w| std.mem.indexOf(u8, k.out.items, w) != null else k.hangups > 0;
+            k.mu.unlock(std.testing.io);
+            if (ok) return true;
+            std.Io.sleep(std.testing.io, .fromMilliseconds(10), .awake) catch {};
+        }
+        return false;
+    }
+};
+
+test "the host holds a pty's master while rc runs on its slave [linux-pty]" {
+    var rb: [std.fs.max_path_bytes]u8 = undefined;
+    const root = nineRoot(&rb) orelse return error.SkipZigTest;
+    var ran: usize = 0;
+    for ([_]vmm.BackendKind{ .hvf, .kvm, .native }) |kind| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var host: [std.fs.max_path_bytes]u8 = undefined;
+        var kb: [std.fs.max_path_bytes + 1]u8 = undefined;
+        const dir = kernPath(&kb, host[0..try tmp.dir.realPath(std.testing.io, &host)]);
+        var ps: h9.Machine.Ptys = .init(std.testing.allocator, std.testing.io);
+        defer ps.deinit();
+        var sink: PtySink = .{};
+        defer sink.out.deinit(std.testing.allocator);
+        try std.testing.expectError(error.NotRunning, ps.open(sink.output(), .{ .rows = 24, .cols = 80 }));
+        // rc waits for the host's pair, says hi on it, and echoes a line
+        // the host types; closing it is a hangup. The pair's line discipline is the default one:
+        // ONLCR on output, and the typed line echoed.
+        // It outlives its close of the slave, so the machine is still
+        // running when the reader sees the hangup.
+        const script = "while(! test -e '#τ/0') sleep 0.05; { echo hi; l=`{read}; echo got $l } <>'#τ/0' >[1=0]; sleep 1";
+        var sh: LinuxSh = .{ .dst = "/", .shell = "/bin/rc" };
+        defer sh.deinit();
+        sh.ptys = &ps;
+        const th = try std.Thread.spawn(.{}, LinuxSh.run, .{ &sh, kind, root, dir, script });
+        var pty: ?*h9.Machine.Pty = null;
+        // Until the run starts; a backend that can't run ends it first.
+        while (!sh.finished.load(.acquire)) {
+            pty = ps.open(sink.output(), .{ .rows = 24, .cols = 80 }) catch |e| switch (e) {
+                error.NotRunning => {
+                    std.Io.sleep(std.testing.io, .fromMilliseconds(10), .awake) catch {};
+                    continue;
+                },
+                else => return e,
+            };
+            break;
+        }
+        const ok = pty != null and sink.waitFor("hi\r\n");
+        // The pair is freed once closed and its processes are done.
+        const n: ?u32 = if (pty) |p| p.n else null;
+        if (pty) |p| {
+            if (ok) {
+                try p.write("ok\n");
+                _ = sink.waitFor("got ok\r\n");
+                _ = sink.waitFor(null);
+            }
+            p.close();
+        }
+        th.join();
+        errdefer std.debug.print("backend {t}: {s}\nread: {s}\n", .{ kind, sh.err.written(), sink.out.items });
+        const got = try sh.got orelse continue;
+        try std.testing.expectEqualStrings("exited ", got);
+        try std.testing.expectEqual(@as(?u32, 0), n);
+        try std.testing.expectEqualStrings("hi\r\nok\r\ngot ok\r\n", sink.out.items);
+        try std.testing.expectEqual(@as(u32, 1), sink.hangups);
+        try std.testing.expect(sink.released);
+        try std.testing.expectError(error.NotRunning, ps.open(sink.output(), .{ .rows = 24, .cols = 80 }));
         ran += 1;
     }
     if (ran == 0) return error.SkipZigTest;
