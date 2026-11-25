@@ -74,7 +74,7 @@ pub const Policy = struct {
 /// root's server decides (`9p`, design/epoch-0/ninep-roots.md), or never, as
 /// constant data in the h9 binary (`builtin`, design/epoch-0/builtin-root.md),
 /// or as the writable layer over what's beneath it, which is only read
-/// (`up`, design/upper-layers.md).
+/// (`up`, design/epoch-0/upper-layers.md).
 pub const Access = enum { ro, rw, eph, up, @"9p", builtin };
 
 /// The built-in root's device path.
@@ -123,7 +123,7 @@ pub const Bind = struct {
     /// member to that stack.
     recursive: bool = false,
     /// `bind -u`: `from` is the writable layer over `to`
-    /// (design/upper-layers.md): the stack's up member on `#Oroot` or
+    /// (design/epoch-0/upper-layers.md): the stack's up member on `#Oroot` or
     /// `#Olinux`, and anywhere else a union of the two.
     upper: bool = false,
     /// Make `to` as a directory in the root's overlay if it's missing;
@@ -510,7 +510,7 @@ pub const Gfx = struct {
     clipboard: bool = true,
     scale: u8 = 1,
     /// The headless screen's size, for a machine with the headless screen
-    /// (design/headless-screen.md) rather than a window.
+    /// (design/epoch-0/headless-screen.md) rather than a window.
     headless: ?struct { dx: u16, dy: u16 } = null,
 
     /// The browser host's canvas (design/epoch-0/browser-gfx.md).
@@ -602,7 +602,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
             return error.Conflict;
         }
     }
-    // A stack takes one layer (design/upper-layers.md).
+    // A stack takes one layer (design/epoch-0/upper-layers.md).
     for ([_]mount.Stack{ .root, .linux }) |st| {
         var ups: usize = 0;
         for (in.mounts) |m| if (m.stack()) |ms| if (ms[0] == st and m.access == .up) {
@@ -898,7 +898,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         try caveats.append(arena, "hardlinks under writable paths can modify host files outside them");
         try caveats.append(arena, "writes to writable paths are not capped (no res.disk)");
     }
-    // Layers (design/upper-layers.md).
+    // Layers (design/epoch-0/upper-layers.md).
     for (binds.items) |b| if (b.upper) {
         const onto = if (std.mem.eql(u8, b.to, mount.Stack.root.dev())) "/" else if (std.mem.eql(u8, b.to, mount.Stack.linux.dev())) "#L" else b.to;
         try caveats.append(arena, try std.fmt.allocPrint(arena, "changes to {s} are written to its layer as they're made, so a run that fails leaves a partial one", .{onto}));
@@ -940,7 +940,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     }
     if (in.gfx) |g| {
         // The headless screen reaches nothing on the host: no window, and
-        // its clipboard is a buffer in h9 (design/headless-screen.md).
+        // its clipboard is a buffer in h9 (design/epoch-0/headless-screen.md).
         if (g.headless != null) {} else if (g.isWeb()) {
             if (g.clipboard) try caveats.append(arena, "the guest can write the page's clipboard, and read what the user pastes into its canvas");
             try caveats.append(arena, "the guest can draw anything in its canvas, including what looks like the page's own UI or a browser dialog");
@@ -1097,7 +1097,7 @@ fn memberBind(arena: std.mem.Allocator, in: Inputs, pol: Policy, m: mount.Mount,
     }
 }
 
-/// An `up` mount's line (design/upper-layers.md): `bind -u` of the
+/// An `up` mount's line (design/epoch-0/upper-layers.md): `bind -u` of the
 /// layer onto `to`, which a host directory writes as `rw` does; what's
 /// beneath it is only read.
 fn upperBind(arena: std.mem.Allocator, m: mount.Mount, to: []const u8, linux: bool, rules: *std.ArrayList(Rule)) CompileError!Bind {

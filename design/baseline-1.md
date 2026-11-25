@@ -58,7 +58,7 @@ The PR that cuts the baseline is the last of epoch 0. Before it, `zig build desi
 
 **Why wait for renames, cow-fork, and retire-unicorn.** A baseline written before the renames would describe h9 in words the next proposal abandons. cow-fork is half merged, and a baseline that says "partly" is a poor foundation for [memory-model](memory-model.md). Unicorn is the difference between "the emulator" being one thing and two.
 
-**Why not wait for more.** [namespace-kernel](namespace-kernel.md), [kernel-serve](epoch-0/kernel-serve.md), [mounts](epoch-0/mounts.md), and [child-machines](child-machines.md) are designs that epoch 1 builds on, and none is far enough along to hold a baseline for. Waiting for them would put the baseline after the work it's meant to orient.
+**Why not wait for more.** [namespace-kernel](epoch-0/namespace-kernel.md), [kernel-serve](epoch-0/kernel-serve.md), [mounts](epoch-0/mounts.md), and [child-machines](child-machines.md) are designs that epoch 1 builds on, and none is far enough along to hold a baseline for. Waiting for them would put the baseline after the work it's meant to orient.
 
 **Why retitle SPEC.md here.** The title is the claim about what h9 is, and the baseline is where that claim is restated on purpose. [renames](renames.md) leaves it alone for that reason.
 

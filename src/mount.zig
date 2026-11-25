@@ -36,7 +36,7 @@ pub const Kind = enum {
 };
 
 /// How a mount can be changed. `up` makes it the writable layer over
-/// what's beneath it (design/upper-layers.md).
+/// what's beneath it (design/epoch-0/upper-layers.md).
 pub const Access = enum { ro, rw, eph, up };
 
 /// Where a mount goes relative to what's at DST.

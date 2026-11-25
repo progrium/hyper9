@@ -876,7 +876,7 @@ bind -rb /tmp/b /tmp/x
 ```
 
 `bind -u new old` makes `new` the writable layer over `old`
-([upper-layers](design/upper-layers.md)): writes, creates, and removes go to
+([upper-layers](design/epoch-0/upper-layers.md)): writes, creates, and removes go to
 `new` as an OCI layer, and `old` is only read (chapter 22). `#O/clone`
 takes it as `upper PATH`, and `ns` prints it as a `bind -u` line.
 
@@ -1654,7 +1654,7 @@ devices in Plan 9.
   are only on the web host: elsewhere `port://` is a usage error and
   `port!` "unknown network port".
 - **A namespace kernel for the page**
-  ([namespace-kernel](design/namespace-kernel.md)). `zig build nskernel`
+  ([namespace-kernel](design/epoch-0/namespace-kernel.md)). `zig build nskernel`
   builds h9's kernel with no machine, as `h9ns.wasm` and `h9ns.js`, for a
   page that composes namespaces and hands them to machines:
   `const k = await createNamespaceKernel()`, then `k.addPort(name, port)`
@@ -1923,7 +1923,7 @@ the host's pointer or reach other host windows.
 
 **The headless screen.** `--gfx=headless` gives the machine a screen in memory
 instead of a window, in every build but the browser host's
-([headless-screen](design/headless-screen.md)). It never opens a window or
+([headless-screen](design/epoch-0/headless-screen.md)). It never opens a window or
 touches the host's display, clipboard, or window system, so it works in CI
 and over SSH, and on Linux in the static release build. `/dev/snarf` is a
 buffer in the h9 process.

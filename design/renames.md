@@ -112,7 +112,7 @@ Identifiers and comments follow: `Backend` types and `backend` fields that mean 
 
 **Why now, and why in one proposal.** A rename conflicts with every open branch, so it wants to land when the fewest are open, and it wants to land once. Doing it before `baseline-1` means the new baseline, and every proposal in epoch 1, is written in one vocabulary. Doing it at the start of epoch 1 instead would put the first proposals of the epoch in the old words, or make them wait.
 
-**Why not move the whole tree.** The larger layout (`kern/dev/`, `kern/ninep/`, `host/`, `machine/`, and `cmd/`) is a reorganization with design questions of its own. [namespace-kernel](namespace-kernel.md) drew the kernel's edge for a namespace-only build (`src/nskernel.zig` and `src/kern/nstab.c`), but how the rest of the tree is cut along it isn't decided, and moving files twice is worse than moving them once, later.
+**Why not move the whole tree.** The larger layout (`kern/dev/`, `kern/ninep/`, `host/`, `machine/`, and `cmd/`) is a reorganization with design questions of its own. [namespace-kernel](epoch-0/namespace-kernel.md) drew the kernel's edge for a namespace-only build (`src/nskernel.zig` and `src/kern/nstab.c`), but how the rest of the tree is cut along it isn't decided, and moving files twice is worse than moving them once, later.
 
 **Why not edit old proposals.** They're a record, and their slugs can't change anyway, so they'd be half-renamed at best. A table of old names in README.md costs less and doesn't touch an accepted body.
 

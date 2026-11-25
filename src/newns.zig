@@ -4,7 +4,7 @@
 //!
 //! Supported: `bind`, `mount`, `unmount`, `cd` and `clear`, with the flags
 //! `-a`, `-b`, `-c`, `-C`, `-r` (a union merged at every depth,
-//! design/epoch-0/mounts.md), and `-u` (a writable layer, design/upper-layers.md), `#` comments, and `'` quoting (`''` is a literal
+//! design/epoch-0/mounts.md), and `-u` (a writable layer, design/epoch-0/upper-layers.md), `#` comments, and `'` quoting (`''` is a literal
 //! quote). A `;` outside quotes ends a line, as a newline does, so
 //! `--ns` takes a namespace inline, and a comment ends at either. As in
 //! newns, a failed operation doesn't stop the replay.
@@ -32,7 +32,7 @@ pub const Flag = struct {
     cache: bool = false,
     /// `-r`: a union merged at every depth (design/epoch-0/mounts.md).
     recursive: bool = false,
-    /// `-u`: `from` is a writable layer over `to` (design/upper-layers.md).
+    /// `-u`: `from` is a writable layer over `to` (design/epoch-0/upper-layers.md).
     upper: bool = false,
 };
 
