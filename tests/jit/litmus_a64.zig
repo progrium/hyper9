@@ -1,5 +1,5 @@
 //! zig build hcpu (and litmus-a64): ha64's memory-model litmus tests
-//! (src/jit/check/litmus_a64.zig), on real host threads, on each tier: T0,
+//! (src/engine/hcpu/jit/check/litmus_a64.zig), on real host threads, on each tier: T0,
 //! the IR evaluator, and this host's emitter (through emit/native.zig).
 //!
 //! arm64 is weakly ordered, and a program relies on its barriers. What

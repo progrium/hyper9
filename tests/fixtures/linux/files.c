@@ -503,7 +503,7 @@ static void id_regs(void) {
 
 /* On x86-64, CPUID shows no AVX feature, in any leaf, when it shows no
  * AVX: KVM and the emulator hide AVX, and Zig takes AVX10 (leaf 0x24)
- * on its own. The native backend runs on the host's CPU, which has it or
+ * on its own. The sud engine runs on the host's CPU, which has it or
  * hasn't. */
 static void cpuid_avx(void) {
 #if defined(__x86_64__)

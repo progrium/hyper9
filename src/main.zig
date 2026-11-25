@@ -36,8 +36,8 @@ const exit_not_found = 127;
 /// the hard limit can be unlimited, at most OPEN_MAX if that's refused).
 /// A file a guest opens in a host tree is an fd of h9's, and macOS's soft
 /// limit is 256, so a parallel build there (cargo running its linkers)
-/// failed with EMFILE while the guest was told it had 1024. KVM's backend
-/// already did this for its vCPU fds; this does it for every backend.
+/// failed with EMFILE while the guest was told it had 1024. KVM's engine
+/// already did this for its vCPU fds; this does it for every engine.
 fn raiseFdLimit() void {
     if (comptime web or builtin.os.tag == .windows) return;
     var rl = std.posix.getrlimit(.NOFILE) catch return;
@@ -62,7 +62,7 @@ pub fn main(init: std.process.Init) !u8 {
         std.debug.print(cli.usage, .{});
         return 2;
     };
-    // The browser host can't listen (design/epoch-0/serve.md).
+    // The web host can't listen (design/epoch-0/serve.md).
     if (web and cfg.serve.len > 0) {
         std.debug.print("h9: --serve isn't available on the web host\n", .{});
         return 2;
@@ -89,7 +89,7 @@ pub fn main(init: std.process.Init) !u8 {
             var buf: [1024]u8 = undefined;
             var w = std.Io.File.stdout().writerStreaming(io, &buf);
             const code = tools.check(init.gpa, io, &w.interface, .{
-                .backend = cfg.backend,
+                .engine = cfg.engine,
                 .arch = cfg.arch,
                 .memory = cfg.memory,
                 .mounts = ms,
@@ -162,7 +162,7 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
     // A host program is read here; a guest one is resolved in the machine.
     // --arch picks the architecture; without it, a host program's header
     // does, and a guest one runs the host's.
-    var arch: ?h9.vmm.Arch = cfg.arch;
+    var arch: ?h9.engine.Arch = cfg.arch;
     // A host #! script runs by its guest path, found once the plan is
     // compiled (design/epoch-0/host-scripts.md).
     var host_script: ?[]const u8 = null;
@@ -258,7 +258,7 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
         .host_fs = cfg.host_fs,
     };
     var base: h9.Machine.Options = .{
-        .backend = cfg.backend,
+        .engine = cfg.engine,
         .arch = arch,
         .mounts = mounts,
         .binds = cfg.binds,
@@ -389,28 +389,28 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
             },
             else => {},
         }
-        const a: h9.vmm.Arch = arch orelse h9.vmm.host_arch orelse .arm64;
-        std.debug.print("h9: cannot create {t} machine for {s}: {s}\n", .{ cfg.backend, a.name(), tools.explain(cfg.backend, err) });
+        const a: h9.engine.Arch = arch orelse h9.engine.host_arch orelse .arm64;
+        std.debug.print("h9: cannot create {t} machine for {s}: {s}\n", .{ cfg.engine, a.name(), tools.explain(cfg.engine, err) });
         // `auto` no longer falls back to native (it isn't a security
         // boundary); point at the explicit opt-in when it's the only
-        // backend that could run here.
-        if (cfg.backend == .auto and err == error.HypervisorUnavailable and h9.vmm.Kind.built(.native)) {
-            std.debug.print("h9: the native backend can run here, but it shares h9's process and is not a security boundary; pass --backend native to use it for a trusted guest\n", .{});
+        // engine that could run here.
+        if (cfg.engine == .auto and err == error.HypervisorUnavailable and h9.engine.Kind.built(.sud)) {
+            std.debug.print("h9: the sud engine can run here, but it shares h9's process and is not a security boundary; pass --engine sud to use it for a trusted guest\n", .{});
         }
         return exit_failed;
     };
     defer machine.deinit();
-    if (cfg.backend == .auto and machine.backend.kind() == .emu) {
-        const why = h9.vmm.whyUnavailable(.auto) orelse "no usable hypervisor";
+    if (cfg.engine == .auto and machine.engine.kind() == .hcpu) {
+        const why = h9.engine.whyUnavailable(.auto) orelse "no usable hypervisor";
         std.debug.print("h9: warning: {s}; using the emulator\n", .{why});
     }
-    // The native backend is a trusted-guest performance path, not a
+    // The sud engine is a trusted-guest performance path, not a
     // sandbox: guest code shares h9's address space (design/0095, Security;
     // audit 2026-11-09). Warn when it's chosen explicitly, but only on a
     // terminal, so scripts that opt into it aren't spammed on every run
     // (as the root-changes notice does below).
-    if (cfg.backend == .native and (std.Io.File.stderr().isTty(io) catch false)) {
-        std.debug.print("h9: warning: the native backend runs guest code in h9's own process and is not a security boundary; use a hypervisor backend to contain an untrusted guest\n", .{});
+    if (cfg.engine == .sud and (std.Io.File.stderr().isTty(io) catch false)) {
+        std.debug.print("h9: warning: the sud engine runs guest code in h9's own process and is not a security boundary; use a hypervisor engine to contain an untrusted guest\n", .{});
     }
 
     const status = machine.run(prog, argv) catch |err| {
@@ -695,7 +695,7 @@ fn credHelpers(arena: std.mem.Allocator, cfg: cli.Config, env: *const std.proces
     };
     // On the web host the embedder's credentials callback gets the
     // matching helper's command to run, or not (design/epoch-0/credential-helpers.md,
-    // "Browser host").
+    // "Web host").
     return list.items;
 }
 

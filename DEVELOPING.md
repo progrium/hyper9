@@ -56,23 +56,23 @@ compilers:
 ```sh
 zig build                              # h9, with hcpu built in
 zig build mkroot                       # /amd64 on x86_64 hosts
-zig build integration -Darch=amd64     # the cases on KVM and emu
+zig build integration -Darch=amd64     # the cases on KVM and hcpu
 ```
 
-The KVM backend blocks `SIGRTMIN + 1` in the threads that run vCPUs and uses
+The KVM engine blocks `SIGRTMIN + 1` in the threads that run vCPUs and uses
 it to kick them; an embedder must leave it to h9.
 
-### Linux without KVM (native)
+### Linux without KVM (sud)
 
 On x86\_64 Linux hosts without a usable KVM (containers, CI, and cloud VMs
-without nested virtualization), h9 can run amd64 binaries on the native
-backend ([native-backend](design/epoch-0/native-backend.md)): guest code runs
+without nested virtualization), h9 can run amd64 binaries on the sud
+engine ([native-backend](design/epoch-0/native-backend.md)): guest code runs
 directly on the host CPU in a small stub process per address space (with a
 thread per thread of a Linux program), and the kernel turns every guest
 syscall into a signal the stub hands to h9 (Syscall User Dispatch, Linux 5.11
 or later, with a seccomp filter behind it). It's built into every Linux
 x86\_64 `h9`, but since it shares h9's process and isn't a security boundary,
-`auto` never picks it: it takes an explicit `--backend native`. Compute runs
+`auto` never picks it: it takes an explicit `--engine sud`. Compute runs
 at native speed, many times faster than the emulator. Before using it, h9
 checks that a guest syscall traps with each of a list of values in AX, and
 `h9 --check` says why it can't run where it can't. A root built on such a
@@ -80,17 +80,17 @@ host (or unpacked from the release's amd64 ISO) runs the integration cases
 quickly:
 
 ```sh
-zig build integration -Darch=amd64 -Dbackends=native
+zig build integration -Darch=amd64 -Dengines=sud
 ```
 
-`-Dbackends` picks the backends the cases run on (by default every one built
-in that runs here), and the Go cases run on native when it's among them.
+`-Dengines` picks the engines the cases run on (by default every one built
+in that runs here), and the Go cases run on sud when it's among them.
 
 ## Build
 
 ```sh
 zig build          # builds and ad-hoc signs zig-out/bin/h9 with h9.entitlements
-zig build test     # unit tests, and the backend tests on every backend built in (not the integration cases)
+zig build test     # unit tests, and the engine tests on every engine built in (not the integration cases)
 zig build kern     # compiles drawterm's kern and the libraries it uses
 zig build embed    # builds docs/embedding/embed.zig, the embedding guide's example, as zig-out/bin/embed
 zig build integration  # real 9front binaries from the root tree through the h9 CLI
@@ -98,7 +98,7 @@ zig build proposal -Dp=baseline  # one proposal's demos, web cases, and integrat
 zig build design -- check        # validate design/, the test tags, and links to design/ (also list, ready, new, propose, log, sign, archive)
 zig build mkroot -- --src        # build the root tree from the pinned image (also --force, --arch arm64,386,amd64)
 zig build slim     # 9box, 9front's commands as one multi-call binary, and a slim root around it in .local/9front/slim-<release>-<arch>
-zig build web      # the browser host into zig-out/web (h9.wasm, h9-web.js, h9-node, the demo page)
+zig build web      # the web host into zig-out/web (h9.wasm, h9-web.js, h9-node, the demo page)
 zig build integration -Dweb   # the integration cases through h9-node on h86 (Node 24 or later); -Darch=arm64 for ha64
 zig build web-test # the demo page, the canvas cases (tests/web/gfx.mjs), and the namespace kernel's machine cases (tests/web/nskernel-browser.mjs), in Chromium with Playwright, and hcpu-web
 zig build nskernel # the namespace kernel into zig-out/nskernel (h9ns.wasm, h9ns.js, libh9ns.a, h9ns.h); -Dnskernel-hostfs keeps #U natively
@@ -106,7 +106,7 @@ zig build nskernel-test  # its cases: tests/nskernel.zig on the native library, 
 zig build hcpu-web # the wasm emitter's suite (tests/jit/suite.mjs) in Chromium
 zig build x86-jit  # h86's [hcpu] cases (tests/x86.zig) on T0 and T1; zig build hcpu runs them too
 zig build x64-jit  # hx64's [hcpu] cases (tests/x64.zig) on T0 and T1; zig build hcpu runs them too
-zig build -Dhcpu-debug  # src/interp and src/jit built Debug too (by default they're ReleaseFast in a Debug h9)
+zig build -Dhcpu-debug  # src/engine/hcpu/interp and src/engine/hcpu/jit built Debug too (by default they're ReleaseFast in a Debug h9)
 zig build clean    # removes zig-out and .zig-cache (not the fetched .local tree)
 ```
 
@@ -142,20 +142,20 @@ integration cases; release builds don't (`-Dguest-test` overrides it).
 
 ### The emulator, and Windows
 
-The emulator backend is hcpu, h9's own CPUs ([hcpu](design/epoch-0/hcpu.md)): ha64
+The hcpu engine is h9's own CPUs ([hcpu](design/epoch-0/hcpu.md)): ha64
 for arm64, h86 for 386, and hx64 for amd64, each with a JIT (T1) and an
 interpreter (T0). It's MIT and always built in on arm64 and x86-64
 targets, so every `h9` has it, and `-Dno-jit` builds the interpreter
-alone. There's no other emulator to build ([retire-unicorn](design/epoch-0/retire-unicorn.md)). `H9_EMU_TIER=t0` or `t1` picks a
+alone. There's no other emulator to build ([retire-unicorn](design/epoch-0/retire-unicorn.md)). `H9_HCPU_TIER=t0` or `t1` picks a
 tier at run time, for tests:
 
 ```sh
 zig build                                        # h9, with hcpu
 zig build -Dtarget=aarch64-linux-musl            # Linux arm64 (also x86_64-linux-musl, and the Windows targets)
-zig build test                                   # tests/backends.zig on T1 and on T0, and the CPUs' own cases
-zig build integration -Dbackends=emu             # the integration cases on hcpu
-zig build integration -Dbackends=emu -Djit-check # every compiled region checked against T0
-zig build bench                                  # compute and syscall speed, emu against the hypervisor
+zig build test                                   # tests/engines.zig on T1 and on T0, and the CPUs' own cases
+zig build integration -Dengines=hcpu             # the integration cases on hcpu
+zig build integration -Dengines=hcpu -Djit-check # every compiled region checked against T0
+zig build bench                                  # compute and syscall speed, hcpu against the hypervisor
 ```
 
 Unicorn is kept as a test oracle only: `zig build lockstep`
@@ -166,7 +166,7 @@ and Linux arm64 and x86\_64 (built for musl there), and `zig build
 lockstep` fails with that hint without it. It's GPLv2, so nothing else
 links it. kern builds for Windows with drawterm's win32 files, so h9.exe
 runs programs on the emulator, and host paths are `/C:/...` in `#U`. On
-Windows x86\_64, h9.exe also has the WHP backend ([whp](design/epoch-0/whp.md)):
+Windows x86\_64, h9.exe also has the WHP engine ([whp](design/epoch-0/whp.md)):
 it needs the Windows Hypervisor Platform feature (Settings >
 Optional features, or `DISM /Online /Enable-Feature
 /FeatureName:HypervisorPlatform`, then restart), and loads
@@ -182,11 +182,11 @@ libX11 (and needs the libXt headers), so it builds natively against glibc,
 not for a musl target. The headless screen, a screen in memory for
 `--gfx=headless` ([headless-screen](design/headless-screen.md)), is linked
 into every build with graphics; `-Dgfx=headless` is a build with only it.
-`-Dgfx=none` leaves graphics out. The backend tests use the `-Dgfx` build's
+`-Dgfx=none` leaves graphics out. The engine tests use the `-Dgfx` build's
 headless screen, or a headless-only build with `none`, so `zig build test
 -Dgfx=x11 -Dtarget=x86_64-linux-gnu` runs the `[gfx]` cases beside a
 window backend. `zig build web`
-always builds `web`, the browser host's canvas backend
+always builds `web`, the web host's canvas backend
 ([browser-gfx](design/epoch-0/browser-gfx.md)), unless `-Dgfx=none` leaves it
 out.
 
@@ -200,7 +200,7 @@ the [Wine page](site/wine.html)'s browser demo are experimental and live on
 the [`wine-draw` branch](https://github.com/progrium/hyper9/tree/wine-draw)
 ([wine-draw](design/wine-draw.md)).
 
-### Browser host
+### Web host
 
 `zig build web` builds h9 for wasm32-wasi
 ([browser-host](design/epoch-0/browser-host.md)). It runs 9front's 386 binaries
@@ -257,7 +257,7 @@ status. Interactive cases run h9 on a terminal the test creates
 ([tests/term.zig](tests/term.zig): a pty, or ConPTY on Windows), so they need
 no human and no `ssh -t`.
 
-[tests/backends.zig](tests/backends.zig) runs small programs on every backend
+[tests/engines.zig](tests/engines.zig) runs small programs on every engine
 built in and checks that each gives the same output and syscall trace.
 [tests/integration.zig](tests/integration.zig) runs real binaries from the
 root tree through `h9` itself, checking output and exit codes.
@@ -265,9 +265,9 @@ root tree through `h9` itself, checking output and exit codes.
 and runs the four parts at once, since the cases mostly wait on h9,
 terminals, and sockets; `-Dshards=N` picks another count, and `-Dshards=1`
 runs them in one process. `zig build test` likewise runs
-[src/hcpu.zig](src/hcpu.zig)'s tests as four binaries split by name.
+[src/engine/hcpu/hcpu.zig](src/engine/hcpu/hcpu.zig)'s tests as four binaries split by name.
 `zig build install-tests` installs both, built for `-Dtarget`, as
-`zig-out/bin/backend-tests` and `zig-out/bin/integration-tests`, to run in a
+`zig-out/bin/engine-tests` and `zig-out/bin/integration-tests`, to run in a
 VM.
 
 `zig build` also writes the test binaries `zig-out/fixtures/hello` (arm64) and
@@ -280,7 +280,7 @@ The Go programs in [tests/fixtures/go](tests/fixtures/go) are built by
 `GOOS=plan9 GOARCH=amd64` with `GOTOOLCHAIN=go$GO_VERSION` from
 [scripts/pins.sh](scripts/pins.sh), so any installed Go fetches the same
 toolchain. `zig build integration` builds them when `go` is on `PATH`, and
-their cases run on native when it's in the list, else on the emulator;
+their cases run on sud when it's in the list, else on the emulator;
 without Go they skip. They don't need the root tree.
 `zig build go-stdtest` runs Go's own tests for `time`,
 `syscall`, `os`, and `runtime` on the emulator and prints pass, skip, and
@@ -321,8 +321,8 @@ packages pinned in `scripts/pins.sh`, and the 9front root is
 `zig build isoroot`, as above) or `.local/9front/root`:
 
 ```sh
-zig build workloads -Darch=amd64 -Dbackends=native
-zig build workloads -Darch=amd64 -Dbackends=native -- python git   # cases by name
+zig build workloads -Darch=amd64 -Dengines=sud
+zig build workloads -Darch=amd64 -Dengines=sud -- python git   # cases by name
 ```
 
 The cases run in parallel and print a table of results and times. Each
@@ -335,18 +335,18 @@ changed since the last run that passed, and by hand on any branch.
 ### Test VMs
 
 [scripts/lima](scripts/lima/README.md) has Lima VMs (arm64 Linux, macOS, and
-Windows, plus emulated x86\_64 Linux) for testing the emu backend on hosts
+Windows, plus emulated x86\_64 Linux) for testing the hcpu engine on hosts
 without a usable hypervisor:
 
 ```sh
 zig build -Dtarget=aarch64-linux-musl --prefix zig-out/linux
 scripts/lima/vm up linux
 scripts/lima/vm push linux zig-out/linux/bin/h9 zig-out/fixtures/hello
-scripts/lima/vm shell linux ./h9/h9 --backend emu ./h9/hello
+scripts/lima/vm shell linux ./h9/h9 --engine hcpu ./h9/hello
 scripts/lima/vm push-root linux             # the root tree, into ~/h9/root
 
 zig build install install-tests -Dtarget=aarch64-linux-musl --prefix zig-out/linux
-scripts/lima/vm test linux                  # backend and integration tests on the emulator
+scripts/lima/vm test linux                  # engine and integration tests on the emulator
 ```
 
 ## Releases
@@ -356,8 +356,8 @@ Each GitHub release has two sets of binaries, built by
 
 | Asset | License | Contents |
 | --- | --- | --- |
-| `h9-<version>-<target>` | MIT | `h9`, with the hypervisor backends and hcpu, for macOS arm64, Linux arm64 and x86_64 (musl, static), and Windows arm64 and x86_64 |
-| `h9-web-<version>.tar.gz` | MIT | the browser host: `h9.wasm`, `h9-web.js`, `h9-node`, the demo page, and its root archive |
+| `h9-<version>-<target>` | MIT | `h9`, with the hypervisor engines and hcpu, for macOS arm64, Linux arm64 and x86_64 (musl, static), and Windows arm64 and x86_64 |
+| `h9-web-<version>.tar.gz` | MIT | the web host: `h9.wasm`, `h9-web.js`, `h9-node`, the demo page, and its root archive |
 | `h9ns-<version>.tar.gz` | MIT | the namespace kernel for the web: `h9ns.wasm`, `h9ns.js`, `h9ns-worker.js`, and the JS files they import |
 | `h9ns-<version>-<target>.tar.gz` | MIT | the namespace kernel as a static library, `libh9ns.a` and `h9ns.h`, for the targets above but Windows |
 | `SHA256SUMS` | | checksums |
@@ -384,20 +384,20 @@ development builds report `git describe` (`-Dversion=V` overrides it).
 | `src/policy.zig` | the sandbox policy: profiles, the compiled plan, `--print`, and the access rules devfs checks |
 | `src/kern.zig`, `src/kern/` | the Zig/C seam into drawterm's kern; boot and spawn (`glue.c`), process records and notes (`proc.c`), our device table, the machine console `#y`, devenv, and devproc ported from 9front, the copy-on-write overlay device `#O` (`devoverlay.c`), h9's guest commands `#H` (`devhtools.c`), and the devfs policy hooks (`fscheck.c`) |
 | `src/guest/` | h9's own guest commands (rc scripts), as the guest sees them under `#H`; embedded by the build through `tools/guesttree.zig`. |
-| `src/syscall.zig`, `src/guestmem.zig` | the 9front syscall table, and checked access to guest memory |
-| `src/loader.zig` | loads an a.out into an address space, builds the stack and Tos |
-| `src/aout.zig` | a.out parser and arch layouts |
-| `src/vmm.zig`, `src/vmm/` | hypervisor interface and backends (HVF, KVM, WHP, native, and emu, on h9's own CPUs, which the browser host uses too), with the guest-physical allocator and page tables the hypervisor backends share |
-| `src/hcpu.zig`, `src/jit/`, `src/interp/` | h9's own CPUs for the emulator (hcpu): the JIT's IR and its reference evaluator, the runtime ABI, the emitters (arm64, wasm), the front ends (`a64/`), and the interpreters and software TLB the two tiers share. `src/jit/README.md` has the contracts |
-| `src/web.zig`, `src/web/` | the browser host: coroutines on JSPI, its `std.Io` and console, the JS host (`h9-web.js`, `h9-node`, `worker.js`, `wasi-mem.js`, and `statictree.js` for static dotfs trees) and the demo page |
+| `src/abi/plan9/syscall.zig`, `src/guestmem.zig` | the 9front syscall table, and checked access to guest memory |
+| `src/abi/plan9/loader.zig` | loads an a.out into an address space, builds the stack and Tos |
+| `src/abi/plan9/aout.zig` | a.out parser and arch layouts |
+| `src/engine.zig`, `src/engine/` | the engine interface and engines (HVF, KVM, WHP, sud, and hcpu, h9's own CPUs, which the web host uses too), with the guest-physical allocator and page tables the hypervisor engines share |
+| `src/engine/hcpu/hcpu.zig`, `src/engine/hcpu/jit/`, `src/engine/hcpu/interp/` | h9's own CPUs for the emulator (hcpu): the JIT's IR and its reference evaluator, the runtime ABI, the emitters (arm64, wasm), the front ends (`a64/`), and the interpreters and software TLB the two tiers share. `src/engine/hcpu/jit/README.md` has the contracts |
+| `src/web.zig`, `src/web/` | the web host: coroutines on JSPI, its `std.Io` and console, the JS host (`h9-web.js`, `h9-node`, `worker.js`, `wasi-mem.js`, and `statictree.js` for static dotfs trees) and the demo page |
 | `src/nskernel.zig`, `src/nskernel/`, `src/kern/devns.c`, `src/kern/nstab.c` | the namespace kernel: its Zig root (ctl lines, dials, serving, the native API), `h9ns.h`, the `#N` device, and its device table and stubs; `src/web/h9ns.js` and `h9ns-worker.js` are its JS host |
 | `src/arch/` | per-architecture Ureg/ABI and the guest shims |
 | `third_party/drawterm` | vendored drawterm (git subtree; kern and libraries). Local changes: the sandbox hooks in `kern/devfs-posix.c` and `kern/devfs-win32.c` |
-| `tests/backends.zig` | backend conformance tests |
+| `tests/engines.zig` | engine conformance tests |
 | `tests/integration.zig` | real 9front binaries through the h9 CLI |
 | `tests/term.zig` | a pty (ConPTY on Windows) for the interactive integration cases |
-| `tests/fixtures` | test programs and binary generators; `segattach/` holds the arm64 programs for the segattach backend cases and `gfx/` those for the `[gfx]` cases, assembled at build time |
-| `tests/web/` | the browser host's Playwright check, and the namespace kernel's Node cases with a small 9P2000 client and server (`ninep.mjs`) |
+| `tests/fixtures` | test programs and binary generators; `segattach/` holds the arm64 programs for the segattach engine cases and `gfx/` those for the `[gfx]` cases, assembled at build time |
+| `tests/web/` | the web host's Playwright check, and the namespace kernel's Node cases with a small 9P2000 client and server (`ninep.mjs`) |
 | `tests/nskernel.zig`, `tests/ninep.zig` | the namespace kernel's native cases, and their 9P2000 client |
 | `tests/jit/` | the wasm emitter's checks: a runtime module standing in for h9.wasm, a random region generator, the suite (`suite.mjs`) and its Node and Chromium drivers, and `bench.mjs`, which times installs and tier-up in V8 |
 | `tools/mkroot.zig` | `zig build mkroot`: builds the 9front root tree from the pinned image |

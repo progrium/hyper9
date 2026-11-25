@@ -40,7 +40,7 @@ The ideas rest on a handful of properties that are rare together:
 
 - **A process starts like a native process.** There's no image, boot or
   guest kernel, yet guest code runs under a hypervisor (HVF, KVM, WHP), the
-  native backend, or the emulator.
+  sud engine, or the emulator.
 - **The namespace is the whole interface.** Per-process mount tables, union
   binds, `/srv` and `--ns` files make a program's world a small declarative
   plan that `--print` shows and you can diff.
@@ -75,14 +75,14 @@ person or a policy reviews before it touches anything real.
 things away. h9 starts from nothing and adds mounts, so the list of
 capabilities *is* the `--print` plan. Startup is process-fast, so a machine
 per tool call is affordable. `#O` gives the review step for free, and
-`--net-allow` pins egress to the broker alone. The Linux personality means
+`--net-allow` pins egress to the broker alone. The Linux ABI means
 the agent's ordinary tools run too.
 
 **Sketch.**
 
 - A daemon embeds `h9.Machine` and keeps a pool of machines (one HVF
   machine per host process on a Mac, so a few worker processes; KVM or the
-  native backend on Linux).
+  sud engine on Linux).
 - A broker 9P server, in any language, is the only thing the agent can
   reach. It serves synthetic trees: `/n/gh/repos/acme/web/pulls/new` (write
   a body, read back a URL), `/n/db/query` (write SQL, read rows, through a
@@ -377,7 +377,7 @@ so there's nothing to uninstall.
   fetched blobs on disk and serves them offline. Machines mount it instead
   of the registry.
 - `h9 run tool@1.2` becomes a thin launcher: resolve, write the namespace
-  file, run. With the Linux personality, the same scheme distributes Linux
+  file, run. With the Linux ABI, the same scheme distributes Linux
   tools without containers.
 
 **Builds on:** [websocket-9p](../design/epoch-0/websocket-9p.md),
@@ -410,7 +410,7 @@ states the program's entire world in a few lines anyone can read.
 - `h9 open paper.h9a` mounts it as a read-only root with an overlay for
   scratch, and runs the entry point.
 - Journals, courts and regulators get "rerun this analysis" as a button,
-  and the browser host makes that a link rather than an install.
+  and the web host makes that a link rather than an install.
 - Fixity is built in: the tree's root hash is the archive's identity.
 
 **Builds on:** [ninep-roots](../design/epoch-0/ninep-roots.md),
@@ -431,7 +431,7 @@ Services are file servers you or others run, and the client is just h9.
 your namespace, which never left Plan 9 because you needed a Plan 9
 terminal. h9 makes the terminal one binary on mainstream systems: `--gfx`
 gives rio and acme a host window, WebSocket roots cross corporate proxies,
-and the browser host makes it zero-install.
+and the web host makes it zero-install.
 
 **Sketch.**
 

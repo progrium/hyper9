@@ -1,7 +1,7 @@
 // A writable 9P2000 tree in memory, which a page serves a machine on a
 // MessagePort: the page's own server for the [upper-layers] case, which
 // keeps an up layer there (design/upper-layers.md, "The library and the
-// browser host"). It's the least a layer needs: walks, creates, reads and
+// web host"). It's the least a layer needs: walks, creates, reads and
 // writes, removes, and wstat of mode, times, length, and name.
 
 const enc = new TextEncoder(), dec = new TextDecoder();

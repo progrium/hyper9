@@ -2,8 +2,8 @@
 # Builds release assets into dist/<version>/ for a GitHub release:
 #
 #   h9-<version>-<target>.tar.gz|zip      MIT: h9, with hcpu, h9's own CPUs,
-#                                         as the emulator backend
-#   h9-web-<version>.tar.gz               MIT: the browser host
+#                                         as the hcpu engine
+#   h9-web-<version>.tar.gz               MIT: the web host
 #                                         (h9.wasm, h9-web.js, h9-node,
 #                                         the demo page and its root archive)
 #   h9ns-<version>.tar.gz                 MIT: the namespace kernel for the
@@ -20,7 +20,7 @@
 #
 #   scripts/release.sh [version]    (default: git describe --tags --always)
 #
-# Needs a clean checkout (tracked files). The browser host's root archive
+# Needs a clean checkout (tracked files). The web host's root archive
 # comes from the 386 root tree (scripts/mkroot.py --arch 386), when there
 # is one. Runs on macOS, which can build every target.
 set -euo pipefail
@@ -74,7 +74,7 @@ for t in $H9_TARGETS; do
 	archive "$work/$name" "$name"
 done
 
-# The browser host (design/epoch-0/browser-host.md): one archive for every
+# The web host (design/epoch-0/browser-host.md): one archive for every
 # platform.
 name="h9-web-$version"
 web_root=()

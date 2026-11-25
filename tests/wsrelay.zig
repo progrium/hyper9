@@ -202,15 +202,15 @@ pub const Relay = struct {
                 return;
             }
         }
-        const backend: ?net.Stream = if (rl.opts.echo) null else blk: {
+        const engine: ?net.Stream = if (rl.opts.echo) null else blk: {
             const ip: net.IpAddress = .{ .ip4 = .loopback(rl.opts.target_port) };
             break :blk ip.connect(io, .{ .mode = .stream }) catch {
                 ws.writeStatus(&sw.interface, 502, "Bad Gateway") catch {};
                 return;
             };
         };
-        defer if (backend) |b| b.close(io);
-        if (backend) |b| noDelay(b);
+        defer if (engine) |b| b.close(io);
+        if (engine) |b| noDelay(b);
         var c: Conn = .{ .rl = rl, .w = &sw.interface };
         if (rl.opts.accept_headers.len > 0) {
             c.w.print("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {s}\r\n", .{&ws.acceptFor(q.key)}) catch return;
@@ -223,14 +223,14 @@ pub const Relay = struct {
         defer rl.track(st, false);
         if (rl.opts.send_text) |t| c.send(.text, t) catch return;
         var down: ?std.Thread = null;
-        if (backend) |b| down = std.Thread.spawn(.{}, Conn.fromTarget, .{ &c, b }) catch return;
+        if (engine) |b| down = std.Thread.spawn(.{}, Conn.fromTarget, .{ &c, b }) catch return;
         defer if (down) |t| {
-            if (backend) |b| b.shutdown(io, .both) catch {};
+            if (engine) |b| b.shutdown(io, .both) catch {};
             t.join();
         };
         var bw_buf: [16384]u8 = undefined;
         var bw: net.Stream.Writer = undefined;
-        if (backend) |b| bw = b.writer(io, &bw_buf);
+        if (engine) |b| bw = b.writer(io, &bw_buf);
         var rc: ws.Receiver = .{ .side = .server };
         var msg: std.ArrayList(u8) = .empty;
         defer msg.deinit(gpa);
@@ -256,7 +256,7 @@ pub const Relay = struct {
                 },
                 .pong => msg.shrinkRetainingCapacity(at),
                 else => {
-                    if (backend != null) {
+                    if (engine != null) {
                         // A relay passes binary payload bytes as they come.
                         bw.interface.writeAll(msg.items[at..]) catch return;
                         bw.interface.flush() catch return;

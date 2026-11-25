@@ -1,10 +1,10 @@
 /*
- * FIFOs for the Linux personality (design/epoch-0/linux-fifo.md).
+ * FIFOs for the Linux ABI (design/epoch-0/linux-fifo.md).
  *
  * A FIFO file (an overlay's Nfifo node, or a host FIFO in a devfs tree)
  * is never read or written itself. A Linux open of one joins a pipe kept
  * for it in a table keyed by the file's identity: its device, instance,
- * and qid path, as src/linux/locks.zig keys file locks. A host file's
+ * and qid path, as src/abi/linux/locks.zig keys file locks. A host file's
  * qid path is its host device and inode, so its key leaves out devfs's
  * attach number, and machines in one h9 process that open one host FIFO
  * share its pipe. One table serves every machine.

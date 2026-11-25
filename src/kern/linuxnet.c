@@ -10,7 +10,7 @@
  *
  * Also #ε, eventfd and epoll instances: an eventfd is a counter,
  * readable when it's not zero; an epoll fd is an identity for the
- * interest list, which the Linux layer keeps (src/linux/sys.zig).
+ * interest list, which the Linux layer keeps (src/abi/linux/sys.zig).
  */
 
 #include "u.h"
@@ -1303,7 +1303,7 @@ h9_linux_socksend(int fd, void *buf, long n, int dontwait, uchar *raddr, ushort 
 
 /*
  * Bytes queued in the pipe that a write on pipe end fd goes into, for
- * SCM_RIGHTS (src/linux/sys.zig); -1 if fd isn't a pipe's data file.
+ * SCM_RIGHTS (src/abi/linux/sys.zig); -1 if fd isn't a pipe's data file.
  */
 long
 h9_linux_pipequeued(int fd)
@@ -1325,7 +1325,7 @@ h9_linux_pipequeued(int fd)
 
 /*
  * Takes what's queued on pipe end fd's read side now, without waiting,
- * for O_NONBLOCK reads and for gathering more after a read (src/linux/
+ * for O_NONBLOCK reads and for gathering more after a read (src/abi/linux/
  * sys.zig): the bytes read, 0 at end of file, -2 when nothing is
  * queued and a writer is still open, -3 if fd isn't a pipe's data file,
  * or -1 with the error string set. Asking whether the pipe is readable

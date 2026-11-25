@@ -1,5 +1,5 @@
 // Opens /tmp/f, which only another machine has written: it fails, and the
-// program exits with the error (tests/backends.zig).
+// program exits with the error (tests/engines.zig).
 
 #include "lib.S"
 

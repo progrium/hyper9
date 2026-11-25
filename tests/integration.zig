@@ -3,9 +3,9 @@
 //! so it covers the CLI, root resolution and exit codes end to end.
 //!
 //! The build passes the root tree (-Droot, default .local/9front/root) and
-//! the backends to test (H9_TEST_BACKENDS, the ones built in) through the
+//! the engines to test (H9_TEST_ENGINES, the ones built in) through the
 //! environment, and the h9 binary and fixtures as build options, which the
-//! environment overrides (getenv). Every case runs on each backend
+//! environment overrides (getenv). Every case runs on each engine
 //! that can run arm64 here. Without a root tree, the tests are skipped.
 //! `zig build install-tests` builds this file for another target, and
 //! `scripts/lima/vm test` runs it in a test VM with the same variables.
@@ -36,7 +36,7 @@ const gpa = std.testing.allocator;
 const Env = struct {
     h9: []const u8,
     root: []const u8,
-    backends: []const u8,
+    engines: []const u8,
     /// H9_TEST_ARCH (-Darch), passed to h9 as --arch; null for the host's.
     arch: ?[]const u8,
 };
@@ -92,8 +92,8 @@ fn env(comptime src: std.builtin.SourceLocation) !Env {
     var cat_buf: [32]u8 = undefined;
     const cat = try std.fmt.bufPrint(&cat_buf, "{s}/bin/cat", .{arch orelse "arm64"});
     std.Io.Dir.cwd().access(std.testing.io, try hostPath(root, cat), .{}) catch return error.SkipZigTest;
-    const backends = getenv(2, "H9_TEST_BACKENDS") orelse "auto";
-    return .{ .h9 = h9, .root = root, .backends = backends, .arch = arch };
+    const engines = getenv(2, "H9_TEST_ENGINES") orelse "auto";
+    return .{ .h9 = h9, .root = root, .engines = engines, .arch = arch };
 }
 
 /// Cases the web host can't run (design/epoch-0/browser-host.md), skipped
@@ -216,8 +216,8 @@ const Result = struct {
     }
 };
 
-/// Runs `h9 --dir <root> args...` on each backend and returns the first
-/// result, after checking that every backend gave the same one.
+/// Runs `h9 --dir <root> args...` on each engine and returns the first
+/// result, after checking that every engine gave the same one.
 fn run(e: Env, args: []const []const u8) !Result {
     return runIn(e, args, null);
 }
@@ -231,12 +231,12 @@ fn runIn(e: Env, args: []const []const u8, stdin: ?[]const u8) !Result {
 fn runInFor(e: Env, args: []const []const u8, stdin: ?[]const u8, ms: u32) !Result {
     var first: ?Result = null;
     errdefer if (first) |f| f.deinit();
-    var it = std.mem.tokenizeScalar(u8, e.backends, ',');
-    while (it.next()) |backend| {
-        const r = try runOnFor(e, backend, args, stdin, ms);
+    var it = std.mem.tokenizeScalar(u8, e.engines, ',');
+    while (it.next()) |engine| {
+        const r = try runOnFor(e, engine, args, stdin, ms);
         if (first) |f| {
             defer r.deinit();
-            errdefer std.debug.print("backend {s} differs from {s} for h9 {s}\n", .{ backend, firstBackend(e), args[0] });
+            errdefer std.debug.print("engine {s} differs from {s} for h9 {s}\n", .{ engine, firstEngine(e), args[0] });
             try std.testing.expectEqualStrings(f.out, r.out);
             try std.testing.expectEqual(f.code, r.code);
         } else first = r;
@@ -244,19 +244,19 @@ fn runInFor(e: Env, args: []const []const u8, stdin: ?[]const u8, ms: u32) !Resu
     return first orelse error.SkipZigTest;
 }
 
-fn firstBackend(e: Env) []const u8 {
-    var it = std.mem.tokenizeScalar(u8, e.backends, ',');
+fn firstEngine(e: Env) []const u8 {
+    var it = std.mem.tokenizeScalar(u8, e.engines, ',');
     return it.next() orelse "auto";
 }
 
-fn runOn(e: Env, backend: []const u8, args: []const []const u8, stdin: ?[]const u8) !Result {
-    return runOnFor(e, backend, args, stdin, 30_000);
+fn runOn(e: Env, engine: []const u8, args: []const []const u8, stdin: ?[]const u8) !Result {
+    return runOnFor(e, engine, args, stdin, 30_000);
 }
 
-fn runOnFor(e: Env, backend: []const u8, args: []const []const u8, stdin: ?[]const u8, ms: u32) !Result {
+fn runOnFor(e: Env, engine: []const u8, args: []const []const u8, stdin: ?[]const u8, ms: u32) !Result {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
-    try argv.appendSlice(gpa, &.{ e.h9, "--backend", backend });
+    try argv.appendSlice(gpa, &.{ e.h9, "--engine", engine });
     if (!givesRoot(args)) try argv.appendSlice(gpa, &.{ "--dir", e.root });
     if (e.arch) |a| try argv.appendSlice(gpa, &.{ "--arch", a });
     try argv.appendSlice(gpa, args);
@@ -335,10 +335,10 @@ test "echo [baseline]" {
 
 test "--check passes with the root tree, and --version and -h print to stdout [baseline]" {
     const e = try env(@src());
-    var it = std.mem.tokenizeScalar(u8, e.backends, ',');
-    while (it.next()) |backend| {
-        errdefer std.debug.print("backend {s}\n", .{backend});
-        const r = try runOn(e, backend, &.{"--check"}, null);
+    var it = std.mem.tokenizeScalar(u8, e.engines, ',');
+    while (it.next()) |engine| {
+        errdefer std.debug.print("engine {s}\n", .{engine});
+        const r = try runOn(e, engine, &.{"--check"}, null);
         defer r.deinit();
         try std.testing.expectEqual(0, r.code);
         try std.testing.expect(std.mem.indexOf(u8, r.out, "/bin/echo runs") != null);
@@ -660,7 +660,7 @@ test "devfs checks the file it opened, not the path it was given [baseline]" {
     // Reading (OREAD), overwriting with truncation (OWRITE|OTRUNC, through
     // the deferred ftruncate), and listing the directory (the fdopendir
     // path) all go through the refactored fsopen and still work on an
-    // in-policy file. Each backend starts from its own copy of f, as the
+    // in-policy file. Each engine starts from its own copy of f, as the
     // one before it overwrote it.
     const r = try run(e, &.{ "--cwd", s.path, "--rc", "cp f.orig f && cat f && echo two >f && cat f && ls ." });
     defer r.deinit();
@@ -925,13 +925,13 @@ test "more live processes than HVF has vCPUs [baseline]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-/// The KVM vCPU limit `h9 --backend kvm --check` reports, or null when
+/// The KVM vCPU limit `h9 --engine kvm --check` reports, or null when
 /// KVM can't be used here.
 fn kvmLimit(e: Env) !?u32 {
     const r = runOn(e, "kvm", &.{"--check"}, null) catch return null;
     defer r.deinit();
-    const at = std.mem.indexOf(u8, r.out, "backend kvm: ok, ") orelse return null;
-    var it = std.mem.tokenizeScalar(u8, r.out[at + "backend kvm: ok, ".len ..], ' ');
+    const at = std.mem.indexOf(u8, r.out, "engine kvm: ok, ") orelse return null;
+    var it = std.mem.tokenizeScalar(u8, r.out[at + "engine kvm: ok, ".len ..], ' ');
     return try std.fmt.parseInt(u32, it.next() orelse return null, 10);
 }
 
@@ -950,7 +950,7 @@ test "auto uses kvm when /dev/kvm is usable [kvm]" {
     _ = try kvmLimit(e) orelse return error.SkipZigTest;
     const r = try runOn(e, "auto", &.{"--check"}, null);
     defer r.deinit();
-    try std.testing.expect(std.mem.indexOf(u8, r.out, "backend auto: ok (uses kvm)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "engine auto: ok (uses kvm)") != null);
     const w = try runOn(e, "auto", &.{ "/bin/echo", "hi" }, null);
     defer w.deinit();
     try std.testing.expectEqualStrings("hi\n", w.out);
@@ -994,7 +994,7 @@ test "more live processes than KVM's owned vCPUs run on the pool [kvm]" {
     // pipeline need the pool.
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
-    try argv.appendSlice(gpa, &.{ "/bin/sh", "-c", "ulimit -n 330 && exec \"$@\"", "sh", e.h9, "--backend", "kvm", "--dir", e.root });
+    try argv.appendSlice(gpa, &.{ "/bin/sh", "-c", "ulimit -n 330 && exec \"$@\"", "sh", e.h9, "--engine", "kvm", "--dir", e.root });
     if (e.arch) |a| try argv.appendSlice(gpa, &.{ "--arch", a });
     try argv.appendSlice(gpa, &.{ "--rc", "c='echo deep'; for(i in `{seq 79}) c=$c^' | cat'; eval $c" });
     const r = try runProcess(argv.items, null);
@@ -1012,7 +1012,7 @@ test "more processes over a machine's life than KVM's vCPU limit [kvm]" {
     const script = try std.fmt.bufPrint(&buf, "for(i in `{{seq {d}}}) /bin/true; echo done", .{n + 16});
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
-    try argv.appendSlice(gpa, &.{ e.h9, "--backend", "kvm", "--dir", e.root });
+    try argv.appendSlice(gpa, &.{ e.h9, "--engine", "kvm", "--dir", e.root });
     if (e.arch) |a| try argv.appendSlice(gpa, &.{ "--arch", a });
     try argv.appendSlice(gpa, &.{ "--rc", script });
     const r = try runProcessWith(argv.items, null, null, 120_000);
@@ -1028,7 +1028,7 @@ fn requireWhp(e: Env) !void {
     if (builtin.os.tag != .windows or builtin.cpu.arch != .x86_64) return error.SkipZigTest;
     const r = try runOn(e, "whp", &.{"--check"}, null);
     defer r.deinit();
-    if (std.mem.indexOf(u8, r.out, "backend whp: ok") == null) return error.SkipZigTest;
+    if (std.mem.indexOf(u8, r.out, "engine whp: ok") == null) return error.SkipZigTest;
 }
 
 test "--check reports whp and its vCPU limit [whp]" {
@@ -1037,7 +1037,7 @@ test "--check reports whp and its vCPU limit [whp]" {
     const r = try runOn(e, "auto", &.{"--check"}, null);
     defer r.deinit();
     try std.testing.expectEqual(0, r.code);
-    try std.testing.expect(std.mem.indexOf(u8, r.out, "backend whp: ok, 64 vCPUs") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "engine whp: ok, 64 vCPUs") != null);
 }
 
 test "auto uses whp when the feature is enabled [whp]" {
@@ -1045,7 +1045,7 @@ test "auto uses whp when the feature is enabled [whp]" {
     try requireWhp(e);
     const r = try runOn(e, "auto", &.{"--check"}, null);
     defer r.deinit();
-    try std.testing.expect(std.mem.indexOf(u8, r.out, "backend auto: ok (uses whp)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "engine auto: ok (uses whp)") != null);
 }
 
 test "more live processes than WHP's owned vCPUs run on the pool [whp]" {
@@ -1065,65 +1065,84 @@ test "h9.exe starts and falls back to the emulator without the WHP feature [whp]
     defer r.deinit();
     errdefer std.debug.print("--check said:\n{s}\n", .{r.out});
     // For a machine without the feature; with it, the cases above apply.
-    if (std.mem.indexOf(u8, r.out, "backend whp: ok") != null) return error.SkipZigTest;
+    if (std.mem.indexOf(u8, r.out, "engine whp: ok") != null) return error.SkipZigTest;
     // WHP runs amd64 only: with another root, it says so before it looks
     // for a hypervisor.
-    if (std.mem.indexOf(u8, r.out, "backend whp: can't run this architecture") != null) return error.SkipZigTest;
-    try std.testing.expect(std.mem.indexOf(u8, r.out, "backend whp: no usable hypervisor (enable the Windows Hypervisor Platform feature") != null);
-    if (std.mem.indexOf(u8, r.out, "backend emu: ok") != null) {
-        try std.testing.expect(std.mem.indexOf(u8, r.out, "backend auto: ok (uses emu)") != null);
+    if (std.mem.indexOf(u8, r.out, "engine whp: can't run this architecture") != null) return error.SkipZigTest;
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "engine whp: no usable hypervisor (enable the Windows Hypervisor Platform feature") != null);
+    if (std.mem.indexOf(u8, r.out, "engine hcpu: ok") != null) {
+        try std.testing.expect(std.mem.indexOf(u8, r.out, "engine auto: ok (uses hcpu)") != null);
     }
 }
 
-/// Skips unless the native backend runs here (design/epoch-0/native-backend.md):
+/// Skips unless the sud engine runs here (design/epoch-0/native-backend.md):
 /// Linux x86_64 with Syscall User Dispatch and seccomp, and amd64 binaries.
-fn requireNative(e: Env) !void {
+fn requireSud(e: Env) !void {
     if (builtin.os.tag != .linux or builtin.cpu.arch != .x86_64) return error.SkipZigTest;
     if (e.arch == null or !std.mem.eql(u8, e.arch.?, "amd64")) return error.SkipZigTest;
-    const r = try runOn(e, "native", &.{"--check"}, null);
+    const r = try runOn(e, "sud", &.{"--check"}, null);
     defer r.deinit();
-    if (std.mem.indexOf(u8, r.out, "backend native: ok") == null) return error.SkipZigTest;
+    if (std.mem.indexOf(u8, r.out, "engine sud: ok") == null) return error.SkipZigTest;
 }
 
-test "--check reports native and runs its trap probe [native-backend]" {
+test "--check reports sud and runs its trap probe [native-backend]" {
     const e = try env(@src());
-    try requireNative(e);
-    // The backend runs its probe (a guest syscall with each of a list of
+    try requireSud(e);
+    // The engine runs its probe (a guest syscall with each of a list of
     // values in AX must trap) before it says it's usable.
-    const r = try runOn(e, "native", &.{"--check"}, null);
+    const r = try runOn(e, "sud", &.{"--check"}, null);
     defer r.deinit();
     try std.testing.expectEqual(0, r.code);
-    try expectIn(r.out, "backend native: ok, hello in ");
+    try expectIn(r.out, "engine sud: ok, hello in ");
     try expectIn(r.out, "/bin/echo runs (amd64)");
 }
 
-test "auto never selects native; it stays an explicit opt-in [native-backend]" {
-    // The native backend shares h9's address space and is not a security
-    // boundary, so `auto` must not pick it silently (design/0095, Security;
-    // security audit 2026-11-09). On a host with a hypervisor or the
-    // emulator, auto uses one of those; native runs only when asked for.
+test "auto never selects sud; it stays an explicit opt-in [native-backend]" {
+    // The sud engine shares h9's address space and is not a security
+    // boundary, so `auto` must not pick it silently (design/epoch-0/native-backend.md,
+    // Security; security audit 2026-11-09). On a host with a hypervisor or
+    // hcpu, auto uses one of those; sud runs only when asked for.
     const e = try env(@src());
-    try requireNative(e);
+    try requireSud(e);
     if (try kvmLimit(e) != null) return error.SkipZigTest;
     const r = try runOn(e, "auto", &.{"--check"}, null);
     defer r.deinit();
-    try std.testing.expect(std.mem.indexOf(u8, r.out, "backend auto: ok (uses native)") == null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "engine auto: ok (uses sud)") == null);
     // Explicit native still works. Its not-a-security-boundary warning is
     // printed only on a terminal, so stderr is clean here (not a tty).
-    const w = try runOn(e, "native", &.{ "/bin/echo", "hi" }, null);
+    const w = try runOn(e, "sud", &.{ "/bin/echo", "hi" }, null);
     defer w.deinit();
     try std.testing.expectEqualStrings("hi\n", w.out);
     try std.testing.expectEqualStrings("", w.err);
 }
 
+test "auto never selects sud, by either name [renames]" {
+    // `native` is an alias of `sud` for one release (design/renames.md), and
+    // the rule that `auto` never picks it holds under both names: --check
+    // says what auto uses, and only an explicit --engine runs on it.
+    const e = try env(@src());
+    try requireSud(e);
+    if (try kvmLimit(e) != null) return error.SkipZigTest;
+    const r = try runOn(e, "auto", &.{"--check"}, null);
+    defer r.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "engine auto: ok (uses sud)") == null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "(uses native)") == null);
+    for ([_][]const u8{ "sud", "native" }) |name| {
+        const w = try runOn(e, name, &.{ "/bin/echo", "hi" }, null);
+        defer w.deinit();
+        try std.testing.expectEqualStrings("hi\n", w.out);
+        try std.testing.expectEqualStrings("", w.err);
+    }
+}
+
 test "rfork with RFMEM shares data and bss but not the stack [native-backend]" {
     const e = try env(@src());
-    try requireNative(e);
+    try requireSud(e);
     var s: Scratch = undefined;
     try s.init();
     defer s.deinit();
     try buildC(e, &s, "rfstack", @embedFile("fixtures/rfmem/rfstack.c"));
-    const r = try runOn(e, "native", &.{ "--sandbox", s.path, "--rc", "./rfstack" }, null);
+    const r = try runOn(e, "sud", &.{ "--sandbox", s.path, "--rc", "./rfstack" }, null);
     defer r.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{r.err});
     try std.testing.expectEqualStrings("2 3 1\n", r.out);
@@ -1261,10 +1280,10 @@ test "--rc alone on a terminal is an interactive login rc [default-command]" {
     var s: Scratch = undefined;
     try defaultCommand(&s, "echo hello from the root\n");
     defer s.deinit();
-    var it = backendList(e);
-    while (it.next()) |backend| {
-        errdefer std.debug.print("backend {s}\n", .{backend});
-        var t = try spawnTerm(e, backend, &.{ "--timeout", "60s", "--cwd", s.path, "--ns", s.ns(), "--rc" });
+    var it = engineList(e);
+    while (it.next()) |engine| {
+        errdefer std.debug.print("engine {s}\n", .{engine});
+        var t = try spawnTerm(e, engine, &.{ "--timeout", "60s", "--cwd", s.path, "--ns", s.ns(), "--rc" });
         defer t.deinit();
         try t.expect("hello from the root", slow(10_000));
         try t.expect(prompt, slow(10_000));
@@ -1758,10 +1777,10 @@ test "the discarded-changes notice is printed on a terminal and not otherwise [o
     defer r.deinit();
     try std.testing.expectEqualStrings("done\n", r.out);
     try std.testing.expect(std.mem.indexOf(u8, r.err, notice) == null);
-    var it = backendList(e);
-    while (it.next()) |backend| {
-        errdefer std.debug.print("backend {s}\n", .{backend});
-        var t = try spawnTerm(e, backend, &.{ "--rc", script });
+    var it = engineList(e);
+    while (it.next()) |engine| {
+        errdefer std.debug.print("engine {s}\n", .{engine});
+        var t = try spawnTerm(e, engine, &.{ "--rc", script });
         defer t.deinit();
         try t.expect(notice ++ "/lib, /sys were discarded (--dir DIR:/:up keeps them in DIR)", slow(20_000));
         try std.testing.expectEqual(0, try t.wait(slow(10_000)));
@@ -1770,11 +1789,11 @@ test "the discarded-changes notice is printed on a terminal and not otherwise [o
 
 test "changes only under $home, or only by the namespace builder, print no notice [overlay]" {
     const e = try env(@src());
-    var it = backendList(e);
-    while (it.next()) |backend| {
-        errdefer std.debug.print("backend {s}\n", .{backend});
+    var it = engineList(e);
+    while (it.next()) |engine| {
+        errdefer std.debug.print("engine {s}\n", .{engine});
         // The builder may make $home; the guest writes only there.
-        var t = try spawnTerm(e, backend, &.{ "--rc", "echo x > $home/h9-notice; echo done" });
+        var t = try spawnTerm(e, engine, &.{ "--rc", "echo x > $home/h9-notice; echo done" });
         defer t.deinit();
         try t.expect("done", slow(20_000));
         try std.testing.expectEqual(0, try t.wait(slow(10_000)));
@@ -1913,7 +1932,7 @@ test "NPROC defaults to the vCPU limit, and --env overrides it [self-host]" {
     const set = try run(e, &.{ "--cpus", "2", "--env", "NPROC=5", "--rc", "echo $NPROC" });
     defer set.deinit();
     try expectOk(set, "5\n");
-    // Without --cpus, the host's CPU count, capped by the backend's limit.
+    // Without --cpus, the host's CPU count, capped by the engine's limit.
     const def = try run(e, &.{ "--rc", "echo $NPROC" });
     defer def.deinit();
     const n = try std.fmt.parseInt(u32, std.mem.trim(u8, def.out, "\n"), 10);
@@ -2130,32 +2149,32 @@ const enter = "\r";
 /// through, and draws the trailing space of "% " as a cursor movement.
 const prompt = "%";
 
-/// Runs `h9 --backend <backend> --dir <root> args...` on a new terminal.
-fn spawnTerm(e: Env, backend: []const u8, args: []const []const u8) !Term {
-    return spawnTermEnv(e, backend, args, &.{});
+/// Runs `h9 --engine <engine> --dir <root> args...` on a new terminal.
+fn spawnTerm(e: Env, engine: []const u8, args: []const []const u8) !Term {
+    return spawnTermEnv(e, engine, args, &.{});
 }
 
 /// `spawnTerm`, with `extra` (NAME=value strings) in h9's environment.
-fn spawnTermEnv(e: Env, backend: []const u8, args: []const []const u8, extra: []const []const u8) !Term {
+fn spawnTermEnv(e: Env, engine: []const u8, args: []const []const u8, extra: []const []const u8) !Term {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
-    try argv.appendSlice(gpa, &.{ e.h9, "--backend", backend });
+    try argv.appendSlice(gpa, &.{ e.h9, "--engine", engine });
     if (!givesRoot(args)) try argv.appendSlice(gpa, &.{ "--dir", e.root });
     if (e.arch) |a| try argv.appendSlice(gpa, &.{ "--arch", a });
     try argv.appendSlice(gpa, args);
     return Term.spawnEnv(gpa, argv.items, extra);
 }
 
-fn backendList(e: Env) std.mem.TokenIterator(u8, .scalar) {
-    return std.mem.tokenizeScalar(u8, e.backends, ',');
+fn engineList(e: Env) std.mem.TokenIterator(u8, .scalar) {
+    return std.mem.tokenizeScalar(u8, e.engines, ',');
 }
 
 test "an interactive rc reads typed lines [baseline]" {
     const e = try env(@src());
-    var it = backendList(e);
-    while (it.next()) |backend| {
-        errdefer std.debug.print("backend {s}\n", .{backend});
-        var t = try spawnTerm(e, backend, &.{ "rc", "-i" });
+    var it = engineList(e);
+    while (it.next()) |engine| {
+        errdefer std.debug.print("engine {s}\n", .{engine});
+        var t = try spawnTerm(e, engine, &.{ "rc", "-i" });
         defer t.deinit();
         try t.expect(prompt, slow(10_000));
         // The output, xy, isn't in the echoed input, echo x^y.
@@ -2183,13 +2202,13 @@ test "a write to a closed pipe kills the writer with the note and its pc [baseli
 
 test "--timeout stops a console read on a terminal at once [baseline]" {
     const e = try env(@src());
-    var it = backendList(e);
-    while (it.next()) |backend| {
-        errdefer std.debug.print("backend {s}\n", .{backend});
+    var it = engineList(e);
+    while (it.next()) |engine| {
+        errdefer std.debug.print("engine {s}\n", .{engine});
         var tb: [16]u8 = undefined;
         // Long enough for rc to start and print ready first, under
         // -Djit-check too (about 3 s there).
-        var t = try spawnTerm(e, backend, &.{ "--timeout", slowTimeout(&tb, 1_500), "--rc", "echo ready; read" });
+        var t = try spawnTerm(e, engine, &.{ "--timeout", slowTimeout(&tb, 1_500), "--rc", "echo ready; read" });
         defer t.deinit();
         try t.expect("ready", slow(10_000));
         // Before the reader thread, the read held the machine until a
@@ -2201,10 +2220,10 @@ test "--timeout stops a console read on a terminal at once [baseline]" {
 
 test "kill and ps work in an interactive rc (demo) [baseline]" {
     const e = try env(@src());
-    var it = backendList(e);
-    while (it.next()) |backend| {
-        errdefer std.debug.print("backend {s}\n", .{backend});
-        var t = try spawnTerm(e, backend, &.{ "--timeout", "60s", "rc", "-i" });
+    var it = engineList(e);
+    while (it.next()) |engine| {
+        errdefer std.debug.print("engine {s}\n", .{engine});
+        var t = try spawnTerm(e, engine, &.{ "--timeout", "60s", "rc", "-i" });
         defer t.deinit();
         try t.expect(prompt, slow(10_000));
         try t.send("sleep 1000 &" ++ enter);
@@ -2227,10 +2246,10 @@ test "kill and ps work in an interactive rc (demo) [baseline]" {
 
 test "Ctrl-C interrupts the foreground command and rc carries on [baseline]" {
     const e = try env(@src());
-    var it = backendList(e);
-    while (it.next()) |backend| {
-        errdefer std.debug.print("backend {s}\n", .{backend});
-        var t = try spawnTerm(e, backend, &.{ "--timeout", "60s", "rc", "-i" });
+    var it = engineList(e);
+    while (it.next()) |engine| {
+        errdefer std.debug.print("engine {s}\n", .{engine});
+        var t = try spawnTerm(e, engine, &.{ "--timeout", "60s", "rc", "-i" });
         defer t.deinit();
         try t.expect(prompt, slow(10_000));
         try t.send("sleep 1000" ++ enter);
@@ -2246,11 +2265,11 @@ test "Ctrl-C interrupts the foreground command and rc carries on [baseline]" {
 
 test "a second Ctrl-C within a second tears the machine down [baseline]" {
     const e = try env(@src());
-    var it = backendList(e);
-    while (it.next()) |backend| {
-        errdefer std.debug.print("backend {s}\n", .{backend});
+    var it = engineList(e);
+    while (it.next()) |engine| {
+        errdefer std.debug.print("engine {s}\n", .{engine});
         // rc traps interrupt and loops, so only the second Ctrl-C stops it.
-        var t = try spawnTerm(e, backend, &.{ "--timeout", "60s", "--rc", "fn sigint {}; echo ready; while() sleep 1" });
+        var t = try spawnTerm(e, engine, &.{ "--timeout", "60s", "--rc", "fn sigint {}; echo ready; while() sleep 1" });
         defer t.deinit();
         try t.expect("ready", slow(10_000));
         try t.send("\x03");
@@ -2263,11 +2282,11 @@ test "a second Ctrl-C within a second tears the machine down [baseline]" {
 
 test "a program killed by interrupt exits 130, with nothing printed [exit-status]" {
     const e = try env(@src());
-    var it = backendList(e);
-    while (it.next()) |backend| {
-        errdefer std.debug.print("backend {s}\n", .{backend});
+    var it = engineList(e);
+    while (it.next()) |engine| {
+        errdefer std.debug.print("engine {s}\n", .{engine});
         // rc execs sleep in place, so sleep is the first process.
-        var t = try spawnTerm(e, backend, &.{ "--timeout", "60s", "--rc", "echo ready; sleep 1000" });
+        var t = try spawnTerm(e, engine, &.{ "--timeout", "60s", "--rc", "echo ready; sleep 1000" });
         defer t.deinit();
         try t.expect("ready", slow(10_000));
         try t.drain(slow(500));
@@ -2344,10 +2363,10 @@ test "a note that isn't a signal exits 1 and prints it [exit-status]" {
 test "rawon puts the host terminal in raw mode until exit [baseline]" {
     if (builtin.os.tag == .windows) return error.SkipZigTest; // no termios to check
     const e = try env(@src());
-    var it = backendList(e);
-    while (it.next()) |backend| {
-        errdefer std.debug.print("backend {s}\n", .{backend});
-        var t = try spawnTerm(e, backend, &.{ "--timeout", "60s", "--rc", ">[3]/dev/consctl { echo rawon >[1=3]; echo ready; read >/dev/null }" });
+    var it = engineList(e);
+    while (it.next()) |engine| {
+        errdefer std.debug.print("engine {s}\n", .{engine});
+        var t = try spawnTerm(e, engine, &.{ "--timeout", "60s", "--rc", ">[3]/dev/consctl { echo rawon >[1=3]; echo ready; read >/dev/null }" });
         defer t.deinit();
         // consctl is on fd 3: rc execs read in place, and closing the last
         // consctl (as >/dev/null over it would) turns raw off.
@@ -2368,14 +2387,14 @@ const hangup_wait = "echo ready; sleep 1000; echo after";
 
 test "closing the terminal posts hangup [baseline]" {
     const e = try env(@src());
-    var it = backendList(e);
-    while (it.next()) |backend| {
-        errdefer std.debug.print("backend {s}\n", .{backend});
+    var it = engineList(e);
+    while (it.next()) |engine| {
+        errdefer std.debug.print("engine {s}\n", .{engine});
         // The terminal is gone, so the handler leaves its mark in a file.
         var s: Scratch = undefined;
         try s.init();
         defer s.deinit();
-        var t = try spawnTerm(e, backend, &.{ "--timeout", "60s", "--cwd", s.path, "--rc", "fn sighup { echo >hup }; " ++ hangup_wait });
+        var t = try spawnTerm(e, engine, &.{ "--timeout", "60s", "--cwd", s.path, "--rc", "fn sighup { echo >hup }; " ++ hangup_wait });
         defer t.deinit();
         try t.expect("ready", slow(10_000));
         try t.drain(slow(500));
@@ -2388,10 +2407,10 @@ test "closing the terminal posts hangup [baseline]" {
 test "SIGTERM posts hangup [baseline]" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const e = try env(@src());
-    var it = backendList(e);
-    while (it.next()) |backend| {
-        errdefer std.debug.print("backend {s}\n", .{backend});
-        var t = try spawnTerm(e, backend, &.{ "--timeout", "60s", "--rc", "fn sighup { echo got hangup }; " ++ hangup_wait });
+    var it = engineList(e);
+    while (it.next()) |engine| {
+        errdefer std.debug.print("engine {s}\n", .{engine});
+        var t = try spawnTerm(e, engine, &.{ "--timeout", "60s", "--rc", "fn sighup { echo got hangup }; " ++ hangup_wait });
         defer t.deinit();
         try t.expect("ready", slow(10_000));
         try t.drain(slow(500));
@@ -2404,12 +2423,12 @@ test "SIGTERM posts hangup [baseline]" {
 test "a run torn down after SIGTERM exits 143 [exit-status]" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const e = try env(@src());
-    var it = backendList(e);
-    while (it.next()) |backend| {
-        errdefer std.debug.print("backend {s}\n", .{backend});
+    var it = engineList(e);
+    while (it.next()) |engine| {
+        errdefer std.debug.print("engine {s}\n", .{engine});
         // rc ignores the hangup, so the machine is stopped after the grace
         // period, and the exit code names the host signal that started it.
-        var t = try spawnTerm(e, backend, &.{ "--timeout", "60s", "--rc", "fn sighup {}; echo ready; while() sleep 1" });
+        var t = try spawnTerm(e, engine, &.{ "--timeout", "60s", "--rc", "fn sighup {}; echo ready; while() sleep 1" });
         defer t.deinit();
         try t.expect("ready", slow(10_000));
         try t.drain(slow(500));
@@ -2433,7 +2452,7 @@ test "an unhandled note kills the process with the note as its status [baseline]
     // of a background child that exits while it waits for a foreground one
     // (echo, here). The note goes out once sleep has exec'd, as before that
     // the child is still rc, which would catch it. The status names sleep's
-    // pid, which differs between backends, so sed drops it.
+    // pid, which differs between engines, so sed drops it.
     const script =
         \\rc -c 'sleep 1000 & wait $apid; echo $status | sed ''s/^sleep [0-9]+: /sleep: /''' &
         \\w=$apid
@@ -2546,7 +2565,7 @@ test "--memory caps segattach [segattach]" {
 // with the architecture's compiler and loader (7c and 7l on arm64) into
 // a scratch directory given with --sandbox.
 
-/// Builds sema.c into `s` as `sema`, on each backend.
+/// Builds sema.c into `s` as `sema`, on each engine.
 fn buildSema(e: Env, s: *Scratch) !void {
     try buildC(e, s, "sema", @embedFile("fixtures/sema/sema.c"));
 }
@@ -2660,8 +2679,8 @@ test "--timeout stops processes blocked in rendezvous and semacquire [semaphores
     errdefer std.debug.print("took {d} ms: {s}", .{ took, r.err });
     try std.testing.expectEqual(124, r.code);
     try std.testing.expect(std.mem.indexOf(u8, r.err, "h9: timeout") != null);
-    // Hangup or the teardown 2 s later; one run per backend.
-    try std.testing.expect(took < 10_000 * @as(i64, @intCast(std.mem.count(u8, e.backends, ",") + 1)));
+    // Hangup or the teardown 2 s later; one run per engine.
+    try std.testing.expect(took < 10_000 * @as(i64, @intCast(std.mem.count(u8, e.engines, ",") + 1)));
 }
 
 // The network policy (design/epoch-0/net-policy.md). The cases listen on
@@ -2738,13 +2757,13 @@ test "--net=enable allows a server [net-policy]" {
     probe.deinit(io);
     var addr_buf: [64]u8 = undefined;
     const addr = try std.fmt.bufPrint(&addr_buf, "tcp!127.0.0.1!{d}", .{port});
-    var it = std.mem.tokenizeScalar(u8, e.backends, ',');
-    while (it.next()) |backend| {
+    var it = std.mem.tokenizeScalar(u8, e.engines, ',');
+    while (it.next()) |engine| {
         // The root's binaries are for -Darch's architecture, if any.
         const argv: []const []const u8 = if (e.arch) |a|
-            &.{ e.h9, "--backend", backend, "--arch", a, "--dir", e.root, "--net=enable", "--timeout", "20s", "aux/listen1", "-1", "-t", addr, "/bin/cat" }
+            &.{ e.h9, "--engine", engine, "--arch", a, "--dir", e.root, "--net=enable", "--timeout", "20s", "aux/listen1", "-1", "-t", addr, "/bin/cat" }
         else
-            &.{ e.h9, "--backend", backend, "--dir", e.root, "--net=enable", "--timeout", "20s", "aux/listen1", "-1", "-t", addr, "/bin/cat" };
+            &.{ e.h9, "--engine", engine, "--dir", e.root, "--net=enable", "--timeout", "20s", "aux/listen1", "-1", "-t", addr, "/bin/cat" };
         var child = try std.process.spawn(io, .{
             .argv = argv,
             .stdin = .ignore,
@@ -2783,9 +2802,9 @@ test "outbound allows connect [net-policy]" {
     var addr_buf: [64]u8 = undefined;
     var cmd_buf: [256]u8 = undefined;
     const addr = try std.fmt.bufPrint(&addr_buf, "127.0.0.1!{d}", .{srv.socket.address.getPort()});
-    var it = std.mem.tokenizeScalar(u8, e.backends, ',');
-    while (it.next()) |backend| {
-        const r = try runOn(e, backend, &.{ "--rc", try rcDial(&cmd_buf, addr, "hello") }, null);
+    var it = std.mem.tokenizeScalar(u8, e.engines, ',');
+    while (it.next()) |engine| {
+        const r = try runOn(e, engine, &.{ "--rc", try rcDial(&cmd_buf, addr, "hello") }, null);
         defer r.deinit();
         try std.testing.expectEqualStrings("", r.err);
         try std.testing.expectEqual(0, r.code);
@@ -2842,9 +2861,9 @@ test "--net-allow allows a matching CIDR and port [net-policy]" {
     var cmd_buf: [256]u8 = undefined;
     const addr = try std.fmt.bufPrint(&addr_buf, "127.0.0.1!{d}", .{port});
     const pat = try std.fmt.bufPrint(&pat_buf, "tcp!127.0.0.0/8!{d}-{d}", .{ port, port });
-    var it = std.mem.tokenizeScalar(u8, e.backends, ',');
-    while (it.next()) |backend| {
-        const r = try runOn(e, backend, &.{ "--net-allow", pat, "--rc", try rcDial(&cmd_buf, addr, "cidr") }, null);
+    var it = std.mem.tokenizeScalar(u8, e.engines, ',');
+    while (it.next()) |engine| {
+        const r = try runOn(e, engine, &.{ "--net-allow", pat, "--rc", try rcDial(&cmd_buf, addr, "cidr") }, null);
         defer r.deinit();
         try std.testing.expectEqualStrings("", r.err);
         var buf: [64]u8 = undefined;
@@ -2868,9 +2887,9 @@ test "a name pattern allows a connect through cs [net-policy]" {
     defer refused.deinit();
     try std.testing.expect(std.mem.indexOf(u8, refused.err, "write error: permission denied") != null);
     const cmd = try std.fmt.bufPrint(&cmd_buf, "ndb/csquery /net/cs '{s}' >/dev/null && {s}", .{ pat, try rcDial(&dial_buf, addr, "named") });
-    var it = std.mem.tokenizeScalar(u8, e.backends, ',');
-    while (it.next()) |backend| {
-        const r = try runOn(e, backend, &.{ "--net-allow", pat, "--rc", cmd }, null);
+    var it = std.mem.tokenizeScalar(u8, e.engines, ',');
+    while (it.next()) |engine| {
+        const r = try runOn(e, engine, &.{ "--net-allow", pat, "--rc", cmd }, null);
         defer r.deinit();
         try std.testing.expectEqualStrings("", r.err);
         var buf: [64]u8 = undefined;
@@ -3095,11 +3114,11 @@ test "plumber starts and serves /mnt/plumb [devsrv]" {
 
 // Go compatibility (design/epoch-0/go-compat.md). The Go cases run the
 // plan9/amd64 programs from tests/fixtures/go, which `zig build
-// go-fixtures` builds into H9_TEST_GO, on the native backend where the
-// build runs the cases on it (H9_TEST_GO_BACKEND), else on the emulator.
+// go-fixtures` builds into H9_TEST_GO, on the sud engine where the
+// build runs the cases on it (H9_TEST_GO_ENGINE), else on the emulator.
 // They don't need the root tree: each gets a scratch root holding only
 // the directories the namespace binds onto, and the fixtures at
-// /mnt/term/cwd. Without Go, or either backend, H9_TEST_GO is unset and
+// /mnt/term/cwd. Without Go, or either engine, H9_TEST_GO is unset and
 // they skip.
 
 const GoEnv = struct {
@@ -3126,17 +3145,17 @@ fn goEnv(comptime src: std.builtin.SourceLocation, g: *GoEnv) !void {
     for (go_root_dirs) |d| try g.root.tmp.dir.createDirPath(std.testing.io, d);
 }
 
-/// The backend the Go cases run on: the native backend when the build
+/// The engine the Go cases run on: the sud engine when the build
 /// says it's in the list (Linux x86_64, design/epoch-0/native-backend.md), else
 /// the emulator.
-fn goBackend() []const u8 {
-    const v = getenv(3, "H9_TEST_GO_BACKEND") orelse return "emu";
-    return if (std.mem.eql(u8, v, "native")) "native" else "emu";
+fn goEngine() []const u8 {
+    const v = getenv(3, "H9_TEST_GO_ENGINE") orelse return "hcpu";
+    return if (std.mem.eql(u8, v, "sud")) "sud" else "hcpu";
 }
 
 /// The argv for running fixture `prog` with h9 flags `flags` and arguments `args`.
 fn goArgv(g: *const GoEnv, argv: *std.ArrayList([]const u8), flags: []const []const u8, prog: []const u8, args: []const []const u8) !void {
-    try argv.appendSlice(gpa, &.{ g.h9, "--backend", goBackend(), "--arch", "amd64", "--dir", g.root.path, "--cwd", g.dir, "--timeout", "60s" });
+    try argv.appendSlice(gpa, &.{ g.h9, "--engine", goEngine(), "--arch", "amd64", "--dir", g.root.path, "--cwd", g.dir, "--timeout", "60s" });
     try argv.appendSlice(gpa, flags);
     try argv.append(gpa, try std.fmt.allocPrint(gpa, "/mnt/term/cwd/{s}", .{prog}));
     try argv.appendSlice(gpa, args);
@@ -3385,17 +3404,17 @@ test "syscall.Gettimeofday has microsecond resolution [go-compat]" {
 
 test "/dev/bintime has four words and a monotonic clock [go-compat]" {
     const e = try env(@src());
-    // The clock differs from run to run, so each backend is checked on its
+    // The clock differs from run to run, so each engine is checked on its
     // own rather than compared with the others.
-    var it = backendList(e);
-    while (it.next()) |backend| {
-        errdefer std.debug.print("backend {s}\n", .{backend});
-        try checkBintime(e, backend);
+    var it = engineList(e);
+    while (it.next()) |engine| {
+        errdefer std.debug.print("engine {s}\n", .{engine});
+        try checkBintime(e, engine);
     }
 }
 
-fn checkBintime(e: Env, backend: []const u8) !void {
-    const r = try runOn(e, backend, &.{ "--rc", "dd -if /dev/bintime -bs 32 -count 1 >[2]/dev/null | xd -1x; sleep 1; dd -if /dev/bintime -bs 32 -count 1 >[2]/dev/null | xd -1x" }, null);
+fn checkBintime(e: Env, engine: []const u8) !void {
+    const r = try runOn(e, engine, &.{ "--rc", "dd -if /dev/bintime -bs 32 -count 1 >[2]/dev/null | xd -1x; sleep 1; dd -if /dev/bintime -bs 32 -count 1 >[2]/dev/null | xd -1x" }, null);
     defer r.deinit();
     errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
     try std.testing.expectEqual(0, r.code);
@@ -3433,7 +3452,7 @@ fn checkBintime(e: Env, backend: []const u8) !void {
 // same run over the host tree, whose namespace is otherwise the same.
 
 /// A second h9 serving the root tree on a loopback port, on the first
-/// backend, for the life of a case.
+/// engine, for the life of a case.
 const RootServer = struct {
     child: std.process.Child,
     port: u16,
@@ -3464,8 +3483,8 @@ const RootServer = struct {
         // (H9_TEST_SERVER, from -Dweb), or the case skips.
         if (onWeb()) {
             const server = getenv(6, "H9_TEST_SERVER") orelse return error.SkipZigTest;
-            try argv.appendSlice(gpa, &.{ server, "--backend", "auto", "--dir", e.root, "--net=enable" });
-        } else try argv.appendSlice(gpa, &.{ e.h9, "--backend", firstBackend(e), "--dir", e.root, "--net=enable" });
+            try argv.appendSlice(gpa, &.{ server, "--engine", "auto", "--dir", e.root, "--net=enable" });
+        } else try argv.appendSlice(gpa, &.{ e.h9, "--engine", firstEngine(e), "--dir", e.root, "--net=enable" });
         if (e.arch) |a| try argv.appendSlice(gpa, &.{ "--arch", a });
         // The tree is the server's cwd, so it's /mnt/term/cwd wherever
         // it is on the host.
@@ -3835,8 +3854,8 @@ test "spec= is sent as the attach name [mounts]" {
     var f: FakeAttach = undefined;
     try f.start("no such tree");
     var ub: [128]u8 = undefined;
-    // One backend: the server takes one connection.
-    const r = runOn(e, firstBackend(e), &.{ "--url", urlOpts(&ub, f.url(), "spec=other"), "/bin/echo" }, null) catch |err| {
+    // One engine: the server takes one connection.
+    const r = runOn(e, firstEngine(e), &.{ "--url", urlOpts(&ub, f.url(), "spec=other"), "/bin/echo" }, null) catch |err| {
         f.finish();
         return err;
     };
@@ -3867,7 +3886,7 @@ test "--url tcp:// and unix:// mount 9P, with spec from the path or spec= [mount
         try relay.start(sock, srv.port);
         const u = try std.fmt.allocPrint(gpa, "unix://{s}:/n/fs", .{sock});
         defer gpa.free(u);
-        const r = try runOn(e, firstBackend(e), &.{ "--url", u, "--rc", "test -e /n/fs/lib/namespace && echo unix" }, null);
+        const r = try runOn(e, firstEngine(e), &.{ "--url", u, "--rc", "test -e /n/fs/lib/namespace && echo unix" }, null);
         defer r.deinit();
         errdefer std.debug.print("stderr: {s}\n", .{r.err});
         try std.testing.expectEqualStrings("unix\n", r.out);
@@ -3877,7 +3896,7 @@ test "--url tcp:// and unix:// mount 9P, with spec from the path or spec= [mount
         var f: FakeAttach = undefined;
         try f.start("no such tree");
         var ub: [128]u8 = undefined;
-        const r = runOn(e, firstBackend(e), &.{ "--url", try std.fmt.bufPrint(&ub, "{s}{s}", .{ f.url(), c[0] }), "/bin/echo" }, null) catch |err| {
+        const r = runOn(e, firstEngine(e), &.{ "--url", try std.fmt.bufPrint(&ub, "{s}{s}", .{ f.url(), c[0] }), "/bin/echo" }, null) catch |err| {
             f.finish();
             return err;
         };
@@ -4092,7 +4111,7 @@ const StaticRig = struct {
         try argv.appendSlice(gpa, &.{ "--url", try std.fmt.bufPrint(&ub, "{s}:/n/t", .{x.http.url()}), "--index-cache", try std.fmt.bufPrint(&cb, "{s}/cache", .{x.s.path}) });
         try argv.appendSlice(gpa, args);
         x.http.reset();
-        return runOn(e, firstBackend(e), argv.items, null);
+        return runOn(e, firstEngine(e), argv.items, null);
     }
 };
 
@@ -4109,7 +4128,7 @@ test "--url http:// upgrades to a WebSocket when the server answers 101 [mounts]
     defer w.stop();
     var ub: [160]u8 = undefined;
     const u = try std.fmt.bufPrint(&ub, "http://{s}:/n/fs", .{w.url()["ws://".len..]});
-    const r = try runOn(e, firstBackend(e), &.{ "--url", u, "--rc", "test -e /n/fs/lib/namespace && echo ws" }, null);
+    const r = try runOn(e, firstEngine(e), &.{ "--url", u, "--rc", "test -e /n/fs/lib/namespace && echo ws" }, null);
     defer r.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{r.err});
     try std.testing.expectEqualStrings("ws\n", r.out);
@@ -4264,8 +4283,8 @@ test "user= is sent as the attach uname [mounts]" {
         var ob: [64]u8 = undefined;
         try args.appendSlice(gpa, &.{ "--url", if (user) |u| urlOpts(&ub, f.url(), try std.fmt.bufPrint(&ob, "user={s}", .{u})) else f.url() });
         try args.append(gpa, "/bin/echo");
-        // One backend: the server takes one connection.
-        const r = runOn(e, firstBackend(e), args.items, null) catch |err| {
+        // One engine: the server takes one connection.
+        const r = runOn(e, firstEngine(e), args.items, null) catch |err| {
             f.finish();
             return err;
         };
@@ -4313,7 +4332,7 @@ test "a 9P root that wants authentication exits 125 [ninep-roots]" {
     const e = try env(@src());
     var f: FakeAttach = undefined;
     try f.start("authentication required");
-    const r = runOn(e, firstBackend(e), &.{ "--url", f.url(), "/bin/echo" }, null) catch |err| {
+    const r = runOn(e, firstEngine(e), &.{ "--url", f.url(), "/bin/echo" }, null) catch |err| {
         f.finish();
         return err;
     };
@@ -5169,15 +5188,15 @@ fn rcWs(buf: []u8, url: []const u8, extra: []const u8, body: []const u8) ![]cons
     return std.fmt.bufPrint(buf, "{{ n=`{{read}}; echo connect {s}{s} >/net/ws/$n/ctl && {s} }} <>/net/ws/clone", .{ url, extra, body });
 }
 
-/// Runs `h9 args...` on `backend` with `vars` (pairs of name and value)
+/// Runs `h9 args...` on `engine` with `vars` (pairs of name and value)
 /// added to the environment, and a timeout of `ms`.
-fn runEnv(e: Env, backend: []const u8, args: []const []const u8, vars: []const [2][]const u8, ms: u32) !Result {
+fn runEnv(e: Env, engine: []const u8, args: []const []const u8, vars: []const [2][]const u8, ms: u32) !Result {
     var map = try std.testing.environ.createMap(gpa);
     defer map.deinit();
     for (vars) |v| try map.put(v[0], v[1]);
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
-    try argv.appendSlice(gpa, &.{ e.h9, "--backend", backend });
+    try argv.appendSlice(gpa, &.{ e.h9, "--engine", engine });
     if (!givesRoot(args)) try argv.appendSlice(gpa, &.{ "--dir", e.root });
     if (e.arch) |a| try argv.appendSlice(gpa, &.{ "--arch", a });
     try argv.appendSlice(gpa, args);
@@ -5287,13 +5306,13 @@ test "an unreachable ws:// root exits 125 [websocket-9p]" {
 
 test "a server close makes guest file operations fail [websocket-9p]" {
     const e = try env(@src());
-    var it = backendList(e);
-    while (it.next()) |backend| {
-        errdefer std.debug.print("backend {s}\n", .{backend});
+    var it = engineList(e);
+    while (it.next()) |engine| {
+        errdefer std.debug.print("engine {s}\n", .{engine});
         var w: WsRoot = undefined;
         try w.start(e, .{});
         defer w.stop();
-        var t = try spawnTerm(e, backend, &.{ "--url", w.url(), "--timeout", "60s", "--rc", "echo ready; sleep 2; /bin/echo after" });
+        var t = try spawnTerm(e, engine, &.{ "--url", w.url(), "--timeout", "60s", "--rc", "echo ready; sleep 2; /bin/echo after" });
         defer t.deinit();
         try t.expect("ready", slow(10_000));
         w.relay.hangupAll();
@@ -5314,7 +5333,7 @@ test "an idle ws:// root pings, and a server that stops answering fails it [webs
         try w.start(e, .{});
         defer w.stop();
         const cmd = try std.fmt.bufPrint(&cmd_buf, "sleep {d}; /bin/echo still", .{slow(1000) * 4 / 1000});
-        const r = try runEnv(e, firstBackend(e), &.{ "--url", w.url(), "--rc", cmd }, &.{.{ "H9_TEST_KEEPALIVE", ka }}, slow(30_000));
+        const r = try runEnv(e, firstEngine(e), &.{ "--url", w.url(), "--rc", cmd }, &.{.{ "H9_TEST_KEEPALIVE", ka }}, slow(30_000));
         defer r.deinit();
         errdefer std.debug.print("stderr: {s}\n", .{r.err});
         try std.testing.expectEqual(0, r.code);
@@ -5326,7 +5345,7 @@ test "an idle ws:// root pings, and a server that stops answering fails it [webs
         try w.start(e, .{ .no_pong = true });
         defer w.stop();
         const cmd = try std.fmt.bufPrint(&cmd_buf, "sleep {d}; /bin/echo still", .{slow(1000) * 6 / 1000});
-        const r = try runEnv(e, firstBackend(e), &.{ "--url", w.url(), "--rc", cmd }, &.{.{ "H9_TEST_KEEPALIVE", ka }}, slow(30_000));
+        const r = try runEnv(e, firstEngine(e), &.{ "--url", w.url(), "--rc", cmd }, &.{.{ "H9_TEST_KEEPALIVE", ka }}, slow(30_000));
         defer r.deinit();
         errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
         try std.testing.expect(r.code != 0);
@@ -5342,13 +5361,13 @@ test "a ws:// root goes through HTTP_PROXY with CONNECT, and NO_PROXY skips it [
     defer w.stop();
     var p: wsrelay.Proxy = undefined;
     try p.start(std.testing.io, null);
-    const via = try runEnv(e, firstBackend(e), &.{ "--url", w.url(), "/bin/ls", "/bin/ls" }, &.{.{ "HTTP_PROXY", p.url() }}, 30_000);
+    const via = try runEnv(e, firstEngine(e), &.{ "--url", w.url(), "/bin/ls", "/bin/ls" }, &.{.{ "HTTP_PROXY", p.url() }}, 30_000);
     defer via.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{via.err});
     try std.testing.expectEqual(0, via.code);
     try std.testing.expectEqualStrings("/bin/ls\n", via.out);
     try std.testing.expectEqual(1, p.connects.load(.acquire));
-    const direct = try runEnv(e, firstBackend(e), &.{ "--url", w.url(), "/bin/ls", "/bin/ls" }, &.{ .{ "http_proxy", p.url() }, .{ "NO_PROXY", "localhost,127.0.0.1" } }, 30_000);
+    const direct = try runEnv(e, firstEngine(e), &.{ "--url", w.url(), "/bin/ls", "/bin/ls" }, &.{ .{ "http_proxy", p.url() }, .{ "NO_PROXY", "localhost,127.0.0.1" } }, 30_000);
     defer direct.deinit();
     try std.testing.expectEqual(0, direct.code);
     try std.testing.expectEqual(1, p.connects.load(.acquire));
@@ -5358,7 +5377,7 @@ test "a proxy answering 407 exits 125 with the status [websocket-9p]" {
     const e = try env(@src());
     var p: wsrelay.Proxy = undefined;
     try p.start(std.testing.io, 407);
-    const r = try runEnv(e, firstBackend(e), &.{ "--url", "ws://127.0.0.1:1/9p", "/bin/echo" }, &.{.{ "HTTP_PROXY", p.url() }}, 30_000);
+    const r = try runEnv(e, firstEngine(e), &.{ "--url", "ws://127.0.0.1:1/9p", "/bin/echo" }, &.{.{ "HTTP_PROXY", p.url() }}, 30_000);
     defer r.deinit();
     try std.testing.expectEqual(125, r.code);
     try expectIn(r.err, "root ws://127.0.0.1:1/9p: proxy answered 407 Proxy Authentication Required");
@@ -5372,7 +5391,7 @@ test "a /net/ws connect ignores HTTP_PROXY [websocket-9p]" {
     var p: wsrelay.Proxy = undefined;
     try p.start(std.testing.io, null);
     var cmd: [512]u8 = undefined;
-    const r = try runEnv(e, firstBackend(e), &.{ "--rc", try rcWs(&cmd, rl.url(), "", "echo hi >/net/ws/$n/data && read </net/ws/$n/data") }, &.{.{ "HTTP_PROXY", p.url() }}, 30_000);
+    const r = try runEnv(e, firstEngine(e), &.{ "--rc", try rcWs(&cmd, rl.url(), "", "echo hi >/net/ws/$n/data && read </net/ws/$n/data") }, &.{.{ "HTTP_PROXY", p.url() }}, 30_000);
     defer r.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{r.err});
     try std.testing.expectEqual(0, r.code);
@@ -5398,13 +5417,13 @@ test "ca= with a ws:// root is a usage error [mounts]" {
 
 test "a note interrupts a read waiting on a ws:// root [websocket-9p]" {
     const e = try env(@src());
-    var it = backendList(e);
-    while (it.next()) |backend| {
-        errdefer std.debug.print("backend {s}\n", .{backend});
+    var it = engineList(e);
+    while (it.next()) |engine| {
+        errdefer std.debug.print("engine {s}\n", .{engine});
         var w: WsRoot = undefined;
         try w.start(e, .{});
         defer w.stop();
-        var t = try spawnTerm(e, backend, &.{ "--url", w.url(), "--timeout", "60s", "rc", "-i" });
+        var t = try spawnTerm(e, engine, &.{ "--url", w.url(), "--timeout", "60s", "rc", "-i" });
         defer t.deinit();
         try t.expect(prompt, slow(10_000));
         // The server stops answering, so the exec's reads wait.
@@ -5649,10 +5668,10 @@ test "a note interrupts a /net/ws connect [websocket-9p]" {
     var url: [64]u8 = undefined;
     var cmd: [512]u8 = undefined;
     const c = try rcWs(&cmd, try std.fmt.bufPrint(&url, "ws://127.0.0.1:{d}/", .{srv.socket.address.getPort()}), "", "echo connected");
-    var it = backendList(e);
-    while (it.next()) |backend| {
-        errdefer std.debug.print("backend {s}\n", .{backend});
-        var t = try spawnTerm(e, backend, &.{ "--timeout", "60s", "rc", "-i" });
+    var it = engineList(e);
+    while (it.next()) |engine| {
+        errdefer std.debug.print("engine {s}\n", .{engine});
+        var t = try spawnTerm(e, engine, &.{ "--timeout", "60s", "rc", "-i" });
         defer t.deinit();
         try t.expect(prompt, slow(10_000));
         try t.send(c);
@@ -5706,7 +5725,7 @@ test "--write=none with a ws:// root is a usage error [websocket-9p]" {
 
 // schemeless-roots: a --url or $H9ROOT without a scheme.
 
-/// Runs `h9 args...` on the first backend without the case's root, in
+/// Runs `h9 args...` on the first engine without the case's root, in
 /// `cwd` (if not null), with `vars` added to the environment.
 fn runBare(e: Env, cwd: ?[]const u8, args: []const []const u8, vars: []const [2][]const u8) !Result {
     var map = try std.testing.environ.createMap(gpa);
@@ -5716,7 +5735,7 @@ fn runBare(e: Env, cwd: ?[]const u8, args: []const []const u8, vars: []const [2]
     const n = try std.Io.Dir.cwd().realPathFile(std.testing.io, e.h9, &h9_buf);
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
-    try argv.appendSlice(gpa, &.{ h9_buf[0..n], "--backend", firstBackend(e) });
+    try argv.appendSlice(gpa, &.{ h9_buf[0..n], "--engine", firstEngine(e) });
     if (e.arch) |a| try argv.appendSlice(gpa, &.{ "--arch", a });
     try argv.appendSlice(gpa, args);
     const io = std.testing.io;
@@ -5858,7 +5877,7 @@ fn wssUrl(buf: []u8) ![]const u8 {
     return buf[0..v.len];
 }
 
-// websocket-9p on the browser host: the cases above run there too, under
+// websocket-9p on the web host: the cases above run there too, under
 // -Dweb with a native h9 for their servers; these check what's
 // particular to it.
 
@@ -5939,7 +5958,7 @@ fn runPorts(e: Env, spec: []const u8, args: []const []const u8) !Result {
     var pm: PortsMod = undefined;
     try pm.init();
     defer pm.deinit();
-    return runEnv(e, firstBackend(e), args, &.{ .{ "H9_NODE_PORTS", pm.path }, .{ "H9_TEST_PORTS", spec } }, slow(60_000));
+    return runEnv(e, firstEngine(e), args, &.{ .{ "H9_NODE_PORTS", pm.path }, .{ "H9_TEST_PORTS", spec } }, slow(60_000));
 }
 
 /// `NAME=tcp!127.0.0.1!PORT` and `extra`: a port relayed to `dial`.
@@ -6125,7 +6144,7 @@ fn startServedPorts(e: Env, pm: *PortsMod, t: *Term, extra: []const u8) !u16 {
     errdefer pm.deinit();
     var nb: [std.Io.Dir.max_path_bytes + 32]u8 = undefined;
     var sb: [128]u8 = undefined;
-    t.* = try spawnTermEnv(e, firstBackend(e), &.{ "--rc", "echo ready; sleep 60" }, &.{
+    t.* = try spawnTermEnv(e, firstEngine(e), &.{ "--rc", "echo ready; sleep 60" }, &.{
         try std.fmt.bufPrint(&nb, "H9_NODE_PORTS={s}", .{pm.path}),
         try std.fmt.bufPrint(&sb, "H9_TEST_PORTS=serve=tcp!127.0.0.1!{d}{s}", .{ port, extra }),
     });
@@ -6141,7 +6160,7 @@ fn runServedClient(e: Env, port: u16, cmd: []const u8) !Result {
     var ub: [64]u8 = undefined;
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
-    try argv.appendSlice(gpa, &.{ native, "--backend", "auto", "--dir", e.root });
+    try argv.appendSlice(gpa, &.{ native, "--engine", "auto", "--dir", e.root });
     if (e.arch) |a| try argv.appendSlice(gpa, &.{ "--arch", a });
     try argv.appendSlice(gpa, &.{ "--url", try std.fmt.bufPrint(&ub, "tcp://127.0.0.1:{d}:/n/web", .{port}), "--rc", cmd });
     const r = try runProcessWith(argv.items, null, null, slow(60_000));
@@ -6929,7 +6948,7 @@ test "ls -l /bin in a contained tree with links (demo) [symlinks-in-root]" {
     try std.testing.expect(std.mem.indexOf(u8, r.out, "/bin/cat") != null);
 }
 
-// The Linux personality (design/epoch-0/linux-personality.md): static Linux
+// The Linux ABI (design/epoch-0/linux-personality.md): static Linux
 // programs from tests/fixtures/linux (H9_TEST_LINUX) and an Alpine root
 // from scripts/fetch.sh (H9_TEST_LINUX_ROOT/alpine-<arch>).
 
@@ -6942,7 +6961,7 @@ const LinuxEnv = struct {
     /// The 9front root, for the cases that mix the two; null if there's none.
     nine: ?[]const u8,
     arch: []const u8,
-    backends: []const u8,
+    engines: []const u8,
     /// `root:#L`, the --dir that mounts it (design/epoch-0/mounts.md).
     lmount: []const u8 = "",
     buf: [2][std.Io.Dir.max_path_bytes]u8 = undefined,
@@ -6959,15 +6978,15 @@ fn linuxEnv(comptime src: std.builtin.SourceLocation, le: *LinuxEnv) !void {
     };
     const fx = getenv(2, "H9_TEST_LINUX") orelse return error.SkipZigTest;
     const lr = getenv(3, "H9_TEST_LINUX_ROOT") orelse return error.SkipZigTest;
-    le.* = .{ .h9 = h9, .root = undefined, .fixtures = undefined, .nine = null, .arch = arch, .backends = "auto" };
+    le.* = .{ .h9 = h9, .root = undefined, .fixtures = undefined, .nine = null, .arch = arch, .engines = "auto" };
     le.root = try std.fmt.bufPrint(&le.buf[0], "{s}/alpine-{s}", .{ lr, arch });
     le.lmount = try std.fmt.bufPrint(&le.lbuf, "{s}:#L", .{le.root});
     le.fixtures = try std.fmt.bufPrint(&le.buf[1], "{s}/{s}", .{ fx, arch });
     const io = std.testing.io;
     std.Io.Dir.cwd().access(io, try hostPath(le.root, "etc/os-release"), .{}) catch return error.SkipZigTest;
     std.Io.Dir.cwd().access(io, try hostPath(le.fixtures, "hello"), .{}) catch return error.SkipZigTest;
-    // The backends and the 9front root go in slots 2 and 1, read last.
-    le.backends = getenv(2, "H9_TEST_BACKENDS") orelse "auto";
+    // The engines and the 9front root go in slots 2 and 1, read last.
+    le.engines = getenv(2, "H9_TEST_ENGINES") orelse "auto";
     // The 9front root counts only if it has this architecture's programs.
     if (getenv(1, "H9_TEST_ROOT")) |n| {
         var cat_buf: [32]u8 = undefined;
@@ -6977,16 +6996,16 @@ fn linuxEnv(comptime src: std.builtin.SourceLocation, le: *LinuxEnv) !void {
 }
 
 /// Runs `h9 --dir <alpine>:#L [--dir <9front>] --cwd <fixtures> args...` on
-/// each backend, checking they agree, as `run` does.
+/// each engine, checking they agree, as `run` does.
 fn runLinux(le: *const LinuxEnv, with_nine: bool, args: []const []const u8) !Result {
     if (with_nine and le.nine == null) return error.SkipZigTest;
     var first: ?Result = null;
     errdefer if (first) |f| f.deinit();
-    var it = std.mem.tokenizeScalar(u8, le.backends, ',');
-    while (it.next()) |backend| {
+    var it = std.mem.tokenizeScalar(u8, le.engines, ',');
+    while (it.next()) |engine| {
         var argv: std.ArrayList([]const u8) = .empty;
         defer argv.deinit(gpa);
-        try argv.appendSlice(gpa, &.{ le.h9, "--backend", backend, "--arch", le.arch, "--dir", le.lmount });
+        try argv.appendSlice(gpa, &.{ le.h9, "--engine", engine, "--arch", le.arch, "--dir", le.lmount });
         if (with_nine) try argv.appendSlice(gpa, &.{ "--dir", le.nine.? });
         try argv.appendSlice(gpa, &.{ "--cwd", le.fixtures });
         try argv.appendSlice(gpa, args);
@@ -7003,7 +7022,7 @@ fn runLinux(le: *const LinuxEnv, with_nine: bool, args: []const []const u8) !Res
         const r: Result = .{ .code = code, .out = p.stdout, .err = p.stderr };
         if (first) |f| {
             defer r.deinit();
-            errdefer std.debug.print("backend {s} differs for h9 {s}\n", .{ backend, args[0] });
+            errdefer std.debug.print("engine {s} differs for h9 {s}\n", .{ engine, args[0] });
             try std.testing.expectEqualStrings(f.out, r.out);
             try std.testing.expectEqual(f.code, r.code);
         } else first = r;
@@ -7283,21 +7302,21 @@ test "/proc/self/exe is the file a Linux program runs, its links followed [linux
 // a directory in the Alpine root to bind over.
 
 /// Runs `script` under sh in the Linux view with `s` as the cwd and
-/// `extra` flags after the Alpine root's, on each backend; checks it
+/// `extra` flags after the Alpine root's, on each engine; checks it
 /// prints `want` and exits 0.
 fn linkCase(le: *const LinuxEnv, s: *const Scratch, extra: []const []const u8, script: []const u8, want: []const u8) !void {
     var ran = false;
-    var it = std.mem.tokenizeScalar(u8, le.backends, ',');
-    while (it.next()) |backend| {
+    var it = std.mem.tokenizeScalar(u8, le.engines, ',');
+    while (it.next()) |engine| {
         var argv: std.ArrayList([]const u8) = .empty;
         defer argv.deinit(gpa);
-        try argv.appendSlice(gpa, &.{ le.h9, "--backend", backend, "--arch", le.arch, "--dir", le.lmount });
+        try argv.appendSlice(gpa, &.{ le.h9, "--engine", engine, "--arch", le.arch, "--dir", le.lmount });
         try argv.appendSlice(gpa, extra);
         try argv.appendSlice(gpa, &.{ "--cwd", s.path, "sh", "-c", script });
         const p = try runProcessWith(argv.items, null, null, 120_000);
         defer gpa.free(p.stdout);
         defer gpa.free(p.stderr);
-        errdefer std.debug.print("backend {s}\nstdout: {s}\nstderr: {s}\n", .{ backend, p.stdout, p.stderr });
+        errdefer std.debug.print("engine {s}\nstdout: {s}\nstderr: {s}\n", .{ engine, p.stdout, p.stderr });
         try std.testing.expectEqualStrings(want, p.stdout);
         try std.testing.expect(p.term == .exited and p.term.exited == 0);
         ran = true;
@@ -7394,15 +7413,15 @@ test "a dangling link lists and removes [linux-symlinks]" {
         \\ls pkg; rm -r pkg; [ ! -e pkg ]; echo host
         \\cd /usr/lib; mkdir pkg; ln -s gone pkg/a; ls pkg; rm -r pkg; [ ! -e pkg ]; echo overlay
     ;
-    // The script removes the links, so each backend gets them anew.
-    var it = std.mem.tokenizeScalar(u8, le.backends, ',');
-    while (it.next()) |backend| {
+    // The script removes the links, so each engine gets them anew.
+    var it = std.mem.tokenizeScalar(u8, le.engines, ',');
+    while (it.next()) |engine| {
         // Made on the host: one to nothing, one to a path only the guest has.
         try s.tmp.dir.createDirPath(io, "pkg");
         try symLinkOrSkip(s.tmp.dir, io, "gone", "pkg/a", .{});
         try symLinkOrSkip(s.tmp.dir, io, "/etc/alpine-release", "pkg/b", .{});
         var one = le;
-        one.backends = backend;
+        one.engines = engine;
         try linkCase(&one, &s, &.{}, script, "a\nb\nhost\na\noverlay\n");
     }
 }
@@ -7742,7 +7761,7 @@ test "set_thread_area gives TLS entries 6 to 8, %fs keeps its own base, and IRET
     var fb: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const fixtures = try std.fmt.bufPrint(&fb, "{s}/386", .{fx});
     std.Io.Dir.cwd().access(std.testing.io, try hostPath(fixtures, "tls386"), .{}) catch return error.SkipZigTest;
-    const p = try runProcessWith(&.{ h9, "--backend", "emu", "--arch", "386", "--cwd", fixtures, "/mnt/term/cwd/tls386" }, null, null, 60_000);
+    const p = try runProcessWith(&.{ h9, "--engine", "hcpu", "--arch", "386", "--cwd", fixtures, "/mnt/term/cwd/tls386" }, null, null, 60_000);
     defer gpa.free(p.stdout);
     defer gpa.free(p.stderr);
     if (std.mem.indexOf(u8, p.stderr, "emulator isn't built") != null) return error.SkipZigTest;
@@ -7773,7 +7792,7 @@ test "an Alpine x86 shell runs on the emulator, with TLS, signals, pipes, and fo
         \\echo $(ls /etc | grep -c release)
         \\/mnt/term/cwd/threads timed_tls fork_thread
     ;
-    const p = try runProcessWith(&.{ h9, "--backend", "emu", "--arch", "386", "--dir", try std.fmt.bufPrint(&lb, "{s}:#L", .{root}), "--cwd", fixtures, "/bin/sh", "-c", script }, null, null, 120_000);
+    const p = try runProcessWith(&.{ h9, "--engine", "hcpu", "--arch", "386", "--dir", try std.fmt.bufPrint(&lb, "{s}:#L", .{root}), "--cwd", fixtures, "/bin/sh", "-c", script }, null, null, 120_000);
     defer gpa.free(p.stdout);
     defer gpa.free(p.stderr);
     if (std.mem.indexOf(u8, p.stderr, "emulator isn't built") != null) return error.SkipZigTest;
@@ -7911,10 +7930,10 @@ test "fsync on a directory, syncfs and sync reach the host [linux-personality]" 
     const dir = try std.fmt.bufPrint(&dir_buf, "DIR=/mnt/term{s}", .{s.path});
     var trace_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const trace = try std.fmt.bufPrint(&trace_buf, "{s}/trace", .{s.path});
-    var it = std.mem.tokenizeScalar(u8, le.backends, ',');
+    var it = std.mem.tokenizeScalar(u8, le.engines, ',');
     const p = try runProcessWith(&.{
         "strace", "-f",     "-y",    "-qq",                 "-e",                    "trace=fsync,fdatasync,syncfs,sync",
-        "-o",     trace,    le.h9,   "--backend",           it.next() orelse "auto", "--arch",
+        "-o",     trace,    le.h9,   "--engine",           it.next() orelse "auto", "--arch",
         le.arch,  "--dir", le.lmount, "--cwd",               le.fixtures,             "--writable",
         s.path,   "env",    dir,     "/mnt/term/cwd/files", "dir_sync",
     }, null, null, 120_000);
@@ -7966,10 +7985,10 @@ test "writes through an fd opened O_DSYNC or O_SYNC sync the host file [linux-pe
     const dir = try std.fmt.bufPrint(&dir_buf, "DIR=/mnt/term{s}", .{s.path});
     var trace_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const trace = try std.fmt.bufPrint(&trace_buf, "{s}/trace", .{s.path});
-    var it = std.mem.tokenizeScalar(u8, le.backends, ',');
+    var it = std.mem.tokenizeScalar(u8, le.engines, ',');
     const p = try runProcessWith(&.{
         "strace", "-f",     "-y",    "-qq",                 "-e",                    "trace=fsync,fdatasync",
-        "-o",     trace,    le.h9,   "--backend",           it.next() orelse "auto", "--arch",
+        "-o",     trace,    le.h9,   "--engine",           it.next() orelse "auto", "--arch",
         le.arch,  "--dir",  le.lmount, "--cwd",               le.fixtures,             "--writable",
         s.path,   "env",    dir,     "/mnt/term/cwd/files", "sync_open",
     }, null, null, 120_000);
@@ -8018,8 +8037,8 @@ test "rename across directories moves in an overlay, and is the host's rename in
     defer sc.deinit();
     var fb: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try std.Io.Dir.copyFile(std.Io.Dir.cwd(), try std.fmt.bufPrint(&fb, "{s}/files", .{le.fixtures}), sc.tmp.dir, "files", std.testing.io, .{});
-    var bit = std.mem.tokenizeScalar(u8, le.backends, ',');
-    const p = try runProcessWith(&.{ le.h9, "--backend", bit.next() orelse "auto", "--arch", le.arch, "--dir", le.lmount, "--cwd", sc.path, "--writable", sc.path, "--env", "DIR=.", "sh", "-c", "./files rename_across" }, null, null, 120_000);
+    var bit = std.mem.tokenizeScalar(u8, le.engines, ',');
+    const p = try runProcessWith(&.{ le.h9, "--engine", bit.next() orelse "auto", "--arch", le.arch, "--dir", le.lmount, "--cwd", sc.path, "--writable", sc.path, "--env", "DIR=.", "sh", "-c", "./files rename_across" }, null, null, 120_000);
     defer gpa.free(p.stdout);
     defer gpa.free(p.stderr);
     errdefer std.debug.print("stderr: {s}\n", .{p.stderr});
@@ -8039,8 +8058,8 @@ test "a mode-0000 file in a host tree can have its times and mode set and be ren
     defer sc.deinit();
     var fb: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try std.Io.Dir.copyFile(std.Io.Dir.cwd(), try std.fmt.bufPrint(&fb, "{s}/files", .{le.fixtures}), sc.tmp.dir, "files", std.testing.io, .{});
-    var bit = std.mem.tokenizeScalar(u8, le.backends, ',');
-    const p = try runProcessWith(&.{ le.h9, "--backend", bit.next() orelse "auto", "--arch", le.arch, "--dir", le.lmount, "--cwd", sc.path, "--writable", sc.path, "--env", "DIR=.", "sh", "-c", "./files mode_zero" }, null, null, 120_000);
+    var bit = std.mem.tokenizeScalar(u8, le.engines, ',');
+    const p = try runProcessWith(&.{ le.h9, "--engine", bit.next() orelse "auto", "--arch", le.arch, "--dir", le.lmount, "--cwd", sc.path, "--writable", sc.path, "--env", "DIR=.", "sh", "-c", "./files mode_zero" }, null, null, 120_000);
     defer gpa.free(p.stdout);
     defer gpa.free(p.stderr);
     errdefer std.debug.print("stderr: {s}\n", .{p.stderr});
@@ -8363,7 +8382,7 @@ test "edge-triggered epoll in another thread reports a TCP socket's next data af
     const io = std.testing.io;
     var srv = try listenLocal();
     defer srv.deinit(io);
-    // One connection for each backend netCase runs, in turn.
+    // One connection for each engine netCase runs, in turn.
     const Echo = struct {
         fn serve(sv: *std.Io.net.Server, n: usize) void {
             for (0..n) |_| {
@@ -8381,9 +8400,9 @@ test "edge-triggered epoll in another thread reports a TCP socket's next data af
             }
         }
     };
-    var backends = std.mem.tokenizeScalar(u8, le.backends, ',');
+    var engines = std.mem.tokenizeScalar(u8, le.engines, ',');
     var n: usize = 0;
-    while (backends.next()) |_| n += 1;
+    while (engines.next()) |_| n += 1;
     const t = try std.Thread.spawn(.{}, Echo.serve, .{ &srv, n });
     defer t.join();
     var port_buf: [64]u8 = undefined;
@@ -8589,10 +8608,10 @@ test "a Linux program's termios reaches the host terminal: echo off keeps lines,
     if (builtin.os.tag == .windows) return error.SkipZigTest; // no termios to check
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
-    var it = std.mem.tokenizeScalar(u8, le.backends, ',');
-    while (it.next()) |backend| {
-        errdefer std.debug.print("backend {s}\n", .{backend});
-        var t = try Term.spawn(gpa, &.{ le.h9, "--backend", backend, "--arch", le.arch, "--dir", le.lmount, "--timeout", "120s", "/bin/sh", "-c", "stty -echo; echo ready1; read x; echo got=$x; stty echo raw; echo ready2; dd bs=1 count=1 2>/dev/null; stty sane; echo; echo done" });
+    var it = std.mem.tokenizeScalar(u8, le.engines, ',');
+    while (it.next()) |engine| {
+        errdefer std.debug.print("engine {s}\n", .{engine});
+        var t = try Term.spawn(gpa, &.{ le.h9, "--engine", engine, "--arch", le.arch, "--dir", le.lmount, "--timeout", "120s", "/bin/sh", "-c", "stty -echo; echo ready1; read x; echo got=$x; stty echo raw; echo ready2; dd bs=1 count=1 2>/dev/null; stty sane; echo; echo done" });
         defer t.deinit();
         try t.expect("ready1", slow(30_000));
         try std.testing.expect(t.noEcho());
@@ -8615,12 +8634,12 @@ test "a Linux program in raw mode gets Enter as CR without ICRNL, polls with VMI
     if (builtin.os.tag == .windows) return error.SkipZigTest; // no termios to check
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
-    var it = std.mem.tokenizeScalar(u8, le.backends, ',');
-    while (it.next()) |backend| {
-        errdefer std.debug.print("backend {s}\n", .{backend});
+    var it = std.mem.tokenizeScalar(u8, le.engines, ',');
+    while (it.next()) |engine| {
+        errdefer std.debug.print("engine {s}\n", .{engine});
         // fzf tells Enter (CR) from Ctrl-J, and btop reads with VMIN 0
         // until a read returns nothing.
-        var t = try Term.spawn(gpa, &.{ le.h9, "--backend", backend, "--arch", le.arch, "--dir", le.lmount, "--timeout", "120s", "/bin/sh", "-c", "echo size=$(stty size); stty raw -echo; echo ready; dd bs=1 count=2 2>/dev/null | od -An -c; stty min 0 time 0; echo poll=$(dd bs=1 count=1 2>/dev/null | wc -c); stty sane; echo done" });
+        var t = try Term.spawn(gpa, &.{ le.h9, "--engine", engine, "--arch", le.arch, "--dir", le.lmount, "--timeout", "120s", "/bin/sh", "-c", "echo size=$(stty size); stty raw -echo; echo ready; dd bs=1 count=2 2>/dev/null | od -An -c; stty min 0 time 0; echo poll=$(dd bs=1 count=1 2>/dev/null | wc -c); stty sane; echo done" });
         defer t.deinit();
         try t.expect("size=25 80", slow(30_000));
         try t.expect("ready", slow(10_000));
@@ -8731,8 +8750,8 @@ test "Go GC with a goroutine in a call-free loop, at 1 ms slices [linux-threads]
     try netCase(&le, &.{"/mnt/term/cwd/go/gcloop"}, "ok gcloop 20\n");
 }
 
-// The browser host's cases (design/epoch-0/browser-host.md). They run on
-// every backend; what they guard is the web host's: coroutines that park
+// The web host's cases (design/epoch-0/browser-host.md). They run on
+// every engine; what they guard is the web host's: coroutines that park
 // for the event loop, a JIT over recycled pages, and stacks without
 // guard pages.
 
@@ -8749,11 +8768,11 @@ test "a spinning process doesn't starve a pipeline [browser-host]" {
 
 test "a console read parks and resumes on input [browser-host]" {
     const e = try env(@src());
-    var it = backendList(e);
-    while (it.next()) |backend| {
-        errdefer std.debug.print("backend {s}\n", .{backend});
+    var it = engineList(e);
+    while (it.next()) |engine| {
+        errdefer std.debug.print("engine {s}\n", .{engine});
         // While read waits for a line, the background process still runs.
-        var t = try spawnTerm(e, backend, &.{ "--timeout", "60s", "--rc", "{sleep 1; echo ti^ck} & echo rea^dy; x=`{read}; echo got $x" });
+        var t = try spawnTerm(e, engine, &.{ "--timeout", "60s", "--rc", "{sleep 1; echo ti^ck} & echo rea^dy; x=`{read}; echo got $x" });
         defer t.deinit();
         try t.expect("ready", slow(10_000));
         try t.expect("tick", slow(10_000));
@@ -8765,11 +8784,11 @@ test "a console read parks and resumes on input [browser-host]" {
 
 test "a note interrupts a parked console read [browser-host]" {
     const e = try env(@src());
-    var it = backendList(e);
-    while (it.next()) |backend| {
-        errdefer std.debug.print("backend {s}\n", .{backend});
+    var it = engineList(e);
+    while (it.next()) |engine| {
+        errdefer std.debug.print("engine {s}\n", .{engine});
         // Nothing is typed, so read stays parked until the note.
-        var t = try spawnTerm(e, backend, &.{ "--timeout", "60s", "--rc", "read </dev/cons & r=$apid; sleep 1; echo interrupt >/proc/$r/note; wait; echo af^ter" });
+        var t = try spawnTerm(e, engine, &.{ "--timeout", "60s", "--rc", "read </dev/cons & r=$apid; sleep 1; echo interrupt >/proc/$r/note; wait; echo af^ter" });
         defer t.deinit();
         try t.expect("after", slow(10_000));
         try std.testing.expectEqual(0, try t.wait(slow(10_000)));
@@ -8833,10 +8852,10 @@ test "a coroutine stack overflow panics instead of corrupting [browser-host]" {
     // Coroutines are the web host's; native kernel processes are threads
     // with guard pages.
     if (getenv(3, "H9_TEST_WEB") == null) return error.SkipZigTest;
-    var it = backendList(e);
-    while (it.next()) |backend| {
+    var it = engineList(e);
+    while (it.next()) |engine| {
         // Every coroutine gets an 8 KiB stack, which running a command overflows.
-        const r = try runEnv(e, backend, &.{ "--rc", "ls /bin >/dev/null" }, &.{.{ "H9_TEST_KSTACK", "8192" }}, slow(30_000));
+        const r = try runEnv(e, engine, &.{ "--rc", "ls /bin >/dev/null" }, &.{.{ "H9_TEST_KSTACK", "8192" }}, slow(30_000));
         defer r.deinit();
         errdefer std.debug.print("stderr: {s}\n", .{r.err});
         try expectIn(r.err, "kernel stack overflow in ");
@@ -8874,12 +8893,12 @@ fn noRootEnv() !std.process.Environ.Map {
     return environ;
 }
 
-/// Runs `h9 args...` on the first backend, with no root and no H9ROOT,
+/// Runs `h9 args...` on the first engine, with no root and no H9ROOT,
 /// in `cwd` if given.
 fn runNoRoot(e: Env, h9: []const u8, args: []const []const u8) !Result {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
-    try argv.appendSlice(gpa, &.{ h9, "--backend", firstBackend(e) });
+    try argv.appendSlice(gpa, &.{ h9, "--engine", firstEngine(e) });
     if (e.arch) |a| try argv.appendSlice(gpa, &.{ "--arch", a });
     try argv.appendSlice(gpa, args);
     var environ = try noRootEnv();
@@ -8925,7 +8944,7 @@ test "--builtin alone ignores H9ROOT [mounts]" {
     try needBuiltin(e);
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
-    try argv.appendSlice(gpa, &.{ e.h9, "--backend", firstBackend(e), "--builtin" });
+    try argv.appendSlice(gpa, &.{ e.h9, "--engine", firstEngine(e), "--builtin" });
     if (e.arch) |a| try argv.appendSlice(gpa, &.{ "--arch", a });
     // The full tree has /sys/src; the built-in root doesn't.
     try argv.appendSlice(gpa, &.{ "--rc", "test -d /sys || echo builtin" });
@@ -9942,14 +9961,14 @@ fn scratchPath(s: *Scratch, buf: []u8, name: []const u8) ![]const u8 {
     return std.fmt.bufPrint(buf, "{s}/{s}", .{ s.path, name });
 }
 
-/// Starts `h9 args...` on a terminal on the first backend.
+/// Starts `h9 args...` on a terminal on the first engine.
 fn startServer(e: Env, args: []const []const u8) !Term {
-    return spawnTerm(e, firstBackend(e), args);
+    return spawnTerm(e, firstEngine(e), args);
 }
 
 /// `startServer`, with `extra` (NAME=value strings) in h9's environment.
 fn startServerEnv(e: Env, args: []const []const u8, extra: []const []const u8) !Term {
-    return spawnTermEnv(e, firstBackend(e), args, extra);
+    return spawnTermEnv(e, firstEngine(e), args, extra);
 }
 
 /// Waits for the server's next "serve: ADDR" line and returns ADDR,
@@ -9993,7 +10012,7 @@ fn pathExists(path: []const u8) bool {
     return true;
 }
 
-/// Runs a client, `h9 --dir ROOT args...`, on the first backend, without
+/// Runs a client, `h9 --dir ROOT args...`, on the first engine, without
 /// the proxy variables, so a ws:// root on 127.0.0.1 is dialed directly.
 fn runClient(e: Env, root: []const u8, args: []const []const u8) !Result {
     var map = try std.testing.environ.createMap(gpa);
@@ -10001,7 +10020,7 @@ fn runClient(e: Env, root: []const u8, args: []const []const u8) !Result {
     for ([_][]const u8{ "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy" }) |k| _ = map.swapRemove(k);
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
-    try argv.appendSlice(gpa, &.{ e.h9, "--backend", firstBackend(e) });
+    try argv.appendSlice(gpa, &.{ e.h9, "--engine", firstEngine(e) });
     try argv.appendSlice(gpa, &rootFlag(root));
     if (e.arch) |a| try argv.appendSlice(gpa, &.{ "--arch", a });
     try argv.appendSlice(gpa, args);
@@ -10457,7 +10476,7 @@ test "a unix socket path that isn't a socket exits 125 [serve]" {
     var pb: [512]u8 = undefined;
     var ab: [600]u8 = undefined;
     const addr = try std.fmt.bufPrint(&ab, "unix!{s}", .{try scratchPath(&s, &pb, "fs.sock")});
-    const r = try runOn(e, firstBackend(e), &.{ "--serve", addr, "--rc", "echo ran" }, null);
+    const r = try runOn(e, firstEngine(e), &.{ "--serve", addr, "--rc", "echo ran" }, null);
     defer r.deinit();
     try std.testing.expectEqual(125, r.code);
     try std.testing.expectEqualStrings("", r.out);
@@ -10492,7 +10511,7 @@ test "an address in use exits 125 [serve]" {
     defer srv.deinit(std.testing.io);
     var ab: [64]u8 = undefined;
     const addr = try std.fmt.bufPrint(&ab, "tcp!127.0.0.1!{d}", .{srv.socket.address.getPort()});
-    const r = try runOn(e, firstBackend(e), &.{ "--serve", addr, "--rc", "echo ran" }, null);
+    const r = try runOn(e, firstEngine(e), &.{ "--serve", addr, "--rc", "echo ran" }, null);
     defer r.deinit();
     try std.testing.expectEqual(125, r.code);
     try std.testing.expectEqualStrings("", r.out);
@@ -11040,9 +11059,9 @@ test "$serve lists the bound addresses [serve]" {
     var pb: [512]u8 = undefined;
     var ab: [600]u8 = undefined;
     const unix = try std.fmt.bufPrint(&ab, "unix!{s}", .{try scratchPath(&s, &pb, "fs.sock")});
-    // One backend: the output depends on a port h9 picks,
-    // which a second backend's run wouldn't repeat.
-    const r = try runOn(e, firstBackend(e), &.{ "--serve", unix, "--serve", "tcp!127.0.0.1!0", "--rc", "echo $#serve; echo $serve(1); echo $serve(2)" }, null);
+    // One engine: the output depends on a port h9 picks,
+    // which a second engine's run wouldn't repeat.
+    const r = try runOn(e, firstEngine(e), &.{ "--serve", unix, "--serve", "tcp!127.0.0.1!0", "--rc", "echo $#serve; echo $serve(1); echo $serve(2)" }, null);
     defer r.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{r.err});
     var lines = std.mem.splitScalar(u8, r.out, '\n');
@@ -11155,10 +11174,10 @@ fn dotlRun(e: Env, d: *DotlServer, script: []const u8) !Result {
     var cmd_buf: [1024]u8 = undefined;
     const allow = try std.fmt.bufPrint(&allow_buf, "tcp!127.0.0.1!{d}", .{d.port()});
     const cmd = try std.fmt.bufPrint(&cmd_buf, "mkdir -p /n/l; dotlfs {s} /n/l || exit mount; {s}", .{ d.dial(), script });
-    // One backend: the server's state (its files, and a drop it's set to
-    // make) carries over from one run to the next, so a second backend's
+    // One engine: the server's state (its files, and a drop it's set to
+    // make) carries over from one run to the next, so a second engine's
     // run can't match the first.
-    return runOn(e, firstBackend(e), &.{ "--net-allow", allow, "--rc", cmd }, null);
+    return runOn(e, firstEngine(e), &.{ "--net-allow", allow, "--rc", cmd }, null);
 }
 
 test "a 9P root is never walked for dev, env, fd, proc, srv, or net [mounts]" {
@@ -11409,9 +11428,9 @@ test "a .L.Z root from the in-memory server survives it dropping the connection 
     defer d.finish(std.testing.io);
     d.lock().drop_after_write = 0;
     d.unlock();
-    // One backend: the output depends on the server's state,
-    // which a second backend's run wouldn't repeat.
-    const r = try runOn(e, firstBackend(e), &.{
+    // One engine: the output depends on the server's state,
+    // which a second engine's run wouldn't repeat.
+    const r = try runOn(e, firstEngine(e), &.{
         "--url", d.url(), "--write=scope", "--rc",
         \\echo new >/usr/glenda/made && cat /usr/glenda/made
         \\cat /net/dotl/*/status
@@ -11438,9 +11457,9 @@ test "a 9P2000.L.Z mount moves to the next address when the server isn't the lea
         \\echo led >/n/l/usr/glenda/log && cat /n/l/usr/glenda/log
         \\cat /net/dotl/*/status
     , .{d.dial()});
-    // One backend: the output depends on the server's state,
-    // which a second backend's run wouldn't repeat.
-    const r = try runOn(e, firstBackend(e), &.{ "--net-allow", "tcp!127.0.0.1!1", "--net-allow", try std.fmt.bufPrint(&allow_buf, "tcp!127.0.0.1!{d}", .{d.port()}), "--rc", cmd }, null);
+    // One engine: the output depends on the server's state,
+    // which a second engine's run wouldn't repeat.
+    const r = try runOn(e, firstEngine(e), &.{ "--net-allow", "tcp!127.0.0.1!1", "--net-allow", try std.fmt.bufPrint(&allow_buf, "tcp!127.0.0.1!{d}", .{d.port()}), "--rc", cmd }, null);
     defer r.deinit();
     errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
     try std.testing.expectEqual(0, r.code);
@@ -11469,9 +11488,9 @@ test "a .L.Z unix socket root survives the server restarting mid-write [dotl]" {
     var relay: UnixRelay = undefined;
     const sock = try scratchPath(&s, &pb, "fs.sock");
     try relay.start(sock, d.port());
-    // One backend: the output depends on the server's state,
-    // which a second backend's run wouldn't repeat.
-    const r = try runOn(e, firstBackend(e), &.{
+    // One engine: the output depends on the server's state,
+    // which a second engine's run wouldn't repeat.
+    const r = try runOn(e, firstEngine(e), &.{
         "--url", try std.fmt.bufPrint(&ab, "unix://{s}", .{sock}), "--write=scope", "--rc",
         \\echo new >/usr/glenda/made && cat /usr/glenda/made
         \\cat /net/dotl/*/status
@@ -12307,7 +12326,7 @@ test "a bad --cred or $H9CRED is a usage error [credential-helpers]" {
     const r = try run(e, &.{ "--cred", "*=cat", "/bin/echo" });
     defer r.deinit();
     try std.testing.expectEqual(2, r.code);
-    const v = try runEnv(e, firstBackend(e), &.{"/bin/echo"}, &.{.{ "H9CRED", "wanix.io" }}, 30_000);
+    const v = try runEnv(e, firstEngine(e), &.{"/bin/echo"}, &.{.{ "H9CRED", "wanix.io" }}, 30_000);
     defer v.deinit();
     try std.testing.expectEqual(2, v.code);
     try expectIn(v.err, "$H9CRED: each entry is PATTERN=COMMAND");
@@ -12345,9 +12364,9 @@ test "a .L.Z reconnect runs the helper again and sends the new token [credential
         \\cat /n/usr/glenda/log
         \\grep -h reconnects /net/dotl/*/status
     ;
-    // One backend: the output depends on the server's state,
-    // which a second backend's run wouldn't repeat.
-    const r = try runOn(e, firstBackend(e), &.{ "--cwd", s.path, "--ns", s.ns(), "--cred", try credArg(&cb, "127.0.0.1", tok), "--rc", script }, null);
+    // One engine: the output depends on the server's state,
+    // which a second engine's run wouldn't repeat.
+    const r = try runOn(e, firstEngine(e), &.{ "--cwd", s.path, "--ns", s.ns(), "--cred", try credArg(&cb, "127.0.0.1", tok), "--rc", script }, null);
     defer r.deinit();
     errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
     try std.testing.expectEqual(0, r.code);

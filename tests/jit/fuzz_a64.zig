@@ -1,4 +1,4 @@
-//! zig build fuzz-a64 [-- options]: random arm64 programs (src/jit/check/
+//! zig build fuzz-a64 [-- options]: random arm64 programs (src/engine/hcpu/jit/check/
 //! gen_a64.zig), each checked T1 against T0 a region at a time and, with
 //! Unicorn's prebuilt library fetched (scripts/fetch.sh unicorn), T0
 //! against Unicorn an instruction at a time (tools/lockstep.zig).

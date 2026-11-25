@@ -79,8 +79,8 @@ something the runtime does for you.
 | `docker run --rm` | Always | main |
 | The container's writable layer | The default, `--write=overlay`: the root takes writes in memory ([section 8](#8-the-containers-writable-layer)) | main |
 | `docker run --read-only` | `--write=scope`: the root is read-only, writable volumes still write | main |
-| `docker pull` from Docker Hub | The registry API and `tar` ([section 5](#5-linux-images-from-docker-hub)), or `h9box pull` | main (Linux personality) |
-| Running Linux images | `h9 --dir ./alpine:#L sh`: a Linux root, run by the Linux personality | main ([linux-personality](../design/epoch-0/linux-personality.md)) |
+| `docker pull` from Docker Hub | The registry API and `tar` ([section 5](#5-linux-images-from-docker-hub)), or `h9box pull` | main (Linux ABI) |
+| Running Linux images | `h9 --dir ./alpine:#L sh`: a Linux root, run by the Linux ABI | main ([linux-personality](../design/epoch-0/linux-personality.md)) |
 | `FROM scratch` + static binaries | A slim root tree: Plan 9 binaries are statically linked ([section 4](#4-from-scratch-slim-images)) | main |
 | A busybox base image | `zig build slim`, or the built-in root h9 carries: 44 of 9front's commands in one binary | main |
 | `ENTRYPOINT`, `CMD` | An rc script in the image, run by path; or `/rc/lib/rcmain.local`, run by `h9 --rc` | main |
@@ -241,7 +241,7 @@ through `--rc`.
 
 ## 5. Linux images from Docker Hub
 
-h9 runs Linux programs too. Its Linux personality loads ELF binaries and
+h9 runs Linux programs too. Its Linux ABI loads ELF binaries and
 answers their system calls with the same Plan 9 kernel, so a Linux program
 gets the machine's sandbox, network policy, and limits like a 9front one.
 A Linux root goes on `#L`, the Linux tree, with `--dir ./alpine:#L`, and the
@@ -301,7 +301,7 @@ host$ h9 --dir ./images/alpine:#L sh -c '/9/bin/ls /9/bin | wc -l'
   `/bin/ls -> /bin/busybox` reads the image's busybox.
 - **The architecture** should be the host's: arm64 images on Apple Silicon
   run on the hypervisor, and amd64 ones on x86\_64 Linux on KVM or the
-  native backend. An image for another architecture runs only on the
+  sud engine. An image for another architecture runs only on the
   emulator, and much more slowly.
 - **A Linux root** has to be a local directory: 9P and WebSocket roots are
   9front trees.
@@ -863,13 +863,13 @@ where there is one:
 - **Network isolation between machines.** There's no private network: guests
   use the host's, so isolation is `--net-allow` on each side.
 - **Disk quotas.** Writes to writable host paths aren't capped.
-- **All of Linux.** The Linux personality runs a lot of Alpine, but not
+- **All of Linux.** The Linux ABI runs a lot of Alpine, but not
   everything: job-control stops are ignored, `chown` does nothing, and some
   system calls are missing. Its [proposal](../design/epoch-0/linux-personality.md)
   lists them.
 - **A daemon, an API, and Windows hypervisors.** h9 is a command, not a
   service. Windows mostly runs on the emulator: the
-  [whp](../design/epoch-0/whp.md) backend is built for x86\_64 but incomplete.
+  [whp](../design/epoch-0/whp.md) engine is built for x86\_64 but incomplete.
 
 ## 18. Putting it together: h9box
 

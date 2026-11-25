@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Checks src/interp/softfloat.zig, the shared binary16/32/64 core, against
+# Checks src/engine/hcpu/interp/softfloat.zig, the shared binary16/32/64 core, against
 # Berkeley TestFloat: arithmetic, fused multiply-add, square root,
 # round-to-integral, comparisons, and conversions, for f16, f32, and f64,
 # in every rounding mode SoftFloat has, with tininess detected both before
@@ -10,7 +10,7 @@
 #   scripts/softfloat-test.sh [-level 2] [function...]   (default: all)
 #
 # `--sample` regenerates the sample `zig build test` runs,
-# src/interp/softfloat-vectors.txt.
+# src/engine/hcpu/interp/softfloat-vectors.txt.
 set -euo pipefail
 . "$(dirname "$0")/env.sh"
 
@@ -59,7 +59,7 @@ gen="$tfb/testfloat_gen"
 
 check="$H9_LOCAL/bin/softfloat_vectors"
 mkdir -p "$H9_LOCAL/bin"
-zig build-exe -OReleaseFast "$H9_ROOT/src/interp/softfloat_vectors.zig" -femit-bin="$check"
+zig build-exe -OReleaseFast "$H9_ROOT/src/engine/hcpu/interp/softfloat_vectors.zig" -femit-bin="$check"
 
 all=()
 for f in f16 f32 f64; do
@@ -72,7 +72,7 @@ done
 modes=(near_even min_mag min max near_max_mag odd)
 tfmode() { case $1 in min_mag) echo minMag ;; near_max_mag) echo near_maxMag ;; *) echo "$1" ;; esac; }
 
-out="$H9_ROOT/src/interp/softfloat-vectors.txt"
+out="$H9_ROOT/src/engine/hcpu/interp/softfloat-vectors.txt"
 run() {
 	local f=$1 m=$2 t=$3 e=$4
 	if [ -n "$sample" ]; then

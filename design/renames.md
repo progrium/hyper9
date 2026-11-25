@@ -5,8 +5,8 @@ status: draft
 created: 2026-11-21
 authors: [progrium]
 depends: [hcpu]
-areas: [process, vmm, linux, cli, build, tests]
-branch: []
+areas: [process, engine, linux, cli, build, tests]
+branch: [renames]
 ---
 
 # Proposal: Rename the parts, to ABI, engine, sud, and hcpu
@@ -161,3 +161,13 @@ Each step is one PR that changes names and nothing else, so its diff can be revi
 - Whether step 8 belongs to this proposal or to the release that does it. As written, the proposal is implemented at step 7, and step 8 is a line in that release's notes.
 - Whether `src/kern/linux.c`, `linuxnet.c`, and `devlinux.c` should move under `src/abi/linux/` now. They're C compiled with the kernel, and the proposal leaves them where the kernel's build expects them.
 - Whether SPEC.md's title should change here or wait for `baseline-1`. The proposal waits.
+
+## Updates
+
+**2026-11-25, implementation.** Built in one PR on the `renames` branch instead of steps 2 to 6 as separate PRs, since few branches were open. Refinements:
+
+- **Where the hcpu files went.** `src/hcpu.zig`, the root of the `hcpu` module, is `src/engine/hcpu/hcpu.zig`, and `src/vmm/hcpu.zig`, the engine, is `src/engine/hcpu/engine.zig`, since the two can't share a name in one directory. `src/jit/check/vmm.zig`, `-Djit-check`'s hook in the engine's run loop, is `jit/check/engine.zig`. `src/vmm/x86.zig` stays in `src/engine/`, beside `pt_amd64.zig`: it's the amd64 CPU state that KVM and WHP set, not hcpu's. `arena.zig` stays there too.
+- **Tests.** `tests/backends.zig` is `tests/engines.zig`, `install-tests` installs it as `engine-tests`, and the build hands the integration cases `H9_TEST_ENGINES` and `H9_TEST_GO_ENGINE` for `H9_TEST_BACKENDS` and `H9_TEST_GO_BACKEND`. The `[native-backend]` case that `auto` never picks the engine stays, beside the new `[renames]` case that checks both names.
+- **What keeps "backend".** The plan's `gfx` field, which `--print` shows, names the GUI backend, so it keeps its name, as do `h9.gfx.backend` and the `-Dgfx` help. The page's `createMachine` keeps its `backend` option and the demo page its `?backend=` parameter; they pass the value as `--engine`, where the old values parse for the release the aliases last.
+- **The greps.** `git grep -il personalit` also finds the `linux-personality` slug, in links and test tags, which slugs keep. It and `git grep -wl vmm` also find SPEC.md's table of sections from before the split, which names them as they were. [README.md](README.md) has the table of old names, under Old names.
+- **Order.** `engine.Kind` keeps its order, `hcpu` before `sud`, so `--version` lists the engines as before.

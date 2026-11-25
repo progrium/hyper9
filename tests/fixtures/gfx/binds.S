@@ -1,4 +1,4 @@
-// The window's files are in /dev (tests/backends.zig, design/epoch-0/gfx.md):
+// The window's files are in /dev (tests/engines.zig, design/epoch-0/gfx.md):
 // stats /dev/draw/new, /dev/mouse, /dev/cursor and /dev/kbd, which it
 // does without opening the screen.
 

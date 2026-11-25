@@ -4,7 +4,7 @@
  * sbrk and hands the new memory to an rfork(RFPROC|RFMEM) child that's
  * spinning in user mode, with no syscall in between, as a libthread
  * proc does with a block another proc's malloc just got. The child
- * writes to it. On a backend that maps new pages into an address space
+ * writes to it. On an engine that maps new pages into an address space
  * only when its process next enters the kernel, the child's write
  * faults ("sys: trap: fault write").
  *

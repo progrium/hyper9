@@ -9,14 +9,14 @@
  * A pair has a queue each way, 64 KiB as Linux's N_TTY buffer is: the
  * master's writes are the slave's reads, and the other way round. It
  * also keeps the Linux state of the terminal: its termios, window size,
- * foreground process group, session, and lock. The Linux personality
+ * foreground process group, session, and lock. The Linux ABI
  * reads and writes that through h9_pty_get and h9_pty_set, on an fd of
- * either side; the ioctls are its interface (src/linux/sys.zig). The
+ * either side; the ioctls are its interface (src/abi/linux/sys.zig). The
  * termios is applied here, as a line discipline (below).
  *
  * Until the slave first opens, a master read waits, as on Linux. When
  * the slave's last open closes, the master reads what's left and then
- * an end of file, which the personality makes EIO, as Linux has it;
+ * an end of file, which the ABI makes EIO, as Linux has it;
  * opening the slave again reopens it. When the master closes, the slave
  * reads to an end of file, its writes fail with EIO, the session's
  * terminal is gone, and the foreground group is sent SIGHUP through
@@ -47,7 +47,7 @@ enum
 
 	Npty = 4096,		/* pairs per machine, as Linux's kernel.pty.max */
 	Ptyq = 64*1024,		/* each way, as Linux's N_TTY buffer */
-	Termlen = 60,		/* the personality's termios, of which the kernel's is the first 36 bytes */
+	Termlen = 60,		/* the ABI's termios, of which the kernel's is the first 36 bytes */
 	Linemax = 4096,		/* a canonical line, as N_TTY's */
 	Chunk = 4096,		/* input taken through the line discipline at a time */
 	Maxsig = 8,
@@ -93,7 +93,7 @@ struct Pty
 	int	nline;
 };
 
-/* The pair state h9_pty_get and h9_pty_set copy; src/linux/kc.zig's PtyState. */
+/* The pair state h9_pty_get and h9_pty_set copy; src/abi/linux/kc.zig's PtyState. */
 typedef struct Ptystate Ptystate;
 struct Ptystate
 {
@@ -122,7 +122,7 @@ static struct
 	Pty	*list;
 } ptys;
 
-/* The personality's default termios, set on each new pair (h9_pty_setdefault). */
+/* The ABI's default termios, set on each new pair (h9_pty_setdefault). */
 static uchar defterm[Termlen];
 
 /*
@@ -244,7 +244,7 @@ ptyinit(void)
  * file VEOF on an empty line makes. Echo and lines are added without
  * waiting, and dropped when the queue is full, as N_TTY drops input
  * beyond its buffer; raw input waits for room, as a master write
- * does on Linux. VMIN and VTIME are the personality's (src/linux/sys.zig).
+ * does on Linux. VMIN and VTIME are the ABI's (src/abi/linux/sys.zig).
  */
 
 static ulong

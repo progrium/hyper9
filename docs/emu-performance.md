@@ -22,9 +22,9 @@ from fastest to slowest:
 - **Real program:** the same program built for the host and run there
   directly, whatever the guest architecture. Each host table says how it
   was built.
-- **HVF:** on the Mac, the arm64 Alpine build on h9's hardware backend
-  (`--backend hvf`), as a reference for what h9 costs without emulation.
-- **T1:** the JIT, through `h9 --backend emu`.
+- **HVF:** on the Mac, the arm64 Alpine build on h9's hardware engine
+  (`--engine hvf`), as a reference for what h9 costs without emulation.
+- **T1:** the JIT, through `h9 --engine hcpu`.
 - **wasm T1:** the same tier through `h9-node`, the WebAssembly build
   under Node.
 - **v86:** for 386 guests only,
@@ -33,7 +33,7 @@ from fastest to slowest:
   initramfs. Its times run from a serial-console marker before each workload
   to one after it, so they leave out boot. h9's times include starting
   `h9-node`, which favors v86 a little on the short workloads.
-- **T0 and wasm T0:** the interpreter alone (`H9_EMU_TIER=t0`), natively
+- **T0 and wasm T0:** the interpreter alone (`H9_HCPU_TIER=t0`), natively
   and in wasm.
 
 A dash marks a run that can't work. The Go workload's HTTP server can't
@@ -127,7 +127,7 @@ run in a chroot on the host. v86 boots in 9 s.
 ### hx64 (amd64 guests)
 
 Measured on the `hx64` branch at e86efbc. On this host, amd64 programs
-normally run at hardware speed on the native backend or KVM. These rows
+normally run at hardware speed on the sud engine or KVM. These rows
 show the emulator alone.
 
 | workload | real program | T1 | wasm T1 | T0 | wasm T0 |
@@ -170,9 +170,9 @@ Build the roots and a ReleaseFast h9, as in
 
 `tools/workloads/run.sh` runs the native tiers, with `TIERS="hvf t1 t0"` on
 an arm64 Mac. For a wasm tier, run the same command line through
-`zig-out/web/h9-node` with `H9_EMU_TIER` set to `t1` or `t0`:
+`zig-out/web/h9-node` with `H9_HCPU_TIER` set to `t1` or `t0`:
 
-    H9_EMU_TIER=t1 zig-out/web/h9-node --arch 386 \
+    H9_HCPU_TIER=t1 zig-out/web/h9-node --arch 386 \
         --dir .local/workloads/alpine-386:#L --net enable \
         sh -c "python3 /w/bench.py"
 

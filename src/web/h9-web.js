@@ -74,7 +74,7 @@ function importedMin(bytes, want) {
 }
 
 /**
- * The JIT's side of the host (src/jit/emit/wasm.zig): compiles the modules
+ * The JIT's side of the host (src/engine/hcpu/jit/emit/wasm.zig): compiles the modules
  * h9's JIT builds in its memory, asynchronously, and installs their
  * regions in h9's function table. h9 calls a region there through a
  * function pointer, and regions tail-call each other through it.
@@ -167,7 +167,7 @@ const nextTask = (() => {
  *   without graphics.
  * - credentials(url, failed, helper): called before each WebSocket
  *   handshake h9 makes, a root's or a namespace file's mount
- *   (design/epoch-0/credential-helpers.md, "Browser host"). `failed` is null, or
+ *   (design/epoch-0/credential-helpers.md, "Web host"). `failed` is null, or
  *   why the last try failed, for a retry; `helper` is the matching
  *   `--cred` helper's command as an array, or undefined. It returns (or
  *   resolves to) null for no credential, header lines (a string or an
@@ -252,7 +252,7 @@ export async function run({ h9, wasi, host, log = console.error, stats, gfx, cre
     h9: h9imports,
   });
   hx = inst.exports;
-  // Table slots from here on are the JIT's (src/jit/wasm_t1.zig).
+  // Table slots from here on are the JIT's (src/engine/hcpu/jit/wasm_t1.zig).
   if (h9table && hx.jit_table_base) hx.jit_table_base(h9table.length);
   entry = WebAssembly.promising(hx.h9_coro_entry);
   // _start is the first coroutine, on the linker's stack.
@@ -262,7 +262,7 @@ export async function run({ h9, wasi, host, log = console.error, stats, gfx, cre
 }
 
 // WebSockets for src/hstream.zig (design/epoch-0/websocket-9p.md, "On the
-// browser host"): the page's WebSocket, or Node's, does the handshake,
+// web host"): the page's WebSocket, or Node's, does the handshake,
 // TLS and framing. ws_opened and ws_recv are Suspending: each parks only
 // the stream's reader coroutine.
 // Whether this host's WebSocket takes handshake headers: Node's does, as
@@ -1026,7 +1026,7 @@ function attachCanvas(canvas, worker, { clipboard, scale, size, events }) {
  *   root.h9a beside this file is the root
  * - binds: --bind lines, each 'SRC:DST[:OPTS]'
  * - memory: --memory, such as '256M'
- * - backend: --backend: 'emu' (h9's own CPUs, h86, ha64, and hx64, the default) or 'v86', its old name
+ * - backend: --engine: 'hcpu' (h9's own CPUs, h86, ha64, and hx64, the default), or 'emu' or 'v86', its old names
  * - arch: --arch: the guest's CPU, '386' (h86, the default), 'arm64'
  *   (ha64), or 'amd64' (hx64); 'arm64' and 'amd64' run Linux programs
  *   of their architecture, such as Alpine's
@@ -1042,7 +1042,7 @@ function attachCanvas(canvas, worker, { clipboard, scale, size, events }) {
  *   draws in device pixels, 1 in CSS pixels, and N in device pixels
  *   divided by N. The canvas moves into the Worker at run.
  * - env: h9's own environment (an object), not its programs': the
- *   emulator's knobs, such as H9_JIT_HOT (src/jit/wasm_t1.zig)
+ *   emulator's knobs, such as H9_JIT_HOT (src/engine/hcpu/jit/wasm_t1.zig)
  * - ports: MessagePorts the machine can mount by name
  *   (design/epoch-0/port-streams.md), an object from names to ports, each
  *   carrying a 9P connection; a mount's source can be { port: NAME } or
@@ -1096,7 +1096,7 @@ export async function createMachine({ mounts, binds = [], memory, backend, arch,
       if (started) return Promise.reject(new Error('a machine runs once'));
       started = true;
       const ms = (mounts ?? [{ archive: new URL('root.h9a', import.meta.url) }]).map((m) => mountOf(m, portMap));
-      const flags = [...(backend ? ['--backend', backend] : []), ...(arch ? ['--arch', arch] : []), ...(memory ? [`--memory=${memory}`] : []), ...policyFlags(policy)];
+      const flags = [...(backend ? ['--engine', backend] : []), ...(arch ? ['--arch', arch] : []), ...(memory ? [`--memory=${memory}`] : []), ...policyFlags(policy)];
       let onGfx = () => false;
       let start = {}, transfer = [];
       if (gfx) {

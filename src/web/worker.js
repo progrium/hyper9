@@ -10,7 +10,7 @@
 // { type: 'exit', code } or { type: 'error', message }.
 //
 // With start's `credentials` set, the page has a credentials callback
-// (design/epoch-0/credential-helpers.md, "Browser host"): the Worker sends
+// (design/epoch-0/credential-helpers.md, "Web host"): the Worker sends
 // { type: 'cred', id, url, failed, helper } before each handshake h9
 // makes, and the page answers { type: 'cred-reply', id, result } or
 // { type: 'cred-reply', id, error }.

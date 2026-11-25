@@ -1,4 +1,4 @@
-// Shared prologue for the segattach backend fixtures (tests/backends.zig),
+// Shared prologue for the segattach engine fixtures (tests/engines.zig),
 // arm64. Each fixture includes this, then continues at `main`.
 //
 // The program starts at the a.out's entry with 512 bytes of frame. `call`

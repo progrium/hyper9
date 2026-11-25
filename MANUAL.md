@@ -87,9 +87,9 @@ network, the program can see. Chapter 23 covers that sandbox.
 
 On Linux x86\_64 hosts without KVM, such as containers and many cloud VMs,
 h9 can run amd64 programs directly on the CPU, in a small helper process
-whose system calls it traps (the native backend) — but that backend shares
+whose system calls it traps (the sud engine) — but that engine shares
 h9's own process and isn't a sandbox, so you choose it explicitly, with
-`--backend native`, for a program you trust (chapter 23). On other hosts
+`--engine sud`, for a program you trust (chapter 23). On other hosts
 without a usable hypervisor, such as most Windows machines and CI runners,
 h9 runs the same programs on hcpu, its own CPU emulator: slower for heavy
 computation, but otherwise identical (chapter 27).
@@ -148,7 +148,7 @@ there isn't (chapter 27).
 | --- | --- | --- |
 | macOS on Apple Silicon | ✓ (Hypervisor.framework) | The emulator, for amd64 and 386 programs |
 | Linux arm64 | ✓ (KVM) | The emulator |
-| Linux x86\_64 | ✓ (KVM), with an amd64 root tree (`zig build mkroot` on x86\_64) | The emulator, or `--backend native` for a trusted guest |
+| Linux x86\_64 | ✓ (KVM), with an amd64 root tree (`zig build mkroot` on x86\_64) | The emulator, or `--engine sud` for a trusted guest |
 | Windows on ARM | *Not yet available ([whp](design/epoch-0/whp.md))* | The emulator |
 | Windows x86\_64 | ✓ (WHP, with the Windows Hypervisor Platform feature), with an amd64 root tree | The emulator |
 
@@ -160,10 +160,10 @@ entitlement in `h9.entitlements`; `zig build` does that, and release binaries
 will come signed. The emulator needs nothing special. On Linux, KVM needs
 read and write access to `/dev/kvm` (usually by being in the `kvm` group),
 and in a VM, nested virtualization. Without them, `auto` falls back to the
-emulator; `--backend native` is faster for a program you trust (the native
-backend shares h9's process and isn't a sandbox; it needs Linux 5.11 or
+emulator; `--engine sud` is faster for a program you trust (the sud
+engine shares h9's process and isn't a sandbox; it needs Linux 5.11 or
 later, for Syscall User Dispatch, and seccomp). `h9 --check` tells you which
-backends work and why the others don't. On Windows x86\_64, the WHP backend
+engines work and why the others don't. On Windows x86\_64, the WHP engine
 needs the optional Windows Hypervisor Platform feature; without it, h9
 falls back to the emulator.
 
@@ -257,23 +257,23 @@ built-in root has its directories but no commands.
 
 #### Checking the install
 
-`h9 --check` tries each backend built into h9 and the root, one line each,
+`h9 --check` tries each engine built into h9 and the root, one line each,
 and exits 0 if h9 can run programs from the root (125 if not):
 
 ```sh
 host$ h9 --check
 h9 v0.1.0-123-gfe6c65f on macos aarch64
-backend hvf: ok, 64 vCPUs, hello in 2.8 ms
-backend auto: ok (uses hvf), 64 vCPUs, hello in 1.1 ms
+engine hvf: ok, 64 vCPUs, hello in 2.8 ms
+engine auto: ok (uses hvf), 64 vCPUs, hello in 1.1 ms
 gfx cocoa: built in
 root /Users/me/src/hyper9/.local/9front/root-11952: ok, /bin/echo runs (arm64)
 ```
 
-Each backend line runs a tiny test program in a new machine, so a failure
-there names the problem (see the table below). The `backend emu` line names
+Each engine line runs a tiny test program in a new machine, so a failure
+there names the problem (see the table below). The `engine hcpu` line names
 the emulator's tier: `hcpu (jit)`, or `hcpu (interpreter)` where the JIT
-can't run. `auto` is the backend h9 uses unless you pass `--backend`; with
-`--backend`, only that one is checked. The vCPU count is the hypervisor's
+can't run. `auto` is the engine h9 uses unless you pass `--engine`; with
+`--engine`, only that one is checked. The vCPU count is the hypervisor's
 limit (see chapter 8). The `gfx` lines say whether `--gfx` can open a window,
 and that `--gfx=headless` has a screen in memory (chapter 17). The version is `git describe` for a development build
 and the release's version for a release. The root line shows the root with
@@ -286,15 +286,15 @@ this:
 ```sh
 host$ h9 --check
 h9 fe6c65f on linux x86_64
-backend kvm: no /dev/kvm (no KVM in this kernel, or a VM without nested virtualization)
-backend native: ok, hello in 2.8 ms
-backend auto: ok (uses native), hello in 1.9 ms
+engine kvm: no /dev/kvm (no KVM in this kernel, or a VM without nested virtualization)
+engine sud: ok, hello in 2.8 ms
+engine auto: ok (uses sud), hello in 1.9 ms
 gfx: not built in
 root: built-in (9front 11952 slim, amd64; no tree found): ok, /bin/echo runs (amd64)
 ```
 
 `h9 --version` prints the h9 version, the 9front release, and drawterm
-revision it was built against, the backends built in, the window code
+revision it was built against, the engines built in, the window code
 (`gfx:`), and what the built-in root holds:
 
 ```sh
@@ -302,7 +302,7 @@ host$ h9 --version
 h9 fe6c65f
 9front 11952 (602faae9a52f)
 drawterm be39bbaa88fd
-backends: kvm native
+engines: kvm sud
 gfx: none
 built-in root: 9front 11952 slim, amd64 (44 commands)
 ```
@@ -325,9 +325,9 @@ If this fails, the message says why:
 | `h9: --root was removed: use --dir PATH ...` | 2 | `--root` and its `--root-*` flags are now mount flags (chapter 21) |
 | `h9: mk: not found (not in the built-in root; ...)` | 127 | The command is only in the full tree: pass `--dir` or set `H9ROOT` |
 | `h9: warning: no usable hypervisor; using the emulator` | | Not an error: h9 fell back to the emulator |
-| `h9: cannot create kvm machine for amd64: no access to /dev/kvm (is your user in the kvm group?)` | 125 | Only with `--backend kvm`: add yourself to the `kvm` group, or leave `--backend` off |
-| `h9: warning: the native backend runs guest code in h9's own process and is not a security boundary` | | Not an error: `--backend native` was chosen; use a hypervisor or the emulator to contain an untrusted guest |
-| `h9: cannot create native machine for amd64: the kernel has no Syscall User Dispatch (Linux 5.11 or later)` | 125 | Upgrade the kernel, or leave `--backend` off for the emulator |
+| `h9: cannot create kvm machine for amd64: no access to /dev/kvm (is your user in the kvm group?)` | 125 | Only with `--engine kvm`: add yourself to the `kvm` group, or leave `--engine` off |
+| `h9: warning: the sud engine runs guest code in h9's own process and is not a security boundary` | | Not an error: `--engine sud` was chosen; use a hypervisor or the emulator to contain an untrusted guest |
+| `h9: cannot create sud machine for amd64: the kernel has no Syscall User Dispatch (Linux 5.11 or later)` | 125 | Upgrade the kernel, or leave `--engine` off for the emulator |
 
 ### 3. First run
 
@@ -1872,7 +1872,7 @@ the run ends.
   freedom to draw anything in its window (including what looks like a host
   dialog) as caveats.
 
-**In a browser.** On the browser host, a page's `<canvas>` is the window
+**In a browser.** On the web host, a page's `<canvas>` is the window
 ([browser-gfx](design/epoch-0/browser-gfx.md)). `h9-web.js`'s
 `createMachine({ gfx: { canvas } })` moves the canvas into the machine's
 Worker, and rio and acme draw on it. The demo page's **rio** button runs
@@ -1922,7 +1922,7 @@ On a real window, these reach only the guest's own screen and input queues:
 the host's pointer or reach other host windows.
 
 **The headless screen.** `--gfx=headless` gives the machine a screen in memory
-instead of a window, in every build but the browser host's
+instead of a window, in every build but the web host's
 ([headless-screen](design/headless-screen.md)). It never opens a window or
 touches the host's display, clipboard, or window system, so it works in CI
 and over SSH, and on Linux in the static release build. `/dev/snarf` is a
@@ -1935,7 +1935,7 @@ buffer in the h9 process.
 - `--print`'s `gfx:` line says `headless WxH`.
 - Only one screen per h9 process: once a machine has opened the headless
   screen, a later machine can't have a window, and the other way around.
-- In a `-Dgfx=none` build, and on the browser host, `--gfx=headless` exits
+- In a `-Dgfx=none` build, and on the web host, `--gfx=headless` exits
   125.
 
 A GUI test is then an ordinary run: rio starts a window, and a script types
@@ -2065,14 +2065,14 @@ hello, world
 
 - **Architecture.** Go supports `plan9/amd64` and `plan9/386`, but not
   `plan9/arm64`. So on an Apple Silicon Mac a Go program runs on the
-  emulator; h9 picks it by itself, with the warning above, and `--backend
-  emu` picks it silently. On an x86\_64 Linux host, h9 runs it on KVM, or on
-  the native backend when you pass `--backend native` (Go's own test suite
+  emulator; h9 picks it by itself, with the warning above, and `--engine
+  hcpu` picks it silently. On an x86\_64 Linux host, h9 runs it on KVM, or on
+  the sud engine when you pass `--engine sud` (Go's own test suite
   has been run on the emulator only), and on Windows on WHP or the
   emulator. Compute-heavy Go code runs several times slower
   on the emulator than natively (chapter 27).
 - **Or build for Linux.** A `GOOS=linux` binary runs through the Linux
-  personality (chapter 20), and Go has `linux/arm64`, so on an Apple Silicon
+  ABI (chapter 20), and Go has `linux/arm64`, so on an Apple Silicon
   Mac `GOOS=linux GOARCH=arm64 go build` gives a program that runs on the
   hypervisor at full speed: `h9 ./hello`. It sees Linux's system calls
   rather than Plan 9's, so it can't use Plan 9 features such as `bind` or
@@ -2234,7 +2234,7 @@ h9: sh: linux: signal 15
 ```
 
 **Architectures and speed.** A program for the host's architecture runs on
-the hypervisor (or, with `--backend native`, the native backend), at native
+the hypervisor (or, with `--engine sud`, the sud engine), at native
 speed apart from system calls. One for another architecture, such as an amd64 image on an Apple
 Silicon Mac, runs only on the emulator, and much more slowly.
 32-bit x86 programs run with `--arch 386` on the emulator
@@ -2289,7 +2289,7 @@ Silicon Mac, runs only on the emulator, and much more slowly.
 h9 [flags] [--] program [args...]
 h9 [flags] --rc 'command' [args...]
 h9 [flags] --rc
-h9 [--backend B] [mount flags] [--memory SIZE] --check
+h9 [--engine B] [mount flags] [--memory SIZE] --check
 h9 --version
 h9 --help          (or -h alone)
 ```
@@ -2329,7 +2329,7 @@ Machine:
 
 | Flag | Meaning |
 | --- | --- |
-| `--backend auto\|hvf\|kvm\|whp\|native\|emu` | What runs guest code (chapter 27). `auto` (the default) uses the host's hypervisor when it can run the program's architecture, and otherwise the emulator, with a warning. It never selects `native`, which shares h9's process and isn't a security boundary (chapter 23); pass `--backend native` to choose it for a trusted guest. Naming one that isn't built in or can't run here is exit 125. `whp` runs amd64 programs on Windows x86\_64 with the Windows Hypervisor Platform feature ([whp](design/epoch-0/whp.md)). |
+| `--engine auto\|hvf\|kvm\|whp\|sud\|hcpu` | What runs guest code (chapter 27). `auto` (the default) uses the host's hypervisor when it can run the program's architecture, and otherwise the emulator, with a warning. It never selects `sud`, which shares h9's process and isn't a security boundary (chapter 23); pass `--engine sud` to choose it for a trusted guest. Naming one that isn't built in or can't run here is exit 125. `whp` runs amd64 programs on Windows x86\_64 with the Windows Hypervisor Platform feature ([whp](design/epoch-0/whp.md)). `hcpu` is h9's own CPUs, and `sud` runs guest code on the host CPU with Syscall User Dispatch. |
 | `--arch arm64\|amd64\|386` | The architecture to run. It picks `/$cputype/bin` and sets `$cputype`. Default: a host program's own, and the host's for anything else. Only the emulator runs amd64 on arm64 hosts, and 386 anywhere. |
 | `--user-map FILE` | A file in `/etc/passwd` format that maps user names to the numbers a 9P2000.L server sees, both ways. Without it, your user is sent as your host uid (65534 when you're root, never 0). |
 | `--cred 'PATTERN=COMMAND'` | A credential helper for the WebSocket handshakes h9 makes, the `--url` mounts and a namespace file's, and their reconnects: `COMMAND get URL` runs before each one whose URL matches `PATTERN`, and the `Name: value` lines it prints are sent with it (chapter 16); repeatable. `$H9CRED` adds more, separated by `;`. A bad pattern is exit 2, and a helper that fails before the program starts is exit 125. |
@@ -2353,7 +2353,7 @@ around a value with commas.
 | --- | --- |
 | `--dir PATH[:DST[:OPTS]]` | A host directory or file, through `#U`. Its path joins the access rules: readable, or writable with `rw` or `up`. `contained` resolves its symlinks inside it for 9front programs, as a tree on `#L` always does; a Linux program's links resolve from its own `/` (chapter 20). |
 | `--url URL[:DST[:OPTS]]` | A 9P server: `tcp://HOST:PORT[/SPEC]`, `unix:///PATH`, `ws://...`, or `wss://...`. `http://...` and `https://...` are a WebSocket if the server upgrades, and otherwise a static tree (chapter 16). With no scheme, `http://` for a loopback host and `https://` for any other. A DST of `/srv/NAME` posts the connection there without mounting it. |
-| `--archive FILE[:DST[:OPTS]]` | A tar, a gzipped tar, or an `.h9a` (the browser host's root archive), unpacked into memory before the program runs. Its files count against `--memory`, and it takes writes in memory. Symbolic links are kept for Linux programs. |
+| `--archive FILE[:DST[:OPTS]]` | A tar, a gzipped tar, or an `.h9a` (the web host's root archive), unpacked into memory before the program runs. Its files count against `--memory`, and it takes writes in memory. Symbolic links are kept for Linux programs. |
 | `--builtin[=DST[:OPTS]]` | The built-in root. Bare, it's the bottom of `/`. |
 | `--tmp DST[:OPTS]` | An empty tree in memory |
 | `--bind SRC:DST[:OPTS]` | Bind a path already in the machine: SRC is a guest path or `#` device. Every `--bind` runs after every mount flag. Its options are `b`, `a`, `c`, and `r`. |
@@ -2423,8 +2423,8 @@ Tools:
 
 | Flag | Meaning |
 | --- | --- |
-| `--check` | Check each backend and the root, then exit 0 or 125 (chapter 2). Takes `--backend`, the mount flags, `--cred`, `--index`, `--index-cache`, and `--memory`, and reports a 9P root's index. |
-| `--version` | Print the version, the pinned 9front and drawterm revisions, the backends built in, and the window code (`gfx:`) |
+| `--check` | Check each engine and the root, then exit 0 or 125 (chapter 2). Takes `--engine`, the mount flags, `--cred`, `--index`, `--index-cache`, and `--memory`, and reports a 9P root's index. |
+| `--version` | Print the version, the pinned 9front and drawterm revisions, the engines built in, and the window code (`gfx:`) |
 | `--help`, `-h` | Print the usage to standard output |
 
 
@@ -2437,7 +2437,7 @@ Tools:
 | 1 | Any other exit string, including `0`; or the program was killed by a note that isn't a signal | The string, or `h9: PROG: NOTE` |
 | 2 | Usage error or refused combination | The usage, or `h9: ...` |
 | 124 | `--timeout` was reached | `h9: PROG: h9: timeout` |
-| 125 | h9 failed: no root, no usable backend, too little memory, a 9P root that can't be reached, a `--serve` address that can't be listened on, or the machine failed mid-run | `h9: ...` |
+| 125 | h9 failed: no root, no usable engine, too little memory, a 9P root that can't be reached, a `--serve` address that can't be listened on, or the machine failed mid-run | `h9: ...` |
 | 126 | The program isn't a runnable a.out or ELF binary for this machine, or it's a host script the machine can't read | `h9: PROG: not a 9front executable...`, or `h9: PROG: the machine can't read this script...` |
 | 127 | The program wasn't found | `h9: PROG: ...` |
 | 128+N | The program was killed by a note that's signal N, as a shell reports it: 130 for Ctrl-C (`interrupt`), 129 for `hangup`, 137 for `kill`, 141 for a closed pipe, 139 for a fault; a Linux program killed by signal N (`linux: signal N`); or a second Ctrl-C (130), SIGHUP (129), or SIGTERM (143) stopped the machine. N is the host's number for the signal, so `usr1` is 138 on Linux and 158 on macOS | Nothing for Ctrl-C and a closed pipe; otherwise `h9: PROG: NOTE` |
@@ -2611,9 +2611,9 @@ whether `/net` exists, and which devices are masked so they can't be
 attached again. What's *not* protected: the h9 process itself, which runs as
 you with your full rights and isn't sandboxed by the host, so a bug in h9's
 kernel or device code is a bug in the sandbox; and anything you share. The
-native backend goes further: it runs guest code in h9's own process, so it
+sud engine goes further: it runs guest code in h9's own process, so it
 is not a boundary at all, and `auto` never chooses it — use it, with
-`--backend native`, only for a program you already trust.
+`--engine sud`, only for a program you already trust.
 
 **Profiles**
 
@@ -2853,33 +2853,33 @@ environment variables, binds, `/tmp` files, posted servers, or background
 processes.
 
 **Embedding h9 in a Zig program.** The CLI is a thin layer over a library.
-`Machine.init` takes `Machine.Options` (the backend, architecture, root,
+`Machine.init` takes `Machine.Options` (the engine, architecture, root,
 cwd, environment, sandbox `Policy`, standard I/O, and an optional trace
 writer), and `Machine.run` runs a program and returns its exit string
 unchanged; the mapping to exit codes is the CLI's. Several machines can run
 in one host process. [Embedding h9 in a Zig program](docs/embedding.md)
 walks through all of it with an example that builds.
 
-### 27. Backends and performance
+### 27. Engines and performance
 
-A **backend** is what runs guest code:
+A **engine** is what runs guest code:
 
-| Backend | Host | Runs |
+| Engine | Host | Runs |
 | --- | --- | --- |
 | `hvf` | macOS on Apple Silicon (Hypervisor.framework) | arm64 |
 | `kvm` | Linux x86\_64 and arm64, with access to `/dev/kvm` | The host's architecture. |
 | `whp` | Windows x86\_64, with the Windows Hypervisor Platform feature | amd64 |
-| `native` | Linux x86\_64, 5.11 or later, without a hypervisor | amd64 |
-| `emu` | Any (hcpu: ha64, h86, and hx64) | arm64, amd64, and 386 |
+| `sud` | Linux x86\_64, 5.11 or later, without a hypervisor | amd64 |
+| `hcpu` | Any (hcpu: ha64, h86, and hx64) | arm64, amd64, and 386 |
 
-`--backend auto`, the default, uses the host's hypervisor if it's built in,
+`--engine auto`, the default, uses the host's hypervisor if it's built in,
 usable, and can run the program's architecture, and otherwise the emulator,
 printing `h9: warning: no usable hypervisor; using the emulator`. It never
-chooses the native backend, which shares h9's process and isn't a security
+chooses the sud engine, which shares h9's process and isn't a security
 boundary, so on Linux x86\_64 without KVM it runs the emulator, and
-`--backend native` is an explicit choice for a trusted guest. Naming a backend uses
-that one or fails with exit 125, and `--backend native` warns that it isn't
-a security boundary. `h9 --check` lists each backend built in and whether it
+`--engine sud` is an explicit choice for a trusted guest. Naming an engine uses
+that one or fails with exit 125, and `--engine sud` warns that it isn't
+a security boundary. `h9 --check` lists each engine built in and whether it
 works here.
 
 **KVM** runs guest code on a virtual CPU, as Hypervisor.framework does on a
@@ -2887,7 +2887,7 @@ Mac. In a VM it needs nested virtualization, and each system call then goes
 through both hypervisors, so it costs tens of microseconds rather than
 about one.
 
-**The native backend** runs amd64 guest code directly on the CPU, with no
+**The sud engine** runs amd64 guest code directly on the CPU, with no
 hypervisor, so it works in containers without `/dev/kvm` and cloud VMs
 without nested virtualization ([native-backend](design/epoch-0/native-backend.md)).
 Each address space is a tiny stub process that h9 starts; the kernel's
@@ -2897,15 +2897,15 @@ host kernel any other way. It's much faster than the emulator (an awk loop
 that takes 10.7 s on the emulator takes 0.24 s), and a Linux program's
 threads run in parallel. Unlike under KVM, guests see the host CPU's
 features, such as AVX-512, in `CPUID`. It runs amd64 only. Because the stub
-shares h9's own address space, this backend is **not a security boundary**:
+shares h9's own address space, this engine is **not a security boundary**:
 guest code that gets past the dispatch and seccomp gates reaches the h9
-process. So `auto` never picks it, and you choose it with `--backend native`
+process. So `auto` never picks it, and you choose it with `--engine sud`
 only for a program you trust (chapter 23).
 
 **The emulator.** Use it where there's no hypervisor (Windows on ARM,
 Windows without the Windows Hypervisor Platform, and arm64 Linux VMs
 without nested virtualization), where there's no KVM and you won't opt into
-the native backend, for Go programs on Apple Silicon, and for programs of
+the sud engine, for Go programs on Apple Silicon, and for programs of
 another architecture on any host. It's hcpu, h9's own CPUs: ha64 runs arm64
 programs, h86 runs 386 programs, and hx64 runs amd64 programs
 ([hcpu](design/epoch-0/hcpu.md)). Each compiles hot guest code to host code (its
@@ -2919,12 +2919,12 @@ times slower than the same program built for macOS, and amd64 and 386
 ones 8 to 62 times slower; on an x86\_64 Linux host, arm64 programs run 17
 to 32 times slower, and amd64 and 386 ones 25 to 99 times slower.
 [Emulator performance](docs/emu-performance.md) has the measurements.
-`H9_EMU_TIER=t0` runs the interpreter alone, for testing.
+`H9_HCPU_TIER=t0` runs the interpreter alone, for testing.
 
 **In a browser.** h9 also builds for WebAssembly, where the same emulator
 runs 386 and arm64 programs, its JIT compiling to WebAssembly
-([browser-host](design/epoch-0/browser-host.md)). `--backend v86`, the browser's
-backend before hcpu replaced it, is another name for `emu`, for one more
+([browser-host](design/epoch-0/browser-host.md)). `--engine hcpu`, the browser's
+engine before hcpu replaced it, is another name for `hcpu`, for one more
 release.
 
 **vCPU limits.** Each process normally has its own vCPU. On macOS the
@@ -2932,7 +2932,7 @@ hypervisor allows 64; KVM usually allows 1024, fewer if h9 can open few
 file descriptors, since each vCPU holds one; WHP is set to 64. Past the
 limit less 8, the rest share a pool of 8, costing a thread handoff per
 system call. `--cpus N` caps how many processes run guest code at the same
-moment, on every backend. The emulator and the native backend have no vCPU
+moment, on every engine. The emulator and the sud engine have no vCPU
 limit; `h9 --check` prints the limit for each hypervisor.
 
 ### 28. Debugging
@@ -2977,16 +2977,16 @@ work too
 ### 29. Troubleshooting and FAQ
 
 **Exit 125: h9 couldn't run anything.** The message says why: no root tree
-a root that isn't there (`h9: --dir DIR: not found`, chapter 2), no usable backend (`zig build` signs h9 on macOS; join the
-`kvm` group on Linux; `h9 --check` says which backends
+a root that isn't there (`h9: --dir DIR: not found`, chapter 2), no usable engine (`zig build` signs h9 on macOS; join the
+`kvm` group on Linux; `h9 --check` says which engines
 work), a 9P root that refused the connection or wants authentication, or
 too little memory (`OutOfGuestMemory`: raise `--memory`).
 
 **Exit 126: not a 9front executable.** The file isn't a Plan 9 a.out or a
 Linux ELF binary (a Mach-O or PE binary), or
-it's for an architecture this backend can't run: an amd64 binary on an Apple
+it's for an architecture this engine can't run: an amd64 binary on an Apple
 Silicon Mac needs the emulator, and so does a 386 binary everywhere
-(`--backend auto` or `emu`). A guest `#!`
+(`--engine auto` or `hcpu`). A guest `#!`
 script whose interpreter line is empty also gives 126, and so does a host
 script outside every shared directory (`the machine can't read this
 script`): share its directory with `--readable`, or run h9 from it.
@@ -3090,16 +3090,16 @@ They change faster than this manual, as proposals land.
 
 - **a.out**: Plan 9's executable format: a short header, then text, then data, then a
   symbol table. h9 loads a.outs itself, and Linux ELF binaries through the
-  Linux personality (chapter 20); it doesn't run Mach-O or PE programs. A
-  program for an architecture the backend can't run exits 126.
+  Linux ABI (chapter 20); it doesn't run Mach-O or PE programs. A
+  program for an architecture the engine can't run exits 126.
 
 - **attach**: The first 9P message on a connection, which gives a client the root of a
   server's tree. Attaching a kernel device is what a `#` name does.
 
-- **backend**: h9's name for what runs guest code: a hypervisor (`hvf` on macOS, `kvm`
+- **engine**: h9's name for what runs guest code: a hypervisor (`hvf` on macOS, `kvm`
   on Linux, and `whp` on Windows), the host CPU in a stub
-  process (`native`, on Linux x86\_64), or the emulator (`emu`). Chosen with
-  `--backend`; see chapter 27.
+  process (`sud`, on Linux x86\_64), or the emulator (`hcpu`). Chosen with
+  `--engine`; see chapter 27.
 
 - **bind**: Make one name in the namespace refer to another file or directory, like a
   symlink that lives in the process's namespace rather than on disk. See
@@ -3156,7 +3156,7 @@ They change faster than this manual, as proposals land.
 
 - **Hyper9**: The project; `h9` is its command and library.
 
-- **Linux personality, Linux view**: The part of h9 that runs Linux ELF programs by
+- **Linux ABI, Linux view**: The part of h9 that runs Linux ELF programs by
   translating their system calls onto the Plan 9 kernel, and the file tree
   a Linux process sees as `/` (the device `#L`): the Linux root with `/9`,
   `/tmp`, `/mnt/term`, `/dev`, and `/proc` added. See chapter 20.

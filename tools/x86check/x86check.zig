@@ -53,7 +53,7 @@ const Answer = extern struct {
     fx: [512]u8,
 };
 
-/// vmm.X86Extra's shape, which Cpu.getExtra and setExtra take: an FXSAVE
+/// engine.X86Extra's shape, which Cpu.getExtra and setExtra take: an FXSAVE
 /// image (32-bit mode keeps FCS and FDS above FIP and FDP).
 const Extra = struct {
     fx: extern struct {

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Lima VMs for testing h9's emu backend: linux, macos and windows (arm64)
-# and linux-amd64 (emulated x86_64); and its KVM backend: linux-kvm (arm64,
+# Lima VMs for testing h9's hcpu engine: linux, macos and windows (arm64)
+# and linux-amd64 (emulated x86_64); and its KVM engine: linux-kvm (arm64,
 # nested virtualization). Instances live in .local/lima (their
 # LIMA_HOME).
 #
@@ -11,9 +11,9 @@
 #   scripts/lima/vm shell <os> [cmd]   ssh into it (cmd.exe on windows)
 #   scripts/lima/vm push <os> file...  copy files into ~/h9 in the guest
 #   scripts/lima/vm push-root <os> [-f] copy the 9front root tree into ~/h9/root
-#   scripts/lima/vm test <os> [backend|integration]...
+#   scripts/lima/vm test <os> [engine|integration]...
 #                                      push zig-out/<os> and the root tree, then
-#                                      run the backend and integration tests
+#                                      run the engine and integration tests
 #
 # Env: WIN_ISO (Windows 11 Arm64 installer ISO); H9_TEST_PENDING and
 # H9_TEST_SLOW are passed to the integration tests.
@@ -126,13 +126,13 @@ cmd_test() {
 	local which=("$@")
 	# The root tree is arm64 only, so x86_64 has no integration tests yet.
 	if [[ ${#which[@]} -eq 0 ]]; then
-		if [[ "$os" == linux-amd64 ]]; then which=(backend); else which=(backend integration); fi
+		if [[ "$os" == linux-amd64 ]]; then which=(engine); else which=(engine integration); fi
 	fi
 	local bin="$ROOT/zig-out/$os/bin" exe=""
 	[[ "$os" == windows ]] && exe=.exe
 	local files=("$bin/h9$exe")
 	for w in "${which[@]}"; do
-		case "$w" in backend|integration) files+=("$bin/$w-tests$exe") ;; *) die "unknown test set '$w' (want: backend integration)" ;; esac
+		case "$w" in engine|integration) files+=("$bin/$w-tests$exe") ;; *) die "unknown test set '$w' (want: engine integration)" ;; esac
 	done
 	for f in "${files[@]}"; do [[ -f "$f" ]] || die "no $f (see scripts/lima/README.md, Tests)"; done
 	cmd_push "$os" "${files[@]}"
@@ -148,14 +148,14 @@ cmd_test() {
 	for w in "${which[@]}"; do
 		log "$os: $w tests"
 		if [[ "$os" == windows ]]; then
-			local set="set H9_TEST_BIN=%USERPROFILE%\\h9\\h9.exe&& set H9_TEST_ROOT=%USERPROFILE%/h9/root&& set H9_TEST_BACKENDS=emu&& set H9_TEST_SLOW=$slow&&"
+			local set="set H9_TEST_BIN=%USERPROFILE%\\h9\\h9.exe&& set H9_TEST_ROOT=%USERPROFILE%/h9/root&& set H9_TEST_ENGINES=hcpu&& set H9_TEST_SLOW=$slow&&"
 			[[ -n "$pend" ]] && set+=" set H9_TEST_PENDING=1&&"
 			[[ -n "$arch" ]] && set+=" set H9_TEST_ARCH=$arch&&"
 			ssh_ "$os" "$set cd h9 && $w-tests.exe" </dev/null || status=1
 		else
-			local backends=emu
-			[[ "$os" == linux-kvm ]] && backends=kvm,emu
-			local vars="H9_TEST_BIN=\$HOME/h9/h9 H9_TEST_ROOT=\$HOME/h9/root H9_TEST_BACKENDS=$backends H9_TEST_SLOW=$slow"
+			local engines=hcpu
+			[[ "$os" == linux-kvm ]] && engines=kvm,hcpu
+			local vars="H9_TEST_BIN=\$HOME/h9/h9 H9_TEST_ROOT=\$HOME/h9/root H9_TEST_ENGINES=$engines H9_TEST_SLOW=$slow"
 			[[ -n "$pend" ]] && vars+=" H9_TEST_PENDING=1"
 			[[ -n "$arch" ]] && vars+=" H9_TEST_ARCH=$arch"
 			ssh_ "$os" "cd h9 && env $vars ./$w-tests" </dev/null || status=1

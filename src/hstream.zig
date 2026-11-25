@@ -17,7 +17,7 @@
 //! the machine's page allocator (kern.Pages), so they count against
 //! `--memory`; data and text together are capped at `ws.max_message`.
 //!
-//! On the web host (design/epoch-0/websocket-9p.md, "On the browser host")
+//! On the web host (design/epoch-0/websocket-9p.md, "On the web host")
 //! the JS host's WebSocket connects, does TLS and frames, through the
 //! `h9_ws_*` imports below; each stream's reader is a coroutine parked
 //! in `ws_recv`. ws.zig, TLS, proxies and the keepalive aren't used there.
@@ -95,7 +95,7 @@ const js = struct {
     /// the socket's 9P server (design/epoch-0/mounts.md, "Static trees").
     extern "h9" fn ws_open(url: [*]const u8, url_n: u32, protocols: [*]const u8, protocols_n: u32, headers: [*]const u8, headers_n: u32, static_tree: u32) i32;
     /// Asks the embedder's credentials callback for a host-made stream's
-    /// handshake (design/epoch-0/credential-helpers.md, "Browser host"): `failed`
+    /// handshake (design/epoch-0/credential-helpers.md, "Web host"): `failed`
     /// is empty, or why the last try failed; `argv` is the matching
     /// `--cred` helper's command, one word per line, or empty. Writes
     /// `Name: value` lines to `out`, the first of which may instead be
@@ -326,7 +326,7 @@ pub const HostOptions = struct {
     /// pattern matches the URL best runs before each handshake, and its
     /// headers go with it, after `headers`, which win on a name.
     cred: []const cred.Helper = &.{},
-    /// The URL was `http://` or `https://`: on the browser host, a server
+    /// The URL was `http://` or `https://`: on the web host, a server
     /// that doesn't upgrade is tried as a static dotfs tree. Native h9
     /// serves those itself (src/statictree.zig).
     static_tree: bool = false,
@@ -1326,7 +1326,7 @@ fn webConnect(s: *Stream) ConnectError!void {
     }
     // A host-made stream asks the embedder's credentials callback before
     // each try, and tries once more if one gave a credential and the
-    // open failed (design/epoch-0/credential-helpers.md, "Browser host").
+    // open failed (design/epoch-0/credential-helpers.md, "Web host").
     var failed: [96]u8 = undefined;
     var failed_len: usize = 0;
     while (true) {

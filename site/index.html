@@ -6,7 +6,7 @@
 <title>h9: native 9front executables on host hypervisors</title>
 <link rel="icon" href="data:,">
 <!-- The project's page, published to GitHub Pages by
-     .github/workflows/pages.yml with the browser host's build in demo/.
+     .github/workflows/pages.yml with the web host's build in demo/.
      Plain on purpose, after the vx32 page. -->
 <style>
   body { max-width: 46em; margin: 1em auto; padding: 0 1em calc(0.7em + env(safe-area-inset-bottom, 0px)); background: #fff; color: #000; }
@@ -64,7 +64,7 @@ which is also how they run in the browser, where there is no CPU to run natively
 <h2 id="demo">Demo</h2>
 
 <p>
-Below is h9's browser host: h9 built for wasm32-wasi, running in a Web Worker,
+Below is h9's web host: h9 built for wasm32-wasi, running in a Web Worker,
 with 9front's own 386 binaries on h9's own 386 CPU and a small root file system loaded into memory.
 Type to rc; try <tt>ls /bin</tt>, <tt>cal</tt>, <tt>primes 1 50</tt>,
 <tt>echo hello | tr h H</tt> or <tt>ps</tt>.
@@ -116,7 +116,7 @@ zig build
 </pre>
 
 <p>
-The browser host builds with <tt>zig build web</tt>.
+The web host builds with <tt>zig build web</tt>.
 <a href="https://github.com/progrium/hyper9/blob/main/DEVELOPING.md">DEVELOPING.md</a>
 has the details for each host.
 </p>

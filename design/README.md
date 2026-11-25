@@ -6,10 +6,10 @@ Design changes to h9 go through proposals: one Markdown file each in this direct
 
 A proposal is needed for:
 
-- changes to the `vmm` interface, the `Machine` API, or `Machine.Options`
+- changes to the engine interface, the `Machine` API, or `Machine.Options`
 - CLI flags and exit codes
 - sandbox capabilities, profiles, and defaults
-- new backends, personalities, devices, or root types
+- new engines, ABIs, devices, or root types
 - changes to `third_party/` beyond merging upstream
 - changes to this process
 
@@ -92,7 +92,7 @@ status: accepted
 created: 2026-11-03
 authors: [progrium]
 depends: [symlinks-in-root, exit-status]
-areas: [kern, vmm, cli, sandbox]
+areas: [kern, engine, cli, sandbox]
 branch: [linux-personality]
 superseded-by:
 ---
@@ -107,7 +107,7 @@ superseded-by:
 | `created` | always | `YYYY-MM-DD` |
 | `authors` | always | GitHub logins |
 | `depends` | always, may be `[]` | Proposals, by slug, that must be implemented before this one can be |
-| `areas` | no | Free-form tags for filtering: `vmm`, `kern`, `cli`, `sandbox`, `build`, `tests`, `process`, and so on |
+| `areas` | no | Free-form tags for filtering: `engine`, `kern`, `cli`, `sandbox`, `build`, `tests`, `process`, and so on |
 | `branch` | when work has started; `[main]` once implemented | See Branches |
 | `superseded-by` | when `superseded` | The proposal that replaces it, by slug |
 
@@ -144,6 +144,25 @@ Cases are tagged with the proposal they prove, by slug, in brackets at the end o
 The top of this directory holds the proposals still being decided or built. A proposal that's implemented, declined, or superseded is archived in the current epoch's folder, `epoch-N/`, by `zig build design -- archive`, which moves it and rewrites every link to it ([epochs](epoch-0/epochs.md)). An epoch is the work between two baselines: [baseline](epoch-0/baseline.md) opened epoch 0, and a proposal named `baseline-K` opens epoch K once it's implemented.
 
 Archiving isn't part of finishing a proposal. The PR that finishes one leaves its file where it is, and `archive` is run now and then in a PR of its own, and whenever a baseline is cut. It changes link targets in archived proposals, which is the one edit to an accepted proposal's body that isn't a Done criteria checkbox. A proposal keeps its slug in any folder, so test tags, `depends`, and `zig build proposal -Dp=<slug>` don't change. Link to an archived proposal as `design/epoch-N/<slug>.md`.
+
+## Old names
+
+[renames](renames.md) renamed some of h9's parts at the end of epoch 0. Proposals keep the words they were written in, so an epoch-0 proposal may use these:
+
+| Old name | Now |
+| --- | --- |
+| personality (the Linux personality, the Plan 9 personality) | ABI (the Linux ABI, the 9front ABI) |
+| `vmm`, backend (`src/vmm.zig`, `src/vmm/`, `vmm.Backend`, `vmm.BackendKind`) | engine (`src/engine.zig`, `src/engine/`, `engine.Engine`, `engine.Choice`) |
+| the native backend, `--backend native` | the sud engine, `--engine sud` |
+| the emulator backend, `--backend emu`, `v86` | the hcpu engine, `--engine hcpu` |
+| `--backend`, `-Dbackends`, `Machine.Options.backend` | `--engine`, `-Dengines`, `Machine.Options.engine` |
+| `H9_EMU_*`, `H9_WL_BACKEND` | `H9_HCPU_*`, `H9_WL_ENGINE` |
+| `src/hcpu.zig`, `src/interp/`, `src/jit/`, `src/vmm/{hcpu,h86,ha64,hx64}.zig` | `src/engine/hcpu/` (`hcpu.zig`, `interp/`, `jit/`, `engine.zig`, `h86.zig`, `ha64.zig`, `hx64.zig`) |
+| `src/aout.zig`, `src/loader.zig`, `src/syscall.zig`, `src/linux/` | `src/abi/plan9/`, `src/abi/linux/` |
+| the browser host | the web host |
+| `spec/host-js.md` | `spec/host-web.md`, with the namespace kernel in `spec/nskernel.md` |
+
+The GUI backends behind `--gfx` keep their name. Slugs never change, so `native-backend`, `linux-personality`, and `browser-host` keep theirs.
 
 ## Checks
 

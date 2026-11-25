@@ -2,13 +2,13 @@
 
 > **Work in progress.** h9 is under active development and hasn't had a
 > security audit. Most of what this guide describes is built: 9front and
-> Linux programs, the HVF and KVM backends, the emulator, and the browser
-> host. The [Linux personality](../design/epoch-0/linux-personality.md) and its
+> Linux programs, the HVF and KVM engines, the emulator, and the web
+> host. The [Linux ABI](../design/epoch-0/linux-personality.md) and its
 > [threads](../design/epoch-0/linux-threads.md) and
 > [sockets](../design/epoch-0/linux-net.md) are built but their proposals are
 > still drafts while gaps close. Parts that are still drafts or not built
 > are marked *(planned)*, chief among them the
-> [WHP backend](../design/epoch-0/whp.md) for Windows. The
+> [WHP engine](../design/epoch-0/whp.md) for Windows. The
 > [proposal status](../design/STATUS.md) is the current state.
 >
 > This is a short map from things you may already know to h9. The
@@ -88,7 +88,7 @@ against POSIX. They're ordinary host processes in the host's single namespace,
 with no per-process namespaces, no `/srv` or `bind` as Plan 9 has them, and no
 isolation. h9 runs the actual 9front binaries, unmodified, with real
 per-process namespaces, `/proc`, `/srv`, notes, and 9P mounts, because the
-kernel serving them is a Plan 9 kernel. With the Linux personality, h9 also
+kernel serving them is a Plan 9 kernel. With the Linux ABI, h9 also
 covers plan9port's other use, mixing Plan 9 tools with Unix ones in one
 pipeline, without porting either side.
 
@@ -105,7 +105,7 @@ different direction:
   no Linux VM on macOS: Linux syscalls are translated onto h9's kernel in the
   h9 process. SQLite, PostgreSQL, Redis, git, CPython, the Go toolchain, and
   Zig have all been run this way (see the
-  [Linux personality page](../site/linux.html)).
+  [Linux ABI page](../site/linux.html)).
 - **Image vs root.** A container starts from a layered image. h9 starts from a
   root tree, a 9P server ([ninep-roots](../design/epoch-0/ninep-roots.md)), or one
   behind a WebSocket ([websocket-9p](../design/epoch-0/websocket-9p.md)), and
@@ -120,7 +120,7 @@ different direction:
   for 9front and Linux processes alike.
 - **Policy.** h9's flags (`--readable`, `--writable`, `--read-deny`,
   `--net=outbound`, `--net-allow`, `--memory`, `--pids`, `--timeout`) are
-  enforced in h9's kernel, so they're the same on every host and backend.
+  enforced in h9's kernel, so they're the same on every host and engine.
   Linux sockets are `/net` conversations, so the network rules apply to them
   unchanged.
 - **Exit codes.** 125, 126, and 127 follow `docker run`.
@@ -133,7 +133,7 @@ different direction:
 **gVisor.** The closest relative, doing the same job. gVisor's Sentry is a
 user-space kernel that serves a Linux application's syscalls so they never
 reach the host kernel, and its KVM platform runs the application on a vCPU.
-h9 has the same shape: the vmm layer is the platform, and drawterm's kernel,
+h9 has the same shape: the engine layer is the platform, and drawterm's kernel,
 with the Linux syscall table translated onto it, is the Sentry. The
 differences:
 
@@ -163,7 +163,7 @@ differences:
   process tree, and ends with it, so it can fence a single step of a
   pipeline (`git log | h9 sort`) as easily as a shell.
 - **A Linux kernel, or a syscall table.** sbx runs anything Linux runs,
-  Docker included. h9's [Linux personality](../design/epoch-0/linux-personality.md)
+  Docker included. h9's [Linux ABI](../design/epoch-0/linux-personality.md)
   runs a growing set of programs and fails the rest with `ENOSYS`, and there's
   no Docker inside h9.
 - **Host files.** sbx shares the workspace whole, and can't hide a file in
@@ -196,17 +196,17 @@ hundred lines of shim that saves registers and exits to the host. So startup
 is closer to a process than to a boot, and the host sees and serves every
 syscall. The trade is that h9 runs programs, not an operating system: no
 guest kernel features beyond what h9 serves, and no devices. If you want
-complete Linux in isolation, a microVM is the better tool; the Linux
-personality proposal says so itself. h9's closest relative on this axis is
+complete Linux in isolation, a microVM is the better tool; the
+[linux-personality](../design/epoch-0/linux-personality.md) proposal says so itself. h9's closest relative on this axis is
 [hyper-linux](https://github.com/zw3rk/hyper-linux), which runs Linux ELF
 binaries on macOS's Hypervisor.framework the same way, and whose shim and
 ELF loader h9's design draws on.
 
 **WSL.** WSL 1 translated Linux syscalls in the host OS kernel (NT), with no
-VM. h9's Linux personality is the same idea, with the translation in user
+VM. h9's Linux ABI is the same idea, with the translation in user
 space behind a hypervisor and onto a Plan 9 kernel rather than NT. WSL 2 is a
 lightweight VM with a real Linux kernel, closer to Firecracker. On Windows,
-h9 mostly runs on the emulator today. Its WHP backend for the Windows
+h9 mostly runs on the emulator today. Its WHP engine for the Windows
 Hypervisor Platform is built for x86\_64 but incomplete, and its proposal is
 a draft ([whp](../design/epoch-0/whp.md), *planned*).
 
@@ -233,7 +233,7 @@ binary runs as `h9 ./prog`.
 ## The browser and wasm
 
 **v86.** v86 emulates a whole x86 PC in the browser, and you boot an OS on
-it. h9's [browser host](../design/epoch-0/browser-host.md) works
+it. h9's [web host](../design/epoch-0/browser-host.md) works
 differently: h9 itself is compiled to wasm and runs in a Web Worker, with its
 own 386 CPU (interpreted, and compiled to wasm when hot) and no PC around it. So in a browser tab, as on
 every other host, 9front's 386 binaries and Alpine's 386 Linux binaries
@@ -245,7 +245,7 @@ wasm modules with capability-style access: preopened directories and granted
 sockets, much like h9's namespace allowlist. The difference is the program: a
 WASI program is compiled for wasm, while h9 runs existing native binaries and
 gives them a whole environment (rc or a Linux shell, `/proc`, `/srv`, 9P,
-signals and notes, process trees). The browser host puts h9 on the wasm side
+signals and notes, process trees). The web host puts h9 on the wasm side
 as the host, not as the guest format.
 
 ## When h9 fits

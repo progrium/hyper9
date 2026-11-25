@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const vmm = @import("h9").vmm;
+const engine = @import("h9").engine;
 const policy = @import("h9").policy;
 const ws = @import("h9").ws;
 const RootChanges = @import("h9").RootChanges;
@@ -16,7 +16,7 @@ const mount = @import("h9").policy.mount;
 pub var why: []const u8 = "";
 
 pub const usage =
-    \\usage: h9 [--backend auto|hvf|kvm|whp|native|emu] [--arch arm64|amd64|386]
+    \\usage: h9 [--engine auto|hvf|kvm|whp|sud|hcpu] [--arch arm64|amd64|386]
     \\           [--dir PATH[:DST[:OPTS]]]... [--url URL[:DST[:OPTS]]]...
     \\           [--archive FILE[:DST[:OPTS]]]... [--builtin[=DST[:OPTS]]]...
     \\           [--tmp DST[:OPTS]]... [--bind SRC:DST[:OPTS]]... [--cwd DIR]
@@ -36,7 +36,7 @@ pub const usage =
     \\       h9 [flags] --rc 'command' [args...]
     \\       h9 [flags] --rc
     \\       h9 [flags] --serve ADDR...
-    \\       h9 [--backend B] [mount flags] [--memory SIZE] --check
+    \\       h9 [--engine E] [mount flags] [--memory SIZE] --check
     \\       h9 --version
     \\       h9 --help
     \\
@@ -45,9 +45,9 @@ pub const usage =
 /// What h9 does: run a program, or one of the tool functions.
 pub const Mode = enum {
     run,
-    /// --check: probe the backends and the root tree, and run a program.
+    /// --check: probe the engines and the root tree, and run a program.
     check,
-    /// --version: print the version, the pins and the backends.
+    /// --version: print the version, the pins and the engines.
     version,
     /// --help, or -h as the only argument: print the usage to stdout.
     help,
@@ -58,10 +58,10 @@ pub const IndexMode = enum { auto, none };
 
 pub const Config = struct {
     mode: Mode = .run,
-    backend: vmm.BackendKind = .auto,
+    engine: engine.Choice = .auto,
     /// --arch: the architecture of the binaries to run; null means a host
     /// program's own, or the host's for a guest one.
-    arch: ?vmm.Arch = null,
+    arch: ?engine.Arch = null,
     /// --trace: null for none, "" for stderr, else a file.
     trace: ?[]const u8 = null,
     /// The mount flags in order (design/epoch-0/mounts.md): --dir, --url,
@@ -243,10 +243,10 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
         } else if (flag(a, "--help")) {
             if (c.mode != .run) return error.Usage;
             c.mode = .help;
-        } else if (value(args, &i, "--backend")) |v| {
-            c.backend = try enumValue(vmm.BackendKind, v);
+        } else if (value(args, &i, "--engine") orelse value(args, &i, "--backend")) |v| {
+            c.engine = try engineValue(v);
         } else if (value(args, &i, "--arch")) |v| {
-            c.arch = vmm.Arch.fromName(v orelse return error.Usage) orelse return error.Usage;
+            c.arch = engine.Arch.fromName(v orelse return error.Usage) orelse return error.Usage;
         } else if (value(args, &i, "--cred")) |v| {
             const spec = v orelse return error.Usage;
             const h = cred.parse(gpa, spec) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else error.Usage;
@@ -417,6 +417,20 @@ fn count(v: ?[]const u8) Error!u32 {
     return if (n == 0) error.Usage else n;
 }
 
+/// An `--engine` value. `--backend`, which `--engine` replaced, and the
+/// old names `native`, `emu`, and `v86` are accepted for one release
+/// (design/renames.md), and the usage text doesn't mention them.
+fn engineValue(v: ?[]const u8) Error!engine.Choice {
+    const name = v orelse return error.Usage;
+    const old = [_]struct { []const u8, engine.Choice }{
+        .{ "native", .sud },
+        .{ "emu", .hcpu },
+        .{ "v86", .hcpu },
+    };
+    for (old) |o| if (std.mem.eql(u8, name, o[0])) return o[1];
+    return enumValue(engine.Choice, name);
+}
+
 fn enumValue(comptime E: type, v: ?[]const u8) Error!E {
     return std.meta.stringToEnum(E, v orelse return error.Usage) orelse error.Usage;
 }
@@ -567,7 +581,7 @@ pub fn killedStatus(note: []const u8, stopped_by: ?Signal) Exit {
         std.mem.startsWith(u8, note, "sys: trap: unexpected exit") or
         std.mem.startsWith(u8, note, "h9: "))
         return .{ .code = exit_failed, .print = true };
-    // The Linux personality's notes (design/epoch-0/linux-personality.md).
+    // The Linux ABI's notes (design/epoch-0/linux-personality.md).
     if (std.mem.startsWith(u8, note, "linux: signal ")) {
         const n = std.fmt.parseInt(u32, note["linux: signal ".len..], 10) catch return .{ .code = 1, .print = true };
         const s = Signal.fromLinux(n) orelse return .{ .code = 1, .print = true };
@@ -613,26 +627,61 @@ fn noticeTo(w: *std.Io.Writer, c: *const RootChanges, ninep: bool) std.Io.Writer
 const t = std.testing;
 
 test "flags stop at the first non-flag" {
-    const c = try parse(t.allocator, &.{ "h9", "--backend", "emu", "--trace", "./ls", "--trace" });
+    const c = try parse(t.allocator, &.{ "h9", "--engine", "hcpu", "--trace", "./ls", "--trace" });
     defer t.allocator.free(c.env);
-    try t.expectEqual(vmm.BackendKind.emu, c.backend);
+    try t.expectEqual(engine.Choice.hcpu, c.engine);
     try t.expectEqualStrings("", c.trace.?);
     try t.expectEqual(@as(usize, 2), c.argv.len);
     try t.expectEqualStrings("--trace", c.argv[1]);
 }
 
+test "--engine and its values [renames]" {
+    inline for (.{ "auto", "hvf", "kvm", "whp", "sud", "hcpu" }) |name| {
+        const c = try parse(t.allocator, &.{ "h9", "--engine", name, "/bin/echo" });
+        defer t.allocator.free(c.env);
+        try t.expectEqual(@field(engine.Choice, name), c.engine);
+    }
+    try t.expectError(error.Usage, parse(t.allocator, &.{ "h9", "--engine", "emulator", "/bin/echo" }));
+}
+
+test "--backend, native, emu, and v86 are aliases [renames]" {
+    const pairs = [_][2][]const u8{
+        .{ "native", "sud" },
+        .{ "emu", "hcpu" },
+        .{ "v86", "hcpu" },
+        .{ "kvm", "kvm" },
+    };
+    for (pairs) |p| {
+        const new = try parse(t.allocator, &.{ "h9", "--engine", p[1], "/bin/echo" });
+        defer t.allocator.free(new.env);
+        inline for (.{ "--engine", "--backend" }) |flag_name| {
+            const old = try parse(t.allocator, &.{ "h9", flag_name, p[0], "/bin/echo" });
+            defer t.allocator.free(old.env);
+            try t.expectEqual(new.engine, old.engine);
+            try t.expectEqual(new.mode, old.mode);
+            try t.expectEqualStrings(new.argv[0], old.argv[0]);
+        }
+    }
+    const eq = try parse(t.allocator, &.{ "h9", "--backend=emu", "/bin/echo" });
+    defer t.allocator.free(eq.env);
+    try t.expectEqual(engine.Choice.hcpu, eq.engine);
+    inline for (.{ "--backend", "native", "emu", "v86" }) |old| {
+        try t.expect(std.mem.indexOf(u8, usage, old) == null);
+    }
+}
+
 test "--arch" {
-    try t.expectEqual(vmm.Arch.i386, (try parse(t.allocator, &.{ "h9", "--arch", "386", "/bin/echo" })).arch.?);
-    try t.expectEqual(vmm.Arch.amd64, (try parse(t.allocator, &.{ "h9", "--arch=amd64", "/bin/echo" })).arch.?);
-    try t.expectEqual(@as(?vmm.Arch, null), (try parse(t.allocator, &.{ "h9", "/bin/echo" })).arch);
+    try t.expectEqual(engine.Arch.i386, (try parse(t.allocator, &.{ "h9", "--arch", "386", "/bin/echo" })).arch.?);
+    try t.expectEqual(engine.Arch.amd64, (try parse(t.allocator, &.{ "h9", "--arch=amd64", "/bin/echo" })).arch.?);
+    try t.expectEqual(@as(?engine.Arch, null), (try parse(t.allocator, &.{ "h9", "/bin/echo" })).arch);
     try t.expectError(error.Usage, parse(t.allocator, &.{ "h9", "--arch", "i386", "x" }));
     try t.expectError(error.Usage, parse(t.allocator, &.{ "h9", "--arch" }));
 }
 
-test "--backend=value and --" {
-    const c = try parse(t.allocator, &.{ "h9", "--backend=hvf", "--", "--weird" });
+test "--engine=value and --" {
+    const c = try parse(t.allocator, &.{ "h9", "--engine=hvf", "--", "--weird" });
     defer t.allocator.free(c.env);
-    try t.expectEqual(vmm.BackendKind.hvf, c.backend);
+    try t.expectEqual(engine.Choice.hvf, c.engine);
     try t.expectEqualStrings("--weird", c.argv[0]);
 }
 
@@ -716,8 +765,8 @@ test "--cwd and repeated --env" {
 
 test "usage errors" {
     try t.expectError(error.Usage, parse(t.allocator, &.{"h9"}));
-    try t.expectError(error.Usage, parse(t.allocator, &.{ "h9", "--backend" }));
-    try t.expectError(error.Usage, parse(t.allocator, &.{ "h9", "--backend", "qemu", "x" }));
+    try t.expectError(error.Usage, parse(t.allocator, &.{ "h9", "--engine" }));
+    try t.expectError(error.Usage, parse(t.allocator, &.{ "h9", "--engine", "qemu", "x" }));
     try t.expectError(error.Usage, parse(t.allocator, &.{ "h9", "--nope", "x" }));
     try t.expectError(error.Usage, parse(t.allocator, &.{ "h9", "--env", "noequals", "x" }));
     try t.expectError(error.Usage, parse(t.allocator, &.{ "h9", "--env", "=v", "x" }));
@@ -902,9 +951,9 @@ test "--check and --version" {
     defer arena.deinit();
     const a = arena.allocator();
     try t.expectEqual(Mode.version, (try parse(a, &.{ "h9", "--version" })).mode);
-    const c = try parse(a, &.{ "h9", "--backend", "emu", "--dir=/r", "--check" });
+    const c = try parse(a, &.{ "h9", "--engine", "hcpu", "--dir=/r", "--check" });
     try t.expectEqual(Mode.check, c.mode);
-    try t.expectEqual(vmm.BackendKind.emu, c.backend);
+    try t.expectEqual(engine.Choice.hcpu, c.engine);
     try t.expectEqualStrings("/r", c.mounts[0].src);
     try t.expectEqual(Mode.run, (try parse(a, &.{ "h9", "ls" })).mode);
     // A flag after the program is the program's.
@@ -921,7 +970,7 @@ test "--help and -h" {
     try t.expectEqual(Mode.help, (try parse(a, &.{ "h9", "--help" })).mode);
     try t.expectEqual(Mode.help, (try parse(a, &.{ "h9", "-h" })).mode);
     // -h counts only alone; anywhere else it's a program name or argument.
-    try t.expectEqualStrings("-h", (try parse(a, &.{ "h9", "--backend", "emu", "-h" })).argv[0]);
+    try t.expectEqualStrings("-h", (try parse(a, &.{ "h9", "--engine", "hcpu", "-h" })).argv[0]);
     const c = try parse(a, &.{ "h9", "ls", "-h" });
     try t.expectEqual(Mode.run, c.mode);
     try t.expectEqualStrings("-h", c.argv[1]);
@@ -990,7 +1039,7 @@ test "notes that kill the first process to exit codes" {
         .{ "halted", null, 125, true },
         .{ "sys: trap: unexpected exit 0x5 pc=0x1000", null, 125, true },
         .{ "h9: OutOfMemory", null, 125, true },
-        // The Linux personality's, by name on the host.
+        // The Linux ABI's, by name on the host.
         .{ "linux: signal 2", null, 130, false },
         .{ "linux: signal 13", null, 141, false },
         .{ "linux: signal 9", null, 137, true },

@@ -41,7 +41,7 @@ static int screenready;
  * set by src/gfx.zig when it claims the screen: the headless screen
  * (src/kern/gfx-headless.c, h9_hl_*) or the window backend (renamed h9_gui_*
  * by gfx-gui.h). H9_GFX_HEADLESS means the headless screen is linked in,
- * H9_GFX_WINDOW that a window backend is; the browser host's canvas
+ * H9_GFX_WINDOW that a window backend is; the web host's canvas
  * (gfx-web.c) is neither, and defines the rest of the interface itself.
  * The screen opens once per process, so h9_gfx_opened says which one did,
  * and src/gfx.zig refuses a later claim for the other.

@@ -1,19 +1,19 @@
-# Engines: the vmm layer, its backends, and the guest shims
+# Engines: the engine interface, the engines, and the guest shims
 
-This describes, as built, the `vmm` interface, the hypervisor, native, and emulator backends behind it, and the shims that run in guest kernel mode. h9's own CPUs for the emulator are in [jit.md](jit.md), [h86.md](h86.md), [hx64.md](hx64.md), and [ha64.md](ha64.md). [SPEC.md](../SPEC.md) describes h9 as a whole and lists the rest of the spec.
+This describes, as built, the `engine` interface, the hypervisor, sud, and hcpu engines behind it, and the shims that run in guest kernel mode. h9's own CPUs for the emulator are in [jit.md](jit.md), [h86.md](h86.md), [hx64.md](hx64.md), and [ha64.md](ha64.md). [SPEC.md](../SPEC.md) describes h9 as a whole and lists the rest of the spec.
 
 ## Contents
 
-- [Hypervisor layer (`vmm`)](#hypervisor-layer-vmm)
+- [The engine interface (`engine`)](#the-engine-interface-engine)
   - [Shared pieces](#shared-pieces)
   - [KVM](#kvm)
   - [WHP](#whp)
-- [Native backend (`native`)](#native-backend-native)
+- [The sud engine (`sud`)](#the-sud-engine-sud)
   - [Stubs](#stubs)
   - [Syscalls and the filter](#syscalls-and-the-filter)
   - [Threads and runs](#threads-and-runs)
   - [Speed](#speed)
-- [Emulator backend (`emu`)](#emulator-backend-emu)
+- [The hcpu engine (`hcpu`)](#the-hcpu-engine-hcpu)
   - [Scope](#scope)
   - [Memory](#memory)
   - [What it's for](#what-its-for)
@@ -22,17 +22,17 @@ This describes, as built, the `vmm` interface, the hypervisor, native, and emula
   - [What the shim does](#what-the-shim-does)
   - [The amd64 shim](#the-amd64-shim)
 
-## Hypervisor layer (`vmm`)
+## The engine interface (`engine`)
 
-A small Zig interface hides the three hypervisor APIs and the emulator. Everything above it is written once.
+A small Zig interface hides the three hypervisor APIs, the sud engine, and hcpu. Everything above it is written once.
 
 ```zig
-// vmm.create picks a backend at run time: .auto tries the host hypervisor, then the emulator; native is explicit-only (not a security boundary).
-pub fn create(gpa, io, want: BackendKind, opts: Options) !Backend;   // Options: { arch: Arch, memory: ?u64 }
+// engine.create picks an engine at run time: .auto tries the host hypervisor, then hcpu; sud is explicit-only (not a security boundary).
+pub fn create(gpa, io, want: Choice, opts: Options) !Engine;   // Options: { arch: Arch, memory: ?u64 }
 
-// One address space per Plan 9 process. Each backend decides how to realize it:
+// One address space per Plan 9 process. Each engine decides how to realize it:
 // the hypervisors build 4K page tables, the emulator keeps a virtual-address -> host-memory map.
-const AddressSpace = union(Kind) {             // Kind: hvf, kvm, whp, native, emu
+const AddressSpace = union(Kind) {             // Kind: hvf, kvm, whp, hcpu, sud
     pub fn destroy(self) void;                 // mapped pages belong to the caller
     pub fn map(self, va: u64, mem: []align(4096) u8, perms: Perms) !void;
     pub fn unmap(self, va: u64) void;          // the mapping map made at va; its pages stay allocated
@@ -41,7 +41,7 @@ const AddressSpace = union(Kind) {             // Kind: hvf, kvm, whp, native, e
     pub fn copy(self, va: u64, buf: []u8, dir: enum { read, write }) bool;  // /proc/n/mem, from any thread
     pub fn codeChanged(self, va: u64, len: u64) void;     // a write to executable pages: drop cached code
 };
-const Backend = union(Kind) {
+const Engine = union(Kind) {
     pub fn kind(self) Kind;
     pub fn destroy(self) void;
     pub fn allocPages(self, n: usize) ![]align(4096) u8;  // memory that address spaces can map
@@ -68,13 +68,13 @@ const Extra = union(Arch) { arm64: Arm64Extra, amd64: X86Extra, i386: X86Extra }
 const Exit = union(enum) { syscall, fault: Fault, breakpoint, interrupted, halted, other: u64 };
 ```
 
-Each backend is a file under `src/vmm/` with the same method set; the unions dispatch to it. Backends not built into a given h9 are replaced by a stub whose `create` fails with `BackendNotBuilt`, so every host builds the same code.
+Each engine is a file under `src/engine/` with the same method set; the unions dispatch to it. Engines not built into a given h9 are replaced by a stub whose `create` fails with `EngineNotBuilt`, so every host builds the same code.
 
-A backend that can't run the binary's architecture fails with `WrongArch`; HVF runs arm64 only, KVM the host's architecture (arm64 or amd64), WHP and native amd64 only, and only the emulator runs 386.
+An engine that can't run the binary's architecture fails with `WrongArch`; HVF runs arm64 only, KVM the host's architecture (arm64 or amd64), WHP and sud amd64 only, and only the emulator runs 386.
 
-`src/arch/i386.zig` holds the 386 Ureg, notify frame, and `noted` sanitizing without backend details, so a hardware backend could add 386 later with a compatibility-mode code segment and an `INT $64` gate in its shim.
+`src/arch/i386.zig` holds the 386 Ureg, notify frame, and `noted` sanitizing without engine details, so a hardware engine could add 386 later with a compatibility-mode code segment and an `INT $64` gate in its shim.
 
-The contract is in Plan 9 terms (address spaces, Ureg, syscall exits) rather than hardware terms such as guest-physical memory and page tables. That keeps page-table building inside the hypervisor backends, and lets the emulator implement the contract without emulating kernel mode or an MMU.
+The contract is in Plan 9 terms (address spaces, Ureg, syscall exits) rather than hardware terms such as guest-physical memory and page tables. That keeps page-table building inside the hypervisor engines, and lets the emulator implement the contract without emulating kernel mode or an MMU.
 
 The interface was shaped around all three hypervisors, so the table and rules below cover WHP as well. HVF, KVM ([kvm](../design/epoch-0/kvm.md)), and WHP ([whp](../design/epoch-0/whp.md)) on Windows x86\_64 are built; WHP on Windows on ARM isn't yet (see WHP below).
 
@@ -90,15 +90,15 @@ The interface was shaped around all three hypervisors, so the table and rules be
 
 - **Exits:** the shim exits to the host by storing to an unmapped doorbell address (MMIO), or with `OUT` on x86. All three hypervisors hand that exit to userspace, so we don't depend on HVC or VMCALL handling, which differs across them. On arm64 KVM in particular, the kernel handles HVC itself unless hypercall filtering is configured.
 - **Threads:** a vCPU is created, run, and destroyed on one host thread, which is HVF's rule and the strictest of the three. `kick` is the only call allowed from another thread.
-- **Memory:** one large guest-physical region is mapped once at VM creation. A host-side page allocator hands out guest-physical pages from it. We never map per segment, because KVM caps the number of memory slots and mapping calls are slow everywhere. The host backs the region's pages only when they're first touched, and freed pages go back to it (`src/vmm/gphys.zig`): each free range keeps the span of it that may be dirty, and once that span reaches 32 MiB it's released (`madvise(MADV_DONTNEED)` on KVM, a hole punched in the RAM file on the native backend, and, with the range taken out of the VM and put back, fresh pages mapped over it on HVF and a decommit and recommit on WHP). A smaller dirty span is zeroed as it's handed out again, so small frees and reallocations cost no syscalls, and never-used or released pages aren't touched when they're handed out.
+- **Memory:** one large guest-physical region is mapped once at VM creation. A host-side page allocator hands out guest-physical pages from it. We never map per segment, because KVM caps the number of memory slots and mapping calls are slow everywhere. The host backs the region's pages only when they're first touched, and freed pages go back to it (`src/engine/gphys.zig`): each free range keeps the span of it that may be dirty, and once that span reaches 32 MiB it's released (`madvise(MADV_DONTNEED)` on KVM, a hole punched in the RAM file on the sud engine, and, with the range taken out of the VM and put back, fresh pages mapped over it on HVF and a decommit and recommit on WHP). A smaller dirty span is zeroed as it's handed out again, so small frees and reallocations cost no syscalls, and never-used or released pages aren't touched when they're handed out.
 - **Page size:** guest page tables use 4K pages on every host, matching 9front's page size on both architectures. hyper-linux shows HVF guests can use 4K pages. Only the single host memory region has to be aligned to the host page size (16K on Apple Silicon).
-- **No hypervisor:** `create` fails cleanly with a clear message, and `auto` falls back to the emulator when it's built in. The native backend is never chosen automatically, since it shares h9's process and isn't a security boundary; it needs an explicit `--backend native`, and the CLI points at it when nothing else can run.
+- **No hypervisor:** `create` fails cleanly with a clear message, and `auto` falls back to the emulator when it's built in. The sud engine is never chosen automatically, since it shares h9's process and isn't a security boundary; it needs an explicit `--engine sud`, and the CLI points at it when nothing else can run.
 
 ### Shared pieces
 
-The hypervisor backends share:
+The hypervisor engines share:
 
-- `src/vmm/gphys.zig`: the guest-physical page allocator over the one RAM region, and the address space type (a list of regions over page tables).
+- `src/engine/gphys.zig`: the guest-physical page allocator over the one RAM region, and the address space type (a list of regions over page tables).
 - A page-table format: `pt_arm64.zig` (TTBR0 for user, a TTBR1 kernel half with the shim, the doorbell page and the per-vCPU shared pages, and the system register values the host sets) or `pt_amd64.zig` (4-level tables, with the kernel half under PML4 entry 511, which every address space's root shares).
 - `x86.zig`: the amd64 CPU state the host sets, as plain values.
 
@@ -106,38 +106,38 @@ The hypervisor backends share:
 
 ### KVM
 
-The KVM backend (`src/vmm/kvm.zig`) runs on Linux on x86\_64 and arm64. Its ioctls and structs are declared in `kvm_abi.zig`, so it needs no headers or library and static musl builds keep working. `/dev/kvm` missing, or not accessible, is `HypervisorUnavailable`, and the CLI says which.
+The KVM engine (`src/engine/kvm.zig`) runs on Linux on x86\_64 and arm64. Its ioctls and structs are declared in `kvm_abi.zig`, so it needs no headers or library and static musl builds keep working. `/dev/kvm` missing, or not accessible, is `HypervisorUnavailable`, and the CLI says which.
 
 The VM has one memory slot, the RAM region at 2 GiB, and no in-kernel interrupt controller: h9 never injects interrupts. On arm64 the VM asks for HVF's 36-bit IPA size, and the host sets the same system registers HVF does with `KVM_SET_ONE_REG`, so the shim is unchanged; the doorbell store is an MMIO exit, which KVM completes and steps past itself. On x86\_64 the doorbell is an `OUT`.
 
 FP state goes through `KVM_{GET,SET}_XSAVE`, whose first 512 bytes are FXSAVE's image (`KVM_GET_FPU` leaves MXCSR out on recent kernels), and the FS base and the user GS base (`KERNEL_GS_BASE`, which `SWAPGS` swaps in) through `KVM_{GET,SET}_MSRS`.
 
-- **vCPU lifetime.** KVM can't destroy one vCPU, and every vCPU a VM ever created counts against its limit. So `destroy` parks the vCPU on a free list, and `createVcpu` takes a parked one first and resets it: `KVM_ARM_VCPU_INIT` again on arm64, which is a full reset, and on x86 the registers, segment state, MSRs, and FP state all set again. A vCPU isn't bound to a thread, so any thread may take a parked one. The limit `maxVcpus` reports is KVM's (`KVM_CAP_MAX_VCPUS`, capped by `KVM_CAP_MAX_VCPU_ID` and 1024 shared-page slots), capped again by the file descriptors left less 256, since each vCPU holds one; the backend raises the soft `RLIMIT_NOFILE` to the hard limit when it creates the VM.
+- **vCPU lifetime.** KVM can't destroy one vCPU, and every vCPU a VM ever created counts against its limit. So `destroy` parks the vCPU on a free list, and `createVcpu` takes a parked one first and resets it: `KVM_ARM_VCPU_INIT` again on arm64, which is a full reset, and on x86 the registers, segment state, MSRs, and FP state all set again. A vCPU isn't bound to a thread, so any thread may take a parked one. The limit `maxVcpus` reports is KVM's (`KVM_CAP_MAX_VCPUS`, capped by `KVM_CAP_MAX_VCPU_ID` and 1024 shared-page slots), capped again by the file descriptors left less 256, since each vCPU holds one; the engine raises the soft `RLIMIT_NOFILE` to the hard limit when it creates the VM.
 - **Kicks.** `kick` sets `kvm_run.immediate_exit` and sends the vCPU's thread `SIGRTMIN + 1`. The signal is blocked in each vCPU thread (from `createVcpu`) and unblocked only inside `KVM_RUN` through `KVM_SET_SIGNAL_MASK`, so it never interrupts a host call; after a stop, h9 consumes it with `sigtimedwait`, as it stays pending once blocked again. A kick can stop the vCPU anywhere. In user mode, the host reads the registers into the Ureg and re-enters the shim at its restore path before the next run, so a note delivered at that exit takes effect. In the shim's save path, before the doorbell, the Ureg is half written, so the host runs it on to the doorbell and returns that exit instead; in its restore path, the Ureg is already current.
 
 ### WHP
 
-The WHP backend (`src/vmm/whp.zig`) runs on Windows x86\_64. It runs KVM's amd64 shim, page tables, and CPU state (`x86.zig`, `pt_amd64.zig`), setting the state through `WHvSetVirtualProcessorRegisters` rather than ioctls; its functions and structs are declared in `whp_abi.zig`.
+The WHP engine (`src/engine/whp.zig`) runs on Windows x86\_64. It runs KVM's amd64 shim, page tables, and CPU state (`x86.zig`, `pt_amd64.zig`), setting the state through `WHvSetVirtualProcessorRegisters` rather than ioctls; its functions and structs are declared in `whp_abi.zig`.
 
 `WinHvPlatform.dll` is loaded at run time, so `h9.exe` starts on machines without the Windows Hypervisor Platform feature, and `auto` falls back to the emulator there.
 
-The doorbell is an `OUT` to an I/O port, whose exit the backend steps past itself, and `kick` is `WHvCancelRunVirtualProcessor` plus a flag that `run` checks first, since a cancel only stops a run already in progress.
+The doorbell is an `OUT` to an I/O port, whose exit the engine steps past itself, and `kick` is `WHvCancelRunVirtualProcessor` plus a flag that `run` checks first, since a cancel only stops a run already in progress.
 
 As on KVM, destroyed vCPUs are parked and reset for their next user. The partition's processor count, and so the vCPU limit, is fixed at 64, HVF's measured limit, until WHP's own is measured.
 
-The baseline and `[whp]` integration cases pass on a Windows x86\_64 VM, except the emulator fallback case, which hasn't run on a machine without the feature. Windows on ARM has no WHP backend yet: `aarch64-windows` builds keep the stub's `BackendNotBuilt`.
+The baseline and `[whp]` integration cases pass on a Windows x86\_64 VM, except the emulator fallback case, which hasn't run on a machine without the feature. Windows on ARM has no WHP engine yet: `aarch64-windows` builds keep the stub's `EngineNotBuilt`.
 
-## Native backend (`native`)
+## The sud engine (`sud`)
 
-The native backend ([native-backend](../design/epoch-0/native-backend.md), `src/vmm/native.zig`) runs amd64 guest code directly on the host CPU on Linux x86\_64, with no hypervisor and no emulator, so it runs where KVM can't: containers without `/dev/kvm` and cloud VMs without nested virtualization. It's MIT and built into every Linux x86\_64 `h9`.
+The sud engine ([native-backend](../design/epoch-0/native-backend.md), `src/engine/sud.zig`) runs amd64 guest code directly on the host CPU on Linux x86\_64, with no hypervisor and no emulator, so it runs where KVM can't: containers without `/dev/kvm` and cloud VMs without nested virtualization. It's MIT and built into every Linux x86\_64 `h9`.
 
 ### Stubs
 
-Every 9front process is linked at the same address with its stack at the same top, so guest code can't run in h9's own address space. Each address space is a stub process instead (`src/vmm/native_stub.zig`): a freestanding static program of about 4 KB, embedded in h9, written to a sealed memfd and started with `clone(CLONE_VM|CLONE_VFORK)` and `execveat`, with every signal blocked across the clone.
+Every 9front process is linked at the same address with its stack at the same top, so guest code can't run in h9's own address space. Each address space is a stub process instead (`src/engine/sud_stub.zig`): a freestanding static program of about 4 KB, embedded in h9, written to a sealed memfd and started with `clone(CLONE_VM|CLONE_VFORK)` and `execveat`, with every signal blocked across the clone.
 
 It's linked at `0x6000_0000_0000` and keeps `[stub_base, stub_base + 4 GiB)` for itself, far above 9front's amd64 layout; at startup it unmaps everything else (the kernel's stack, vDSO, and vvar), so the guest's whole range is free.
 
-It runs in its own session, so the terminal's signals go to h9 alone, with only three file descriptors: the machine's guest RAM, one memfd that h9 maps once and hands out in pages through `gphys.Ram`; its control pages (`src/vmm/native_abi.zig`); and the spin budget every stub shares with h9 (see Threads and runs).
+It runs in its own session, so the terminal's signals go to h9 alone, with only three file descriptors: the machine's guest RAM, one memfd that h9 maps once and hands out in pages through `gphys.Ram`; its control pages (`src/engine/sud_abi.zig`); and the spin budget every stub shares with h9 (see Threads and runs).
 
 `map` and `unmap` queue requests, and a stub thread carries them out (an `mmap` of the RAM file at the guest address, or a `munmap`) before it next runs guest code, so `translate` and `copy` read guest memory in place.
 
@@ -147,7 +147,7 @@ Each stub thread turns on Syscall User Dispatch for everything outside the stub'
 
 A seccomp filter is the backstop: it kills the stub for any call not made from the stub's range, and allows only the few calls the stub makes (`futex`, `mmap` of the RAM file, `munmap`, `clone` with exactly the thread flags, and a handful more).
 
-Backend creation runs a probe once per h9: a guest that makes syscalls with unusual values in AX (0, 39, 335, 336, x32 numbers, high bits) must trap each time, or `--check` says why and the backend is refused.
+Engine creation runs a probe once per h9: a guest that makes syscalls with unusual values in AX (0, 39, 335, 336, x32 numbers, high bits) must trap each time, or `--check` says why and the engine is refused.
 
 ### Threads and runs
 
@@ -161,17 +161,17 @@ Each side spins briefly for the other before it sleeps on the futex, which saves
 
 `kick` sets the page's kick flag and sends SIGURG with `tgkill`; the stub reports `interrupted` only while the flag is set, so a signal that arrives after the run it was meant for has ended just resumes the guest.
 
-`AddressSpace.shootdown` has the control thread carry out the queued unmaps, whose host `munmap` shoots down the other threads' TLBs. Unlike KVM's shim, the backend can't hide CPUID, so guests see the host's AVX.
+`AddressSpace.shootdown` has the control thread carry out the queued unmaps, whose host `munmap` shoots down the other threads' TLBs. Unlike KVM's shim, the engine can't hide CPUID, so guests see the host's AVX.
 
 ### Speed
 
-On a 4-CPU cloud VM without KVM, an awk loop that takes 10.7 s on emu takes 0.24 s on native, and the amd64 integration suite runs in about 5½ minutes against 7 on emu. arm64 isn't built yet.
+On a 4-CPU cloud VM without KVM, an awk loop that takes 10.7 s on hcpu takes 0.24 s on sud, and the amd64 integration suite runs in about 5½ minutes against 7 on hcpu. arm64 isn't built yet.
 
-## Emulator backend (`emu`)
+## The hcpu engine (`hcpu`)
 
-The emulator lets the system run anywhere, including VMs without nested virtualization, at reduced speed. It implements the same Backend, AddressSpace, Vcpu, and Exit contract, so everything above the vmm layer runs unchanged.
+The emulator lets the system run anywhere, including VMs without nested virtualization, at reduced speed. It implements the same Engine, AddressSpace, Vcpu, and Exit contract, so everything above the engine layer runs unchanged.
 
-It's hcpu, h9's own CPUs: ha64 for arm64 binaries, h86 for 386 binaries, and hx64 for amd64 binaries, picked by the binary's architecture when the backend is created ([hcpu](../design/epoch-0/hcpu.md)). [spec/jit.md](jit.md) describes the backend and what the CPUs share, and [spec/ha64.md](ha64.md), [spec/h86.md](h86.md), and [spec/hx64.md](hx64.md) each CPU. It's MIT, and it's built into every `h9` for an arm64 or x86-64 target and into the web host; there's no build option to leave it out or to pick another emulator.
+It's hcpu, h9's own CPUs: ha64 for arm64 binaries, h86 for 386 binaries, and hx64 for amd64 binaries, picked by the binary's architecture when the engine is created ([hcpu](../design/epoch-0/hcpu.md)). [spec/jit.md](jit.md) describes the engine and what the CPUs share, and [spec/ha64.md](ha64.md), [spec/h86.md](h86.md), and [spec/hx64.md](hx64.md) each CPU. It's MIT, and it's built into every `h9` for an arm64 or x86-64 target and into the web host; there's no build option to leave it out or to pick another emulator.
 
 ### Scope
 
@@ -179,7 +179,7 @@ User-mode arm64, amd64, and 386 code only. On an `SVC`, `SYSCALL`, or `INT $64`,
 
 ### Memory
 
-Guest pages come from one reserved range of host memory, twice the memory cap in address space (`src/vmm/arena.zig`: first fit below a bump pointer; a freed range is given back to the host, mapped over with fresh zero pages on POSIX and decommitted on Windows, so neither allocation nor free touches the pages), and the host and the guest share the pages, so syscall arguments are read in place. An address space is a list of regions of that memory.
+Guest pages come from one reserved range of host memory, twice the memory cap in address space (`src/engine/arena.zig`: first fit below a bump pointer; a freed range is given back to the host, mapped over with fresh zero pages on POSIX and decommitted on Windows, so neither allocation nor free touches the pages), and the host and the guest share the pages, so syscall arguments are read in place. An address space is a list of regions of that memory.
 
 Its pages are zero and stay unbacked until touched, and rfork's eager copy skips pages that are still zero (`src/segment.zig`), so the several hundred MB of `brk` a Go program reserves at start cost next to nothing until it uses them. They still count against `--memory`.
 
@@ -187,7 +187,7 @@ Its pages are zero and stay unbacked until touched, and rfork's eager copy skips
 
 - Running on any host or VM without a usable hypervisor: macOS, Linux, Windows, hosted CI runners, and the browser.
 - Cross-architecture runs: amd64 and 386 binaries on an arm64 host, and arm64 binaries on an x86-64 one.
-- Conformance: the backend cases in `tests/backends.zig` run against every backend built in.
+- Conformance: the engine cases in `tests/engines.zig` run against every engine built in.
 
 ### Limits and selection
 
@@ -197,7 +197,7 @@ On HVF on an M3 Max, the same loop takes 0.27 s, a `pwrite` round trip about 1.1
 
 So syscall-heavy work such as rc pipelines runs at hypervisor speed or better, and compute runs a few times slower; that's fine for tests, and tolerable for self-hosted builds.
 
-By default `h9` uses the host's hypervisor when it's available, and otherwise falls back to the emulator with a warning; it never selects the native backend, which shares h9's process and isn't a security boundary. `--backend emu|hvf|kvm|native|whp|v86` forces a choice, and `--backend native` warns that it isn't a security boundary; `v86`, the browser host's old backend, is an alias of `emu` ([browser-host](../design/epoch-0/browser-host.md)).
+By default `h9` uses the host's hypervisor when it's available, and otherwise falls back to hcpu with a warning; it never selects the sud engine, which shares h9's process and isn't a security boundary. `--engine hvf|kvm|whp|sud|hcpu` forces a choice, and `--engine sud` warns on a terminal that it isn't a security boundary. For one release, `--backend` is an alias of `--engine`, and `native`, `emu`, and `v86` (the web host's old backend, [browser-host](../design/epoch-0/browser-host.md)) are aliases of `sud`, `hcpu`, and `hcpu` ([renames](../design/renames.md)).
 
 ## Guest shims
 
