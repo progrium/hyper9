@@ -652,19 +652,17 @@ mountfix(Chan *c, uchar *op, long n, long maxn)
 	return e-op;
 }
 
-static long
-kread(int fd, uchar *p, long n, vlong *offp)
+/*
+ * h9: kread's work on a channel, for kserve (src/kern/kserve.c,
+ * design/kernel-serve.md), so its directory reads of unions and mount
+ * points are sysread's.
+ */
+long
+h9_chanread(Chan *c, uchar *p, long n, vlong *offp)
 {
 	long nn, nnn;
-	Chan *c;
 	vlong off;
 
-	c = fdtochan(fd, OREAD, 1, 1);
-
-	if(waserror()){
-		cclose(c);
-		nexterror();
-	}
 
 	/*
 	 * The offset is passed through on directories, normally.
@@ -711,10 +709,24 @@ kread(int fd, uchar *p, long n, vlong *offp)
 		c->offset += nnn;
 		unlock(&c->lk);
 	}
+	return nnn;
+}
 
+static long
+kread(int fd, uchar *p, long n, vlong *offp)
+{
+	long nn;
+	Chan *c;
+
+	c = fdtochan(fd, OREAD, 1, 1);
+	if(waserror()){
+		cclose(c);
+		nexterror();
+	}
+	nn = h9_chanread(c, p, n, offp);
 	cclose(c);
 	poperror();
-	return nnn;
+	return nn;
 }
 
 /* name conflicts with netbsd
@@ -923,6 +935,19 @@ _sysfstat(int fd, void *s, long n)
 		r = dirsetname(name, strlen(name), s, r, l);
 	cclose(c);
 	poperror();
+	return r;
+}
+
+/* h9: fstat's work on a channel, for kserve (src/kern/kserve.c). */
+long
+h9_chanstat(Chan *c, uchar *s, long n)
+{
+	char *name;
+	long r;
+
+	r = devtab[c->type]->stat(c, s, n);
+	if((name = pathlast(c->path)) != nil && name[0] != '\0')
+		r = dirsetname(name, strlen(name), s, r, n);
 	return r;
 }
 

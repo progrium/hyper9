@@ -208,9 +208,6 @@ pub const Serve = struct {
     net: bool = false,
     /// There's no program: the run only serves. The CLI sets it.
     only: bool = false,
-    /// The exportfs run when the root has no /bin/exportfs: the built-in
-    /// root's.
-    fallback: []const u8 = "",
 };
 
 /// The host-stream device, `#ℏ`, whose tree is the guest's /net/ws.
@@ -332,12 +329,9 @@ pub const Plan = struct {
         try w.print("limits:   write={t} net={t}", .{ p.write, p.net });
         if (p.memory) |m| try w.print(" memory={f}", .{fmtSize(m)});
         if (p.timeout_ns) |d| try w.print(" timeout={f}", .{fmtDuration(d)});
-        if (p.pids) |n| {
-            try w.print(" pids={d}", .{n});
-            // Serving's processes are counted on their own
-            // (design/epoch-0/serve.md, "Limits").
-            if (p.serve != null) try w.print(" (+{d} serving)", .{n});
-        }
+        // Serving runs no guest processes, so --pids is the program's
+        // alone (design/kernel-serve.md).
+        if (p.pids) |n| try w.print(" pids={d}", .{n});
         if (p.cpus) |n| try w.print(" cpus={d}", .{n});
         try w.writeAll("\n");
         try w.writeAll("devmask: ");
@@ -407,14 +401,14 @@ pub const Plan = struct {
             }, r.path });
         }
         if (p.serve) |sv| {
-            try w.print("serve:    # 9P2000 and 9P2000.L; /bin/exportfs, or {s} without one\n", .{sv.fallback});
+            try w.writeAll("serve:    # 9P2000 and 9P2000.L, served by the kernel\n");
             for (sv.listeners) |l| {
                 var line: std.Io.Writer.Allocating = .init(std.heap.page_allocator);
                 defer line.deinit();
                 line.writer.print("  {s}", .{l.addr}) catch return error.WriteFailed;
                 try w.writeAll(line.written());
                 try w.splatByteAll(' ', (40 -| line.written().len) + 1);
-                try w.print("exportfs{s} -r {s}", .{ if (p.write == .none) " -R" else "", sv.root });
+                try w.print("kernel{s} -r {s}", .{ if (p.write == .none) " -R" else "", sv.root });
                 if (l.kind == .ws) {
                     try w.print("   ({s}origins: ", .{if (sv.token) "token, " else ""});
                     if (sv.origins.len == 0) try w.writeAll("none");
@@ -916,7 +910,6 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     if (pol.host_fs) try caveats.append(arena, "--host-fs exposes the whole host filesystem");
     var serve_plan = in.serve;
     if (serve_plan) |*sv| {
-        sv.fallback = try std.fmt.allocPrint(arena, "{s}/{s}/bin/exportfs", .{ builtin_dev, in.arch.name() });
         // Unix sockets rely on file permissions, and TCP has nothing, so
         // both are listed, as is a WebSocket listener without a token.
         for (sv.listeners) |l| if (l.kind != .ws or !sv.token) {

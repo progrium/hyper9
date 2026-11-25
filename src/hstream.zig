@@ -28,7 +28,7 @@
 //! handshake and reads masked frames; a unix or TCP one (`raw`) carries
 //! the bytes as they come. Either way the stream's thread waits for the
 //! client's first 9P message, checks it in the dialect slot, and only then
-//! tells the listener's `Served` that the stream is ready for exportfs.
+//! tells the listener's `Served` that the stream is ready to serve.
 //!
 //! The leaves called from devhstream.c never raise kernel errors: they
 //! return -1 with the error in the caller's ERRMAX buffer, and the C side
@@ -339,14 +339,15 @@ pub const Served = struct {
 
 /// The dialect slot (design/epoch-0/serve.md, "Each connection"): what
 /// serves a connection whose first message has type `typ`. Every
-/// connection goes to an exportfs through a `#ℓ` conversation's server
-/// side (design/epoch-0/dotl.md), which translates a 9P2000.L client and
-/// passes any other version to exportfs to answer.
-pub const Dialect = enum { exportfs };
+/// connection goes to the kernel's 9P server (design/kernel-serve.md)
+/// through a `#ℓ` conversation's server side (design/epoch-0/dotl.md),
+/// which translates a 9P2000.L client and passes any other version to
+/// the server to answer.
+pub const Dialect = enum { kernel };
 
 pub fn dialect(typ: u8) ?Dialect {
     const tversion = 100;
-    return if (typ == tversion) .exportfs else null;
+    return if (typ == tversion) .kernel else null;
 }
 
 pub const Stream = struct {

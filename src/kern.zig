@@ -262,6 +262,13 @@ const c_stub = struct {
     fn h9_hstream_wait(_: c_ulong) c_int {
         return -1;
     }
+    fn h9_kserve_new(_: c_int, _: [*:0]const u8, _: ?*const fn (?*anyopaque) callconv(.c) void, _: ?*anyopaque) ?*anyopaque {
+        return null;
+    }
+    fn h9_kserve_conn(_: *anyopaque, _: c_int) c_int {
+        return -1;
+    }
+    fn h9_kserve_close(_: *anyopaque) void {}
 };
 
 const c_real = struct {
@@ -367,6 +374,9 @@ const c_real = struct {
     extern fn h9_hstream_wake(id: c_ulong) void;
     extern fn h9_hstream_fd(id: c_ulong) c_int;
     extern fn h9_hstream_wait(id: c_ulong) c_int;
+    extern fn h9_kserve_new(readonly: c_int, root: [*:0]const u8, ended: ?*const fn (?*anyopaque) callconv(.c) void, arg: ?*anyopaque) ?*anyopaque;
+    extern fn h9_kserve_conn(s: *anyopaque, fd: c_int) c_int;
+    extern fn h9_kserve_close(s: *anyopaque) void;
 };
 
 const BootState = enum(u8) { idle, booting, up, failed };
@@ -1087,6 +1097,29 @@ pub fn hstreamWait(id: u32) Error!void {
     _ = try check(c.h9_hstream_wait(id));
 }
 
+/// The kernel's 9P2000 server (src/kern/kserve.c, design/kernel-serve.md),
+/// serving the calling process's namespace.
+pub const Kserve = opaque {
+    /// Serves from `root`, a path in the caller's namespace, with ..
+    /// stopping there; read-only refuses writes in the server. `ended`
+    /// is called with `arg` on a kernel thread as each connection ends.
+    pub fn new(readonly: bool, root: [*:0]const u8, ended: *const fn (?*anyopaque) callconv(.c) void, arg: ?*anyopaque) Error!*Kserve {
+        const p = c.h9_kserve_new(@intFromBool(readonly), root, ended, arg) orelse return error.Kern;
+        return @ptrCast(p);
+    }
+
+    /// Serves the caller's fd, a channel of whole 9P2000 messages, until
+    /// it hangs up. The server holds its own reference; the fd can close.
+    pub fn conn(s: *Kserve, fd: u31) Error!void {
+        _ = try check(c.h9_kserve_conn(s, fd));
+    }
+
+    /// Ends every connection, waits for them, and frees the server.
+    pub fn close(s: *Kserve) void {
+        c.h9_kserve_close(s);
+    }
+};
+
 /// Makes a channel for host-made stream `id` and returns an fd on it.
 /// The channel holds the stream; no path names it.
 pub fn hstreamFd(id: u32) Error!u31 {
@@ -1284,6 +1317,7 @@ comptime {
         @export(&h9_clock_wall, .{ .name = "h9_clock_wall" });
         @export(&h9_clock_mono, .{ .name = "h9_clock_mono" });
         @export(&h9_cons_ncpu, .{ .name = "h9_cons_ncpu" });
+        @export(&h9_web_locals, .{ .name = "h9_kern_locals" });
         @export(&h9_tools_table, .{ .name = "h9_tools_table" });
         @export(&h9_root_table, .{ .name = "h9_root_table" });
     }
@@ -1344,6 +1378,8 @@ comptime {
     if (web.enabled) @export(&h9_web_locals, .{ .name = "h9_web_locals" });
 }
 
+/// Also h9_kern_locals, everywhere: a kernel thread that acts for a
+/// machine (kserve.c's workers) takes its starter's plan, pages and CPUs.
 fn h9_web_locals(save: c_int, slots: *[4]usize) callconv(.c) void {
     if (save != 0) {
         slots[0] = @intFromPtr(fs_plan);

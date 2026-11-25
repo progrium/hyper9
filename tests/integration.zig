@@ -9590,7 +9590,7 @@ const Sock = struct {
     }
 
     /// Sends a Tversion and checks for the Rversion: the connection has
-    /// an exportfs behind it.
+    /// a server behind it.
     fn version(k: Sock) !void {
         try k.write("\x13\x00\x00\x00\x64\xff\xff\x00\x20\x00\x00\x06\x009P2000");
         var hdr: [7]u8 = undefined;
@@ -9882,32 +9882,6 @@ test "the 33rd connection is refused [serve]" {
     }
 }
 
-test "clients exporting at the --pids cap don't stop the program's rfork [serve]" {
-    const e = try serveEnv(@src());
-    var t = try startServer(e, &.{ "--pids", "8", "--serve", "tcp!127.0.0.1!0", "--rc", "echo ready; read >/dev/null; echo a | cat; echo forked" });
-    defer t.deinit();
-    var ab: [128]u8 = undefined;
-    const port = try addrPort(try servedAddr(&t, &ab));
-    try t.expect("ready", slow(10_000));
-    // More connections than serving's share of --pids: the ones past it
-    // are closed, and the program still forks.
-    var conns: [12]Sock = undefined;
-    var open: usize = 0;
-    defer for (conns[0..open]) |k| k.close();
-    var refused: usize = 0;
-    while (open < conns.len) : (open += 1) {
-        conns[open] = try Sock.dial(port);
-        conns[open].version() catch {
-            refused += 1;
-        };
-    }
-    try std.testing.expect(refused > 0);
-    try t.send("x" ++ enter);
-    try t.expect("a", slow(10_000));
-    try t.expect("forked", slow(10_000));
-    try std.testing.expectEqual(0, try t.wait(slow(10_000)));
-}
-
 test "--serve with no program serves until a hangup and exits 0 [serve]" {
     // It ends the server with SIGHUP, which Windows has no way to send.
     if (builtin.os.tag == .windows) return error.SkipZigTest;
@@ -10057,33 +10031,484 @@ test "--serve-origin '*' without --serve-token exits 2 [serve]" {
     try std.testing.expectEqualStrings("", r.out);
 }
 
-test "a connection past 8 blocking requests fails them without affecting another [serve]" {
+/// A raw 9P2000 client on a `--serve` TCP connection, for the
+/// [kernel-serve] cases that need to see the protocol itself.
+const P9 = struct {
+    k: Sock,
+    out: [512]u8 = undefined,
+    n: usize = 0,
+    in: [8192 + 24]u8 = undefined,
+
+    const Reply = struct { typ: u8, tag: u16, body: []const u8 };
+
+    const Tversion = 100;
+    const Tattach = 104;
+    const Rerror = 107;
+    const Tflush = 108;
+    const Rflush = 109;
+    const Twalk = 110;
+    const Rwalk = 111;
+    const Topen = 112;
+    const Tcreate = 114;
+    const Tread = 116;
+    const Rread = 117;
+    const Tclunk = 120;
+    const Tremove = 122;
+    const Tstat = 124;
+    const Twstat = 126;
+    const nofid = 0xffff_ffff;
+
+    /// Dials `port`, negotiates 9P2000, and attaches fid 0.
+    fn dial(port: u16) !P9 {
+        var p: P9 = .{ .k = try Sock.dial(port) };
+        errdefer p.k.close();
+        p.begin(Tversion, 0xffff);
+        p.int(u32, 8192 + 24);
+        p.str("9P2000");
+        _ = try p.expect(Tversion + 1);
+        p.begin(Tattach, 1);
+        p.int(u32, 0);
+        p.int(u32, nofid);
+        p.str("none");
+        p.str("");
+        _ = try p.expect(Tattach + 1);
+        return p;
+    }
+
+    fn close(p: *P9) void {
+        p.k.close();
+    }
+
+    fn begin(p: *P9, typ: u8, tag: u16) void {
+        p.out[4] = typ;
+        std.mem.writeInt(u16, p.out[5..7], tag, .little);
+        p.n = 7;
+    }
+
+    fn int(p: *P9, comptime T: type, v: T) void {
+        std.mem.writeInt(T, p.out[p.n..][0..@sizeOf(T)], v, .little);
+        p.n += @sizeOf(T);
+    }
+
+    fn str(p: *P9, s: []const u8) void {
+        p.int(u16, @intCast(s.len));
+        @memcpy(p.out[p.n..][0..s.len], s);
+        p.n += s.len;
+    }
+
+    fn send(p: *P9) !void {
+        std.mem.writeInt(u32, p.out[0..4], @intCast(p.n), .little);
+        try p.k.write(p.out[0..p.n]);
+    }
+
+    fn recv(p: *P9) !Reply {
+        var h: [4]u8 = undefined;
+        try p.k.readFull(&h, slow(10_000));
+        const size = std.mem.readInt(u32, &h, .little);
+        if (size < 7 or size - 4 > p.in.len) return error.BadReply;
+        try p.k.readFull(p.in[0 .. size - 4], slow(10_000));
+        return .{ .typ = p.in[0], .tag = std.mem.readInt(u16, p.in[1..3], .little), .body = p.in[3 .. size - 4] };
+    }
+
+    /// Sends what's built and reads the reply, which must be `want`.
+    fn expect(p: *P9, want: u8) ![]const u8 {
+        try p.send();
+        const r = try p.recv();
+        if (r.typ != want) {
+            std.debug.print("9P: got {d} ({s}), want {d}\n", .{ r.typ, errText(r), want });
+            return error.UnexpectedReply;
+        }
+        return r.body;
+    }
+
+    /// Sends what's built and returns the Rerror's text.
+    fn expectError(p: *P9) ![]const u8 {
+        try p.send();
+        const r = try p.recv();
+        if (r.typ != Rerror) return error.UnexpectedReply;
+        return errText(r);
+    }
+
+    fn errText(r: Reply) []const u8 {
+        if (r.typ != Rerror or r.body.len < 2) return "";
+        const n = std.mem.readInt(u16, r.body[0..2], .little);
+        return r.body[2..][0..@min(n, r.body.len - 2)];
+    }
+
+    /// Builds a Twalk of `names` from `fid` to `newfid`.
+    fn walk(p: *P9, fid: u32, newfid: u32, names: []const []const u8) void {
+        p.begin(Twalk, 2);
+        p.int(u32, fid);
+        p.int(u32, newfid);
+        p.int(u16, @intCast(names.len));
+        for (names) |s| p.str(s);
+    }
+
+    /// Walks all of `names` and returns the last qid's path.
+    fn walkPath(p: *P9, fid: u32, newfid: u32, names: []const []const u8) !u64 {
+        p.walk(fid, newfid, names);
+        const b = try p.expect(Rwalk);
+        const n = std.mem.readInt(u16, b[0..2], .little);
+        if (n != names.len) return error.ShortWalk;
+        if (n == 0) return 0;
+        return std.mem.readInt(u64, b[2 + 13 * (n - 1) + 5 ..][0..8], .little);
+    }
+
+    /// Walks `names` and returns how many the server walked: fewer than
+    /// all is a partial walk, which 9P answers with Rwalk, not Rerror.
+    fn walkCount(p: *P9, fid: u32, newfid: u32, names: []const []const u8) !u16 {
+        p.walk(fid, newfid, names);
+        const b = try p.expect(Rwalk);
+        return std.mem.readInt(u16, b[0..2], .little);
+    }
+
+    fn open(p: *P9, fid: u32, mode: u8) void {
+        p.begin(Topen, 3);
+        p.int(u32, fid);
+        p.int(u8, mode);
+    }
+
+    fn read(p: *P9, tag: u16, fid: u32, off: u64, count: u32) void {
+        p.begin(Tread, tag);
+        p.int(u32, fid);
+        p.int(u64, off);
+        p.int(u32, count);
+    }
+
+    /// Reads a file's whole contents, up to the buffer.
+    fn readAll(p: *P9, fid: u32, buf: []u8) ![]u8 {
+        var off: usize = 0;
+        while (off < buf.len) {
+            p.read(4, fid, off, @intCast(@min(buf.len - off, 8192)));
+            const b = try p.expect(Rread);
+            const n = std.mem.readInt(u32, b[0..4], .little);
+            if (n == 0) break;
+            @memcpy(buf[off..][0..n], b[4..][0..n]);
+            off += n;
+        }
+        return buf[0..off];
+    }
+
+    fn clunk(p: *P9, fid: u32) !void {
+        p.begin(Tclunk, 5);
+        p.int(u32, fid);
+        _ = try p.expect(Tclunk + 1);
+    }
+
+    /// A Twstat that renames `fid` and changes nothing else.
+    fn rename(p: *P9, fid: u32, name: []const u8) void {
+        p.begin(Twstat, 6);
+        p.int(u32, fid);
+        const fixed = 2 + 4 + 13 + 4 + 4 + 4 + 8;
+        const n = fixed + 2 + name.len + 2 * 3;
+        p.int(u16, @intCast(n + 2));
+        p.int(u16, @intCast(n));
+        p.int(u16, 0xffff);
+        p.int(u32, 0xffff_ffff);
+        p.int(u8, 0xff);
+        p.int(u32, 0xffff_ffff);
+        p.int(u64, 0xffff_ffff_ffff_ffff);
+        p.int(u32, 0xffff_ffff);
+        p.int(u32, 0xffff_ffff);
+        p.int(u32, 0xffff_ffff);
+        p.int(u64, 0xffff_ffff_ffff_ffff);
+        p.str(name);
+        p.str("");
+        p.str("");
+        p.str("");
+    }
+};
+
+/// Starts a server on a TCP port with `rc` as its program, which must
+/// print "ready", and returns the port.
+fn startRawServer(e: Env, t: *Term, extra: []const []const u8, rc: []const u8) !u16 {
+    var args: std.ArrayList([]const u8) = .empty;
+    defer args.deinit(gpa);
+    try args.appendSlice(gpa, extra);
+    try args.appendSlice(gpa, &.{ "--serve", "tcp!127.0.0.1!0", "--rc", rc });
+    // The program's end closes the listener, so it outlasts the case.
+    t.* = try startServer(e, args.items);
+    errdefer t.deinit();
+    var ab: [128]u8 = undefined;
+    const port = try addrPort(try servedAddr(t, &ab));
+    try t.expect("ready", slow(10_000));
+    return port;
+}
+
+test "serving runs no guest process [kernel-serve]" {
+    const e = try serveEnv(@src());
+    var t = try startServer(e, &.{ "--serve", "tcp!127.0.0.1!0", "--rc", "echo ready; sleep 60" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const addr = try servedAddr(&t, &ab);
+    try t.expect("ready", slow(10_000));
+    // The client's own root comes through the server too, so its
+    // processes are being served while it looks.
+    const r = try runServed(e, addr, "cat /mnt/temp/proc/*/status | awk '{print $1}' | sort -u");
+    defer r.deinit();
+    errdefer std.debug.print("client stderr: {s}\n", .{r.err});
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "exportfs") == null);
+    try expectIn(r.out, "serve\n");
+    try expectIn(r.out, "sleep\n");
+}
+
+test "a blocking read doesn't hold up the connection [kernel-serve]" {
     const e = try serveEnv(@src());
     var s: Scratch = undefined;
     try serveScratch(&s);
     defer s.deinit();
-    // /srv/blk is a pipe nobody writes, so each read through it blocks
-    // one of the connection's exportfs processes.
+    // /srv/blk is a pipe nobody writes, so each read through it blocks.
     try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "srv.rc", .data = "{ echo 3 >/srv/blk; echo ready; sleep 60 } <>[3] '#|/data'\n" });
     var t = try startServer(e, &.{ "--cwd", s.path, "--serve", "ws://127.0.0.1:0/9p", "--rc", ". /mnt/term/cwd/srv.rc" });
     defer t.deinit();
     var ab: [128]u8 = undefined;
     const addr = try servedAddr(&t, &ab);
     try t.expect("ready", slow(10_000));
+    // Twelve blocked reads, more than exportfs's 8 processes, then a
+    // read of the marker on the same connection: it waits for none of
+    // them, and none of them fails.
     var cmd: [512]u8 = undefined;
     const r = try runClient(e, e.root, &.{ "--rc", try std.fmt.bufPrint(&cmd,
-        \\mkdir /tmp/a /tmp/b && wsmount {s} /tmp/a || exit
+        \\mkdir /tmp/a && wsmount {s} /tmp/a || exit
         \\for(i in 1 2 3 4 5 6 7 8 9 10 11 12) {{ cat /tmp/a/srv/blk >[2]/tmp/err.$i & }}
-        \\sleep 3
-        \\wsmount {s} /tmp/b && cat /tmp/b/mnt/term/cwd/marker
-        \\cat /tmp/err.* | grep -c 'Out of processes'
-    , .{ addr, addr }) });
+        \\sleep 2
+        \\cat /tmp/a/mnt/term/cwd/marker
+        \\cat /tmp/err.* | wc -c
+    , .{addr}) });
     defer r.deinit();
     errdefer std.debug.print("client out: {s}\nclient stderr: {s}\n", .{ r.out, r.err });
     var lines = std.mem.splitScalar(u8, r.out, '\n');
     try std.testing.expectEqualStrings("served", lines.next().?);
-    const failed = try std.fmt.parseInt(u32, lines.next().?, 10);
-    try std.testing.expect(failed > 0);
+    try std.testing.expectEqualStrings("0", std.mem.trim(u8, lines.next().?, " "));
+}
+
+test "Tflush interrupts a blocked read and answers after its reply [kernel-serve]" {
+    const e = try serveEnv(@src());
+    var t: Term = undefined;
+    const port = try startRawServer(e, &t, &.{}, "{ echo 3 >/srv/blk; echo ready; sleep 600 } <>[3] '#|/data'");
+    defer t.deinit();
+    var p = try P9.dial(port);
+    defer p.close();
+    _ = try p.walkPath(0, 1, &.{ "srv", "blk" });
+    p.open(1, 0);
+    _ = try p.expect(P9.Topen + 1);
+    p.read(7, 1, 0, 100);
+    try p.send();
+    try std.Io.sleep(std.testing.io, .fromMilliseconds(300), .awake);
+    p.begin(P9.Tflush, 8);
+    p.int(u16, 7);
+    try p.send();
+    // The read's reply comes first, failed as a note fails a system
+    // call, then the Rflush.
+    const r1 = try p.recv();
+    try std.testing.expectEqual(7, r1.tag);
+    try std.testing.expectEqual(P9.Rerror, r1.typ);
+    try expectIn(P9.errText(r1), "interrupted");
+    const r2 = try p.recv();
+    try std.testing.expectEqual(8, r2.tag);
+    try std.testing.expectEqual(P9.Rflush, r2.typ);
+    // The connection carries on.
+    _ = try p.walkPath(0, 2, &.{"tmp"});
+}
+
+test "an open fid survives a rename by another client [kernel-serve]" {
+    const e = try serveEnv(@src());
+    var t: Term = undefined;
+    const port = try startRawServer(e, &t, &.{}, "echo before >/tmp/f && echo ready; sleep 600");
+    defer t.deinit();
+    var a = try P9.dial(port);
+    defer a.close();
+    var b = try P9.dial(port);
+    defer b.close();
+    _ = try a.walkPath(0, 1, &.{ "tmp", "f" });
+    a.open(1, 0);
+    _ = try a.expect(P9.Topen + 1);
+    _ = try b.walkPath(0, 1, &.{ "tmp", "f" });
+    b.rename(1, "g");
+    _ = try b.expect(P9.Twstat + 1);
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("before\n", try a.readAll(1, &buf));
+    // The old name is gone and the new one is the same file.
+    try std.testing.expectEqual(1, try a.walkCount(0, 2, &.{ "tmp", "f" }));
+    _ = try a.walkPath(0, 2, &.{ "tmp", "g" });
+}
+
+test "create in a union lands in the MCREATE member [kernel-serve]" {
+    const e = try serveEnv(@src());
+    var t = try startServer(e, &.{ "--serve", "tcp!127.0.0.1!0", "--rc", "echo ready; sleep 60" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const addr = try servedAddr(&t, &ab);
+    try t.expect("ready", slow(10_000));
+    // / is #/ with the root's overlay bound after it with -c: the file
+    // goes in the overlay, which is also /root.
+    var ub: [std.Io.Dir.max_path_bytes + 32]u8 = undefined;
+    var db: [std.Io.Dir.max_path_bytes + 16]u8 = undefined;
+    const srv = try std.fmt.bufPrint(&ub, "{s}:/srv/served", .{dialUrl(&db, addr)});
+    const r = try runClient(e, e.root, &.{ "--url", srv, "--rc", "mount -c /srv/served /mnt/temp && echo made >/mnt/temp/kserve-new && cat /mnt/temp/root/kserve-new" });
+    defer r.deinit();
+    errdefer std.debug.print("client stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("made\n", r.out);
+}
+
+test "walking .. back across a mount matches namec [kernel-serve]" {
+    const e = try serveEnv(@src());
+    var s: Scratch = undefined;
+    try serveScratch(&s);
+    defer s.deinit();
+    var t: Term = undefined;
+    const port = try startRawServer(e, &t, &.{ "--cwd", s.path }, "echo ready; sleep 600");
+    defer t.deinit();
+    var p = try P9.dial(port);
+    defer p.close();
+    // /mnt/term/cwd is a host tree bound over /mnt/term's cwd: .. from
+    // it is /mnt/term, as cd .. in the guest finds.
+    const term = try p.walkPath(0, 1, &.{ "mnt", "term" });
+    const back = try p.walkPath(0, 2, &.{ "mnt", "term", "cwd", ".." });
+    try std.testing.expectEqual(term, back);
+    const up = try p.walkPath(0, 3, &.{ "mnt", "term", "cwd", "..", "..", "term", "cwd", "marker" });
+    _ = up;
+}
+
+test "a walk past the fid cap fails without hurting other fids [kernel-serve]" {
+    const e = try serveEnv(@src());
+    var t: Term = undefined;
+    const port = try startRawServer(e, &t, &.{}, "echo ready; sleep 600");
+    defer t.deinit();
+    var p = try P9.dial(port);
+    defer p.close();
+    // Fid 0 is the attach's; 4095 more reach the cap of 4096.
+    var fid: u32 = 1;
+    while (fid < 4096) : (fid += 1) _ = try p.walkPath(0, fid, &.{});
+    p.walk(0, fid, &.{});
+    try std.testing.expectEqualStrings("too many fids", try p.expectError());
+    // The others still work, and a clunk makes room.
+    _ = try p.walkPath(17, 17, &.{"tmp"});
+    try p.clunk(5);
+    _ = try p.walkPath(0, fid, &.{"tmp"});
+}
+
+test "--write=none refuses writes in the server [kernel-serve]" {
+    const e = try serveEnv(@src());
+    var t: Term = undefined;
+    const port = try startRawServer(e, &t, &.{"--write=none"}, "echo ready; sleep 600");
+    defer t.deinit();
+    var p = try P9.dial(port);
+    defer p.close();
+    // exportfs -R's error, before the device sees the request.
+    _ = try p.walkPath(0, 1, &.{"tmp"});
+    p.begin(P9.Tcreate, 3);
+    p.int(u32, 1);
+    p.str("f");
+    p.int(u32, 0o644);
+    p.int(u8, 1);
+    try std.testing.expectEqualStrings("file system read only", try p.expectError());
+    _ = try p.walkPath(0, 2, &.{ "lib", "namespace" });
+    p.open(2, 1);
+    try std.testing.expectEqualStrings("file system read only", try p.expectError());
+    p.rename(2, "x");
+    try std.testing.expectEqualStrings("file system read only", try p.expectError());
+    p.begin(P9.Tremove, 3);
+    p.int(u32, 2);
+    try std.testing.expectEqualStrings("file system read only", try p.expectError());
+    // Reading is fine.
+    _ = try p.walkPath(0, 2, &.{ "lib", "namespace" });
+    p.open(2, 0);
+    _ = try p.expect(P9.Topen + 1);
+}
+
+test "--serve-root stops .. at the attach root [kernel-serve]" {
+    const e = try serveEnv(@src());
+    var s: Scratch = undefined;
+    try serveScratch(&s);
+    defer s.deinit();
+    var t: Term = undefined;
+    const port = try startRawServer(e, &t, &.{ "--cwd", s.path, "--serve-root", "/mnt/term/cwd" }, "echo ready; sleep 600");
+    defer t.deinit();
+    var p = try P9.dial(port);
+    defer p.close();
+    // .. from the root, alone or in the middle of a walk, stays there.
+    const marker = try p.walkPath(0, 1, &.{"marker"});
+    try std.testing.expectEqual(marker, try p.walkPath(0, 2, &.{ "..", "..", "marker" }));
+    try std.testing.expectEqual(1, try p.walkCount(0, 3, &.{ "..", "lib" }));
+    var buf: [64]u8 = undefined;
+    p.open(2, 0);
+    _ = try p.expect(P9.Topen + 1);
+    try std.testing.expectEqualStrings("served\n", try p.readAll(2, &buf));
+}
+
+test "a union directory reads the same as through exportfs [kernel-serve]" {
+    const e = try serveEnv(@src());
+    var t = try startServer(e, &.{ "--serve", "tcp!127.0.0.1!0", "--rc", "echo sum `{cd /bin && ls | sort | md5sum}; echo ready; sleep 60" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const addr = try servedAddr(&t, &ab);
+    // The program's own listing of the union, through read(2).
+    try t.expect("sum ", slow(10_000));
+    const start = t.mark;
+    try t.expect("\n", slow(10_000));
+    var lb: [64]u8 = undefined;
+    const line = std.mem.trim(u8, t.out.items[start..t.mark], " \r\n");
+    @memcpy(lb[0..line.len], line);
+    const local = lb[0..line.len];
+    try t.expect("ready", slow(10_000));
+    const r = try runServed(e, addr, "cd /mnt/temp/bin && ls | sort | md5sum");
+    defer r.deinit();
+    errdefer std.debug.print("client stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings(local, std.mem.trim(u8, r.out, " \r\n"));
+}
+
+test "a fuzzed 9P stream fails the connection, not the machine [kernel-serve]" {
+    const e = try serveEnv(@src());
+    var t: Term = undefined;
+    const port = try startRawServer(e, &t, &.{}, "echo ready; read >/dev/null; echo still; exit");
+    defer t.deinit();
+    var prng: std.Random.DefaultPrng = .init(0x9f);
+    const rand = prng.random();
+    var i: usize = 0;
+    while (i < 24) : (i += 1) {
+        var p = try P9.dial(port);
+        defer p.close();
+        // A message the right size with a random type and body, or a
+        // random size: either way the connection ends or answers
+        // Rerror, and the machine carries on.
+        var msg: [96]u8 = undefined;
+        rand.bytes(&msg);
+        const n: u32 = if (i % 3 == 0) rand.int(u32) else @intCast(7 + rand.uintLessThan(usize, msg.len - 7));
+        std.mem.writeInt(u32, msg[0..4], n, .little);
+        if (i % 2 == 0) msg[4] = @intCast(100 + rand.uintLessThan(u8, 28));
+        p.k.write(msg[0..@min(n, msg.len)]) catch {};
+        var buf: [256]u8 = undefined;
+        _ = p.k.read(&buf, 500) catch {};
+    }
+    var p = try P9.dial(port);
+    defer p.close();
+    _ = try p.walkPath(0, 1, &.{"tmp"});
+    try t.send("x" ++ enter);
+    try t.expect("still", slow(10_000));
+    try std.testing.expectEqual(0, try t.wait(slow(10_000)));
+}
+
+test "--pids no longer counts serving [kernel-serve]" {
+    const e = try serveEnv(@src());
+    var t = try startServer(e, &.{ "--pids", "8", "--serve", "tcp!127.0.0.1!0", "--rc", "echo ready; read >/dev/null; echo a | cat; echo forked" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const port = try addrPort(try servedAddr(&t, &ab));
+    try t.expect("ready", slow(10_000));
+    // More connections than --pids, each answered, and the program
+    // still forks.
+    var conns: [12]Sock = undefined;
+    var open: usize = 0;
+    defer for (conns[0..open]) |k| k.close();
+    while (open < conns.len) : (open += 1) {
+        conns[open] = try Sock.dial(port);
+        try conns[open].version();
+    }
+    try t.send("x" ++ enter);
+    try t.expect("a", slow(10_000));
+    try t.expect("forked", slow(10_000));
+    try std.testing.expectEqual(0, try t.wait(slow(10_000)));
 }
 
 test "--serve works over a root without /bin/exportfs [serve]" {
@@ -10092,8 +10517,8 @@ test "--serve works over a root without /bin/exportfs [serve]" {
     var s: Scratch = undefined;
     try serveScratch(&s);
     defer s.deinit();
-    // --read-deny hides the root's exportfs, so the server falls back to
-    // the built-in root's.
+    // --read-deny hides the root's exportfs, which serving doesn't need
+    // (design/kernel-serve.md).
     var db: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const deny = try std.fmt.bufPrint(&db, "{s}/{s}/bin/exportfs", .{ e.root, testArch(e) });
     var t = try startServer(e, &.{ "--cwd", s.path, "--read-deny", deny, "--serve", "tcp!127.0.0.1!0", "--rc", "test -e /bin/exportfs || echo ready; sleep 60" });
@@ -10196,7 +10621,7 @@ test "--print lists listeners and elides the token [serve]" {
     try std.testing.expectEqual(0, r.code);
     try expectIn(r.out, "\nserve:");
     try expectIn(r.out, "ws://127.0.0.1:8080/9p");
-    try expectIn(r.out, "exportfs -R -r /   (token, origins: http://a.example)");
+    try expectIn(r.out, "kernel -R -r /   (token, origins: http://a.example)");
     try expectIn(r.out, unix);
     try expectIn(r.out, "served without authentication on " ++ "unix!");
     try std.testing.expect(std.mem.indexOf(u8, r.out, "s3cret") == null);

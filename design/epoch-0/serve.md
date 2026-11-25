@@ -256,3 +256,5 @@ Follow-ups recorded elsewhere: 9P authentication for served TCP in [root-auth](r
 - The 503 for a WebSocket connection past the cap is written after reading the request, on a short-lived thread, at most 4 at once; past that, the connection is just closed.
 - `--serve-token`'s file holds one token, with surrounding whitespace trimmed; a token with spaces in it is a usage error, and a missing file is exit 125.
 - A unix socket is created mode 0600 (under a umask of 0177, then `chmod`), like its lock file.
+
+**2026-11-25, kernel-serve.** [kernel-serve](../kernel-serve.md) replaces each connection's exportfs with the kernel's own 9P server: step 3 of Each connection hands the stream to it, Which exportfs no longer applies, and Per connection and Processes change, since serving runs no guest processes and no longer counts against `--pids`. The cases `clients exporting at the --pids cap don't stop the program's rfork` and `a connection past 8 blocking requests fails them without affecting another` are replaced by kernel-serve's.

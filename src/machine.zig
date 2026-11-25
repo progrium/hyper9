@@ -275,8 +275,8 @@ pub const Machine = struct {
         /// On macOS the program must run `h9.gfx.main` on its main thread.
         gfx: ?Gfx = null,
         /// Listeners that serve the machine's namespace over 9P while a run
-        /// is in progress, each connection with its own exportfs
-        /// (design/epoch-0/serve.md). With an empty `argv`, `run` only serves,
+        /// is in progress, each connection served by the kernel's 9P server
+        /// (design/epoch-0/serve.md, design/kernel-serve.md). With an empty `argv`, `run` only serves,
         /// until a note ends it.
         serve: []const Listen = &.{},
         /// The guest path each connection exports.
@@ -765,16 +765,11 @@ pub const Machine = struct {
         /// this is empty it stays empty.
         procs: std.ArrayList(*Proc) = .empty,
         next_pid: u32 = 1,
-        /// Of `procs`: the program's, and the server Proc and its
-        /// descendants, each counted against `--pids` on its own
-        /// (design/epoch-0/serve.md, "Limits").
+        /// Of `procs`: the program's, which `--pids` caps. The server Proc
+        /// isn't counted (design/kernel-serve.md, "Caps").
         n_program: u32 = 0,
-        n_serving: u32 = 0,
         /// The listeners, with `--serve` (design/epoch-0/serve.md).
         srv: ?*serve.Server = null,
-        /// The exportfs the server Proc runs, as a guest path.
-        exportfs_buf: [64]u8 = undefined,
-        exportfs: []const u8 = "",
         trace_lock: std.atomic.Mutex = .unlocked,
         /// vCPUs for the processes.
         pool: cpupool.Pool,
@@ -835,37 +830,24 @@ pub const Machine = struct {
             if (j.mach.load(.acquire)) |mc| _ = mc.post(to, msg);
         }
 
-        /// Whose a new process is: the program's, or serving's, and then
-        /// which connection's, if any (design/epoch-0/serve.md).
-        const Owner = union(enum) {
-            program,
-            serving: ?*Conn,
-        };
+        /// Whose a new process is: the program's, or serving's: the server
+        /// Proc (design/epoch-0/serve.md), which runs no guest code.
+        const Owner = enum { program, serving };
 
         /// Allocates and registers a process with the next pid. Fails with
-        /// TooManyProcs at the policy's `--pids` cap, which the program's
-        /// processes and serving's are each counted against, or at a
-        /// connection's cap.
+        /// TooManyProcs at the policy's `--pids` cap, which only the
+        /// program's processes are counted against
+        /// (design/kernel-serve.md, "Caps").
         fn newProc(j: *Job, owner: Owner) error{ OutOfMemory, TooManyProcs }!*Proc {
             const gpa = j.m.gpa;
             const p = try gpa.create(Proc);
             errdefer gpa.destroy(p);
             j.lockSpin();
             defer j.lock.unlock();
-            const n = switch (owner) {
-                .program => &j.n_program,
-                .serving => &j.n_serving,
-            };
-            if (j.m.plan.pids) |cap| if (n.* >= cap) return error.TooManyProcs;
-            const conn: ?*Conn = switch (owner) {
-                .program => null,
-                .serving => |c| c,
-            };
-            if (conn) |c| if (c.live >= serve.conn_procs) return error.TooManyProcs;
+            if (owner == .program) if (j.m.plan.pids) |cap| if (j.n_program >= cap) return error.TooManyProcs;
             try j.procs.append(gpa, p);
-            n.* += 1;
-            if (conn) |c| c.live += 1;
-            p.* = .{ .job = j, .pid = j.next_pid, .serving = owner == .serving, .conn = conn };
+            if (owner == .program) j.n_program += 1;
+            p.* = .{ .job = j, .pid = j.next_pid, .serving = owner == .serving };
             j.next_pid += 1;
             return p;
         }
@@ -877,31 +859,15 @@ pub const Machine = struct {
                 _ = j.procs.swapRemove(i);
                 break;
             };
-            const ended = j.uncount(p);
+            j.uncount(p);
             j.lock.unlock();
-            if (ended) |c| j.connEnded(c);
             j.m.gpa.destroy(p);
         }
 
-        /// Takes a leaving process out of the counts. Returns its
-        /// connection if it was the connection's last. Called with `lock`
+        /// Takes a leaving process out of the counts. Called with `lock`
         /// held.
-        fn uncount(j: *Job, p: *Proc) ?*Conn {
-            if (!p.serving) {
-                j.n_program -= 1;
-                return null;
-            }
-            j.n_serving -= 1;
-            const c = p.conn orelse return null;
-            c.live -= 1;
-            return if (c.live == 0) c else null;
-        }
-
-        /// A connection's last process is gone: it's no longer counted
-        /// against the cap of 32.
-        fn connEnded(j: *Job, c: *Conn) void {
-            if (j.srv) |s| s.connEnded();
-            j.m.gpa.destroy(c);
+        fn uncount(j: *Job, p: *Proc) void {
+            if (!p.serving) j.n_program -= 1;
         }
 
         /// Waits for the first process to exit, delivering host signals
@@ -987,27 +953,15 @@ pub const Machine = struct {
         }
     };
 
-    /// One served connection (design/epoch-0/serve.md): how many processes
-    /// its exportfs and their children have, up to `serve.conn_procs`.
-    /// Guarded by `Job.lock`; freed with its last process.
-    const Conn = struct {
-        live: u32 = 0,
-    };
-
     /// One guest process: a kernel process with its own host thread, an
     /// address space and segments, and a vCPU while it runs.
     const Proc = struct {
         job: *Job,
         /// Machine-local pid.
         pid: u32,
-        /// The server Proc or one of its descendants (design/epoch-0/serve.md),
-        /// counted apart from the program's processes.
+        /// The server Proc (design/epoch-0/serve.md), not counted against
+        /// `--pids`.
         serving: bool = false,
-        /// The connection a serving process belongs to, if any.
-        conn: ?*Conn = null,
-        /// For a connection's first process: its stream's fd, which
-        /// becomes fds 0 and 1 before exportfs runs.
-        serve_fd: ?u31 = null,
         /// For a host pty's control and reader processes: the pair, and
         /// (for the reader) the master's fd.
         pty: ?*Pty = null,
@@ -1319,9 +1273,8 @@ pub const Machine = struct {
                 break;
             };
             const empty = j.procs.items.len == 0;
-            const ended = j.uncount(p);
+            j.uncount(p);
             j.lock.unlock();
-            if (ended) |c| j.connEnded(c);
             gpa.destroy(p);
             if (empty) j.all_done.set(io);
         }
@@ -1500,11 +1453,11 @@ pub const Machine = struct {
     /// Forks the server Proc (design/epoch-0/serve.md, "Each connection"):
     /// a copy of the first Proc's namespace, without `/net` unless
     /// `serve_net`, in a note group of its own, with no wait record for
-    /// the program to see. It runs no guest code; it takes each ready
-    /// stream and forks an exportfs for it.
+    /// the program to see. It runs no guest code; it hands each ready
+    /// stream to the kernel's 9P server (design/kernel-serve.md).
     fn startServer(m: *Machine, first: *Proc) RunError!void {
         const j = first.job;
-        const p = j.newProc(.{ .serving = null }) catch |e| switch (e) {
+        const p = j.newProc(.serving) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             error.TooManyProcs => unreachable, // the cap is at least 1
         };
@@ -1527,18 +1480,21 @@ pub const Machine = struct {
         defer p.exit();
         const srv = j.srv.?;
         if (!m.opts.serve_net) kern.unmount(null, "/net") catch {};
-        // A root without 9front's binaries has the built-in root's.
-        var st: [512]u8 = undefined;
-        j.exportfs = if (kern.stat("/bin/exportfs", &st)) |_|
-            "/bin/exportfs"
-        else |_|
-            std.fmt.bufPrint(&j.exportfs_buf, "{s}/{s}/bin/exportfs", .{ policy.builtin_dev, m.arch.name() }) catch "/bin/exportfs";
+        var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const root = std.fmt.bufPrintSentinel(&root_buf, "{s}", .{m.opts.serve_root}, 0) catch "/";
+        // A --serve-root that can't be walked hangs up each connection,
+        // as exportfs -r of it did by exiting.
+        const ks: ?*kern.Kserve = kern.Kserve.new(m.plan.write == .none, root, serveEnded, srv) catch null;
+        defer if (ks) |k| k.close();
         const mc = kern.mach() orelse return;
         const owner = @intFromPtr(mc);
         mc.put();
         srv.start(owner, kern.currentPages());
         while (srv.next()) |id| {
-            m.serveConn(p, id);
+            if (ks) |k| serveConn(srv, k, id) else {
+                hstream.release(id);
+                srv.connEnded();
+            }
             if (j.stopping.load(.acquire)) break;
         }
     }
@@ -1547,7 +1503,7 @@ pub const Machine = struct {
     /// starts a control process for each pair the host asks for.
     fn startPtyServer(m: *Machine, first: *Proc) RunError!void {
         const j = first.job;
-        const p = j.newProc(.{ .serving = null }) catch |e| switch (e) {
+        const p = j.newProc(.serving) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             error.TooManyProcs => unreachable, // the cap is at least 1
         };
@@ -1569,7 +1525,7 @@ pub const Machine = struct {
         defer p.exit();
         const ps = m.opts.ptys.?;
         while (ps.next(&j.stopping)) |pty| {
-            const c = j.newProc(.{ .serving = null }) catch {
+            const c = j.newProc(.serving) catch {
                 pty.finish(.failed);
                 pty.unref();
                 continue;
@@ -1614,7 +1570,7 @@ pub const Machine = struct {
         st.winsz = .{ pty.size.rows, pty.size.cols, pty.size.xpixel, pty.size.ypixel };
         _ = kc.ptySet(fd, &st, S.lock_bit | S.winsz_bit, .set) catch return pty.finish(.failed);
         pty.n = @intCast(st.n);
-        const r = j.newProc(.{ .serving = null }) catch return pty.finish(.failed);
+        const r = j.newProc(.serving) catch return pty.finish(.failed);
         r.pty = pty.ref();
         r.pty_fd = fd;
         // The reader shares this process's fds: closing the master here
@@ -1702,19 +1658,22 @@ pub const Machine = struct {
         }
     }
 
-    /// Forks an exportfs for a ready stream. Its fd is the child's until
-    /// it execs, when it becomes fds 0 and 1.
-    fn serveConn(m: *Machine, server: *Proc, id: u32) void {
-        const j = server.job;
-        const srv = j.srv.?;
+    /// A kserve connection has ended: its slot is free.
+    fn serveEnded(arg: ?*anyopaque) callconv(.c) void {
+        const srv: *serve.Server = @ptrCast(@alignCast(arg.?));
+        srv.connEnded();
+    }
+
+    /// Hands a ready stream to the kernel's 9P server, through a `#ℓ`
+    /// conversation's server side (design/epoch-0/dotl.md), so a 9P2000.L
+    /// client is translated and a 9P2000 one passes.
+    fn serveConn(srv: *serve.Server, ks: *kern.Kserve, id: u32) void {
         const fd = kern.hstreamFd(id) catch {
             hstream.release(id);
             srv.connEnded();
             return;
         };
         hstream.release(id);
-        // Through a `#ℓ` conversation's server side (design/epoch-0/dotl.md),
-        // so a 9P2000.L client is translated and a 9P2000 one passes.
         const data = dotlConv("serve {d}", fd);
         kern.close(fd) catch {};
         const sfd = data catch {
@@ -1722,73 +1681,7 @@ pub const Machine = struct {
             return;
         };
         defer kern.close(sfd) catch {};
-        const conn = m.gpa.create(Conn) catch {
-            srv.connEnded();
-            return;
-        };
-        conn.* = .{};
-        const c = j.newProc(.{ .serving = conn }) catch {
-            m.gpa.destroy(conn);
-            srv.connEnded();
-            return;
-        };
-        c.serve_fd = sfd;
-        const flags = kern.RF.PROC | kern.RF.NAMEG | kern.RF.FDG | kern.RF.NOWAIT;
-        // On failure dropProc ends the connection, as its last process.
-        kern.fork(flags, c.pid, Proc, exportfsMain, c) catch j.dropProc(c);
-    }
-
-    /// A connection's first process: puts the stream on fds 0 and 1 and
-    /// runs `exportfs -r ROOT`, with `-R` under `--write=none`, as
-    /// listen(8) does for a network service.
-    fn exportfsMain(p: *Proc) void {
-        const j = p.job;
-        const m = j.m;
-        kern.setPlan(&m.plan);
-        kern.setPages(&j.pages);
-        kern.setCpus(j.ncpu);
-        p.setKproc();
-        const st = m.startExportfs(p) catch |e| Status{ .killed = std.fmt.bufPrint(&p.msg_buf, "h9: exportfs: {t}", .{e}) catch "h9: error" };
-        setExits(switch (st) {
-            .exited => |t| t,
-            .killed => |t| t,
-        });
-        p.exit();
-    }
-
-    fn startExportfs(m: *Machine, p: *Proc) RunError!Status {
-        const j = p.job;
-        const fd = p.serve_fd.?;
-        _ = try kern.dup(fd, 0);
-        _ = try kern.dup(fd, 1);
-        try kern.close(fd);
-        var arena: std.heap.ArenaAllocator = .init(m.gpa);
-        defer arena.deinit();
-        const a = arena.allocator();
-        var argv: std.ArrayList([]const u8) = .empty;
-        try argv.append(a, "exportfs");
-        if (m.plan.write == .none) try argv.append(a, "-R");
-        try argv.appendSlice(a, &.{ "-r", m.opts.serve_root });
-        const path = try a.dupeSentinel(u8, j.exportfs, 0);
-        const bytes = readFile(a, path) catch |e| {
-            return .{ .killed = std.fmt.bufPrint(&p.msg_buf, "h9: {s}: {t}", .{ j.exportfs, e }) catch "h9: no exportfs" };
-        };
-        if (elf.isElf(bytes)) return .{ .killed = "h9: exportfs isn't a 9front binary" };
-        const hdr = aout.parse(bytes) catch return .{ .killed = "h9: exportfs: " ++ ebadexec };
-        if (hdr.arch != m.arch) return .{ .killed = "h9: exportfs: wrong architecture" };
-        kern.setText("exportfs");
-        p.as = try m.backend.newAddressSpace();
-        const img = try loader.load(m.gpa, m.backend, p.as.?, bytes, argv.items, p.pid);
-        p.segs.replace(p.as.?, img.segs);
-        p.tos = img.tos;
-        p.ureg = .initExec(img.arch, img.entry, img.sp, img.tos);
-        p.extra = .initExec(img.arch);
-        p.keepImage(bytes);
-        p.initSys();
-        p.noteMem();
-        kern.setArgs(argv.items);
-        kern.setTextPath(path);
-        return m.loop(p);
+        ks.conn(sfd) catch srv.connEnded();
     }
 
     /// A run with `serve` and no program: the first Proc sleeps in the
@@ -2875,7 +2768,7 @@ pub const Machine = struct {
         const thread = cl.flags & lsys.CLONE_THREAD != 0;
         const share = cl.flags & lsys.CLONE_VM != 0;
         const j = p.job;
-        const c = j.newProc(if (p.serving) .{ .serving = p.conn } else .program) catch return -attr.E.AGAIN;
+        const c = j.newProc(if (p.serving) .serving else .program) catch return -attr.E.AGAIN;
         const cx = m.gpa.create(lsys.Process) catch {
             j.dropProc(c);
             return -attr.E.NOMEM;
@@ -3208,7 +3101,7 @@ pub const Machine = struct {
         }
         const j = p.job;
         // 9front's error when it runs out of procs.
-        const c = j.newProc(if (p.serving) .{ .serving = p.conn } else .program) catch return failWith("no procs");
+        const c = j.newProc(if (p.serving) .serving else .program) catch return failWith("no procs");
         const cas = m.backend.newAddressSpace() catch {
             j.dropProc(c);
             return failWith("no procs");

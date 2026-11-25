@@ -48,11 +48,16 @@ swapchan(Chan *c, int which)
 }
 
 /*
- * Marks the Chan that is a chroot's root (design/linux-chroot.md), held in
- * the record's lroot and as slash. Not a drawterm flag: only this file
- * sets or reads it, and clones don't copy it.
+ * Mark the Chan that is a root where .. stops (h9_fs_markroot): a
+ * chroot's (design/linux-chroot.md), held in the record's lroot and as
+ * slash, and a served attach root (kserve.c, design/kernel-serve.md),
+ * held as its workers' slash. Only a chroot's makes the process's root
+ * the Linux view. Not drawterm flags: only this file sets or reads them,
+ * and clones don't copy them.
  */
-enum { CLROOT = 0x4000 };
+enum { CLROOT = 0x4000, CSROOT = 0x8000 };
+
+void	h9_fs_markroot(Chan*, int);
 
 /* Whether path s is p or under it. */
 static int
@@ -666,9 +671,7 @@ h9_linux_chroot(char *path)
 		cclose(c);
 		c = nil;
 	}else{
-		pathclose(c->path);
-		c->path = newpath("/");
-		c->flag |= CLROOT;
+		h9_fs_markroot(c, 1);
 	}
 
 	/* The working directory's name from the new root, if it's under it. */
@@ -716,9 +719,22 @@ h9_fs_atroot(Chan *c)
 {
 	Chan *r;
 
-	if(up == nil || (r = up->slash) == nil || (r->flag & CLROOT) == 0)
+	if(up == nil || (r = up->slash) == nil || (r->flag & (CLROOT|CSROOT)) == 0)
 		return 0;
 	return samedir(c, r) || mountedon(r, c);
+}
+
+/*
+ * Makes c, a channel of the caller's own (a clone), a root where ..
+ * stops once it's a process's slash: named "/", and marked as a chroot's
+ * (lx set) or a served attach root's.
+ */
+void
+h9_fs_markroot(Chan *c, int lx)
+{
+	pathclose(c->path);
+	c->path = newpath("/");
+	c->flag |= lx ? CLROOT : CSROOT;
 }
 
 /*
