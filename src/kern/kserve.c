@@ -77,12 +77,17 @@ typedef struct Kworker Kworker;
 typedef struct Kconn Kconn;
 typedef struct Kserver Kserver;
 
-/* A namespace a fid is served from: a Pgrp and the root .. stops at. */
+/*
+ * A namespace a fid is served from: a Pgrp and the root .. stops at. A
+ * named source's (h9_kserve_kns) calls put(arg) when its last fid goes.
+ */
 struct Kns
 {
 	Ref	ref;
 	Pgrp	*pg;
 	Chan	*slash;
+	void	(*put)(void*);
+	void	*arg;
 };
 
 struct Kfid
@@ -142,6 +147,8 @@ struct Kconn
 
 	Kfid	*fids[Nfidhash];
 	int	nfid;
+
+	char	*aname;	/* the attach name the host fixed, or nil */
 };
 
 /* Where attaches get their namespace (design/epoch-0/kernel-serve.md, Namespaces). */
@@ -160,6 +167,7 @@ struct Kserver
 	int	readonly;
 	Kns	*ns;		/* the plan's namespace */
 	Ksource	*src;
+	Kns	*(*named)(char*);	/* a named source's lookup */
 	void	*hp;		/* the starter's record, for the workers' */
 	uintptr	locals[4];
 	char	user[KNAMELEN];
@@ -190,6 +198,15 @@ planlookup(Kserver *s, char *aname)
 
 static Ksource plansource = { planlookup };
 
+/* Named namespaces (namespace-kernel): the attach name picks one. */
+static Kns*
+namedlookup(Kserver *s, char *aname)
+{
+	return s->named(aname);
+}
+
+static Ksource namedsource = { namedlookup };
+
 static void
 nsput(Kns *ns)
 {
@@ -197,6 +214,8 @@ nsput(Kns *ns)
 		return;
 	closepgrp(ns->pg);
 	cclose(ns->slash);
+	if(ns->put != nil)
+		ns->put(ns->arg);
 	free(ns);
 }
 
@@ -491,7 +510,13 @@ rattach(Kconn *k, Fcall *t, Fcall *r)
 
 	if(t->afid != NOFID)
 		error(Enoauth);
-	ns = k->s->src->lookup(k->s, t->aname);
+	/* A connection the host gave an attach name attaches only to that. */
+	if(k->aname != nil){
+		if(t->aname[0] != '\0' && strcmp(t->aname, k->aname) != 0)
+			error("no such namespace");
+		ns = k->s->src->lookup(k->s, k->aname);
+	} else
+		ns = k->s->src->lookup(k->s, t->aname);
 	if(ns == nil)
 		error("no such namespace");
 	if(waserror()){
@@ -1392,6 +1417,7 @@ kconnput(Kconn *k)
 	}
 	clunkall(k);
 	cclose(k->c);
+	free(k->aname);
 	s = k->s;
 	lock(&s->lk);
 	for(l = &s->conns; *l != nil; l = &(*l)->next)
@@ -1460,20 +1486,93 @@ h9_kserve_new(int readonly, char *root, void (*ended)(void*), void *arg)
 	return s;
 }
 
+/*
+ * A Kns for a named source: pg and slash, referenced, with put(arg)
+ * called when its last fid is clunked.
+ */
+void*
+h9_kserve_kns(Pgrp *pg, Chan *slash, void (*put)(void*), void *arg)
+{
+	Kns *ns;
+
+	ns = mallocz(sizeof *ns, 1);
+	if(ns == nil)
+		return nil;
+	ns->ref.ref = 1;
+	incref(&pg->ref);
+	ns->pg = pg;
+	incref(&slash->ref);
+	ns->slash = slash;
+	ns->put = put;
+	ns->arg = arg;
+	return ns;
+}
+
+/*
+ * Starts a server of named namespaces (design/namespace-kernel.md,
+ * Serving): each Tattach gets lookup(aname)'s Kns (h9_kserve_kns), or
+ * fails with "no such namespace" for nil. Otherwise as h9_kserve_new.
+ */
+void*
+h9_kserve_newnamed(void *(*lookup)(char*), void (*ended)(void*), void *arg)
+{
+	Kserver *s;
+
+	s = mallocz(sizeof *s, 1);
+	if(s == nil){
+		kstrcpy(up->errstr, Enomem, ERRMAX);
+		return nil;
+	}
+	s->hp = h9_kprocsrc();
+	if(s->hp == nil){
+		free(s);
+		kstrcpy(up->errstr, "kserve: not an h9 process", ERRMAX);
+		return nil;
+	}
+	s->src = &namedsource;
+	s->named = (Kns*(*)(char*))lookup;
+	s->ended = ended;
+	s->arg = arg;
+	h9_kern_locals(1, s->locals);
+	strecpy(s->user, s->user+sizeof s->user, up->user);
+	return s;
+}
+
+static int	kconnstart(Kserver*, int, char*);
+
 /* Serves connection fd of the calling process. Returns 0, or -1 with the error string set. */
 int
 h9_kserve_conn(void *v, int fd)
 {
-	Kserver *s;
+	return kconnstart(v, fd, nil);
+}
+
+/*
+ * As h9_kserve_conn, with every attach on the connection to aname
+ * (design/namespace-kernel.md, Security): a Tattach naming another fails.
+ */
+int
+h9_kserve_connas(void *v, int fd, char *aname)
+{
+	return kconnstart(v, fd, aname);
+}
+
+static int
+kconnstart(Kserver *s, int fd, char *aname)
+{
 	Kconn *k;
 	Chan *c;
 
-	s = v;
 	if(waserror())
 		return -1;
 	c = fdtochan(fd, ORDWR, 1, 1);
 	k = mallocz(sizeof *k, 1);
 	if(k == nil){
+		cclose(c);
+		error(Enomem);
+	}
+	if(aname != nil && (k->aname = strdup(aname)) == nil){
+		free(k);
 		cclose(c);
 		error(Enomem);
 	}

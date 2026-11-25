@@ -616,7 +616,7 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.O
     });
     kern.root_module.addCSourceFiles(.{
         .root = b.path("src/kern"),
-        .files = &.{ "glue.c", "proc.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "devproc.c", "devoverlay.c", "devsrv.c", "devhtools.c", "fscheck.c", "netcheck.c", "consx.c", "tsleep.c", "sema.c", "rootdial.c", "devhstream.c", "devdotl.c", "devhidx.c", "kserve.c" },
+        .files = &.{ "glue.c", "proc.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "devproc.c", "devoverlay.c", "devsrv.c", "devhtools.c", "fscheck.c", "netcheck.c", "consx.c", "tsleep.c", "sema.c", "rootdial.c", "devhstream.c", "devdotl.c", "devhidx.c", "kserve.c", "ns.c" },
         .flags = flags,
     });
     // The Linux personality (design/epoch-0/linux-personality.md) and its host
@@ -723,6 +723,105 @@ fn addWeb(b: *std.Build, optimize: std.lang.Optimize, parts: ModuleParts, gfx: G
     for ([_][]const u8{ "h9-web.js", "h9-node", "worker.js", "wasi-mem.js", "statictree.js", "index.html", "package.json" }) |f|
         all.dependOn(&b.addInstallFileWithDir(b.path(b.pathJoin(&.{ "src/web", f })), dir, f).step);
     return .{ .exe = exe, .install = all };
+}
+
+// The namespace kernel (design/namespace-kernel.md): drawterm's channels,
+// mount tables, devmnt and these devices, and nothing for running
+// programs. src/kern/nstab.c is its device table and stands in for what
+// the left-out files would define.
+const nskern_sources = [_][]const u8{
+    "alloc.c",  "allocb.c", "chan.c",   "data.c",   "dev.c",    "devmnt.c",
+    "devroot.c", "error.c", "parse.c",  "pgrp.c",   "procinit.c", "rwlock.c",
+    "sleep.c",  "stub.c",   "sysfile.c", "qio.c",   "qlock.c",  "waserror.c",
+};
+const nskern_h9 = [_][]const u8{
+    "glue.c",    "proc.c",      "ns.c",     "devns.c", "nstab.c",    "devoverlay.c", "devsrv.c",
+    "devhstream.c", "devdotl.c", "kserve.c", "tsleep.c", "rootdial.c",
+};
+// libc's files the kernel subset uses, from kern_libs' list.
+const nskern_libc_skip = [_][]const u8{ "pushssl.c", "pushtls.c", "crypt.c", "dial.c" };
+
+/// The namespace kernel for `target`: natively a static library with the
+/// C API in src/nskernel/h9ns.h, and for wasm32-wasi h9ns.wasm, run by
+/// h9ns.js in a Worker. `hostfs` keeps devfs (#U) natively.
+fn addNsKernel(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, web: bool, hostfs: bool) struct { artifact: *std.Build.Step.Compile, mod: *std.Build.Module } {
+    const options = b.addOptions();
+    options.addOption(bool, "kern", true);
+    options.addOption(bool, "nskernel", true);
+    const root = b.createModule(.{
+        .root_source_file = b.path("src/nskernel.zig"),
+        .target = if (web) webTarget(b, false) else target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    root.addOptions("build_options", options);
+    // On the web the C kernel turns on wasm exception handling, for
+    // setjmp and longjmp, which wasi-libc doesn't build with (webTarget),
+    // so it's a library of its own; natively it's in the one archive.
+    const m = if (web) blk: {
+        const kern = b.addLibrary(.{
+            .name = "h9ns-kern",
+            .linkage = .static,
+            .root_module = b.createModule(.{ .target = webTarget(b, true), .optimize = optimize, .link_libc = true }),
+        });
+        root.linkLibrary(kern);
+        break :blk kern.root_module;
+    } else root;
+    m.addIncludePath(b.path(drawterm));
+    m.addIncludePath(b.path(drawterm ++ "/include"));
+    m.addIncludePath(b.path(drawterm ++ "/kern"));
+    m.addIncludePath(b.path("src/kern"));
+    const base: []const []const u8 = if (web) &kern_flags_web else &kern_flags;
+    const extra: []const []const u8 = if (hostfs and !web) &.{ "-DH9_NSKERNEL", "-DH9_NSKERNEL_HOSTFS" } else &.{"-DH9_NSKERNEL"};
+    const flags = std.mem.concat(b.allocator, []const u8, &.{ base, extra }) catch @panic("OOM");
+    m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/kern"), .files = &nskern_sources, .flags = flags });
+    m.addCSourceFiles(.{
+        .root = b.path(drawterm ++ "/kern"),
+        .files = &kern_notes,
+        .flags = std.mem.concat(b.allocator, []const u8, &.{ flags, &.{"-Dpostnote=h9_postnote"} }) catch @panic("OOM"),
+    });
+    m.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &nskern_h9, .flags = flags });
+    var libc: std.ArrayList([]const u8) = .empty;
+    for (kern_libs[0].files) |f| {
+        for (nskern_libc_skip) |skip| {
+            if (std.mem.eql(u8, f, skip)) break;
+        } else libc.append(b.allocator, f) catch @panic("OOM");
+    }
+    m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/libc"), .files = libc.items, .flags = flags });
+    if (target.result.abi.isMusl() and !web) {
+        m.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"memccpy.c"}, .flags = flags });
+        m.addCMacro("memccpy", "h9_memccpy");
+    }
+    if (web) {
+        m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/posix-port"), .files = &.{"tas.c"}, .flags = flags });
+        m.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"os-wasm.c"}, .flags = flags });
+        m.addCSourceFiles(.{ .root = b.path("src/web"), .files = &.{"coro.c"}, .flags = flags });
+        m.addAssemblyFile(b.path("src/web/stack.S"));
+        m.addAssemblyFile(b.path("src/web/sjlj_tag.S"));
+        m.addCSourceFile(.{
+            .file = b.graph.path(.zig_lib, "libc/wasi/libc-top-half/musl/src/setjmp/wasm32/rt.c"),
+            .flags = &.{ "-mllvm", "-wasm-enable-sjlj" },
+        });
+        for ([_][]const u8{ "wasi-emulated-signal", "wasi-emulated-process-clocks", "wasi-emulated-mman", "wasi-emulated-getpid" }) |l|
+            m.linkSystemLibrary(l, .{});
+    } else {
+        m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/kern"), .files = &.{ "posix.c", "devlfd-posix.c" }, .flags = flags });
+        if (hostfs) {
+            m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/kern"), .files = &.{"devfs-posix.c"}, .flags = flags });
+            m.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"fscheck.c"}, .flags = flags });
+        }
+        m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/posix-port"), .files = &kern_port, .flags = flags });
+        if (target.result.os.tag == .macos) addSdkPaths(b, m);
+    }
+    if (web) {
+        const exe = b.addExecutable(.{ .name = "h9ns", .root_module = root });
+        exe.import_memory = true;
+        exe.stack_size = 1 << 20;
+        exe.rdynamic = true;
+        exe.use_lld = true;
+        return .{ .artifact = exe, .mod = root };
+    }
+    return .{ .artifact = b.addLibrary(.{ .name = "h9ns", .linkage = .static, .root_module = root }), .mod = root };
 }
 
 /// The compute benchmarks (tests/bench/*.c): each built as an arm64 and a
@@ -1123,6 +1222,41 @@ pub fn build(b: *std.Build) void {
     web_gfx_test.step.dependOn(web.install);
     const web_test_step = b.step("web-test", "Run the browser host's demo page and its canvas cases in Chromium with Playwright (needs a 386 root for root.h9a)");
     web_test_step.dependOn(&web_test.step);
+
+    // The namespace kernel (design/namespace-kernel.md): h9ns.wasm and its
+    // JS host, and libh9ns.a with h9ns.h, in zig-out/nskernel.
+    const ns_hostfs = b.option(bool, "nskernel-hostfs", "Keep devfs (#U) in the native namespace kernel, for embedders that lend host directories") orelse false;
+    const ns_step = b.step("nskernel", "Build the namespace kernel into zig-out/nskernel (design/namespace-kernel.md)");
+    const ns_dir: std.Build.InstallDir = .{ .custom = "nskernel" };
+    const ns_web = addNsKernel(b, webTarget(b, false), optimize, true, false).artifact;
+    ns_step.dependOn(&b.addInstallArtifact(ns_web, .{ .dest_dir = .{ .override = ns_dir } }).step);
+    for ([_][]const u8{ "h9ns.js", "h9ns-worker.js" }) |f|
+        ns_step.dependOn(&b.addInstallFileWithDir(b.path(b.pathJoin(&.{ "src/web", f })), ns_dir, f).step);
+    for ([_][]const u8{ "h9-web.js", "wasi-mem.js", "statictree.js" }) |f|
+        ns_step.dependOn(&b.addInstallFileWithDir(b.path(b.pathJoin(&.{ "src/web", f })), ns_dir, f).step);
+    const ns_lib = addNsKernel(b, target, optimize, false, ns_hostfs);
+    ns_step.dependOn(&b.addInstallArtifact(ns_lib.artifact, .{ .dest_dir = .{ .override = ns_dir } }).step);
+    ns_step.dependOn(&b.addInstallFileWithDir(b.path("src/nskernel/h9ns.h"), ns_dir, "h9ns.h").step);
+    // Its cases: tests/nskernel.zig through the native library, and
+    // tests/web/nskernel.mjs through h9ns.wasm under Node.
+    const ns_test_step = b.step("nskernel-test", "Run the namespace kernel's cases, natively and under Node (design/namespace-kernel.md)");
+    const ns_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/nskernel.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "h9ns", .module = ns_lib.mod },
+        },
+    }) });
+    ns_test_step.dependOn(&b.addRunArtifact(ns_tests).step);
+    const ns_node = b.addSystemCommand(&.{ "node", "tests/web/nskernel.mjs" });
+    ns_node.addDirectoryArg2(b.graph.path(.install_prefix, "nskernel"), .{ .make_absolute = true });
+    ns_node.setCwd(b.path("."));
+    ns_node.has_side_effects = true;
+    ns_node.expectExitCode(0);
+    ns_node.step.dependOn(ns_step);
+    ns_test_step.dependOn(&ns_node.step);
     if (web_gfx != .none) web_test_step.dependOn(&web_gfx_test.step);
 
     const exe = b.addExecutable(.{
