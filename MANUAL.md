@@ -925,7 +925,7 @@ kernel has. `intro(3)` introduces them, and each has its own page in section
 | `#s` | srv | `/srv` | 9front's service registry, one per machine |
 | `#\|` | pipe | | Pipes |
 | `#I` | ip | `/net` | The network, through the host's own stack: `cs`, `tcp`, `udp`. Masked under `--net=disable`. |
-| `#ℏ` | hstream | `/net`, after `#I` | WebSockets, as `/net/ws` (chapter 16), and the connection behind a WebSocket root. Masked under `--net=disable`. |
+| `#ℏ` | hstream | `/net`, after `#I` | WebSockets, as `/net/ws` (chapter 16), and the connection behind a WebSocket root; on the web host, the page's ports too, as `/net/port`. Masked under `--net=disable`. |
 | `#M` | mnt | | The 9P client behind every `mount` |
 | `#U` | fs | `/`, `/mnt/term/...` | The host's file system, through the sandbox's checks. Masked after startup. |
 | `#O` | overlay | `/tmp`, ephemeral paths | h9's copy-on-write overlay in memory (chapter 22), and the unions `bind -r` and `bind -u` make (chapter 6) |
@@ -1634,6 +1634,25 @@ devices in Plan 9.
   stream, and its `text` file text messages, one per read and write.
   `wsmount [-h 'Name: value'] url mountpoint` dials a 9P server and mounts
   it. Guest connections don't use the host's proxies.
+- **Ports, in a browser** ([port-streams](design/epoch-0/port-streams.md)). A page
+  can hand a machine `MessagePort`s by name, each carrying a 9P connection,
+  one 9P message per message: `createMachine({ ports: { home: port } })`,
+  and `machine.addPort(name, port)` and `machine.removePort(name)` while it
+  runs. A name is letters, digits, `-`, `_`, and `.`. `--url
+  port://home:/usr/me` (or a mount object `{ port, dst }`, where `port` is a
+  name or a `MessagePort`) mounts it, and a namespace file's `mount
+  port!home /usr/me` does too; `spec=` and `up` work as for any `--url`.
+  The page makes the channel, so the other end can be a file server in
+  another Worker, with the page out of the data path. The guest opens one
+  through `/net/port`: write `open NAME` to a conversation's `ctl`, then
+  mount its `data`. A port is opened once, so a second mount of the same
+  name fails with "port in use", and it doesn't reconnect.
+  `createMachine({ serve: port })`, or `serve: true` and later
+  `machine.serve(port)`, serves the machine on a port as `--serve` serves a
+  connection, without `/net` unless `serveNet: true` is given; there's no
+  token or origin, since the page decided who's on the other end. Ports
+  are only on the web host: elsewhere `port://` is a usage error and
+  `port!` "unknown network port".
 - **Serving the machine** ([serve](design/epoch-0/serve.md)). `--serve ADDR`
   makes h9 a 9P server while the program runs: `unix!/path`,
   `tcp!host!port`, or `ws://host:port/path`, repeatable. h9's kernel

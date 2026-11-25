@@ -32,6 +32,7 @@ A `--url` names its server by scheme:
 | `tcp://HOST:PORT[/SPEC]` | Dialed through devip by device path (`#I/cs` and `#I/tcp/clone`), outside the network policy, since h9 makes it and the guest can't dial anything through it. The path is the attach spec. |
 | `unix:///PATH` | A unix socket, on POSIX hosts only, dialed by the `#ℓ` conversation, or for a path with a comma connected on the host and wrapped with devlfd's `lfdchan` (`src/kern/rootdial.c`). |
 | `ws://`, `wss://` | Connected by `src/hstream.zig` (TCP, TLS, the HTTP proxy if one applies, and the handshake), its stream's channel from devhstream. |
+| `port://NAME[/SPEC]` | On the web host, the page's port NAME ([port-streams](../design/epoch-0/port-streams.md)), `port!NAME` in the plan, opened through the JS host and handed to `#ℓ` with `fd`; never redialed. Elsewhere a usage error. |
 | `http://`, `https://` | The probe: the same handshake to the URL's `ws://` or `wss://` form. A `101` is a WebSocket connection. Any other answer (`server answered N`) makes h9 fetch `URL/.fs/index`, and a `200` makes it a static tree (below). Anything else is exit 125: `no 9P server (the WebSocket handshake: …) and no static tree (/.fs/index: …)`. |
 | `HOST[:PORT][/PATH]` | No scheme: `http://` for `localhost`, `127.0.0.0/8`, and `[::1]`, and `https://` otherwise, so it probes. A bare host is its server's `/`. |
 

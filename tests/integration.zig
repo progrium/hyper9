@@ -5909,13 +5909,307 @@ test "text messages round-trip through /net/ws on the web host [websocket-9p, br
     try std.testing.expectEqualStrings("héllo\n", r.out);
 }
 
+// Ports (design/epoch-0/port-streams.md). On the web host under Node, h9-node
+// loads tests/web/ports.mjs (H9_NODE_PORTS), whose worker_threads relay
+// each port named in H9_TEST_PORTS to a 9P server, one 9P message per
+// message, or listen for connections and hand the machine a port for
+// each to serve.
+
+/// The ports module, written to a scratch directory for h9-node.
+const PortsMod = struct {
+    s: Scratch,
+    path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined,
+    path: []const u8 = "",
+
+    fn init(p: *PortsMod) !void {
+        try p.s.init();
+        try p.s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ports.mjs", .data = @embedFile("web/ports.mjs") });
+        p.path = try std.fmt.bufPrint(&p.path_buf, "{s}/ports.mjs", .{p.s.path});
+    }
+
+    fn deinit(p: *PortsMod) void {
+        p.s.deinit();
+    }
+};
+
+/// Runs `h9 args...` on the web host with the ports `spec`
+/// (H9_TEST_PORTS), or skips off it.
+fn runPorts(e: Env, spec: []const u8, args: []const []const u8) !Result {
+    if (!onWeb()) return error.SkipZigTest;
+    var pm: PortsMod = undefined;
+    try pm.init();
+    defer pm.deinit();
+    return runEnv(e, firstBackend(e), args, &.{ .{ "H9_NODE_PORTS", pm.path }, .{ "H9_TEST_PORTS", spec } }, slow(60_000));
+}
+
+/// `NAME=tcp!127.0.0.1!PORT` and `extra`: a port relayed to `dial`.
+fn portSpec(buf: []u8, name: []const u8, dial: []const u8, extra: []const u8) []const u8 {
+    return std.fmt.bufPrint(buf, "{s}={s}{s}", .{ name, dial, extra }) catch unreachable;
+}
+
+test "a port root serves the program [port-streams]" {
+    const e = try env(@src());
+    if (!onWeb()) return error.SkipZigTest;
+    var srv: RootServer = undefined;
+    try srv.start(e);
+    defer srv.stop();
+    var sb: [128]u8 = undefined;
+    const host = try run(e, &.{ "/bin/ls", "/", "/bin/ls" });
+    defer host.deinit();
+    const r = try runPorts(e, portSpec(&sb, "root", srv.dial(), ""), &.{ "--url", "port://root", "/bin/ls", "/", "/bin/ls" });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings(host.out, r.out);
+}
+
+test "a port mounts away from the root, with spec as the attach name [port-streams]" {
+    const e = try env(@src());
+    if (!onWeb()) return error.SkipZigTest;
+    var srv: RootServer = undefined;
+    try srv.start(e);
+    defer srv.stop();
+    var sb: [128]u8 = undefined;
+    // exportfs -r / serves the tree whatever the attach name, so the
+    // spec shows in the plan and the mount works with it.
+    const r = try runPorts(e, portSpec(&sb, "home", srv.dial(), ""), &.{ "--url", "port://home:/n/home:spec=work", "--rc", "cat /n/home/lib/namespace | wc -l" });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    const want = try run(e, &.{ "--rc", "cat /lib/namespace | wc -l" });
+    defer want.deinit();
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings(want.out, r.out);
+    const p = try runPorts(e, portSpec(&sb, "home", srv.dial(), ""), &.{ "--url", "port://home:/n/home:spec=work", "--print", "/bin/echo" });
+    defer p.deinit();
+    try expectIn(p.out, "mount 'port!home' /n/home 'work'");
+}
+
+test "a namespace file mounts a port, and --print shows a port mount [port-streams]" {
+    const e = try env(@src());
+    if (!onWeb()) return error.SkipZigTest;
+    var srv: RootServer = undefined;
+    try srv.start(e);
+    defer srv.stop();
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = "mount -c port!home /usr/me\n" });
+    var sb: [128]u8 = undefined;
+    const r = try runPorts(e, portSpec(&sb, "home", srv.dial(), ""), &.{ "--ns", s.ns(), "--rc", "ls /usr/me/bin/ls" });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("/usr/me/bin/ls\n", r.out);
+    // --print shows a port mount as its dial string, and the line
+    // replays in a namespace file.
+    const p = try runPorts(e, portSpec(&sb, "home", srv.dial(), ""), &.{ "--url", "port://home:/usr/me", "--print", "/bin/echo" });
+    defer p.deinit();
+    const at = std.mem.indexOf(u8, p.out, "mount 'port!home' /usr/me ''") orelse {
+        std.debug.print("--print:\n{s}\n", .{p.out});
+        return error.TestExpectedEqual;
+    };
+    const end = std.mem.indexOfScalarPos(u8, p.out, at, '\n') orelse p.out.len;
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = p.out[at..end] });
+    const re = try runPorts(e, portSpec(&sb, "home", srv.dial(), ""), &.{ "--ns", s.ns(), "--rc", "ls /usr/me/bin/ls" });
+    defer re.deinit();
+    errdefer std.debug.print("replay: stdout: {s}\nstderr: {s}\n", .{ re.out, re.err });
+    try std.testing.expectEqualStrings("/usr/me/bin/ls\n", re.out);
+}
+
+test "a second mount of the same port is refused [port-streams]" {
+    const e = try env(@src());
+    if (!onWeb()) return error.SkipZigTest;
+    var srv: RootServer = undefined;
+    try srv.start(e);
+    defer srv.stop();
+    var sb: [128]u8 = undefined;
+    const r = try runPorts(e, portSpec(&sb, "home", srv.dial(), ""), &.{ "--url", "port://home:/n/a", "--url", "port://home:/n/b", "/bin/echo", "ran" });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expect(r.code != 0);
+    try expectIn(r.err, "port in use");
+    try std.testing.expectEqualStrings("", r.out);
+}
+
+test "a message that isn't binary closes the stream [port-streams]" {
+    const e = try env(@src());
+    if (!onWeb()) return error.SkipZigTest;
+    var srv: RootServer = undefined;
+    try srv.start(e);
+    defer srv.stop();
+    var sb: [128]u8 = undefined;
+    const r = try runPorts(e, portSpec(&sb, "home", srv.dial(), "!text"), &.{ "--url", "port://home:/n/home", "/bin/echo", "ran" });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expect(r.code != 0);
+    try std.testing.expectEqualStrings("", r.out);
+}
+
+test "the far end closing hangs up the mount [port-streams]" {
+    const e = try env(@src());
+    if (!onWeb()) return error.SkipZigTest;
+    var srv: RootServer = undefined;
+    try srv.start(e);
+    defer srv.stop();
+    var sb: [128]u8 = undefined;
+    // The relay closes its end a second after the server's first answer.
+    const r = try runPorts(e, portSpec(&sb, "home", srv.dial(), "!close=1000"), &.{ "--url", "port://home:/n/home", "--rc", "ls /n/home/bin/ls; sleep 3; ls /n/home/bin/ls >[2]/dev/null || echo hungup" });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqualStrings("/n/home/bin/ls\nhungup\n", r.out);
+}
+
+test "the guest mounts a port through /net/port [port-streams]" {
+    const e = try env(@src());
+    if (!onWeb()) return error.SkipZigTest;
+    var srv: RootServer = undefined;
+    try srv.start(e);
+    defer srv.stop();
+    var sb: [128]u8 = undefined;
+    const r = try runPorts(e, portSpec(&sb, "home", srv.dial(), ""), &.{ "--rc", "{ n=`{read}; echo open home >/net/port/$n/ctl && cat /net/port/$n/remote /net/port/$n/status && ls /net/port/$n && mkdir -p /tmp/p && mount -c /net/port/$n/data /tmp/p && ls /tmp/p/bin/ls } <>/net/port/clone; echo open nosuch >/net/port/clone || echo refused" });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqualStrings("port!home\nEstablished\n/net/port/0/ctl\n/net/port/0/data\n/net/port/0/remote\n/net/port/0/status\n/tmp/p/bin/ls\nrefused\n", r.out);
+}
+
+test "a 9P2000.L server over a port is translated [port-streams, dotl]" {
+    const e = try env(@src());
+    if (!onWeb()) return error.SkipZigTest;
+    var d: Diod = undefined;
+    try d.start(diod_tree);
+    defer d.stop();
+    var sb: [128]u8 = undefined;
+    var ub: [std.Io.Dir.max_path_bytes + 64]u8 = undefined;
+    const r = try runPorts(e, portSpec(&sb, "l", d.dial(), ""), &.{ "--url", try std.fmt.bufPrint(&ub, "port://l:/n/l:spec={s}", .{d.s.path}), "--rc", "cat /n/l/etc/motd" });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("hello from .L\n", r.out);
+}
+
+test "a port up layer takes the guest's writes [port-streams, upper-layers]" {
+    const e = try env(@src());
+    if (!onWeb()) return error.SkipZigTest;
+    var d: Diod = undefined;
+    try d.start("true");
+    defer d.stop();
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try writeTree(&s, &.{ .{ "n/f", "n\n" }, .{ "n/sub/g", "g\n" } });
+    var sb: [128]u8 = undefined;
+    var pn: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+    var pu: [std.Io.Dir.max_path_bytes + 64]u8 = undefined;
+    const r = try runPorts(e, portSpec(&sb, "layer", d.dial(), ""), &.{
+        "--dir", try std.fmt.bufPrint(&pn, "{s}/n:/n/x", .{s.path}),
+        "--url", try std.fmt.bufPrint(&pu, "port://layer:/n/x:up,spec={s}", .{d.s.path}),
+        "--rc",  "echo w >>/n/x/f; rm /n/x/sub/g; cat /n/x/f; ls /n/x/sub | wc -l",
+    });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqualStrings("n\nw\n      0\n", r.out);
+    try std.testing.expect(d.s.exists("f"));
+    try std.testing.expect(d.s.exists("sub/.wh.g"));
+    try expectFile(&s, "n/f", "n\n");
+}
+
+/// Starts h9 on the web host served on ports, with a relay listening on
+/// a loopback port for clients (`serve=` in H9_TEST_PORTS), running a
+/// program that waits; returns the port.
+fn startServedPorts(e: Env, pm: *PortsMod, t: *Term, extra: []const u8) !u16 {
+    if (!onWeb()) return error.SkipZigTest;
+    var probe = try listenLocal();
+    const port = probe.socket.address.getPort();
+    probe.deinit(std.testing.io);
+    try pm.init();
+    errdefer pm.deinit();
+    var nb: [std.Io.Dir.max_path_bytes + 32]u8 = undefined;
+    var sb: [128]u8 = undefined;
+    t.* = try spawnTermEnv(e, firstBackend(e), &.{ "--rc", "echo ready; sleep 60" }, &.{
+        try std.fmt.bufPrint(&nb, "H9_NODE_PORTS={s}", .{pm.path}),
+        try std.fmt.bufPrint(&sb, "H9_TEST_PORTS=serve=tcp!127.0.0.1!{d}{s}", .{ port, extra }),
+    });
+    errdefer t.deinit();
+    try t.expect("ready", slow(30_000));
+    return port;
+}
+
+/// Runs the native h9 (H9_TEST_SERVER) with the web machine served on
+/// `port` mounted at /n/web, and rc `cmd`.
+fn runServedClient(e: Env, port: u16, cmd: []const u8) !Result {
+    const native = getenv(6, "H9_TEST_SERVER") orelse return error.SkipZigTest;
+    var ub: [64]u8 = undefined;
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try argv.appendSlice(gpa, &.{ native, "--backend", "auto", "--dir", e.root });
+    if (e.arch) |a| try argv.appendSlice(gpa, &.{ "--arch", a });
+    try argv.appendSlice(gpa, &.{ "--url", try std.fmt.bufPrint(&ub, "tcp://127.0.0.1:{d}:/n/web", .{port}), "--rc", cmd });
+    const r = try runProcessWith(argv.items, null, null, slow(60_000));
+    const code = switch (r.term) {
+        .exited => |c| c,
+        else => {
+            gpa.free(r.stdout);
+            gpa.free(r.stderr);
+            return error.Crashed;
+        },
+    };
+    return .{ .code = code, .out = r.stdout, .err = r.stderr };
+}
+
+test "a served port leaves out /net [port-streams]" {
+    const e = try env(@src());
+    var pm: PortsMod = undefined;
+    var t: Term = undefined;
+    const port = try startServedPorts(e, &pm, &t, "");
+    defer pm.deinit();
+    defer t.deinit();
+    const r = try runServedClient(e, port, "ls /n/web/bin/ls; test -d /n/web/net/port || echo no net");
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("/n/web/bin/ls\nno net\n", r.out);
+}
+
+test "a served port exports /net with serveNet [port-streams]" {
+    const e = try env(@src());
+    var pm: PortsMod = undefined;
+    var t: Term = undefined;
+    const port = try startServedPorts(e, &pm, &t, "!net");
+    defer pm.deinit();
+    defer t.deinit();
+    const r = try runServedClient(e, port, "test -d /n/web/net/port && echo net");
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqualStrings("net\n", r.out);
+}
+
+test "port!x and port://x are refused on a native host [port-streams]" {
+    const e = try env(@src());
+    if (onWeb()) return error.SkipZigTest;
+    const u = try run(e, &.{ "--url", "port://x:/n/x", "/bin/echo", "ran" });
+    defer u.deinit();
+    try std.testing.expectEqual(2, u.code);
+    try expectIn(u.err, "ports are only on the web host");
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = "mount port!x /n/x\n" });
+    const n = try run(e, &.{ "--ns", s.ns(), "/bin/echo", "ran" });
+    defer n.deinit();
+    try std.testing.expect(n.code != 0);
+    try expectIn(n.err, "unknown network port");
+    const g = try run(e, &.{ "--rc", "ls /net/port >[2]/dev/null || echo none" });
+    defer g.deinit();
+    try std.testing.expectEqualStrings("none\n", g.out);
+}
+
 test "--net=outbound binds only /net/ws on the web host [websocket-9p, browser-host]" {
     const e = try env(@src());
     if (!onWeb()) return error.SkipZigTest;
     const r = try run(e, &.{ "--net=outbound", "--rc", "ls /net; ls '#I' >[2]/dev/null || echo no ip" });
     defer r.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{r.err});
-    try std.testing.expectEqualStrings("/net/ws\nno ip\n", r.out);
+    try std.testing.expectEqualStrings("/net/dotl\n/net/port\n/net/ws\nno ip\n", r.out);
     const p = try run(e, &.{ "--net=outbound", "--print", "/bin/echo" });
     defer p.deinit();
     try expectIn(p.out, "bind '#ℏ' /net");

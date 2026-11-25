@@ -71,7 +71,7 @@ Step 3 of serve's Each connection becomes: the server Proc starts a kserve conne
 
 ## Rationale
 
-**A second 9P server to keep correct.** That's serve's objection, and it holds: kserve is new code with 9P's subtle parts (flush ordering, fid reuse, directory offsets). What changes the trade is that h9 now needs a server where no guest process can run ([namespace-kernel](../namespace-kernel.md), and port serving on the web host from [port-streams](../port-streams.md)), and that one server can't pick a namespace per attach as exportfs is built. The access rules stay in one implementation, the kernel's, because kserve calls the same channel operations exportfs's system calls end in.
+**A second 9P server to keep correct.** That's serve's objection, and it holds: kserve is new code with 9P's subtle parts (flush ordering, fid reuse, directory offsets). What changes the trade is that h9 now needs a server where no guest process can run ([namespace-kernel](../namespace-kernel.md), and port serving on the web host from [port-streams](port-streams.md)), and that one server can't pick a namespace per attach as exportfs is built. The access rules stay in one implementation, the kernel's, because kserve calls the same channel operations exportfs's system calls end in.
 
 **The chroot mark, not a check of kserve's own.** Stopping `..` in kserve would mean spotting it in each `Twalk` and comparing channels before calling `walk()`, which misses a `..` in the middle of a multi-element walk. linux-chroot already put that check where every walk passes, and keyed it on `slash`, which kserve sets per request anyway.
 

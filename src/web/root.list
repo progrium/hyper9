@@ -45,6 +45,7 @@ adm/timezone/GMT
 386/bin/du
 386/bin/echo
 386/bin/ed
+# What serves the machine on a port the page hands it (design/epoch-0/port-streams.md).
 386/bin/factor
 386/bin/fmt
 386/bin/grep

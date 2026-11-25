@@ -25,6 +25,15 @@
  *	ws/N/remote		the URL
  *	ws/N/status		Idle, Connecting, Established [proto], Closed code reason
  *
+ * On the web host it also serves the page's ports (design/epoch-0/port-streams.md),
+ * by name, the same way, sharing the conversation numbers:
+ *
+ *	port/clone		as ws/clone
+ *	port/N/ctl		open NAME, and hangup; reads give N
+ *	port/N/data		9P messages out, bytes in, as a stream
+ *	port/N/remote		port!NAME
+ *	port/N/status		as ws/N/status
+ *
  * Closing the last fd on a conversation's ctl, data and text hangs it up.
  */
 
@@ -37,10 +46,11 @@
 #include "hproc.h"
 
 /* Implemented in Zig (src/hstream.zig). */
-extern long	h9_hstream_clone(void *mach, char *err);
+extern long	h9_hstream_clone(void *mach, int port, char *err);
 extern long	h9_hstream_conv(void *mach, int n);
-extern int	h9_hstream_convs(void *mach, int *out, int max);
+extern int	h9_hstream_convs(void *mach, int port, int *out, int max);
 extern int	h9_hstream_convno(ulong id);
+extern int	h9_hstream_isport(ulong id);
 extern void	h9_hstream_incref(ulong id);
 extern void	h9_hstream_decref(ulong id);
 extern long	h9_hstream_ctl(ulong id, void *buf, long n, char *err);
@@ -72,7 +82,15 @@ enum {
 	Qremote,
 	Qstatus,
 	Qhost,		/* a host-made stream's channel */
+	Qportdir,	/* port/, on the web host */
+	Qpclone,
 };
+
+#ifdef H9_WEB
+enum { Haveports = 1 };
+#else
+enum { Haveports = 0 };
+#endif
 
 #define TYPE(q)		((ulong)(q).path & 0x1f)
 #define CONV(q)		((int)(((ulong)(q).path >> 5) - 1))
@@ -358,10 +376,53 @@ wsdir(Chan *c, Dir *dp)
 	devdir(c, q, "ws", 0, eve, DMDIR|0555, dp);
 }
 
+static void
+portdir(Chan *c, Dir *dp)
+{
+	Qid q;
+
+	mkqid(&q, Qportdir, 0, QTDIR);
+	devdir(c, q, "port", 0, eve, DMDIR|0555, dp);
+}
+
+/* Whether conversation n of the caller's machine is a port's. */
+static int
+isportconv(int n)
+{
+	long id;
+
+	id = h9_hstream_conv(h9_uphproc()->mach, n);
+	return id >= 0 && h9_hstream_isport(id);
+}
+
+/* A protocol directory's entries: clone, then its conversations. */
+static int
+protogen(Chan *c, int port, int s, Dir *dp)
+{
+	int convs[Maxconv], nc;
+	Qid q;
+
+	if(s == DEVDOTDOT){
+		topdir(c, dp);
+		return 1;
+	}
+	if(s == 0){
+		mkqid(&q, port ? Qpclone : Qclone, 0, QTFILE);
+		devdir(c, q, "clone", 0, eve, 0666, dp);
+		return 1;
+	}
+	s--;
+	nc = h9_hstream_convs(h9_uphproc()->mach, port, convs, Maxconv);
+	if(s < nc){
+		convdir(c, convs[s], dp);
+		return 1;
+	}
+	return -1;
+}
+
 static int
 hsgen(Chan *c, char *name, Dirtab *tab, int ntab, int s, Dir *dp)
 {
-	int convs[Maxconv], nc;
 	Qid q;
 
 	USED(name);
@@ -377,29 +438,31 @@ hsgen(Chan *c, char *name, Dirtab *tab, int ntab, int s, Dir *dp)
 			wsdir(c, dp);
 			return 1;
 		}
+		if(s == 1 && Haveports){
+			portdir(c, dp);
+			return 1;
+		}
 		return -1;
 	case Qwsdir:
-		if(s == DEVDOTDOT){
-			topdir(c, dp);
-			return 1;
-		}
-		if(s == 0){
-			mkqid(&q, Qclone, 0, QTFILE);
-			devdir(c, q, "clone", 0, eve, 0666, dp);
-			return 1;
-		}
-		s--;
-		nc = h9_hstream_convs(upmach(), convs, Maxconv);
-		if(s < nc){
-			convdir(c, convs[s], dp);
-			return 1;
-		}
-		return -1;
+		return protogen(c, 0, s, dp);
+	case Qportdir:
+		return protogen(c, 1, s, dp);
 	case Qclone:
-		mkqid(&q, Qclone, 0, QTFILE);
+	case Qpclone:
+		mkqid(&q, TYPE(c->qid), 0, QTFILE);
 		devdir(c, q, "clone", 0, eve, 0666, dp);
 		return 1;
 	case Qconvdir:
+		if(isportconv(CONV(c->qid))){
+			if(s == DEVDOTDOT){
+				portdir(c, dp);
+				return 1;
+			}
+			/* A port has no text messages. */
+			if(Qctl + s >= Qtext)
+				s++;
+			return convfile(c, CONV(c->qid), Qctl + s, dp);
+		}
 		if(s == DEVDOTDOT){
 			wsdir(c, dp);
 			return 1;
@@ -461,6 +524,7 @@ hsopen(Chan *c, int omode)
 	switch(TYPE(c->qid)){
 	case Qtopdir:
 	case Qwsdir:
+	case Qportdir:
 	case Qconvdir:
 	case Qremote:
 	case Qstatus:
@@ -468,7 +532,8 @@ hsopen(Chan *c, int omode)
 			error(Eperm);
 		break;
 	case Qclone:
-		id = h9_hstream_clone(upmach(), err);
+	case Qpclone:
+		id = h9_hstream_clone(upmach(), TYPE(c->qid) == Qpclone, err);
 		if(id < 0)
 			error(err);
 		n = h9_hstream_convno(id);
@@ -515,6 +580,7 @@ hsread(Chan *c, void *va, long n, vlong off)
 	switch(TYPE(c->qid)){
 	case Qtopdir:
 	case Qwsdir:
+	case Qportdir:
 	case Qconvdir:
 		return devdirread(c, va, n, nil, 0, hsgen);
 	case Qctl:

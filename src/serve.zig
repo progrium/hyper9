@@ -145,6 +145,10 @@ pub const Config = struct {
     /// `--trace`'s writer and its lock, for the connection lines.
     trace: ?*Io.Writer = null,
     trace_lock: ?*std.atomic.Mutex = null,
+    /// On the web host, serve the ports the page hands the machine
+    /// (design/epoch-0/port-streams.md): each is an accepted stream, with no
+    /// listener, origin, or token.
+    ports: bool = false,
 };
 
 pub const OpenError = error{ ServeFailed, OutOfMemory };
@@ -186,6 +190,8 @@ pub const Server = struct {
     pages: ?*const kern.Pages = null,
     /// 503 answers in progress, each on its own thread.
     refusing: std.atomic.Value(u32) = .init(0),
+    /// What a served port's stream tells, with `cfg.ports`.
+    port_served: hstream.Served = undefined,
 
     fn lockSpin(s: *Server) void {
         while (!s.lock.tryLock()) std.atomic.spinLoopHint();
@@ -220,8 +226,16 @@ pub const Server = struct {
         s.owner = owner;
         s.pages = pages;
         hstream.setIo(s.io);
-        for (s.listeners) |*l| {
+        if (!web.enabled) for (s.listeners) |*l| {
             l.thread = std.Thread.spawn(.{}, acceptLoop, .{l}) catch null;
+        };
+        if (web.enabled and s.cfg.ports) {
+            s.ref();
+            const th = web.Thread.spawn(.{}, portLoop, .{s}) catch {
+                s.unref();
+                return;
+            };
+            th.detach();
         }
     }
 
@@ -248,6 +262,7 @@ pub const Server = struct {
     /// Stops accepting and ends `next`. Safe from any thread.
     pub fn stop(s: *Server) void {
         s.stopping.store(true, .release);
+        if (web.enabled and s.cfg.ports) hstream.stopPorts();
         _ = s.seq.fetchAdd(1, .release);
         s.io.futexWake(u32, &s.seq.raw, std.math.maxInt(u32));
     }
@@ -257,7 +272,7 @@ pub const Server = struct {
     /// hung up.
     pub fn close(s: *Server) void {
         s.stop();
-        for (s.listeners) |*l| if (l.thread) |th| {
+        if (!web.enabled) for (s.listeners) |*l| if (l.thread) |th| {
             th.join();
             l.thread = null;
         };
@@ -295,6 +310,7 @@ pub fn open(gpa: std.mem.Allocator, io: Io, cfg: Config, msg: []u8, msg_len: *us
     const s = try gpa.create(Server);
     s.* = .{ .gpa = gpa, .io = io, .cfg = cfg };
     errdefer s.close();
+    s.port_served = .{ .ctx = s, .ready = PortCallbacks.ready, .done = PortCallbacks.done };
     s.listeners = try gpa.alloc(Listener, cfg.listens.len);
     for (s.listeners, cfg.listens) |*l, a| l.* = .{ .srv = s, .kind = a };
     s.addrs = try gpa.alloc([]const u8, cfg.listens.len);
@@ -474,6 +490,32 @@ fn unixAnswers(p: []const u8) bool {
     return c.connect(fd, @ptrCast(&sa), @sizeOf(c.sockaddr.un)) == 0;
 }
 
+/// Takes each port the page hands the machine to serve
+/// (design/epoch-0/port-streams.md), under the same cap as a listener's
+/// connections, until the server stops.
+fn portLoop(s: *Server) void {
+    defer s.unref();
+    while (!s.stopping.load(.acquire)) {
+        const id = hstream.acceptPort() orelse return;
+        if (s.stopping.load(.acquire)) {
+            hstream.dropPort(id);
+            return;
+        }
+        if (s.active.fetchAdd(1, .acq_rel) >= max_conns) {
+            _ = s.active.fetchSub(1, .acq_rel);
+            s.traceLine("port: refused: {d} connections", .{max_conns});
+            hstream.dropPort(id);
+            continue;
+        }
+        s.traceLine("port: accept", .{});
+        s.ref();
+        hstream.openAcceptedPort(s.owner, s.pages, id, &s.port_served) catch {
+            s.connEnded();
+            s.unref();
+        };
+    }
+}
+
 fn acceptLoop(l: *Listener) void {
     const s = l.srv;
     const io = s.io;
@@ -599,7 +641,10 @@ fn peerCred(fd: net.Socket.Handle) ?Cred {
 const Callbacks = struct {
     fn ready(ctx: *anyopaque, id: u32) void {
         const l: *Listener = @ptrCast(@alignCast(ctx));
-        const s = l.srv;
+        readyOn(l.srv, id);
+    }
+
+    fn readyOn(s: *Server, id: u32) void {
         s.lockSpin();
         const ok = if (s.stopping.load(.acquire)) false else blk: {
             s.ready.append(s.gpa, id) catch break :blk false;
@@ -618,9 +663,23 @@ const Callbacks = struct {
 
     fn done(ctx: *anyopaque, handed: bool) void {
         const l: *Listener = @ptrCast(@alignCast(ctx));
-        const s = l.srv;
+        doneOn(l.srv, handed);
+    }
+
+    fn doneOn(s: *Server, handed: bool) void {
         if (!handed) s.connEnded();
         s.unref();
+    }
+};
+
+/// A served port's, whose context is the Server itself.
+const PortCallbacks = struct {
+    fn ready(ctx: *anyopaque, id: u32) void {
+        Callbacks.readyOn(@ptrCast(@alignCast(ctx)), id);
+    }
+
+    fn done(ctx: *anyopaque, handed: bool) void {
+        Callbacks.doneOn(@ptrCast(@alignCast(ctx)), handed);
     }
 };
 

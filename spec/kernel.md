@@ -170,6 +170,8 @@ A host-made stream has no path: `h9_hstream_fd` makes its channel, which is post
 
 Attached with no spec, the device serves `ws/clone` and `ws/N/{ctl,data,text,remote,status}`, listing only the caller's machine's conversations (at most 32); `bind -a '#ℏ' /net` puts them at `/net/ws`. `data` is the binary stream, `text` one text message per read or write.
 
+On the web host it also serves `port/clone` and `port/N/{ctl,data,remote,status}`, the page's ports ([port-streams](../design/epoch-0/port-streams.md)), sharing the conversation numbers: `open NAME` in `ctl` opens the port by name, `remote` is `port!NAME`, and `data` is the stream. A port stream is a host stream with `port` set: `connect` calls the JS host's `port_open`, which opens it at once with no handshake, and it's read and written through the WebSocket imports (`src/web/h9-web.js`). A `port!NAME` mount (`--url port://NAME[/SPEC]`, a namespace file's `mount port!NAME`) is a host-made port stream, its channel handed to a `#ℓ` conversation with `fd` and no redial, since a port is opened once. A port the page serves the machine on is an accepted stream, from the Suspending `port_accept`, whose first message goes through the dialect slot as a listener's does.
+
 Received data is queued in the machine's pages, up to 16 MiB unread per stream.
 
 A guest `connect` asks the net policy as a TCP dial would, through the same `netLookup`, `netResolved`, and `netCheck` as devip and `cs`. The machine's end closes its streams (`h9_hstream_machend`, from `src/kern/proc.c`).

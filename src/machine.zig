@@ -291,6 +291,10 @@ pub const Machine = struct {
         /// `Ptys.open` while a run is in progress (src/hostpty.zig). Not
         /// on the browser host.
         ptys: ?*Ptys = null,
+        /// On the web host, serve the namespace on each port the page
+        /// hands the machine to serve (design/epoch-0/port-streams.md), as
+        /// `serve`'s connections are served, with no listener.
+        serve_ports: bool = false,
         stdio: Stdio,
     };
 
@@ -407,9 +411,9 @@ pub const Machine = struct {
     pub fn compilePlan(arena: std.mem.Allocator, opts: Options, err_msg: *[]const u8) policy.CompileError!policy.Plan {
         const arch = opts.arch orelse vmm.host_arch orelse .arm64;
         var in: policy.Inputs = .{ .mounts = opts.mounts, .binds = opts.binds, .cwd = opts.cwd, .arch = arch, .guest_tools = opts.guest_tools, .nameservers = opts.nameservers };
-        if (opts.serve.len > 0) {
-            const ls = try arena.alloc(policy.Serve.Listener, opts.serve.len);
-            for (ls, opts.serve) |*l, a| l.* = .{
+        if (opts.serve.len > 0 or opts.serve_ports) {
+            const ls = try arena.alloc(policy.Serve.Listener, opts.serve.len + @intFromBool(opts.serve_ports));
+            for (ls[0..opts.serve.len], opts.serve) |*l, a| l.* = .{
                 .addr = try std.fmt.allocPrint(arena, "{f}", .{a}),
                 .kind = switch (a) {
                     .unix => .unix,
@@ -417,6 +421,8 @@ pub const Machine = struct {
                     .ws => .ws,
                 },
             };
+            // The page's served ports (design/epoch-0/port-streams.md).
+            if (opts.serve_ports) ls[opts.serve.len] = .{ .addr = "port", .kind = .port };
             in.serve = .{ .listeners = ls, .root = opts.serve_root, .token = opts.serve_token != null, .origins = opts.serve_origins, .net = opts.serve_net, .only = false };
         }
         for (opts.mounts) |mt| if (mt.kind == .builtin) {
@@ -611,7 +617,19 @@ pub const Machine = struct {
         // The listeners are bound before anything runs, so one that can't
         // listen ends the run here (design/epoch-0/serve.md, "Flags").
         // The browser host can't listen, so its build leaves serving out.
-        const srv: ?*serve.Server = if (comptime web.enabled) null else if (m.opts.serve.len > 0) blk: {
+        const srv: ?*serve.Server = if (comptime web.enabled) blk: {
+            // The page's ports are served with no listener
+            // (design/epoch-0/port-streams.md).
+            if (!m.opts.serve_ports) break :blk null;
+            var len: usize = 0;
+            break :blk serve.open(m.gpa, m.io, .{ .listens = &.{}, .ports = true, .trace = m.opts.trace }, &m.msg_buf, &len) catch |e| switch (e) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.ServeFailed => {
+                    m.err_msg = m.msg_buf[0..len];
+                    return error.ServeFailed;
+                },
+            };
+        } else if (m.opts.serve.len > 0) blk: {
             var len: usize = 0;
             const s = serve.open(m.gpa, m.io, .{
                 .listens = m.opts.serve,
@@ -1399,7 +1417,7 @@ pub const Machine = struct {
         }
         // The server Proc gets a copy of the namespace as it is now, the
         // plan's, before the program can change it (design/epoch-0/serve.md).
-        if (!web.enabled and j.srv != null) {
+        if (j.srv != null) {
             try m.startServer(p);
             if (j.argv.len == 0) return serveOnly(j);
         }
@@ -3849,6 +3867,16 @@ pub const Machine = struct {
                 defer if (!host) kern.setPlan(&m.plan);
                 return wsConv(conn, r.addr, ident.*) catch return m.fail(what ++ " {f}: {s}", .{ shown, kern.errstr() });
             },
+            // The page's port (design/epoch-0/port-streams.md), handed to `#ℓ`
+            // with `fd` as a WebSocket is, without a redial: a port is
+            // opened once.
+            .port => {
+                const conn = try m.connectPort(r.addr, what);
+                defer kern.close(conn) catch {};
+                if (!host) kern.setPlan(null);
+                defer if (!host) kern.setPlan(&m.plan);
+                return dotlConv("fd {d}", conn) catch return m.fail(what ++ " {s}: {s}", .{ r.addr, kern.errstr() });
+            },
             // `#ℓ` dials a TCP or unix socket server itself, so it can
             // dial again if the server goes (9P2000.L.Z). A comma would
             // split the dial's list.
@@ -4290,6 +4318,25 @@ pub const Machine = struct {
         return kern.hstreamFd(id) catch return m.fail(what ++ " {f}: {s}", .{ shown, kern.errstr() });
     }
 
+    /// Opens the page's port `addr`, `port!NAME` (design/epoch-0/port-streams.md),
+    /// and returns an fd on its channel. Only the web host has ports.
+    fn connectPort(m: *Machine, addr: []const u8, comptime what: []const u8) RunError!u31 {
+        const name = addr["port!".len..];
+        const mc = kern.mach() orelse return m.fail(what ++ " {s}: not a machine process", .{addr});
+        const owner = @intFromPtr(mc);
+        mc.put();
+        const id = hstream.openPort(owner, name) catch |e| return m.fail(what ++ " {s}: {s}", .{ addr, switch (e) {
+            error.Unsupported => "unknown network port",
+            error.BadUrl => "bad port name",
+            error.TooManyStreams => "too many streams",
+            error.OutOfMemory => "out of memory",
+            error.SystemResources => "can't start a thread",
+        } });
+        defer hstream.release(id);
+        kern.hstreamWait(id) catch return m.fail(what ++ " {s}: {s}", .{ addr, kern.errstr() });
+        return kern.hstreamFd(id) catch return m.fail(what ++ " {s}: {s}", .{ addr, kern.errstr() });
+    }
+
     /// Binds `from` over `to`, or with `lower` (a host path), a fresh `#O`
     /// overlay over `#U<lower>` (`#U!c<lower>` when `contained`). A bare
     /// `#O` with no `lower` is a fresh overlay over what `to` is now, as in
@@ -4450,12 +4497,14 @@ pub const Machine = struct {
             // other failures, one that fails stops the run.
             // Its connection goes through a `#ℓ` conversation
             // (design/epoch-0/dotl.md), so a 9P2000.L server works too.
-            .mount => |mt| if (std.mem.indexOf(u8, mt.file, "://") != null) {
+            .mount => |mt| if (std.mem.indexOf(u8, mt.file, "://") != null or std.mem.startsWith(u8, mt.file, "port!")) {
                 // A URL (design/epoch-0/mounts.md, "Namespace files"), connected
                 // as a mount flag's is, with the line's settings words;
                 // unlike other failures, one that fails stops the run.
                 if (m.plan.write == .none) return m.fail("mount {f}: --write=none can't be enforced on a {s} mount", .{ ws.Url.elide(mt.file), if (ws.Url.is(mt.file)) "WebSocket" else "9P" });
-                var mo: policy.mount.Mount = .{ .kind = .url, .src = mt.file, .dst = mt.to, .spec = if (mt.spec.len > 0) mt.spec else null };
+                // A port's dial string (design/epoch-0/port-streams.md) as its URL.
+                const src = if (std.mem.startsWith(u8, mt.file, "port!")) try std.fmt.allocPrint(arena, "port://{s}", .{mt.file["port!".len..]}) else mt.file;
+                var mo: policy.mount.Mount = .{ .kind = .url, .src = src, .dst = mt.to, .spec = if (mt.spec.len > 0) mt.spec else null };
                 var headers: std.ArrayList([]const u8) = .empty;
                 for (mt.settings) |kv| {
                     const eq = std.mem.indexOfScalar(u8, kv, '=').?;
