@@ -1,7 +1,8 @@
 ---
 slug: hide-host-paths
 title: Hide host paths in /proc/n/ns
-status: draft
+status: superseded
+superseded-by: host-handles
 created: 2026-11-03
 authors: [progrium]
 depends: []
@@ -29,3 +30,7 @@ This was an open question in SPEC.md, before milestones became proposals ([#1](e
 ## Open issues
 
 - Hide the binds, show the guest path, or show a placeholder; and whether `--ns` can still replay the result.
+
+## Updates
+
+- 2026-11-25: Superseded by [host-handles](host-handles.md). With the host tree device reached only through named directory handles, `#U` is attached by a handle's name, so `/proc/n/ns` shows no host path under any profile, and `--ns` still replays it in a machine with the same handles. That answers the open question here without a profile-specific format.

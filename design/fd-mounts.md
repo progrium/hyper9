@@ -38,7 +38,7 @@ fd: ?std.posix.fd_t = null,
 fd_write: ?std.posix.fd_t = null,
 ```
 
-`std.posix.fd_t` is an `i32` on POSIX hosts and a `HANDLE` on Windows. An `.fd` mount needs `fd`, and `fd_write` is only for `.fd`; either mistake is a usage error (`PolicyConflict`, with `conflict` naming the field). Everything else about the mount is as for `.url`: any destination, `/srv/NAME` to post without mounting, `spec`, `user`, `index`, and the stacks' rules for `/` and `#L`.
+`std.posix.fd_t` is an `i32` on POSIX hosts and a `HANDLE` on Windows. An `.fd` mount needs `fd`, and `fd_write` is only for `.fd`; either mistake is a usage error (`PolicyConflict`, with `conflict` naming the field). Everything else about the mount is as for `.url`: any destination, `/srv/NAME` to post without mounting, `spec`, `user`, `auth`, `index`, the access options, and the stacks' rules for `/` and `#L`. With `up` on `/` or `#L`, the embedder's server holds the machine's writable layer ([upper-layers](upper-layers.md)), as a page's `MessagePort` does on the browser host ([port-streams](port-streams.md)), so an embedder can keep a machine's changes in its own store.
 
 ```zig
 var sv: [2]std.posix.fd_t = undefined;
@@ -63,11 +63,11 @@ So a server sees each run start with `Tversion` on the same stream, which resets
 
 ### In the kernel
 
-`h9_hostfdchan(rd, wr)` in `src/kern/rootdial.c`, beside `h9_unixchan`, duplicates the descriptors and wraps each with `lfdchan`, and `h9_hostfddial` gives the channels kernel fds with `newfd`, as `h9_unixdial` does. It's built on every native host, Windows included. On the browser host it fails with "host descriptors need a native host", and `.port` is the way in there.
+h9 duplicates the descriptors in Zig, in `connectUrl`'s `given` path, so the kernel makes no host call for them. `h9_hostfdchan(rd, wr)` in `src/kern/rootdial.c`, beside `h9_unixchan`, takes the duplicates and wraps each with `lfdchan`, and `h9_hostfddial` gives the channels kernel fds with `newfd`, as `h9_unixdial` does. It's built on every native host, Windows included. On the browser host it fails with "host descriptors need a native host", and `.port` is the way in there.
 
 devdotl's ctl takes a second fd: `fd R W` reads the server from R and writes it to W, kept as `cv->srv` and a new `cv->srvw`, which defaults to `cv->srv`. `fd N` is unchanged, so every caller of it today works as before.
 
-`connectUrl`'s `given` path calls `kern.hostFdDial` first and passes the kernel fds it returns, closing them after, as the unix path does with `unixDial`'s.
+`connectUrl`'s `given` path duplicates the descriptors, calls `kern.hostFdDial` with the duplicates, and passes the kernel fds it returns to `#ℓ`, closing them after, as the unix path does with `unixDial`'s.
 
 ### Windows handles
 
@@ -91,7 +91,7 @@ An `.fd` mount has no address, so its plan line can't replay. `--print` writes i
 
 **Not devhstream.** devhstream carries a host-made stream through a host thread that pumps it, for WebSockets that need framing and TLS. A raw descriptor needs no pump: devlfd already reads and writes it from the conversation's kproc.
 
-**Under [host-handles](host-handles.md).** If that proposal is built, an `.fd` mount's descriptor is one more handle the embedder puts in the machine's host table, and `h9_hostfdchan` is where it's wrapped. Nothing here conflicts with it.
+**Duplicating in Zig, not in the kernel.** [host-handles](host-handles.md) moves every host call out of `src/kern/`, so the kernel only wraps descriptors it's given. Duplicating in `connectUrl` keeps `rootdial.c`'s new code to the wrap, and under host-handles an `.fd` mount's descriptor is one more handle the embedder puts in the machine's host table.
 
 ## Compatibility
 
@@ -105,7 +105,7 @@ An `.fd` mount has no address, so its plan line can't replay. `--print` writes i
 
 ## Security
 
-The guest reaches nothing new: an `.fd` mount is a 9P tree, as an `.url` mount is, and the embedder chose to give it. h9 makes no connection of its own, so the network policy has nothing to check, as for a unix socket the CLI dials. Removing the relay removes a listening socket another local process could connect to. Duplicates are made close-on-exec, and are closed when the run ends, so a host command h9 runs doesn't inherit them.
+The guest reaches nothing new: an `.fd` mount is a 9P tree, as an `.url` mount is, and the embedder chose to give it. h9 makes no connection of its own, so the network policy has nothing to check, as for a unix socket the CLI dials. Removing the relay removes a listening socket another local process could connect to. An `.fd` mount of another machine's served `/net` reaches that machine's network, its loopback included ([virtual-loopback](virtual-loopback.md)), as importing any machine's `/net` does; the embedder chose to hand it over. Duplicates are made close-on-exec, and are closed when the run ends, so a host command h9 runs doesn't inherit them.
 
 ## Done criteria
 
@@ -114,6 +114,7 @@ Integration cases, in `tests/backends.zig`, with a test 9P server on the other e
 - [ ] `test "an .fd mount serves / from a socketpair the embedder holds [fd-mounts]"`
 - [ ] `test "an .fd mount at /n/x and at /srv/x, with spec and user [fd-mounts]"`
 - [ ] `test "an .fd mount with fd_write serves 9P over a pipe pair [fd-mounts]"`
+- [ ] `test "an .fd mount with up on / keeps the guest's writes in the embedder's server [fd-mounts, upper-layers]"`
 - [ ] `test "the embedder's descriptor stays open, and a second run uses it [fd-mounts]"`
 - [ ] `test "an .fd mount without fd, or fd_write on another kind, is PolicyConflict [fd-mounts]"`
 - [ ] `test "a 9P2000.L server works through an .fd mount [fd-mounts]"`
@@ -133,4 +134,5 @@ Integration cases, in `tests/backends.zig`, with a test 9P server on the other e
 
 - **Ending a run while the reader waits.** The conversation's kproc blocks in the host's `read` or `ReadFile`. Closing h9's duplicate doesn't wake it on POSIX, and `shutdown` would end the embedder's stream too. The unix-socket path has the same wait, so whatever ends a run there should work here; if it doesn't, the kproc can poll with a wake pipe, or use `CancelSynchronousIo` on Windows.
 - **Redials.** An `.fd` conversation has nothing to redial, so a 9P2000.L.Z server that drops it hangs up the mount, as a lost unix socket without a path would. An embedder that wants reconnects could give a callback that returns a new descriptor.
+- **Serving over a descriptor.** port-streams gives the page `machine.serve(port)`, and devdotl already takes `serve N`. An embedder holding a stream could hand it over the same way, as `Machine.serveFd(fd, fd_write)`, to serve the machine to an in-process client. It would go through serve's per-connection path as an accepted stream, under its caps and `/net` rule, and [kernel-serve](kernel-serve.md) would make it cost no guest process.
 - **`fd://N` on the CLI.** A parent that spawns `h9` could pass a socketpair as an inherited fd with `--url fd://3:/n/ui`. It's cheap on POSIX, but it puts a descriptor number in the plan, and Windows would need an inheritable handle's value on the command line.

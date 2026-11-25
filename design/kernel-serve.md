@@ -4,7 +4,7 @@ title: A 9P server in the kernel
 status: draft
 created: 2026-11-13
 authors: [progrium]
-depends: [serve, dotl]
+depends: [serve, dotl, linux-chroot]
 areas: [kern, sandbox, web]
 branch: []
 ---
@@ -17,7 +17,7 @@ h9's kernel gets its own 9P2000 server, `src/kern/kserve.c`, and [serve](epoch-0
 
 ## Background
 
-- **How serving works today** ([serve](epoch-0/serve.md), Each connection): a listener accepts a stream, the dialect slot ([dotl](epoch-0/dotl.md)) passes 9P2000 through or translates 9P2000.L, and the machine's server Proc forks a Proc that execs `exportfs -r PATH` (`-R` under `--write=none`) on the stream. exportfs forks one more process for each request that blocks. Serving processes are counted under `--pids` separately from the program's, with 8 per connection and 32 connections (`serve.max_conns`, `serve.conn_procs`), and exportfs's memory counts under `--memory`.
+- **How serving works today** ([serve](epoch-0/serve.md), Each connection): a listener accepts a stream, the dialect slot ([dotl](epoch-0/dotl.md)) hands it to a `#ℓ` conversation's server side (`serve N`), which passes 9P2000 through or translates 9P2000.L, and the machine's server Proc forks a Proc that execs `exportfs -r PATH` (`-R` under `--write=none`) on the conversation's `data`. exportfs forks one more process for each request that blocks. Serving processes are counted under `--pids` separately from the program's, with 8 per connection and 32 connections (`serve.max_conns`, `serve.conn_procs`), and exportfs's memory counts under `--memory`.
 - **Why serve chose exportfs.** Its Rationale: exportfs is "already correct for every device the machine has", and "it serves through the guest's namespace, so devfs's access rules, `--read-deny`, and the write policy hold without a second implementation. Serving from Zig straight off kernel channels would save a process and a copy per message, but it would be a second 9P server to keep correct."
 - **What that costs.**
   - A guest process, and often several, per client. The serving share of `--pids` and memory exists only because of that.
@@ -26,6 +26,8 @@ h9's kernel gets its own 9P2000 server, `src/kern/kserve.c`, and [serve](epoch-0
   - Nothing can serve where there are no guest processes. [namespace-kernel](namespace-kernel.md) is a kernel build with none.
 - **Kernel-side serving already exists in drawterm.** `third_party/drawterm/exportfs/` (about 1.2k lines) is the exportfs drawterm runs in its own kernel, on kprocs, to export `/mnt/term` to a cpu server (`cpu.c`). h9's build leaves it out. It's path-based, as 9front's exportfs is: a fid is a path string, and each walk is a `dirstat` of the joined path. Its state (`fhash`, `fidfree`, `root`) is file-scope globals, so it serves one connection per process.
 - **The checks are in the kernel, not in exportfs.** devfs's `h9_fs_check` (`src/kern/fscheck.c`), `--read-deny`, overlay's write rules, and the device mask all run inside channel operations. exportfs reaches them only because it makes system calls that end in those operations. A server in the kernel that makes the same channel operations reaches the same checks.
+- **Some hooks are in the system calls, not the channel operations.** [file-watch](file-watch.md) records the guest's own changes (its Source 1) with marked calls in `sysfile.c`'s wrappers, so a client's writes through exportfs reach the journal because exportfs makes those system calls. And [linux-chroot](linux-chroot.md) stops `..` at a process's root with a check in `walkl` (`h9_fs_atroot`), keyed on a `slash` marked as a chroot's root.
+- **file-watch serves `.fs/events`.** Its serving phase serves the machine's change journal as `.fs/events` at the served root, for [dotfs](https://github.com/progrium/dotfs/blob/main/docs/9p-dotfs.md) clients and other h9 machines. With exportfs that's a bind on the served root, so `.fs` shows up in its listing, which dotfs asks servers not to do.
 
 ## Proposal
 
@@ -34,11 +36,12 @@ h9's kernel gets its own 9P2000 server, `src/kern/kserve.c`, and [serve](epoch-0
 `src/kern/kserve.c` serves one 9P2000 connection on a channel (a devhstream stream's data channel, or any channel that reads and writes whole 9P messages).
 
 - **Fids hold channels.** `Tattach` gives the fid a clone of the chosen namespace's root channel (see Namespaces). `Twalk` clones the fid's channel and walks only the new elements with chan.c's `walk()`, which crosses mounts as `namec` does and reports how far a partial walk got, so `Rwalk`'s qids come straight from it. Through devmnt that's one upstream `Twalk`, not a walk from the root. A fid never holds a path string, so a rename by another client doesn't change what an open fid names, and a name that's removed and made again is a different file.
-- **namec's special cases, reused.** Some of the kernel's resolution lives in `namec`, not `walk()`: creating in a union (finding the `MCREATE` member), `..` back across a mount, and opening a mount point. For those, the worker sets `up->dot` to the fid's channel and calls `namec` with the last element as a relative name (`Acreate` for `Tcreate`, `Aopen` for `Topen` when the fid's channel is a mount point), so drawterm's own handling runs and isn't copied.
+- **namec's special cases, reused.** `..` back across a mount is `walkl`'s own (`undomount`, from the channel's path), so a walk gets it. Some of the kernel's resolution lives in `namec` instead: creating in a union (finding the `MCREATE` member) and opening a mount point. For those, the worker sets `up->dot` to the fid's channel and calls `namec` with the last element as a relative name (`Acreate` for `Tcreate`, `Aopen` for `Topen` when the fid's channel is a mount point), so drawterm's own handling runs and isn't copied.
 - **Operations** go to the channel's device as `sysfile.c`'s wrappers do: `Topen` and `Tcreate` through the device's `open` and `create` with the same mode checks (`openmode`, `DMEXCL`, `ORCLOSE`), `Tread` and `Twrite` through `devtab[c->type]->read` and `write`, with directory reads of a union through `unionread` and of anything else packed as `Dir`s, `Tstat` and `Twstat` through `stat` and `wstat`, `Tremove` through `remove`, and `Tclunk` through `cclose`.
+- **The journal.** kserve skips `sysfile.c`'s wrappers, so it makes [file-watch](file-watch.md)'s Source 1 calls itself, at the same points: each create, remove, `wstat`, and write, and the close after a write. A served client's change then reaches the machine's watchers as it does through exportfs. The record's pid, which a served request doesn't have, is the server Proc's, or 0 in a build with no guest processes.
 - **Blocking.** Each request runs on a worker from a small per-connection pool of kernel processes (coroutines on the web host), so a read that blocks on a pipe doesn't hold up the connection. `Tflush` interrupts the worker running the flushed tag, which fails its request with "interrupted" as a note does, and answers `Rflush` after the worker's reply, as 9P requires.
 - **Errors** are the kernel's error strings, as exportfs returns them.
-- **Seam rules.** The server is C, under `waserror`, because it lives between devices and channels. Its only Zig is the leaf that hands it a connection.
+- **Seam rules.** The server is C, under `waserror`, because it lives between devices and channels ([spec/kernel.md](../spec/kernel.md), Zig/C seam rules). Its only Zig is the leaf that hands it a connection.
 
 ### Namespaces
 
@@ -52,9 +55,13 @@ Each request runs with `up->pgrp`, `slash`, and `dot` set to its fid's namespace
 ### Policy
 
 - **Read-only serving** (`--write=none`, exportfs's `-R`): `Topen` with a write mode, `Tcreate`, `Tremove`, and `Twstat` fail with "permission denied", in the server, before reaching the device.
-- **`-r PATH`** (serve's `--serve-root`): the attach root is that path walked from the source's root, and `..` stops there, as exportfs's `-r` does.
+- **`-r PATH`** (serve's `--serve-root`): the attach root is that path walked from the source's root, and `..` stops there, as exportfs's `-r` does. kserve doesn't check `..` itself: each request's `slash` is the attach root, marked as [linux-chroot](linux-chroot.md) marks a chroot's root, so `walkl`'s `h9_fs_atroot` stops it. The mark moves from `src/kern/linux.c` to a helper both use.
 - **Caps.** At most 32 connections, as now. Each holds at most 4096 fids, since every fid pins a kernel channel, and for a fid in a mounted tree an upstream fid too; a walk to a new fid past that fails with "too many fids". Each has at most 8 requests outstanding at once; past that, the next request waits for a worker rather than failing, since workers are cheap and waiting is what a slow server does. There's no serving share of `--pids`, since nothing is a guest process. Buffers count against `--memory` as kernel allocations do.
 - **The user.** Every client acts as the machine's user, and `Tattach`'s `uname` isn't checked, as with exportfs.
+
+### `.fs/events`
+
+Where [file-watch](file-watch.md)'s serving is built, kserve answers `.fs` at the attach root itself, in place of the bind exportfs needs. A walk of `.fs` from the attach root's fid gives a directory holding only `events`, whose opens and reads are `#ν`'s, scoped to the attach root as file-watch says. A directory read of the attach root leaves `.fs` out, as dotfs asks. A file the source has at `.fs` under the attach root is hidden, as the bind hides it now. Below the attach root, `.fs` is an ordinary name.
 
 ### serve's per-connection path
 
@@ -64,9 +71,11 @@ Step 3 of serve's Each connection becomes: the server Proc starts a kserve conne
 
 **A second 9P server to keep correct.** That's serve's objection, and it holds: kserve is new code with 9P's subtle parts (flush ordering, fid reuse, directory offsets). What changes the trade is that h9 now needs a server where no guest process can run ([namespace-kernel](namespace-kernel.md), and port serving on the web host from [port-streams](port-streams.md)), and that one server can't pick a namespace per attach as exportfs is built. The access rules stay in one implementation, the kernel's, because kserve calls the same channel operations exportfs's system calls end in.
 
+**The chroot mark, not a check of kserve's own.** Stopping `..` in kserve would mean spotting it in each `Twalk` and comparing channels before calling `walk()`, which misses a `..` in the middle of a multi-element walk. linux-chroot already put that check where every walk passes, and keyed it on `slash`, which kserve sets per request anyway.
+
 **Channels, not paths.** drawterm's exportfs is path-based, as 9front's is: a fid is a name node, each walk step is a `dirstat` of the joined path from the root, and an open opens the path again. Porting it is less new code (make its globals per connection), its fids are cheap, and an idle one holds nothing upstream. But every operation re-resolves the whole path through the mount table, which over a devmnt mount means upstream walks from the root each time with no cache; identity is by name, so a file renamed under an open fid is lost and a recreated name silently becomes the new file; and an opened file with no path can't be named. A channel per fid gives exact identity and short walks, and it's what [dotl](epoch-0/dotl.md) said serving `9P2000.L.Z`'s `Trebind` would need: a fid that survives by identity, not name. Its costs are a pinned channel per fid, bounded by the fid cap, and namec's special cases, which the worker reuses through `up->dot` rather than reimplementing.
 
-**Not in Zig.** The server sits between channels and devices, where errors are `waserror`/`error`. Zig code can't sit between a `waserror` and an `error` (SPEC.md, seam rule 1), so the server would be all leaf calls back into C.
+**Not in Zig.** The server sits between channels and devices, where errors are `waserror`/`error`. Zig code can't sit between a `waserror` and an `error` ([spec/kernel.md](../spec/kernel.md), seam rule 1), so the server would be all leaf calls back into C. [kernel-port](kernel-port.md) removes that reason: it ports `chan.c` and `sysfile.c` to Zig with error unions, and kserve.c, which calls straight into both, is ported with them.
 
 **Waiting, not failing, past the outstanding cap.** exportfs failed requests past its 8 processes because each was a guest process counted against a limit. A kserve worker is a coroutine or a thread from a pool, so a client that pipelines gets backpressure, not errors.
 
@@ -78,7 +87,8 @@ Step 3 of serve's Each connection becomes: the server Proc starts a kserve conne
 - **Limits:** the plan's `limits` line drops `(+N serving)`, and `--pids` covers only the program.
 - **`--print`:** `serve` shows `kernel` instead of an exportfs path.
 - **builtin-root:** serving no longer needs its box's `exportfs`, so a build that embeds no box for an architecture can still serve.
-- **serve:** this changes step 3 of its Each connection and its "Which exportfs", "Per connection", and "Processes" paragraphs. serve stays implemented; SPEC.md's serving section is updated, and serve gets an Updates note pointing here.
+- **serve:** this changes step 3 of its Each connection and its "Which exportfs", "Per connection", and "Processes" paragraphs. serve stays implemented; [spec/ninep.md](../spec/ninep.md)'s Serving section is updated, and serve gets an Updates note pointing here.
+- **[file-watch](file-watch.md):** a served client's changes reach the journal, as through exportfs, and `.fs` is no longer listed at the served root.
 - **`third_party/`:** unchanged. drawterm's exportfs stays out of the build.
 
 ## Security
@@ -91,7 +101,7 @@ Step 3 of serve's Each connection becomes: the server Proc starts a kserve conne
 ## Done criteria
 
 - [ ] `h9 --serve unix!/tmp/h9.sock` serves with no `/bin/exportfs` anywhere in the namespace, and 9front's `mount` lists `/bin` through it.
-- [ ] The serve and dotl integration cases pass unchanged on kserve.
+- [ ] The serve and dotl integration cases pass on kserve, as [virtual-loopback](virtual-loopback.md) leaves them.
 - [ ] Cases tagged `[kernel-serve]`:
   - `test "serving runs no guest process [kernel-serve]"`
   - `test "a blocking read doesn't hold up the connection [kernel-serve]"`
@@ -105,15 +115,18 @@ Step 3 of serve's Each connection becomes: the server Proc starts a kserve conne
   - `test "a union directory reads the same as through exportfs [kernel-serve]"`
   - `test "a fuzzed 9P stream fails the connection, not the machine [kernel-serve]"`
   - `test "--pids no longer counts serving [kernel-serve]"`
-- [ ] SPEC.md describes kserve, and serve has an Updates note.
+  - `test "a served client's write reaches the machine's journal [kernel-serve, file-watch]"`
+  - `test ".fs/events is served at the attach root and isn't listed [kernel-serve, file-watch]"`
+- [ ] spec/ninep.md and spec/kernel.md describe kserve, and serve has an Updates note.
 
 ## Implementation
 
 1. `kserve.c`: attach, walk, open, read, write, stat, clunk, over the plan's namespace, with one worker. Run serve's cases against it behind a build flag.
-2. Workers per connection, flush, create, remove, wstat, union reads, the policy rules.
+2. Workers per connection, flush, create, remove, wstat, union reads, the policy rules, and the journal calls.
 3. Switch serve's per-connection path to kserve, drop the serving share of `--pids`, update `--print` and the plan's limits line.
 4. The named-namespace source interface, for [namespace-kernel](namespace-kernel.md).
-5. SPEC.md and serve's Updates note.
+5. `.fs/events` at the attach root, once file-watch's serving is built.
+6. spec/ninep.md, spec/kernel.md, and serve's Updates note.
 
 ## Open issues
 

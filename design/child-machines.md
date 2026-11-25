@@ -5,7 +5,7 @@ title: Child machines
 status: proposed
 created: 2026-11-08
 authors: [progrium]
-depends: []
+depends: [mounts]
 areas: [kern, vmm, sandbox, cli, guest]
 ---
 
@@ -22,12 +22,12 @@ A program inside a machine can start another machine, a child, by running `h9` w
 **h9 inside h9 today.** A static musl build of h9 (`zig build -Dtarget=x86_64-linux-musl`) runs under the Linux personality. On an x86\_64 cloud VM without KVM, with the outer machine on the native backend:
 
 ```text
-$ h9 --root lroot --memory 4g /bin/h9 --check
+$ h9 --dir lroot --memory 4g /bin/h9 --check
 backend kvm: no /dev/kvm (no KVM in this kernel, or a VM without nested virtualization)
 backend native: the kernel has no Syscall User Dispatch (Linux 5.11 or later)
 backend auto: no /dev/kvm (no KVM in this kernel, or a VM without nested virtualization)
 
-$ h9 --root lroot --memory 4g /bin/h9 --builtin only --rc 'echo hi'
+$ h9 --dir lroot --memory 4g /bin/h9 --builtin --rc 'echo hi'
 h9: cannot create auto machine for amd64: no /dev/kvm (no KVM in this kernel, or a VM without nested virtualization)
 ```
 
@@ -69,7 +69,8 @@ Lines written to `ctl` set options before `exec`. Each matches a host flag, with
 | `profile tight` | `--profile` |
 | `net disable\|outbound\|enable`, `netallow PATTERN` | `--net`, `--net-allow` |
 | `write overlay\|ephemeral\|scope\|none` | `--write` |
-| `root PATH`, `cwd PATH` | `--root`, the cwd |
+| `dir PATH[:DST[:OPTS]]`, `archive PATH[:DST[:OPTS]]`, `builtin[=DST[:OPTS]]`, `tmp DST`, `bind SRC:DST[:OPTS]` | The mount flags ([mounts](mounts.md)), in order |
+| `cwd PATH` | `--cwd` |
 | `readable PATH`, `writable PATH`, `readdeny PATH` | `--readable`, `--writable`, `--read-deny` |
 | `ns PATH` | `--ns` |
 | `env NAME=VALUE` | `--env` |
@@ -81,7 +82,7 @@ Lines written to `ctl` set options before `exec`. Each matches a host flag, with
 
 ### Paths are the caller's
 
-Every path in a child's options names a file in the namespace of the process that wrote `exec`, not a host path. `root /n/alpine` makes the caller's `/n/alpine` the child's `/`; `readable /usr/glenda/src` binds the caller's `/usr/glenda/src` at the same path in the child, where a host machine would use `/mnt/term/<path>`. Without `root`, the child's root is the caller's `/`; without `cwd`, its cwd is the caller's.
+Every path in a child's options names a file in the namespace of the process that wrote `exec`, not a host path. `dir /n/alpine` makes the caller's `/n/alpine` the child's `/`, and `dir /n/src:/src` puts the caller's `/n/src` at the child's `/src`; `readable /usr/glenda/src` binds the caller's `/usr/glenda/src` at the same path in the child, where a host machine would use `/mnt/term/<path>`. Without a mount on `/`, the child's root is the caller's `/`; without `cwd`, its cwd is the caller's.
 
 The namespace builder (`src/policy.zig`) already builds a machine's namespace as binds. For a child, each source that would be a `#U` host path is instead a channel walked from the caller's namespace when `exec` runs. Devices are attached fresh for the child: its own `#c` console, `#p` (only its own processes), `#s` board, `#e` environment, and `#O` overlays. So the child can reach only files the caller can reach, and only with the caller's rights, whatever its options say. `n/plan` prints these binds as `bind '<caller path>' <path>` lines, marked `parent` in the access column.
 
@@ -115,7 +116,7 @@ A guest-tools script, `src/guest/bin/h9`, takes the host CLI's flags (those in t
 h9 --memory 512m --pids 64 --net=disable --rc 'cd /sys/src/cmd && mk'
 ```
 
-`h9 --print` in the guest prints the child's plan from `n/plan` without starting it. Flags the guest can't use (`--backend`, `--gfx`, `--serve`, `--host-cmd`, `--root` with a URL, `--check`) are a usage error with exit 2.
+`h9 --print` in the guest prints the child's plan from `n/plan` without starting it. Flags the guest can't use (`--backend`, `--gfx`, `--serve`, `--host-cmd`, `--url`, `--check`) are a usage error with exit 2.
 
 ### The library
 
