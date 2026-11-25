@@ -1114,6 +1114,47 @@ fn guestPlace(in: Inputs, p: []const u8) Place {
     return .mnt_term;
 }
 
+/// The guest path of the resolved host file `host` under a compiled
+/// plan, or null if the guest can't read it: it's outside the root, the
+/// cwd, every readable path, and every `--dir` mount, or a deny rule
+/// hides it. `mounts`, `cwd`, and `pol` are the plan's inputs. The CLI
+/// runs a host `#!` script by this path, so that its interpreter, a
+/// guest program, can open it (design/host-scripts.md).
+pub fn guestPath(arena: std.mem.Allocator, plan: *const Plan, mounts: []const mount.Mount, cwd: ?[]const u8, pol: Policy, host: []const u8) error{OutOfMemory}!?[]const u8 {
+    // Without a root nothing is bound; with one, the cwd always is.
+    if (plan.guest_cwd == null) return null;
+    if (plan.check(host, .read) != .allow) return null;
+    const in: Inputs = .{ .mounts = mounts, .cwd = cwd, .arch = .arm64 };
+    switch (guestPlace(in, host)) {
+        .root_top, .cwd_top => return null,
+        .root => |rel| return try std.fmt.allocPrint(arena, "/{s}", .{rel}),
+        .cwd => |rel| return try std.fmt.allocPrint(arena, "/mnt/term/cwd/{s}", .{rel}),
+        .mnt_term => {},
+    }
+    // Readable and writable paths, and --host-fs, appear at their host
+    // path under /mnt/term.
+    var shared = pol.host_fs;
+    for ([_][]const []const u8{ pol.readable, pol.writable }) |list| for (list) |p| {
+        if (relUnder(p, host) != null) shared = true;
+    };
+    if (shared) return try std.fmt.allocPrint(arena, "/mnt/term{s}", .{host});
+    // A host directory mounted elsewhere: the deepest that holds it.
+    var best: ?mount.Mount = null;
+    var best_rel: []const u8 = "";
+    for (mounts) |m| {
+        if (m.kind != .dir or m.stack() != null or m.dst.len == 0 or m.dst[0] != '/') continue;
+        const rel = relUnder(m.src, host) orelse continue;
+        if (best == null or m.src.len > best.?.src.len) {
+            best = m;
+            best_rel = rel;
+        }
+    }
+    const m = best orelse return null;
+    if (best_rel.len == 0) return null;
+    const dst = std.mem.trimEnd(u8, m.dst, "/");
+    return try std.fmt.allocPrint(arena, "{s}/{s}", .{ dst, best_rel });
+}
+
 /// Whether host path `p` is a directory on one of the stacks.
 fn isStackDir(in: Inputs, p: []const u8) bool {
     for (in.mounts) |m| if (m.kind == .dir and m.stack() != null and std.mem.eql(u8, m.src, p)) return true;
@@ -1621,6 +1662,23 @@ test "compile: paths outside the root and cwd go under /mnt/term" {
     try t.expect(union_bind and path_bind);
     try t.expectEqual(Verdict.allow, p.check("/src", .walk));
     try t.expectEqual(Verdict.hidden, p.check("/etc/passwd", .read));
+}
+
+test "guestPath: a host file's guest path, or null if the guest can't read it [host-scripts]" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var msg: []const u8 = "";
+    const mounts = r_mounts ++ [_]mount.Mount{.{ .kind = .dir, .src = "/data", .dst = "/n/data" }};
+    const pol: Policy = .{ .readable = &.{"/src/proj"}, .read_deny = &.{"/w/secret"} };
+    const p = try compile(a, .{ .mounts = &mounts, .cwd = "/w", .arch = .arm64 }, pol, &msg);
+    try t.expectEqualStrings("/mnt/term/cwd/greet", (try guestPath(a, &p, &mounts, "/w", pol, "/w/greet")).?);
+    try t.expectEqualStrings("/mnt/term/cwd/a/b", (try guestPath(a, &p, &mounts, "/w", pol, "/w/a/b")).?);
+    try t.expectEqualStrings("/mnt/term/src/proj/x", (try guestPath(a, &p, &mounts, "/w", pol, "/src/proj/x")).?);
+    try t.expectEqualStrings("/n/data/x", (try guestPath(a, &p, &mounts, "/w", pol, "/data/x")).?);
+    try t.expectEqualStrings("/bin/x", (try guestPath(a, &p, &mounts, "/w", pol, "/r/bin/x")).?);
+    try t.expectEqual(null, try guestPath(a, &p, &mounts, "/w", pol, "/w/secret/x"));
+    try t.expectEqual(null, try guestPath(a, &p, &mounts, "/w", pol, "/etc/x"));
 }
 
 test "sizes and durations" {

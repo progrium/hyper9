@@ -425,6 +425,62 @@ test "a guest #! script runs as the first program [baseline]" {
     try std.testing.expectEqual(126, em.code);
 }
 
+test "a host #! script runs by its guest path [host-scripts]" {
+    const e = try env(@src());
+    const io = std.testing.io;
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.writeFile(io, .{ .sub_path = "greet", .data = "#!/bin/rc\necho $0 $*\n" });
+    try s.tmp.dir.writeFile(io, .{ .sub_path = "nointerp", .data = "#!/no/such/rc\n" });
+    try s.tmp.dir.createDirPath(io, "sub/in");
+    try s.tmp.dir.writeFile(io, .{ .sub_path = "sub/in/greet", .data = "#!/bin/rc\necho $0 $*\n" });
+    var other: Scratch = undefined;
+    try other.init();
+    defer other.deinit();
+    try other.tmp.dir.writeFile(io, .{ .sub_path = "away", .data = "#!/bin/rc\necho $0 $*\n" });
+    // Scratch paths are resolved, as h9 resolves the cwd, and siblings.
+    const cwd = s.path;
+    const other_real = other.path;
+
+    // In the cwd, and below it: $0 is the guest path, as exec gives it.
+    const r = try runBare(e, cwd, &.{ "--dir", e.root, "./greet", "hello", "world" }, &.{});
+    defer r.deinit();
+    try std.testing.expectEqualStrings("", r.err);
+    try std.testing.expectEqualStrings("/mnt/term/cwd/greet hello world\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+    const sub = try runBare(e, cwd, &.{ "--dir", e.root, "./sub/in/greet" }, &.{});
+    defer sub.deinit();
+    try std.testing.expectEqualStrings("/mnt/term/cwd/sub/in/greet\n", sub.out);
+    try std.testing.expectEqual(0, sub.code);
+    // Outside every bound path: an error naming the fix, before the
+    // machine starts.
+    var away_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const away = try std.fmt.bufPrint(&away_buf, "../{s}/away", .{std.fs.path.basename(other_real)});
+    const out = try runBare(e, cwd, &.{ "--dir", e.root, away }, &.{});
+    defer out.deinit();
+    try std.testing.expectEqual(126, out.code);
+    try std.testing.expect(std.mem.indexOf(u8, out.err, "--readable") != null);
+    // With the directory shared, it runs from /mnt/term at its host path.
+    var want_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const want = try std.fmt.bufPrint(&want_buf, "/mnt/term{s}/away\n", .{other_real});
+    const shared = try runBare(e, cwd, &.{ "--dir", e.root, "--readable", other_real, away }, &.{});
+    defer shared.deinit();
+    try std.testing.expectEqualStrings(want, shared.out);
+    try std.testing.expectEqual(0, shared.code);
+    // --read-deny hides it like any other file.
+    var deny_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const deny = try std.fmt.bufPrint(&deny_buf, "{s}/greet", .{cwd});
+    const denied = try runBare(e, cwd, &.{ "--dir", e.root, "--read-deny", deny, "./greet" }, &.{});
+    defer denied.deinit();
+    try std.testing.expectEqual(126, denied.code);
+
+    // The interpreter is resolved in the guest.
+    const ni = try runBare(e, cwd, &.{ "--dir", e.root, "./nointerp" }, &.{});
+    defer ni.deinit();
+    try std.testing.expectEqual(127, ni.code);
+}
+
 test "stdin reaches the guest's console [baseline]" {
     const e = try env(@src());
     const r = try runIn(e, &.{"wc"}, "a b\nc\n");

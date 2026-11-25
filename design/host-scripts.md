@@ -1,11 +1,12 @@
 ---
 slug: host-scripts
 title: Running host scripts as the program
-status: draft
+status: implemented
 created: 2026-11-06
 authors: [progrium]
 depends: []
 areas: [cli, machine, tests]
+branch: [main]
 ---
 
 # Proposal: Running host #! scripts as the program
@@ -24,39 +25,51 @@ Nov 25, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially direct
 
 ## Proposal
 
-[To be decided; see Open issues. The leading option: when a host program starts with `#!`, the CLI passes a guest path for it instead of its bytes, mapping a host path under the cwd to `/mnt/term/cwd/...` (and under a `--readable`/`--writable` path to its `/mnt/term/...` view). A script outside every bound path is an error with a message pointing at `--readable`.]
+When a host program starts with `#!`, the CLI runs it as a guest program by its guest path instead of passing its bytes. The `Machine` API doesn't change: the CLI passes `.guest` with that path, and the machine follows `#!` as it does for any guest program.
+
+The CLI resolves the host path, symlinks included, and maps it as the compiled policy binds it:
+
+- under the cwd: `/mnt/term/cwd/...`
+- in a root `--dir`: its path in the root
+- under a `--readable` or `--writable` path, or anywhere with `--host-fs`: `/mnt/term/<host path>`
+- under another `--dir` mount: its path under the mount's destination
+
+A script the policy doesn't let the guest read, because it's outside every bound path or a `--read-deny` path hides it, is an error before the machine starts, with exit code 126 and a message naming the flag that would share it (`--readable DIR`) or the `--read-deny` path that hides it. Nothing is bound for the script.
 
 ## Rationale
 
 Alternatives:
 
-- **Map the host path into the guest namespace** (leading option). Simple, uses the sandbox as is, and the script sees itself at a real path (`$0`). It breaks the "doesn't need to be in the namespace" promise for scripts only.
+- **Map the host path into the guest namespace** (chosen). Simple, uses the sandbox as is, and the script sees itself at a real path (`$0`). It breaks the "doesn't need to be in the namespace" promise for scripts only.
 - **Serve the script's bytes from a synthetic file** (for example `/fd/N` or a one-file `#|`/ramfs bind). Keeps the promise, but `$0` is a meaningless path and scripts that look at their own directory break; it also adds a kernel-side mechanism for one case.
 - **Bind the script's directory read-only automatically.** Widens the sandbox implicitly, which the policy design avoids.
 - **Leave it, and document `h9 rc ./x`.** Costs nothing, but `./x` working for binaries and not scripts is surprising.
 
 ## Compatibility
 
-- Exit codes: a host `#!` file that gives 126 today would run, or give 127 if the interpreter is missing.
-- `Machine.Program` may gain a variant, or the CLI may switch to `.guest` for scripts; either way the `Machine` API or its documented use changes.
+- Exit codes: a host `#!` file that gave 126 runs, or gives 127 if the interpreter is missing, or still 126 if the guest can't read it.
+- `Machine.Program` is unchanged; the CLI uses `.guest` for scripts. spec/cli.md's promise that a host program "doesn't need to be in the guest namespace" now holds for binaries only.
 - `--arch`: a script has no a.out header, so without `--arch` the machine runs the host's architecture, as for a guest program.
 
 ## Security
 
-The interpreter is resolved in the guest, so a `#!/usr/bin/python` line can't run a host program. The script must be readable through the policy, so `--read-deny` and the tight profile apply to it like any other file. With the leading option nothing new is reachable.
+The interpreter is resolved in the guest, so a `#!/usr/bin/python` line can't run a host program. The script must be readable through the policy, so `--read-deny` and the tight profile apply to it like any other file. Nothing is bound for the script, so nothing new is reachable.
 
 ## Done criteria
 
-- [ ] `h9 ./greet world` runs a `#!/bin/rc` script in the host cwd and prints its arguments.
-- [ ] Integration cases: a host script in the cwd runs, with `$0` the guest path; a host script outside every bound path fails with a clear message; a missing interpreter gives 127.
+- [x] `h9 ./greet world` runs a `#!/bin/rc` script in the host cwd and prints its arguments.
+- [x] Integration cases: a host script in the cwd runs, with `$0` the guest path; a host script outside every bound path fails with a clear message; a missing interpreter gives 127.
 
 ## Implementation
 
-1. Decide the open issues.
-2. In `src/main.zig`, detect `#!` in a host program and resolve its guest path.
-3. Pass it as a guest program (or the new `Program` variant), and update spec/cli.md's program resolution table and the README.
+1. In `src/policy.zig`, `guestPath` maps a resolved host file to its guest path under a compiled plan, or null if the guest can't read it.
+2. In `src/main.zig`, detect `#!` in a host program, resolve its host path, and, once the plan is compiled, pass its guest path as a guest program.
+3. Update spec/cli.md's program resolution, and the manual.
 
 ## Open issues
 
-- Keep the "doesn't need to be in the namespace" promise for scripts (synthetic file), or limit host scripts to bound paths?
-- Should a script outside the bound paths get its directory bound read-only, or be an error?
+None. Both were decided for the leading option: host scripts are limited to the bound paths, and a script outside them is an error rather than getting its directory bound.
+
+## Updates
+
+- 2026-11-25: Implemented as the leading option. The integration case `a host #! script runs by its guest path [host-scripts]` covers the cwd, a subdirectory, a `--readable` path, a script outside every bound path, `--read-deny`, and a missing interpreter.

@@ -37,14 +37,16 @@ h9 --version | --check | --help      # tool functions; -h alone is --help
 
 | Argument | Resolution |
 | --- | --- |
-| Starts with `./` or `../` (`./hello`, `../out/x`) | A host path relative to the host cwd, read on the host. It doesn't need to be in the guest namespace. |
+| Starts with `./` or `../` (`./hello`, `../out/x`) | A host path relative to the host cwd, read on the host. An a.out or ELF binary doesn't need to be in the guest namespace; a `#!` script runs by its guest path (below). |
 | Absolute (`/bin/cat`) | A guest path, resolved in the guest namespace. To run an absolute host path, use the guest view of it (`/mnt/term/...`) or a relative path. |
 | Bare name or other relative path (`ls`, `aux/vga`) | Looked up in the guest namespace through `$path` (default `(. /bin)`) |
 | `--rc 'cmd'` | Runs `/bin/rc -c 'cmd'`; the remaining arguments become `$*` |
 | `--rc` as the last argument | Runs a login rc: `rc -l -i` when h9's stdin is a host terminal, and otherwise `rc -l -c '. /fd/0'`, which reads stdin as a script. Either way rcmain sources `/rc/lib/rcmain.local` and then `$home/lib/profile` if they exist and `/bin/test` does, so a root sets its default command in `rcmain.local`, ending it with `exec prog` to replace the shell ([default-command](../design/epoch-0/default-command.md)). Without one, it's a plain rc. `--rc=` is still `rc -c ''` |
 | `--ns 'LINES'\|@FILE` | Replays namespace lines before the program |
 
-A guest program follows `#!` as exec does, so rc scripts such as `man` and `lc` run directly. A host program (`./x`) must be an a.out; run a host script with `h9 rc ./x`.
+A guest program follows `#!` as exec does, so rc scripts such as `man` and `lc` run directly.
+
+A host program that starts with `#!` runs as a guest program by its guest path ([host-scripts](../design/host-scripts.md)), since its interpreter, a guest program, opens the script by name. The CLI resolves the host path (symlinks included) and maps it as the policy binds it: under the cwd to `/mnt/term/cwd/...`, in a root `--dir` to its path in the root, under a `--readable` or `--writable` path (or anything, with `--host-fs`) to `/mnt/term/<host path>`, and under another `--dir` mount to its path under the mount's destination. So `$0` is that guest path, and the interpreter is resolved in the guest; a missing one gives 127. A script the guest can't read (outside every bound path, or hidden by `--read-deny`) fails before the machine starts with 126 and a message naming the flag that would share it. Nothing is bound for the script: the sandbox is as it would be without it. Without `--arch`, a script runs the host's architecture, as a guest program does.
 
 ### Flags
 

@@ -162,13 +162,26 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
     // --arch picks the architecture; without it, a host program's header
     // does, and a guest one runs the host's.
     var arch: ?h9.vmm.Arch = cfg.arch;
-    const prog: h9.Program = if (serve_only) .{ .guest = "" } else switch (cli.programKind(prog_arg)) {
+    // A host #! script runs by its guest path, found once the plan is
+    // compiled (design/host-scripts.md).
+    var host_script: ?[]const u8 = null;
+    var prog: h9.Program = if (serve_only) .{ .guest = "" } else switch (cli.programKind(prog_arg)) {
         .host => blk: {
             const path = if (web) std.fs.path.resolvePosix(arena, &.{ web_pwd, prog_arg }) catch prog_arg else prog_arg;
             const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1 << 30)) catch |err| {
                 std.debug.print("h9: {s}: {t}\n", .{ prog_arg, err });
                 return if (err == error.FileNotFound) exit_not_found else exit_failed;
             };
+            // Its interpreter, a guest program, opens it by name, so it
+            // runs by its guest path. Like a guest program, it runs the
+            // host's architecture unless --arch says otherwise.
+            if (std.mem.startsWith(u8, bytes, "#!")) {
+                host_script = kernPath(arena, realPath(io, arena, path) catch |err| {
+                    std.debug.print("h9: {s}: {t}\n", .{ prog_arg, err });
+                    return exit_failed;
+                });
+                break :blk .{ .guest = "" };
+            }
             if (h9.linux_elf.machineArch(bytes)) |a| {
                 if (arch == null) arch = a;
                 break :blk .{ .bytes = bytes };
@@ -290,6 +303,19 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
         w.interface.flush() catch {};
     }
     if (cfg.print) return 0;
+    if (host_script) |hp| {
+        const gp = try h9.policy.guestPath(arena, &plan, mounts, cwd, pol, hp) orelse {
+            // The interpreter runs in the machine, so it can open only
+            // what the sandbox shares (design/host-scripts.md).
+            for (pol.read_deny) |d| if (h9.policy.relUnder(d, hp) != null) {
+                std.debug.print("h9: {s}: the machine can't read this script: --read-deny {s} hides it\n", .{ prog_arg, d });
+                return exit_not_executable;
+            };
+            std.debug.print("h9: {s}: the machine can't read this script; share its directory with --readable {s}\n", .{ prog_arg, std.fs.path.dirname(prog_arg) orelse "." });
+            return exit_not_executable;
+        };
+        prog = .{ .guest = gp };
+    }
 
     var trace_file: ?std.Io.File = null;
     defer if (trace_file) |f| f.close(io);
