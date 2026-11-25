@@ -6514,6 +6514,212 @@ fn expectGfxNotBuilt(e: Env) !void {
     try std.testing.expect(std.mem.indexOf(u8, r.err, "graphics aren't built into this h9") != null);
 }
 
+// The headless screen (design/headless-screen.md): --gfx=headless gives a
+// screen in memory, and /dev/screen, /dev/mousein and /dev/kbdin read it
+// and type and click into it, from rc.
+
+test "--gfx=headless binds /dev/draw, /dev/mouse, /dev/kbd and /dev/screen [headless-screen]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "--gfx=headless", "--rc", "ls /dev/draw/new /dev/mouse /dev/mousein /dev/cursor /dev/kbd /dev/kbdin /dev/screen" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqual(0, r.code);
+    // ls lists the files, then what it found in the directories.
+    try std.testing.expectEqualStrings("/dev/cursor\n/dev/kbd\n/dev/kbdin\n/dev/mouse\n/dev/mousein\n/dev/screen\n/dev/draw/new\n", r.out);
+}
+
+test "/dev/screen is an image(6) file of the headless screen's size [headless-screen]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "--gfx=headless", "--gfx-size", "640x480", "--rc", "read -c 60 </dev/screen; ls -l /dev/screen | awk '{print $1}'" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("   x8r8g8b8           0           0         640         480 --r--r--r--\n", r.out);
+}
+
+/// Draw messages (draw(3)) that fill (10,10)-(30,30) of the screen, image
+/// 0, with red, as tests/fixtures/gfx/draw.S does: 'b' allocates image 1,
+/// a replicated opaque red pixel, 'd' draws
+/// it through itself as the mask, and 'v' flushes.
+fn redSquare(buf: []u8) []const u8 {
+    var w: std.Io.Writer = .fixed(buf);
+    const put = struct {
+        fn i(wr: *std.Io.Writer, v: u32) void {
+            wr.writeInt(u32, v, .little) catch unreachable;
+        }
+        fn rect(wr: *std.Io.Writer, a: u32, b: u32, c: u32, d: u32) void {
+            i(wr, a);
+            i(wr, b);
+            i(wr, c);
+            i(wr, d);
+        }
+    };
+    w.writeByte('b') catch unreachable;
+    put.i(&w, 1); // id
+    put.i(&w, 0); // screenid
+    w.writeByte(0) catch unreachable; // refresh
+    put.i(&w, 0x08182848); // RGBA32: its alpha makes it an opaque mask too
+    w.writeByte(1) catch unreachable; // repl
+    put.rect(&w, 0, 0, 1, 1);
+    put.rect(&w, @bitCast(@as(i32, -0x3FFFFFFF)), @bitCast(@as(i32, -0x3FFFFFFF)), 0x3FFFFFFF, 0x3FFFFFFF); // clipr: everywhere
+    put.i(&w, 0xFF0000FF); // red, opaque
+    w.writeByte('d') catch unreachable;
+    put.i(&w, 0); // dst: the screen
+    put.i(&w, 1); // src
+    put.i(&w, 1); // mask
+    put.rect(&w, 10, 10, 30, 30);
+    put.rect(&w, 0, 0, 0, 0); // srcp, maskp
+    w.writeByte('v') catch unreachable;
+    return w.buffered();
+}
+
+test "a draw client's image shows up in /dev/screen [headless-screen]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    var mb: [128]u8 = undefined;
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "draw.bin", .data = redSquare(&mb) });
+    // The client's ctl, from /dev/draw/new, stays open on fd 3 while the
+    // messages go to its data file; its first field is the client's number.
+    const r = try run(e, &.{ "--cwd", s.path, "--gfx=headless", "--gfx-size", "64x48", "--rc",
+        \\<[3]/dev/draw/new {
+        \\    ctl=`{read -c 144 <[0=3]}
+        \\    cat draw.bin >/dev/draw/$ctl(1)^/data
+        \\    cat /dev/screen >shot
+        \\}
+    });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqual(0, r.code);
+    var buf: [60 + 64 * 48 * 4 + 1]u8 = undefined;
+    const shot = hostFile(&s, "shot", &buf) orelse return error.NoShot;
+    try std.testing.expectEqual(60 + 64 * 48 * 4, shot.len);
+    try std.testing.expectEqualStrings("   x8r8g8b8           0           0          64          48 ", shot[0..60]);
+    const px = shot[60..];
+    const at = struct {
+        fn f(p: []const u8, x: usize, y: usize) u32 {
+            return std.mem.readInt(u32, p[(y * 64 + x) * 4 ..][0..4], .little) & 0xFFFFFF;
+        }
+    }.f;
+    try std.testing.expectEqual(0xFF0000, at(px, 10, 10));
+    try std.testing.expectEqual(0xFF0000, at(px, 29, 29));
+    try std.testing.expect(at(px, 5, 5) != 0xFF0000);
+    try std.testing.expect(at(px, 30, 30) != 0xFF0000);
+}
+
+test "a line written to /dev/mousein reaches /dev/mouse [headless-screen]" {
+    const e = try env(@src());
+    // 'A' is the pointer at x, y; 'm' moves it by x, y, as on 9front.
+    const r = try run(e, &.{ "--gfx=headless", "--rc",
+        \\</dev/mouse {
+        \\    echo A 100 200 1 0 >/dev/mousein
+        \\    read -c 49
+        \\    echo
+        \\    echo m 5 -10 0 0 >/dev/mousein
+        \\    read -c 49
+        \\    echo
+        \\}
+    });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+    var lines = std.mem.tokenizeScalar(u8, r.out, '\n');
+    for ([_][3][]const u8{ .{ "100", "200", "1" }, .{ "105", "190", "0" } }) |want| {
+        var f = std.mem.tokenizeScalar(u8, lines.next() orelse return error.Short, ' ');
+        try std.testing.expectEqualStrings("m", f.next().?);
+        for (want) |w| try std.testing.expectEqualStrings(w, f.next().?);
+    }
+}
+
+test "text written to /dev/kbdin reaches /dev/kbd as typed keys [headless-screen]" {
+    const e = try env(@src());
+    // kbdfs's format: 'k' and the keys held for a press, 'c' and the
+    // character typed, 'K' and the keys still held for a release; a write
+    // ending in a NUL is messages, 'r' and 'R' a key pressed and released.
+    const r = try run(e, &.{ "--gfx=headless", "--rc",
+        \\</dev/kbd {
+        \\    echo -n a >/dev/kbdin
+        \\    read -c 8 | tr '\0' '.'
+        \\    echo
+        \\}
+    });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("ka.ca.K.\n", r.out);
+}
+
+test "--gfx=headless keeps /dev/snarf away from the host clipboard [headless-screen]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "--gfx=headless", "--rc", "echo -n guest >/dev/snarf; cat /dev/snarf" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("guest", r.out);
+    // The plan says so: a screen in memory, with no clipboard caveat.
+    const p = try run(e, &.{ "--gfx=headless", "--print", "echo" });
+    defer p.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, p.out, "gfx:      headless 1024x768\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, p.out, "clipboard") == null);
+}
+
+test "rio starts on the headless screen, and kbdin types a command into its window [headless-screen]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    // Keys typed before rio reads /dev/kbd are dropped, so the line is
+    // typed again until /dev/snarf, which rio writes through, has it.
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "test.rc", .data = 
+        \\window -r 0 0 600 400 rc
+        \\for(i in `{seq 1 60}){
+        \\    sleep 1
+        \\    if(~ `{cat /dev/snarf} hi){
+        \\        echo hi >/mnt/term/cwd/out
+        \\        kill rio | rc
+        \\        exit
+        \\    }
+        \\    echo 'echo hi >/dev/snarf' >/dev/kbdin
+        \\}
+        \\
+    });
+    var tb: [16]u8 = undefined;
+    const r = try runInFor(e, &.{ "--cwd", s.path, "--timeout", slowTimeout(&tb, 90_000), "--gfx=headless", "rio", "-i", "rc /mnt/term/cwd/test.rc" }, null, slow(120_000));
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("hi\n", hostFile(&s, "out", &buf) orelse "");
+}
+
+test "--gfx-size without --gfx=headless is a usage error [headless-screen]" {
+    const e = try env(@src());
+    for ([_][]const []const u8{
+        &.{ "--gfx-size", "640x480", "echo" },
+        &.{ "--gfx", "--gfx-size", "640x480", "echo" },
+        &.{ "--gfx=headless", "--gfx-scale", "2", "echo" },
+        &.{ "--gfx=headless", "--gfx=noclip", "echo" },
+    }) |args| {
+        const r = try run(e, args);
+        defer r.deinit();
+        try std.testing.expectEqual(2, r.code);
+        try std.testing.expectEqualStrings("", r.out);
+    }
+}
+
+test "--gfx=headless in a -Dgfx=none build exits 125 [headless-screen]" {
+    const e = try env(@src());
+    const v = try runProcess(&.{ e.h9, "--version" }, null);
+    defer gpa.free(v.stdout);
+    defer gpa.free(v.stderr);
+    if (std.mem.indexOf(u8, v.stdout, "gfx: none\n") == null) return error.SkipZigTest;
+    const r = try run(e, &.{ "--gfx=headless", "echo", "hi" });
+    defer r.deinit();
+    try std.testing.expectEqual(125, r.code);
+    try std.testing.expectEqualStrings("", r.out);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "graphics aren't built into this h9") != null);
+}
+
 // Contained trees (design/epoch-0/symlinks-in-root.md). The root for these is
 // a small tree in a scratch directory: a few of the root's commands,
 // copied, the mount points the namespace builder binds onto, and links.

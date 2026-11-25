@@ -2465,7 +2465,7 @@ const GfxRun = struct {
             .mounts = g.mounts[0..n],
             .cwd = o.cwd,
             .policy = .{ .timeout_ns = o.timeout_s * std.time.ns_per_s },
-            .gfx = .{ .clipboard = o.clipboard },
+            .gfx = .{ .screen = .headless, .clipboard = o.clipboard },
             .stdio = .{ .out = &g.out.writer, .err = &g.err.writer },
         }) catch |e| switch (e) {
             error.HypervisorUnavailable, error.BackendNotBuilt, error.WrongArch => return false,
@@ -2655,7 +2655,7 @@ test "a second machine in the process gets GfxInUse [gfx]" {
     const gpa = std.testing.allocator;
     var out: std.Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
-    const opts: h9.Machine.Options = .{ .backend = .emu, .arch = .arm64, .gfx = .{}, .stdio = .{ .out = &out.writer, .err = &out.writer } };
+    const opts: h9.Machine.Options = .{ .backend = .emu, .arch = .arm64, .gfx = .{ .screen = .headless }, .stdio = .{ .out = &out.writer, .err = &out.writer } };
     var a = h9.Machine.init(gpa, std.testing.io, opts) catch |e| switch (e) {
         error.BackendNotBuilt, error.WrongArch => return error.SkipZigTest,
         else => return e,
@@ -2667,6 +2667,56 @@ test "a second machine in the process gets GfxInUse [gfx]" {
     a.deinit();
     var b = try h9.Machine.init(gpa, std.testing.io, opts);
     b.deinit();
+}
+
+test "a second machine in the process gets GfxInUse for the headless screen [headless-screen]" {
+    const gpa = std.testing.allocator;
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    const opts: h9.Machine.Options = .{ .backend = .emu, .arch = .arm64, .gfx = .{ .screen = .headless }, .stdio = .{ .out = &out.writer, .err = &out.writer } };
+    var a = h9.Machine.init(gpa, std.testing.io, opts) catch |e| switch (e) {
+        error.BackendNotBuilt, error.WrongArch => return error.SkipZigTest,
+        else => return e,
+    };
+    // Deferred, so a failed check below still gives the screen up for
+    // the [gfx] cases that follow.
+    defer a.deinit();
+    try std.testing.expectError(error.GfxInUse, h9.Machine.init(gpa, std.testing.io, opts));
+    // A window is the same screen, so it's in use too, or not built, or
+    // there is no display for it (on macOS, a test never hands its main
+    // thread to gfx.main).
+    var wopts = opts;
+    wopts.gfx = .{};
+    if (h9.Machine.init(gpa, std.testing.io, wopts)) |m| {
+        var mm = m;
+        mm.deinit();
+        return error.WindowBesideHeadless;
+    } else |e| try std.testing.expect(e == error.GfxInUse or e == error.GfxNotBuilt or e == error.GfxUnavailable);
+}
+
+test "with Options.gfx.screen = .headless, the hooks reach the machine's screen in a windowed build [headless-screen]" {
+    // In every build with the headless screen, windowed or not (zig build
+    // test -Dgfx=x11 runs this one with a window backend linked in): the
+    // fixture draws, and the hooks see its pixels and send it a key.
+    if (!gfx.has_headless) return error.SkipZigTest;
+    try expectGfx(@embedFile("gfx_draw"), true, null, struct {
+        fn check(_: []const u8) !void {
+            const sz = gfx.headless.size() orelse return error.NoScreen;
+            const px = try std.testing.allocator.alloc(u8, sz.dx * sz.dy * 4);
+            defer std.testing.allocator.free(px);
+            try std.testing.expect(gfx.headless.pixels(px));
+            try std.testing.expectEqual(0xFF0000, pixelAt(px, sz.dx, 10, 10));
+        }
+    }.check);
+    try expectGfx(@embedFile("gfx_kbd"), true, struct {
+        fn act() void {
+            gfx.headless.key('a');
+        }
+    }.act, struct {
+        fn check(out: []const u8) !void {
+            try std.testing.expectEqualStrings("ka\x00", out);
+        }
+    }.check);
 }
 
 /// The root tree for the cases that run rio and acme, from

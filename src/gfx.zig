@@ -1,11 +1,15 @@
-//! Graphics: one host window per process, drawn by drawterm's GUI backends
-//! (design/epoch-0/gfx.md). A machine with `Options.gfx` claims the screen,
-//! and its namespace gets `#i`, `#m` and `#b` on /dev; every other machine
-//! has them masked. The backend is chosen at build time (`-Dgfx`).
+//! Graphics: one screen per process, a host window drawn by drawterm's GUI
+//! backends (design/epoch-0/gfx.md) or a screen in memory, the headless
+//! screen (design/headless-screen.md). A machine with `Options.gfx` claims
+//! the screen, and its namespace gets `#i`, `#m` and `#b` on /dev; every
+//! other machine has them masked. The window backend is chosen at build
+//! time (`-Dgfx`); every native build with graphics has the headless
+//! screen too, and `Options.gfx.screen` picks one per machine.
 //!
-//! The kernel side is src/kern/gfx.c, with the backend's own source, or
-//! src/kern/nogfx.c without one. On the browser host the backend is a
-//! page's canvas (src/kern/gfx-web.c, design/epoch-0/browser-gfx.md).
+//! The kernel side is src/kern/gfx.c, with the backend's own source and
+//! src/kern/gfx-headless.c, or src/kern/nogfx.c without graphics. On the
+//! browser host the backend is a page's canvas (src/kern/gfx-web.c,
+//! design/epoch-0/browser-gfx.md), with no headless screen.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -20,10 +24,37 @@ pub const backend: Backend = std.meta.stringToEnum(Backend, build_options.gfx).?
 /// Whether `Options.gfx` can be honoured at all.
 pub const built = backend != .none and kern.available;
 
+/// Whether this build has a window (or the browser host's canvas):
+/// `Options.screen = .window`.
+pub const has_window = built and backend != .headless;
+
+/// Whether this build has the headless screen: `Options.screen = .headless`.
+pub const has_headless = built and backend != .web;
+
+/// Which screen a machine gets (design/headless-screen.md).
+pub const Screen = enum {
+    /// A host window, or the page's canvas on the browser host.
+    window,
+    /// A screen in memory: no window, display, or window system, and the
+    /// clipboard is a buffer in the h9 process.
+    headless,
+};
+
+/// The headless screen's size, 1024x768 unless `Options.size` says.
+pub const HeadlessSize = struct { dx: u16, dy: u16 };
+pub const default_size: HeadlessSize = .{ .dx = 1024, .dy = 768 };
+
 /// A machine's window (`Machine.Options.gfx`).
 pub const Options = struct {
+    /// A window, or the headless screen.
+    screen: Screen = .window,
+    /// The headless screen's size (`--gfx-size`); null is `default_size`.
+    /// The window backends pick their own.
+    size: ?HeadlessSize = null,
     /// Whether /dev/snarf is the host clipboard. False is `--gfx=noclip`:
     /// a buffer in the h9 process, shared by the guest's programs only.
+    /// The headless screen's "host clipboard" is itself a buffer in the h9
+    /// process, the one `headless.clipboard` reads.
     clipboard: bool = true,
     /// The screen scale, drawterm's `-x`: 0 draws in the display's
     /// backing pixels, 1 in points, N in backing pixels divided by N.
@@ -34,9 +65,13 @@ pub const Options = struct {
 };
 
 pub const Error = error{
-    /// This h9 has no GUI backend (`-Dgfx=none`).
+    /// This h9 has no GUI backend (`-Dgfx=none`), or not the screen asked
+    /// for: no window in a `-Dgfx=headless` build, no headless screen on
+    /// the browser host.
     GfxNotBuilt,
-    /// Another machine in this process has the screen.
+    /// Another machine in this process has the screen, or the process's
+    /// screen already opened as the other kind (or the headless screen at
+    /// another size): it opens once per process.
     GfxInUse,
     /// There's no display; `unavailable` says why.
     GfxUnavailable,
@@ -55,6 +90,10 @@ const c = if (built) struct {
     extern var scalef: c_int;
     extern var h9_gfx_onclose: ?*const fn () callconv(.c) void;
     extern fn h9_gfx_ready() c_int;
+    extern var h9_gfx_headless: c_int;
+    extern var h9_gfx_opened: c_int;
+    extern var h9_gfx_headless_dx: c_int;
+    extern var h9_gfx_headless_dy: c_int;
 } else struct {
     fn h9_gfx_web_present() c_int {
         return 0;
@@ -65,6 +104,10 @@ const c = if (built) struct {
     fn h9_gfx_ready() c_int {
         return 0;
     }
+    var h9_gfx_headless: c_int = 0;
+    var h9_gfx_opened: c_int = 0;
+    var h9_gfx_headless_dx: c_int = 0;
+    var h9_gfx_headless_dy: c_int = 0;
 };
 
 const cocoa = struct {
@@ -115,20 +158,43 @@ pub fn probeDisplay() ?bool {
 /// machine's first attach of `#i` finds it. Fails if this h9 has no
 /// backend, another machine has the screen or there's no display.
 pub fn acquire(io: std.Io, claim: *const Claim, opts: Options) Error!void {
+    switch (opts.screen) {
+        .window => if (!has_window) return error.GfxNotBuilt,
+        .headless => if (!has_headless) return error.GfxNotBuilt,
+    }
     if (built) try claimScreen(io, claim, opts) else return error.GfxNotBuilt;
 }
 
 fn claimScreen(io: std.Io, claim: *const Claim, opts: Options) Error!void {
+    const headless_screen = opts.screen == .headless;
     // The browser host's h9.wasm has the canvas backend, but only a page
     // that passed a canvas has a screen; h9-node never does, and says so
     // as a build without graphics would (design/epoch-0/browser-gfx.md).
     if (backend == .web and c.h9_gfx_web_present() == 0) return error.GfxNotBuilt;
-    if (unavailable() != null) return error.GfxUnavailable;
+    if (!headless_screen and unavailable() != null) return error.GfxUnavailable;
+    const size = opts.size orelse default_size;
     if (owner.cmpxchgStrong(null, claim, .acq_rel, .acquire) != null) return error.GfxInUse;
+    // The screen opens once per process, at the first draw, and stays: a
+    // later machine gets the same one, so it must ask for the same kind
+    // (and the headless screen at the same size).
+    const opened = c.h9_gfx_opened;
+    if (opened != 0) {
+        const same = if (headless_screen)
+            opened == 2 and c.h9_gfx_headless_dx == size.dx and c.h9_gfx_headless_dy == size.dy
+        else
+            opened == 1;
+        if (!same) {
+            release(claim);
+            return error.GfxInUse;
+        }
+    }
+    c.h9_gfx_headless = @intFromBool(headless_screen);
+    c.h9_gfx_headless_dx = size.dx;
+    c.h9_gfx_headless_dy = size.dy;
     c.h9_gfx_noclip = @intFromBool(!opts.clipboard);
     c.scalef = opts.scale;
     c.h9_gfx_onclose = onClose;
-    if (backend == .cocoa) {
+    if (backend == .cocoa and !headless_screen) {
         // AppKit opens the window at start; give it 10 s.
         var waited: u32 = 0;
         while (c.h9_gfx_ready() == 0) : (waited += 10) {
@@ -155,7 +221,7 @@ fn onClose() callconv(.c) void {
 /// Runs `work` with the GUI set up. On macOS this must be called on the
 /// process's main thread: it gives that thread to AppKit and runs `work`
 /// on a new thread, and returns only through `work`'s exit code. Elsewhere
-/// it calls `work` directly.
+/// it calls `work` directly. The headless screen needs none of this.
 pub fn main(work: *const fn (?*anyopaque) u8, ctx: ?*anyopaque) noreturn {
     if (backend == .cocoa) cocoaMain(work, ctx) else std.process.exit(work(ctx));
 }
@@ -209,9 +275,10 @@ fn fatal(msg: []const u8) noreturn {
     std.process.exit(125);
 }
 
-/// The headless backend's test hooks (src/kern/gfx-headless.c), for
-/// `-Dgfx=headless` builds: what a window system would do to the window.
-/// They may be called from any thread.
+/// The headless screen's hooks (src/kern/gfx-headless.c), in any build
+/// with it (design/headless-screen.md): what a window system would do to
+/// a window, acting on the machine whose screen is headless. They may be
+/// called from any thread.
 pub const headless = struct {
     const h = struct {
         extern fn h9_gfx_headless_key(r: u32, down: c_int) void;
@@ -225,7 +292,7 @@ pub const headless = struct {
     };
 
     comptime {
-        if (backend != .headless) @compileError("h9.gfx.headless needs -Dgfx=headless");
+        if (backend == .none or backend == .web) @compileError("h9.gfx.headless needs a build with the headless screen");
     }
 
     /// A key typed in the window: pressed, then released.
@@ -244,7 +311,7 @@ pub const headless = struct {
         h.h9_gfx_headless_mouse(x, y, buttons);
     }
 
-    /// The host clipboard's text, copied into `buf`.
+    /// The headless screen's "host clipboard" text, copied into `buf`.
     pub fn clipboard(buf: []u8) []const u8 {
         const s = h.h9_gfx_headless_clipread() orelse return buf[0..0];
         defer h.free(s);
@@ -260,7 +327,8 @@ pub const headless = struct {
 
     pub const Size = struct { dx: u32, dy: u32 };
 
-    /// The screen's size, or null before it opens.
+    /// The headless screen's size, or null before it opens (or when the
+    /// process's screen is a window).
     pub fn size() ?Size {
         var dx: c_int = 0;
         var dy: c_int = 0;
@@ -270,7 +338,8 @@ pub const headless = struct {
 
     /// The screen's pixels, XRGB32 (one little-endian u32 per pixel, row
     /// by row), into `buf`, which holds at least 4*dx*dy bytes. False
-    /// before the screen opens. Read it while nothing's drawing.
+    /// before the headless screen opens. Read it while nothing's drawing,
+    /// or read /dev/screen in the machine, which takes the draw lock.
     pub fn pixels(buf: []u8) bool {
         return h.h9_gfx_headless_pixels(buf.ptr, @intCast(buf.len)) == 0;
     }

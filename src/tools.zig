@@ -31,7 +31,13 @@ pub fn version(w: *std.Io.Writer) std.Io.Writer.Error!void {
     }
     if (!any) try w.writeAll(" none");
     try w.writeAll("\n");
-    try w.print("gfx: {s}\n", .{build_options.gfx});
+    // Every native build with graphics has the headless screen beside its
+    // window backend (design/headless-screen.md).
+    const g = build_options.gfx;
+    if (std.mem.eql(u8, g, "none") or std.mem.eql(u8, g, "web") or std.mem.eql(u8, g, "headless"))
+        try w.print("gfx: {s}\n", .{g})
+    else
+        try w.print("gfx: {s}, headless\n", .{g});
     const br = build_options.builtin_root;
     if (br.arches.len == 0) {
         try w.writeAll("built-in root: skeleton only\n");
@@ -48,7 +54,7 @@ pub fn version(w: *std.Io.Writer) std.Io.Writer.Error!void {
 fn checkGfx(w: *std.Io.Writer) std.Io.Writer.Error!void {
     switch (h9.gfx.backend) {
         .none => try w.writeAll("gfx: not built in\n"),
-        .headless => try w.writeAll("gfx headless: ok (a screen in memory, for tests)\n"),
+        .headless => {},
         .x11 => if (h9.gfx.unavailable()) |why|
             try w.print("gfx x11: {s}\n", .{why})
         else if (h9.gfx.probeDisplay().?)
@@ -58,6 +64,7 @@ fn checkGfx(w: *std.Io.Writer) std.Io.Writer.Error!void {
         .win32, .cocoa => try w.print("gfx {t}: built in\n", .{h9.gfx.backend}),
         .web => try w.writeAll("gfx web: built in (a page's canvas, given to createMachine)\n"),
     }
+    if (h9.gfx.has_headless) try w.writeAll("gfx headless: ok (a screen in memory, --gfx=headless)\n");
 }
 
 fn short(rev: []const u8) []const u8 {

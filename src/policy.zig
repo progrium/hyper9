@@ -346,7 +346,10 @@ pub const Plan = struct {
         var dv = (std.unicode.Utf8View.init(p.devmask) catch unreachable).iterator();
         while (dv.nextCodepointSlice()) |d| try w.print(" #{s}", .{d});
         try w.writeAll("\n");
-        if (p.gfx) |g| try w.print("gfx:      {s} scale={d} clipboard={s}\n", .{ g.backend, g.scale, if (!g.clipboard) "private" else if (g.isWeb()) "page" else "host" });
+        if (p.gfx) |g| if (g.headless) |sz|
+            try w.print("gfx:      headless {d}x{d}\n", .{ sz.dx, sz.dy })
+        else
+            try w.print("gfx:      {s} scale={d} clipboard={s}\n", .{ g.backend, g.scale, if (!g.clipboard) "private" else if (g.isWeb()) "page" else "host" });
         if (p.net_allow.len > 0) {
             try w.writeAll("net-allow:\n");
             for (p.net_allow) |pat| try w.print("  {s}\n", .{pat.text});
@@ -506,6 +509,9 @@ pub const Gfx = struct {
     /// the browser host, the page's, as the user pastes into the canvas.
     clipboard: bool = true,
     scale: u8 = 1,
+    /// The headless screen's size, for a machine with the headless screen
+    /// (design/headless-screen.md) rather than a window.
+    headless: ?struct { dx: u16, dy: u16 } = null,
 
     /// The browser host's canvas (design/epoch-0/browser-gfx.md).
     pub fn isWeb(g: Gfx) bool {
@@ -933,7 +939,9 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         if (net == .enable) try caveats.append(arena, "servers in the guest are reachable by anything that can reach the host's ports");
     }
     if (in.gfx) |g| {
-        if (g.isWeb()) {
+        // The headless screen reaches nothing on the host: no window, and
+        // its clipboard is a buffer in h9 (design/headless-screen.md).
+        if (g.headless != null) {} else if (g.isWeb()) {
             if (g.clipboard) try caveats.append(arena, "the guest can write the page's clipboard, and read what the user pastes into its canvas");
             try caveats.append(arena, "the guest can draw anything in its canvas, including what looks like the page's own UI or a browser dialog");
         } else {

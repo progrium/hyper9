@@ -1,9 +1,18 @@
 /*
- * The headless GUI backend (-Dgfx=headless, design/epoch-0/gfx.md): a screen
- * in memory, for tests. It implements drawterm's screen interface as the
+ * The headless screen (design/headless-screen.md, design/epoch-0/gfx.md): a
+ * screen in memory. It implements drawterm's screen interface as the
  * window-system backends do, without a window: flushes go nowhere and the
- * "host clipboard" is a buffer. src/gfx.zig's `headless` hooks inject
- * input, read the clipboard and the screen's pixels, and close the window.
+ * "host clipboard" is a buffer in the h9 process.
+ *
+ * It's linked into every native build with graphics, beside the window
+ * backend if there is one, so its side of the interface is named h9_hl_*
+ * and src/kern/gfx.c calls it for a machine that asked for the headless
+ * screen. In a build with only this screen (-Dgfx=headless) it defines
+ * gscreen too; beside a window backend, the backend's gscreen is the one
+ * screen the process has, whichever of the two opened it.
+ *
+ * src/gfx.zig's `headless` hooks inject input, read the clipboard and the
+ * screen's pixels, and close the "window".
  */
 
 #include "u.h"
@@ -16,27 +25,28 @@
 #include <memdraw.h>
 #include "screen.h"
 
-enum {
-	Width = 1024,
-	Height = 768,
-};
-
 extern void h9_kbdkey(Rune, int);	/* gfx.c */
+extern int h9_gfx_headless_open(void);	/* gfx.c */
+void h9_hl_screensize(Rectangle, ulong);
 
+#ifndef H9_GFX_WINDOW
 Memimage *gscreen;
+#endif
+
+extern int h9_gfx_headless_dx, h9_gfx_headless_dy;	/* gfx.c */
+
 static ulong pal[256];
 static Lock cliplk;
 static char *clip;
 
-/* Renamed by gfx-gui.h in the other backends; src/kern/gfx.c wraps it. */
 void
-h9_gui_screeninit(void)
+h9_hl_screeninit(void)
 {
 	Rectangle r;
 
 	memimageinit();
-	r = Rect(0, 0, Width, Height);
-	screensize(r, XRGB32);
+	r = Rect(0, 0, h9_gfx_headless_dx, h9_gfx_headless_dy);
+	h9_hl_screensize(r, XRGB32);
 	if(gscreen == nil)
 		panic("screensize failed");
 	gscreen->clipr = r;
@@ -46,7 +56,7 @@ h9_gui_screeninit(void)
 }
 
 void
-screensize(Rectangle r, ulong chan)
+h9_hl_screensize(Rectangle r, ulong chan)
 {
 	Memimage *i;
 
@@ -59,7 +69,7 @@ screensize(Rectangle r, ulong chan)
 }
 
 Memdata*
-attachscreen(Rectangle *r, ulong *chan, int *depth, int *width, int *softscreen)
+h9_hl_attachscreen(Rectangle *r, ulong *chan, int *depth, int *width, int *softscreen)
 {
 	*r = gscreen->clipr;
 	*chan = gscreen->chan;
@@ -71,13 +81,13 @@ attachscreen(Rectangle *r, ulong *chan, int *depth, int *width, int *softscreen)
 }
 
 void
-flushmemscreen(Rectangle r)
+h9_hl_flushmemscreen(Rectangle r)
 {
 	USED(r);
 }
 
 void
-getcolor(ulong i, ulong *r, ulong *g, ulong *b)
+h9_hl_getcolor(ulong i, ulong *r, ulong *g, ulong *b)
 {
 	ulong v;
 
@@ -88,24 +98,13 @@ getcolor(ulong i, ulong *r, ulong *g, ulong *b)
 }
 
 void
-setcolor(ulong i, ulong r, ulong g, ulong b)
+h9_hl_setcolor(ulong i, ulong r, ulong g, ulong b)
 {
 	pal[i&0xFF] = ((r&0xFF)<<16) | ((g&0xFF)<<8) | (b&0xFF);
 }
 
-void
-setcursor(void)
-{
-}
-
-void
-mouseset(Point p)
-{
-	USED(p);
-}
-
 char*
-h9_gui_clipread(void)
+h9_hl_clipread(void)
 {
 	char *s;
 
@@ -116,7 +115,7 @@ h9_gui_clipread(void)
 }
 
 int
-h9_gui_clipwrite(char *buf)
+h9_hl_clipwrite(char *buf)
 {
 	char *s;
 
@@ -148,28 +147,29 @@ h9_gfx_headless_mouse(int x, int y, int b)
 	absmousetrack(x, y, b, ticks());
 }
 
-/* The host clipboard: a copy the caller frees with free(). */
+/* The headless screen's "host clipboard": a copy the caller frees with free(). */
 char*
 h9_gfx_headless_clipread(void)
 {
-	return h9_gui_clipread();
+	return h9_hl_clipread();
 }
 
 void
 h9_gfx_headless_clipwrite(char *s)
 {
-	h9_gui_clipwrite(s);
+	h9_hl_clipwrite(s);
 }
 
 /*
  * The screen's size, and its pixels as XRGB32 rows copied into buf (n
- * bytes, at least 4*Dx*Dy). Returns 0, or -1 before the screen opens.
- * Not locked against drawing, so it's for a quiet screen.
+ * bytes, at least 4*Dx*Dy). Returns 0, or -1 before the headless screen
+ * opens (or when the process's screen is a window). Not locked against
+ * drawing, so it's for a quiet screen; /dev/screen is the locked read.
  */
 int
 h9_gfx_headless_size(int *dx, int *dy)
 {
-	if(gscreen == nil)
+	if(gscreen == nil || !h9_gfx_headless_open())
 		return -1;
 	*dx = Dx(gscreen->r);
 	*dy = Dy(gscreen->r);
@@ -182,7 +182,7 @@ h9_gfx_headless_pixels(uchar *buf, long n)
 	int y, dx, dy;
 	uchar *row;
 
-	if(gscreen == nil)
+	if(gscreen == nil || !h9_gfx_headless_open())
 		return -1;
 	dx = Dx(gscreen->r);
 	dy = Dy(gscreen->r);

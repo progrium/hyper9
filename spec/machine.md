@@ -68,11 +68,11 @@ Exit status: an empty `exits` string gives 0, a decimal number from 1 to 255 giv
 
 ## Graphics (`--gfx`)
 
-A machine with `Machine.Options.gfx` claims the process's one window (`src/gfx.zig`; a second machine gets `GfxInUse`).
+A machine with `Machine.Options.gfx` claims the process's one screen (`src/gfx.zig`; a second machine gets `GfxInUse`). `Options.gfx.screen` picks a host window (`.window`, `--gfx`) or the headless screen (`.headless`, `--gfx=headless`, [headless-screen](../design/headless-screen.md)). The screen opens once per process and stays, so a later machine that asks for the other kind, or the headless screen at another size, also gets `GfxInUse`.
 
-The window is drawn by drawterm's own GUI backend, chosen at build time with `-Dgfx`: Cocoa on macOS and Win32 on Windows by default, X11 on Linux only with `-Dgfx=x11` (glibc), and `headless`, a screen in memory with hooks to inject keys and mouse events and read pixels, for `tests/backends.zig`. `-Dgfx=none` builds `src/kern/nogfx.c`'s stubs instead.
+The window is drawn by drawterm's own GUI backend, chosen at build time with `-Dgfx`: Cocoa on macOS and Win32 on Windows by default, and X11 on Linux only with `-Dgfx=x11` (glibc). The headless screen, `src/kern/gfx-headless.c`, is a screen in memory (`XRGB32`, 1024×768 unless `Options.gfx.size` says), whose flushes go nowhere and whose "host clipboard" is a buffer in the h9 process; it never opens a window or touches the host's display. It's linked into every native build with graphics, beside the window backend: `-Dgfx=headless`, Linux's default, is a build whose only screen it is. `-Dgfx=none` builds `src/kern/nogfx.c`'s stubs instead. `h9.gfx.headless`'s hooks inject keys and mouse events, read and set its clipboard, read its pixels, and close it, in any build with it; `tests/backends.zig` uses them.
 
-The backend files are compiled unchanged; `src/kern/gfx-gui.h`, force-included before them, renames `screeninit`, `clipread`, `clipwrite`, and `kbdkey` to h9's wrappers in `src/kern/gfx.c`, and turns the backend's `exit` (X11) or `ExitProcess` (Win32) on a closed window into `h9_gfx_exit`, which posts `hangup` to the machine with the window (as for a closed terminal) and parks the backend's thread.
+The backend files are compiled unchanged; `src/kern/gfx-gui.h`, force-included before them, renames drawterm's screen interface (`screeninit`, `attachscreen`, `flushmemscreen`, `screensize`, `getcolor`, `setcolor`, `setcursor`, `mouseset`, `clipread`, and `clipwrite`) to `h9_gui_*`, and `kbdkey` to `h9_kbdkey`. `gfx-headless.c` defines the same interface as `h9_hl_*`, and `src/kern/gfx.c` defines drawterm's names, calling one set or the other by the screen the machine claimed (`h9_gfx_headless`). The backend defines `gscreen`, which the headless screen uses when it's the one open. `gfx-gui.h` also turns the backend's `exit` (X11) or `ExitProcess` (Win32) on a closed window into `h9_gfx_exit`, which posts `hangup` to the machine with the window (as for a closed terminal) and parks the backend's thread.
 
 AppKit exits by itself, so on macOS `src/kern/gfx-cocoa.m` observes the app's termination instead, and `src/gfx.zig` posts the same `hangup` and exits with the run's status once it ends.
 
@@ -80,13 +80,21 @@ The window opens lazily, on the first walk below `#i` or open of `/dev/snarf`, s
 
 `/dev/kbd` serves kbdfs's format (`k`/`K` for keys held, `c` for a key typed), which rio reads, and drops keys while it isn't open. `/dev/snarf` is the host clipboard, or under `--gfx=noclip` a buffer in the h9 process; machines without `#i` can't open it.
 
+With either screen, `gfx.c`'s wrappers around devdraw's, devmouse's, and devkbd's devtabs add three of 9front's files:
+
+- `/dev/screen`, in `#i`'s top directory beside `draw` and `winname`: each open copies `gscreen` under `drawlock`, as an uncompressed image(6) file (a 60-byte header, then the rows), and reads come from that copy. Opening it opens the screen.
+- `/dev/mousein`, in `#m`: each write is one event in `/dev/mouse`'s format, as 9front's devmouse takes it, `A` for the pointer at x, y (`absmousetrack`), `a` for x and y scaled from 0 to 2³¹ across the screen, and any other letter for a move by x, y (`mousetrack`); a msec of 0 is now. It opens the screen, since the pointer stays put without one.
+- `/dev/kbdin`, in `#b`, as kbdfs's `kbdin` reads it: a write that doesn't end in a NUL is text, each rune pressed and released through `h9_kbdkey`; one that does is NUL-terminated messages, `r` and `R` a rune pressed and released, and any other (`c`, `k`, `K`) passed to `/dev/kbd`'s reader as it is.
+
+They reach only the kernel's screen image and input queues, never the host's pointer or other host windows.
+
 The console stays the host terminal, so `/dev/cons` and kernel prints still go there.
 
-On macOS AppKit needs the main thread, so the CLI runs through `h9.gfx.main`, which gives AppKit the main thread and runs the machine on another; an embedder using `--gfx` on macOS does the same.
+On macOS AppKit needs the main thread, so the CLI runs through `h9.gfx.main`, which gives AppKit the main thread and runs the machine on another; an embedder using `--gfx` on macOS does the same. The headless screen needs no AppKit, so `--gfx=headless` runs the machine directly.
 
 ### On the browser host
 
-Web builds have `web`, h9's own backend, `src/kern/gfx-web.c` ([browser-gfx](../design/epoch-0/browser-gfx.md)), compiled with `gfx.c` as `headless` is, without `gfx-gui.h`. Its JS half is `GfxHost` in `h9-web.js`, in the machine's Worker, which owns the page's canvas as an `OffscreenCanvas`; without one (`h9-node`, or a page that passed no `gfx`), `gfx_present` is 0 and `--gfx` fails with `GfxNotBuilt`.
+Web builds have `web`, h9's own backend, `src/kern/gfx-web.c` ([browser-gfx](../design/epoch-0/browser-gfx.md)), compiled with `gfx.c`, without `gfx-gui.h` and without the headless screen. Its JS half is `GfxHost` in `h9-web.js`, in the machine's Worker, which owns the page's canvas as an `OffscreenCanvas`; without one (`h9-node`, or a page that passed no `gfx`), `gfx_present` is 0 and `--gfx` fails with `GfxNotBuilt`.
 
 - **The screen** is `gscreen` in wasm memory as `XBGR32`, at the size the page reports. `flushmemscreen` only adds a rectangle to the host's dirty rectangle; once a frame (`requestAnimationFrame` in the Worker), outside any coroutine, the host copies that rectangle's rows from wasm memory into an `ImageData`, sets each pixel's X byte to 255, and `putImageData`s it. `screensize` tells the host the new image's address, stride, and size, and the host resizes the canvas's buffer to match.
 - **Input** is a queue in the host, four ints per event: a key (rune, down), the pointer (x, y, Plan 9 buttons), a resize, or a paste's length. `gfxinput`, a kernel process started by `screeninit`, takes them through the Suspending `gfx_wait` (saving what's per thread around it, as every Suspending import does) and calls `h9_kbdkey`, `absmousetrack`, and `screenresize`, so the input paths run with `up` set.

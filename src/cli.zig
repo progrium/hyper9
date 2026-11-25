@@ -27,7 +27,7 @@ pub const usage =
     \\           [--net-allow PATTERN]... [--user-map FILE]
     \\           [--memory SIZE] [--timeout DURATION] [--pids N] [--cpus N]
     \\           [--ns 'LINE; LINE'|@FILE]... [--host-fs] [--no-guest-tools]
-    \\           [--gfx[=noclip]] [--gfx-scale N]
+    \\           [--gfx[=noclip|=headless]] [--gfx-scale N] [--gfx-size WxH]
     \\           [--serve unix!PATH|tcp!HOST!PORT|ws://HOST:PORT[/PATH]]...
     \\           [--serve-root PATH] [--serve-token @FILE] [--serve-origin ORIGIN]...
     \\           [--serve-net]
@@ -166,6 +166,10 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
     var serve_origins: std.ArrayList([]const u8) = .empty;
     var ns: std.ArrayList([]const u8) = .empty;
     var gfx_scale: ?u8 = null;
+    var gfx_size: ?gfx.HeadlessSize = null;
+    var gfx_window = false;
+    var gfx_noclip = false;
+    var gfx_headless = false;
     // Long flags only (SPEC.md, "Parsing rules"); -h is accepted alone,
     // where it can't be a program's flag.
     if (args.len == 2 and std.mem.eql(u8, args[1], "-h")) return .{ .mode = .help, .argv = &.{} };
@@ -191,14 +195,17 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
         } else if (flag(a, "--no-guest-tools")) {
             c.guest_tools = false;
         } else if (flag(a, "--gfx")) {
-            const clipboard = if (c.gfx) |g| g.clipboard else true;
-            c.gfx = .{ .clipboard = clipboard };
+            gfx_window = true;
         } else if (flag(a, "--gfx=noclip")) {
-            c.gfx = .{ .clipboard = false };
+            gfx_noclip = true;
+        } else if (flag(a, "--gfx=headless")) {
+            gfx_headless = true;
         } else if (std.mem.startsWith(u8, a, "--gfx=")) {
             return error.Usage;
         } else if (value(args, &i, "--gfx-scale")) |v| {
             gfx_scale = std.fmt.parseInt(u8, v orelse return error.Usage, 10) catch return error.Usage;
+        } else if (value(args, &i, "--gfx-size")) |v| {
+            gfx_size = parseGfxSize(v orelse return error.Usage) orelse return error.Usage;
         } else if (flag(a, "--serve-net")) {
             c.serve_net = true;
         } else if (value(args, &i, "--serve-root")) |v| {
@@ -315,10 +322,19 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
             return error.Usage;
         }
     }
-    // --gfx-scale is the window's, so it needs one.
-    if (gfx_scale) |n| {
-        if (c.gfx == null) return error.Usage;
-        c.gfx.?.scale = n;
+    // --gfx and --gfx=noclip are a window, --gfx=headless a screen in
+    // memory (design/headless-screen.md); --gfx-scale and noclip are the
+    // window's, and --gfx-size the headless screen's.
+    if (gfx_headless) {
+        if (gfx_window or gfx_noclip or gfx_scale != null) return error.Usage;
+        c.gfx = .{ .screen = .headless, .size = gfx_size };
+    } else {
+        if (gfx_size != null) return error.Usage;
+        if (gfx_window or gfx_noclip) c.gfx = .{ .clipboard = !gfx_noclip };
+        if (gfx_scale) |n| {
+            if (c.gfx == null) return error.Usage;
+            c.gfx.?.scale = n;
+        }
     }
     if (c.sandbox != null) {
         if (c.host_fs or c.cwd != null) return error.Usage;
@@ -784,6 +800,34 @@ test "--no-guest-tools" {
     const a = arena.allocator();
     try t.expect((try parse(a, &.{ "h9", "ls" })).guest_tools);
     try t.expect(!(try parse(a, &.{ "h9", "--no-guest-tools", "ls" })).guest_tools);
+}
+
+/// --gfx-size's WxH: each from 1 to 16384.
+fn parseGfxSize(v: []const u8) ?gfx.HeadlessSize {
+    const x = std.mem.indexOfScalar(u8, v, 'x') orelse return null;
+    const dx = std.fmt.parseInt(u16, v[0..x], 10) catch return null;
+    const dy = std.fmt.parseInt(u16, v[x + 1 ..], 10) catch return null;
+    if (dx == 0 or dy == 0 or dx > 16384 or dy > 16384) return null;
+    return .{ .dx = dx, .dy = dy };
+}
+
+test "--gfx=headless and --gfx-size [headless-screen]" {
+    var a: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer a.deinit();
+    const hl = try parse(a.allocator(), &.{ "h9", "--gfx=headless", "rio" });
+    try std.testing.expectEqual(gfx.Options{ .screen = .headless }, hl.gfx.?);
+    const sized = try parse(a.allocator(), &.{ "h9", "--gfx-size", "640x480", "--gfx=headless", "rio" });
+    try std.testing.expectEqual(gfx.Options{ .screen = .headless, .size = .{ .dx = 640, .dy = 480 } }, sized.gfx.?);
+    for ([_][]const []const u8{
+        &.{ "h9", "--gfx-size", "640x480", "rio" },
+        &.{ "h9", "--gfx", "--gfx-size", "640x480", "rio" },
+        &.{ "h9", "--gfx=headless", "--gfx-scale", "2", "rio" },
+        &.{ "h9", "--gfx=headless", "--gfx=noclip", "rio" },
+        &.{ "h9", "--gfx=headless", "--gfx", "rio" },
+        &.{ "h9", "--gfx=headless", "--gfx-size", "640", "rio" },
+        &.{ "h9", "--gfx=headless", "--gfx-size", "0x480", "rio" },
+        &.{ "h9", "--gfx=headless", "--gfx-size", "640x70000", "rio" },
+    }) |args| try std.testing.expectError(error.Usage, parse(a.allocator(), args));
 }
 
 test "--gfx, --gfx=noclip and --gfx-scale" {
