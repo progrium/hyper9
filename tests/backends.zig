@@ -2678,16 +2678,20 @@ test "a second machine in the process gets GfxInUse for the headless screen [hea
         error.BackendNotBuilt, error.WrongArch => return error.SkipZigTest,
         else => return e,
     };
+    // Deferred, so a failed check below still gives the screen up for
+    // the [gfx] cases that follow.
+    defer a.deinit();
     try std.testing.expectError(error.GfxInUse, h9.Machine.init(gpa, std.testing.io, opts));
-    // A window is the same screen, so it's in use too, or not built.
+    // A window is the same screen, so it's in use too, or not built, or
+    // there is no display for it (on macOS, a test never hands its main
+    // thread to gfx.main).
     var wopts = opts;
     wopts.gfx = .{};
     if (h9.Machine.init(gpa, std.testing.io, wopts)) |m| {
         var mm = m;
         mm.deinit();
         return error.WindowBesideHeadless;
-    } else |e| try std.testing.expect(e == error.GfxInUse or e == error.GfxNotBuilt);
-    a.deinit();
+    } else |e| try std.testing.expect(e == error.GfxInUse or e == error.GfxNotBuilt or e == error.GfxUnavailable);
 }
 
 test "with Options.gfx.screen = .headless, the hooks reach the machine's screen in a windowed build [headless-screen]" {
