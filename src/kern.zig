@@ -42,6 +42,9 @@ const c_stub = struct {
     fn h9_kern_spawn(_: [*:0]const u8, _: *const fn (?*anyopaque) callconv(.c) void, _: ?*anyopaque) c_int {
         return -1;
     }
+    fn h9_kern_kprocdetached(_: [*:0]const u8, _: *const fn (?*anyopaque) callconv(.c) void, _: ?*anyopaque) c_int {
+        return -1;
+    }
     fn h9_kern_pid() c_ulong {
         return 0;
     }
@@ -271,6 +274,7 @@ const c_real = struct {
     extern fn h9_kern_boot() c_int;
     extern fn h9_kern_park() noreturn;
     extern fn h9_kern_spawn(name: [*:0]const u8, func: *const fn (?*anyopaque) callconv(.c) void, arg: ?*anyopaque) c_int;
+    extern fn h9_kern_kprocdetached(name: [*:0]const u8, func: *const fn (?*anyopaque) callconv(.c) void, arg: ?*anyopaque) c_int;
     extern fn h9_kern_pid() c_ulong;
     extern fn h9_kern_fork(flag: c_int, pid: c_ulong, func: *const fn (?*anyopaque) callconv(.c) void, arg: ?*anyopaque) c_int;
     extern fn h9_kern_rfork(flag: c_int) c_int;
@@ -416,6 +420,19 @@ pub fn spawn(name: [*:0]const u8, comptime T: type, comptime func: fn (*T) void,
         }
     };
     if (c.h9_kern_spawn(name, Tramp.run, arg) < 0) return error.OutOfMemory;
+}
+
+/// Runs `func(arg)` on a kproc started from the calling process, once it
+/// has dropped the fds, namespace, dot and slash it shares with the
+/// caller, as the kprocs a guest process starts lazily (hostpoll, #ℓ's
+/// reader) do. For tests.
+fn kprocDetached(name: [*:0]const u8, comptime T: type, comptime func: fn (*T) void, arg: *T) Error!void {
+    const Tramp = struct {
+        fn run(p: ?*anyopaque) callconv(.c) void {
+            func(@ptrCast(@alignCast(p.?)));
+        }
+    };
+    if (c.h9_kern_kprocdetached(name, Tramp.run, arg) < 0) return error.OutOfMemory;
 }
 
 /// rfork flags (9front's libc.h).
@@ -2302,6 +2319,61 @@ test "#O overlays a host tree in memory and never writes it" {
     for ([_][]const u8{ "lower/new", "lower/newer", "lower/sub/c2.txt", "lower/mdir", "mnt/new" }) |p| {
         if (tmp.dir.access(io, p, .{})) |_| return error.HostWritten else |_| {}
     }
+}
+
+test "a kproc started from a process in an overlay doesn't keep the overlay" {
+    if (!available) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "mem");
+    var buf: [std.fs.max_path_bytes + 2]u8 = undefined;
+    const root = try testRoot(tmp.dir, &buf);
+    // A kproc that outlives the process that started it, as hostpoll
+    // outlives the machine whose process first polled a host socket.
+    const K = struct {
+        started: std.atomic.Value(bool) = .init(false),
+        release: std.atomic.Value(bool) = .init(false),
+        fn run(k: *@This()) void {
+            k.started.store(true, .release);
+            while (!k.release.load(.acquire)) std.Thread.yield() catch {};
+        }
+    };
+    const T = struct {
+        root: [:0]u8,
+        k: *K,
+        err: ?anyerror = null,
+        done: std.atomic.Value(bool) = .init(false),
+
+        fn run(t: *@This()) void {
+            defer t.done.store(true, .release);
+            t.body() catch |e| {
+                t.err = e;
+            };
+        }
+        fn body(t: *@This()) !void {
+            var spec: [std.fs.max_path_bytes + 16]u8 = undefined;
+            try bind(try std.fmt.bufPrintSentinel(&spec, "#U{s}", .{t.root}, 0), "/", MREPL);
+            const id = try overlayNew(null);
+            try bind(try std.fmt.bufPrintSentinel(&spec, "#O{d}", .{id}, 0), "/mem", MREPL | MCREATE);
+            // A directory in the overlay, so dot is the overlay's channel.
+            close(try create("/mem/d", OREAD, 0x80000000 | 0o775)) catch {};
+            try chdir("/mem/d");
+            try kprocDetached("detached", K, K.run, t.k);
+            while (!t.k.started.load(.acquire)) std.Thread.yield() catch {};
+            // The overlay's last channels go: it's freed, so its number
+            // names nothing. The kproc's dot was a clone of this one.
+            try chdir("/");
+            try unmount(null, "/mem");
+            const o = try std.fmt.bufPrintSentinel(&spec, "#O{d}", .{id}, 0);
+            if (bind(o, "/mem", MREPL)) |_| return error.OverlayKept else |_| {}
+        }
+    };
+    var k: K = .{};
+    defer k.release.store(true, .release);
+    var t: T = .{ .root = root, .k = &k };
+    try spawn("test", T, T.run, &t);
+    while (!t.done.load(.acquire)) std.Thread.yield() catch {};
+    if (t.err) |e| return e;
 }
 
 test "#O finds, removes and lists the children of a large directory" {

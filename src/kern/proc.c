@@ -1020,22 +1020,41 @@ h9_fgrpclose(Fgrp *f)
 	fgrpclose(f);
 }
 
+/* The boot Proc, whose slash is #/. */
+static Proc *bootproc;
+
 /*
  * For a kproc that a guest process starts lazily, such as hostpoll
  * (hostsock-*.c): drops the fd table and namespace that kproc() shares
  * with that process. Kept, they outlived it, so the first process to poll
  * a host socket never had its sockets closed at exit and their peers
  * never saw EOF.
+ *
+ * Its dot and slash, clones of that process's, go too, for #/: they can
+ * be in the machine's root overlay or named unions, which then outlived
+ * the machine and its pages. A later machine in the same host process
+ * whose pages had the same address found the dead machine's #Olinux as
+ * its own and faulted walking it.
  */
 void
 h9_kprocdetach(void)
 {
+	Chan *c;
+
 	fgrpclose(up->fgrp);
 	up->fgrp = nil;
 	if(up->pgrp != nil){
 		closepgrp(up->pgrp);
 		up->pgrp = nil;
 	}
+	c = up->dot;
+	up->dot = cclone(bootproc->slash);
+	if(c != nil)
+		cclose(c);
+	c = up->slash;
+	up->slash = cclone(bootproc->slash);
+	if(c != nil)
+		cclose(c);
 }
 
 /* Code using RFNOMNT expects to block all but these devices. */
@@ -1069,8 +1088,6 @@ struct Spawn {
 	void	(*fn)(void*);
 	void	*arg;
 };
-
-static Proc *bootproc;
 
 extern void h9_tsleepinit(void);	/* tsleep.c */
 extern void h9_semainit(void);		/* sema.c */
@@ -1150,6 +1167,37 @@ h9_kern_spawn(char *name, void (*fn)(void*), void *arg)
 	strecpy(p->text, p->text+sizeof p->text, name);
 	enter(h);
 	osproc(p);
+	return 0;
+}
+
+static void
+detachtramp(void *v)
+{
+	Spawn s;
+
+	s = *(Spawn*)v;
+	free(v);
+	h9_kprocdetach();
+	s.fn(s.arg);
+}
+
+/*
+ * Starts a kproc that drops what it shares with the caller
+ * (h9_kprocdetach) and then runs fn(arg), as the kprocs a guest process
+ * starts lazily do. For kern.zig's tests. Returns 0, or -1 if allocation
+ * fails.
+ */
+int
+h9_kern_kprocdetached(char *name, void (*fn)(void*), void *arg)
+{
+	Spawn *s;
+
+	s = malloc(sizeof *s);
+	if(s == nil)
+		return -1;
+	s->fn = fn;
+	s->arg = arg;
+	kproc(name, detachtramp, s);
 	return 0;
 }
 
