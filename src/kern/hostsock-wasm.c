@@ -72,6 +72,13 @@ h9so_soerror(int fd)
 }
 
 long
+h9so_nread(int fd)
+{
+	USED(fd);
+	return 0;
+}
+
+long
 h9so_recvfrom(int fd, void *buf, long n, int peek, int dontwait, unsigned char *raddr, unsigned short *rport)
 {
 	USED(fd, buf, n, peek, dontwait, raddr, rport);

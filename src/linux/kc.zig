@@ -40,6 +40,7 @@ const real = struct {
     // drawterm's long is 32 bits (include/lib.h): a c_long here would read
     // the top half of the return register as garbage.
     extern fn h9_linux_pipetryread(fd: c_int, buf: [*]u8, n: c_int) c_int;
+    extern fn h9_linux_socknread(fd: c_int) c_int;
     extern fn h9so_hasv6() c_int;
     extern fn h9so_ifaddrs(a: [*]IfAddr, max: c_int) c_int;
     extern fn h9_linux_sockctl(fd: c_int, msg: [*:0]const u8) c_int;
@@ -155,6 +156,9 @@ const stub = struct {
     }
     fn h9_linux_pipetryread(_: c_int, _: [*]u8, _: c_int) c_int {
         return -3;
+    }
+    fn h9_linux_socknread(_: c_int) c_int {
+        return -9;
     }
     fn h9_linux_pipequeued(_: c_int) c_int {
         return -1;
@@ -334,8 +338,12 @@ pub const NetAddr = struct { ip: [16]u8 = @splat(0), port: u16 = 0 };
 /// MSG_DONTWAIT: the count or -errno. `from` gets the source.
 pub fn sockRecv(fd: i32, buf: []u8, peek: bool, dontwait: bool, from: ?*NetAddr) i64 {
     const n: c_int = @intCast(@min(buf.len, 1 << 30));
-    if (from) |f| return c.h9_linux_sockrecv(fd, buf.ptr, n, @intFromBool(peek), @intFromBool(dontwait), &f.ip, &f.port);
-    return c.h9_linux_sockrecv(fd, buf.ptr, n, @intFromBool(peek), @intFromBool(dontwait), null, null);
+    // An empty slice's pointer is a sentinel the host would refuse
+    // (EFAULT); a zero-length recv still takes a datagram, as Linux's does.
+    var none: [1]u8 = undefined;
+    const ptr = if (buf.len == 0) &none else buf.ptr;
+    if (from) |f| return c.h9_linux_sockrecv(fd, ptr, n, @intFromBool(peek), @intFromBool(dontwait), &f.ip, &f.port);
+    return c.h9_linux_sockrecv(fd, ptr, n, @intFromBool(peek), @intFromBool(dontwait), null, null);
 }
 
 /// sendto on a socket fd's host socket (to `to`, checked by the policy,
@@ -366,6 +374,12 @@ pub fn pipeTryRead(fd: i32, buf: []u8) Error!PipeRead {
         -3 => .not_pipe,
         else => if (r < 0) error.Kern else .{ .n = @intCast(r) },
     };
+}
+
+/// FIONREAD on a socket fd: the bytes a recv would take now (a datagram
+/// socket's next message's length), or -errno.
+pub fn sockNread(fd: i32) i64 {
+    return c.h9_linux_socknread(fd);
 }
 
 pub fn soError(fd: i32) u32 {

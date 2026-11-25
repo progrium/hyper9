@@ -1360,6 +1360,37 @@ h9_linux_pipetryread(int fd, void *va, long n)
 	return r;
 }
 
+/*
+ * FIONREAD on a socket fd: what a recv would take now, a datagram
+ * socket's next message's length. glibc's resolver sizes the buffer for
+ * its second answer by it, and with 0 it receives into none, and fails
+ * the lookup.
+ */
+long
+h9_linux_socknread(int fd)
+{
+	Rconv *r;
+	long m;
+	int s;
+
+	if((r = rgetfd(fd)) != nil){
+		lock(&r->lk);
+		m = r->n;
+		if(r->udp && m > 0)
+			m = r->buf[r->rp] << 8 | r->buf[(r->rp + 1) % Rbufsz];
+		unlock(&r->lk);
+		rput(r);
+		return m;
+	}
+	if(waserror())
+		return -9;	/* EBADF */
+	s = sockof(fd, nil);
+	poperror();
+	if(s < 0)
+		return 0;
+	return h9so_nread(s);
+}
+
 int
 h9_linux_soerror(int fd)
 {
