@@ -24,6 +24,7 @@ Every proposal at the top of [design/](README.md), in the order they were writte
 | [headless-screen](headless-screen.md) |  | implemented |  | Headless screen (--gfx=headless) |
 | [file-watch](file-watch.md) |  | draft |  | Watching files for changes, on the host and in the guest |
 | [virtual-loopback](virtual-loopback.md) |  | draft |  | A loopback network per machine |
+| [linux-dns](linux-dns.md) |  | draft |  | Name patterns for a Linux guest's DNS |
 
 ```mermaid
 flowchart LR
@@ -49,6 +50,7 @@ flowchart LR
   p_headless_screen["headless-screen<br/>implemented"]:::implemented
   p_file_watch["file-watch<br/>draft"]:::draft
   p_virtual_loopback["virtual-loopback<br/>draft"]:::draft
+  p_linux_dns["linux-dns<br/>draft"]:::draft
   p_host_handles --> p_host_sandbox
   p_renames --> p_baseline_1
   p_kernel_port --> p_file_interface
