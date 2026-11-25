@@ -1,12 +1,12 @@
 ---
 slug: renames
 title: Rename the parts, to ABI, engine, sud, and hcpu
-status: draft
+status: implemented
 created: 2026-11-21
 authors: [progrium]
 depends: [hcpu]
 areas: [process, engine, linux, cli, build, tests]
-branch: [renames]
+branch: [main]
 ---
 
 # Proposal: Rename the parts, to ABI, engine, sud, and hcpu
@@ -132,16 +132,16 @@ None. No code path changes, and the guest can reach nothing new. The sud engine 
 
 ## Done criteria
 
-- [ ] `h9 --engine hcpu /bin/echo hi` and, on a Linux x86\_64 host, `h9 --engine sud /bin/echo hi` print `hi`.
-- [ ] `test "--engine and its values [renames]"` in `src/cli.zig` parses each of `auto`, `hvf`, `kvm`, `whp`, `sud`, and `hcpu`.
-- [ ] `test "--backend, native, emu, and v86 are aliases [renames]"` in `src/cli.zig` shows each old spelling parses to the same Config as the new one, and that the usage text names none of them.
-- [ ] `test "auto never selects sud, by either name [renames]"` passes.
-- [ ] `h9 --check` and `h9 --version` list engines, as `sud` and `hcpu`.
-- [ ] `zig build test`, `zig build integration`, `zig build integration -Dweb`, and `zig build web-test` pass with the same cases as before the rename, and none newly skipped.
-- [ ] `git grep -il personalit` finds only `design/`, `third_party/`, and the Linux ABI's `personality(2)`.
-- [ ] `git grep -wl vmm` finds only `design/` and `third_party/`.
-- [ ] SPEC.md, `spec/`, README.md, MANUAL.md, DEVELOPING.md, AGENTS.md, and `docs/` use the new names, and [README.md](README.md) has the table of old names.
-- [ ] `zig build design -- check` passes.
+- [x] `h9 --engine hcpu /bin/echo hi` and, on a Linux x86\_64 host, `h9 --engine sud /bin/echo hi` print `hi`.
+- [x] `test "--engine and its values [renames]"` in `src/cli.zig` parses each of `auto`, `hvf`, `kvm`, `whp`, `sud`, and `hcpu`.
+- [x] `test "--backend, native, emu, and v86 are aliases [renames]"` in `src/cli.zig` shows each old spelling parses to the same Config as the new one, and that the usage text names none of them.
+- [x] `test "auto never selects sud, by either name [renames]"` passes.
+- [x] `h9 --check` and `h9 --version` list engines, as `sud` and `hcpu`.
+- [x] `zig build test`, `zig build integration`, `zig build integration -Dweb`, and `zig build web-test` pass with the same cases as before the rename, and none newly skipped.
+- [x] `git grep -il personalit` finds only `design/`, `third_party/`, and the Linux ABI's `personality(2)`.
+- [x] `git grep -wl vmm` finds only `design/` and `third_party/`.
+- [x] SPEC.md, `spec/`, README.md, MANUAL.md, DEVELOPING.md, AGENTS.md, and `docs/` use the new names, and [README.md](README.md) has the table of old names.
+- [x] `zig build design -- check` passes.
 
 ## Implementation
 

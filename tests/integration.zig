@@ -353,7 +353,7 @@ test "--check passes with the root tree, and --version and -h print to stdout [b
     defer gpa.free(v.stdout);
     defer gpa.free(v.stderr);
     try std.testing.expect(std.mem.startsWith(u8, v.stdout, "h9 "));
-    try std.testing.expect(std.mem.indexOf(u8, v.stdout, "\nbackends: ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v.stdout, "\nengines: ") != null);
     const h = try runProcess(&.{ e.h9, "-h" }, null);
     defer gpa.free(h.stdout);
     defer gpa.free(h.stderr);
