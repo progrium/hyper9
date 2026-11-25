@@ -91,9 +91,11 @@ A host program that starts with `#!` runs as a guest program by its guest path (
 | `--sandbox DIR` | The tight profile with only DIR bound, read-write, as the cwd. Can't be combined with `--host-fs` |
 | `--trace[=FILE]` | ratrace-style syscall log, with the Ureg and a symbolized PC when the guest faults, to stderr by default |
 | `--gfx[=noclip]` | Gives the machine one host window (see Graphics), with `/dev/draw`, `/dev/mouse`, `/dev/cursor`, and `/dev/kbd` in it, and `/dev/snarf` as the host clipboard; `=noclip` keeps `/dev/snarf` in the h9 process instead. Exit 125 if this build has no GUI backend, there's no display, or another machine in the process has the window |
+| `--gfx=headless` | Gives the machine the headless screen, a screen in memory, instead of a window ([headless-screen](../design/headless-screen.md)), with the same files; `/dev/snarf` is a buffer in the h9 process. `--gfx`, `--gfx=noclip`, or `--gfx-scale` with it is a usage error. Exit 125 in a `-Dgfx=none` build or on the browser host |
 | `--gfx-scale N` | The window's scale, drawterm's `-x` (Cocoa only): 0 draws in backing pixels, 1 (the default) in points, N in backing pixels divided by N. Needs `--gfx` |
+| `--gfx-size WxH` | The headless screen's size, each from 1 to 16384, `1024x768` by default. Needs `--gfx=headless` |
 | `--check` | Runs a test program on each backend built in, or just `--backend`'s (on HVF this also checks the entitlement), reports the vCPU limit, and runs `/bin/echo` from the root tree, or from the built-in root when there's none (`root: built-in (9front 11952 slim, arm64; no tree found)`), then a 9P root's index notes. Exits 0, or 125 if h9 can't run programs from the root |
-| `--version` | Prints the h9 version (`git describe`, or `-Dversion` in releases), the pinned 9front release and drawterm revision, the backends built in, the GUI backend (`gfx:`), and the built-in root's contents (`built-in root: 9front 11952 slim, arm64 amd64 386 (44 commands)`, or `skeleton only`) |
+| `--version` | Prints the h9 version (`git describe`, or `-Dversion` in releases), the pinned 9front release and drawterm revision, the backends built in, the GUI backend (`gfx:`, with `headless` after a window backend, such as `gfx: cocoa, headless`), and the built-in root's contents (`built-in root: 9front 11952 slim, arm64 amd64 386 (44 commands)`, or `skeleton only`) |
 | `--help`, `-h` | Prints the usage to stdout and exits 0 (`-h` only as the only argument) |
 
 ### Default guest environment
@@ -192,7 +194,7 @@ pub const Options = struct {
     serve_net: bool = false,            // export /net too
     owned_vcpus: ?u32 = null,           // for tests of the vCPU pool
     signals: ?*Signals = null,          // Ctrl-C and hangup from the embedder
-    gfx: ?Gfx = null,                   // a host window; one machine in the process at a time
+    gfx: ?Gfx = null,                   // a host window or the headless screen (.screen, .size); one machine in the process at a time
     stdio: Stdio,                       // host fds behind the console
 };
 pub fn run(m: *Machine, prog: Program, argv: []const []const u8) !ExitStatus;

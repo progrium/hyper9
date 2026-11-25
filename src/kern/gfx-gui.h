@@ -3,12 +3,16 @@
  * it with -include), so the vendored files compile unmodified
  * (design/epoch-0/gfx.md):
  *
- * - The backend's screeninit, clipread and clipwrite (and on X11,
- *   setcursor and mouseset) are renamed, so
- *   src/kern/gfx.c can wrap them: screeninit to start the backend's
- *   kprocs outside the guest's namespace and keep kernel prints on the
- *   host terminal, and the clipboard for --gfx=noclip. Its keys go
- *   to h9_kbdkey, which serves them on /dev/kbd as kbdfs would.
+ * - The backend's side of drawterm's screen interface (screeninit,
+ *   attachscreen, flushmemscreen, screensize, getcolor, setcolor,
+ *   setcursor, mouseset, clipread and clipwrite) is renamed h9_gui_*, so
+ *   src/kern/gfx.c can wrap it, and the headless screen
+ *   (src/kern/gfx-headless.c, design/headless-screen.md) can link beside
+ *   it: gfx.c calls one or the other, by the screen the machine asked for.
+ *   It wraps screeninit to start the backend's kprocs outside the guest's
+ *   namespace and keep kernel prints on the host terminal, and the
+ *   clipboard for --gfx=noclip. Its keys go to h9_kbdkey, which serves
+ *   them on /dev/kbd as kbdfs would.
  * - With H9_GUI_EXIT, the backend's process exits (exit on X11,
  *   ExitProcess on Win32) go to h9_gfx_exit, which takes a closed window
  *   through the machine's hangup path. Win32's FreeConsole would detach
@@ -20,19 +24,16 @@
  */
 
 #define screeninit h9_gui_screeninit
+#define attachscreen h9_gui_attachscreen
+#define flushmemscreen h9_gui_flushmemscreen
+#define screensize h9_gui_screensize
+#define getcolor h9_gui_getcolor
+#define setcolor h9_gui_setcolor
+#define setcursor h9_gui_setcursor
+#define mouseset h9_gui_mouseset
 #define clipread h9_gui_clipread
 #define clipwrite h9_gui_clipwrite
 #define kbdkey h9_kbdkey
-
-/*
- * X11 opens its display in screeninit, but a guest can bind #m before its
- * first attach of #i, and devmouse's attach sets the cursor: gfx.c skips
- * the cursor calls until the screen is open, then sets it.
- */
-#ifdef H9_GFX_X11
-#define setcursor h9_gui_setcursor
-#define mouseset h9_gui_mouseset
-#endif
 
 #ifdef H9_GUI_EXIT
 #ifdef WINDOWS

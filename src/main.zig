@@ -109,8 +109,9 @@ pub fn main(init: std.process.Init) !u8 {
         },
     }
     // --gfx: on macOS AppKit needs the main thread, so the run goes on
-    // another (design/epoch-0/gfx.md). Elsewhere this runs it directly.
-    if (cfg.gfx != null) {
+    // another (design/epoch-0/gfx.md). Elsewhere this runs it directly,
+    // and the headless screen (design/headless-screen.md) needs no AppKit.
+    if (cfg.gfx != null and cfg.gfx.?.screen == .window) {
         var ctx: GfxRun = .{ .init = init, .cfg = cfg };
         h9.gfx.main(GfxRun.work, &ctx);
     }
@@ -372,7 +373,10 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
     var machine = h9.Machine.init(init.gpa, io, opts) catch |err| {
         switch (err) {
             error.GfxNotBuilt => {
-                std.debug.print("h9: graphics aren't built into this h9\n", .{});
+                if (cfg.gfx != null and cfg.gfx.?.screen == .window and h9.gfx.has_headless)
+                    std.debug.print("h9: --gfx: this h9 has no window, only the headless screen (--gfx=headless)\n", .{})
+                else
+                    std.debug.print("h9: graphics aren't built into this h9\n", .{});
                 return exit_failed;
             },
             error.GfxInUse => {

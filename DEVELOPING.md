@@ -174,11 +174,16 @@ falls back to the emulator, without it.
 ### Graphics
 
 `-Dgfx` picks the GUI backend for `--gfx` ([gfx](design/epoch-0/gfx.md)):
-drawterm's Cocoa on macOS and Win32 on Windows by default, `none` on Linux.
-`-Dgfx=x11` builds the X11 backend for Linux, which links the host's libX11
-(and needs the libXt headers), so it builds natively against glibc, not for
-a musl target. `-Dgfx=none` leaves graphics out; `-Dgfx=headless` is a screen
-in memory, which the backend tests use whatever `-Dgfx` is. `zig build web`
+drawterm's Cocoa on macOS and Win32 on Windows by default, `headless` on
+Linux. `-Dgfx=x11` builds the X11 backend for Linux, which links the host's
+libX11 (and needs the libXt headers), so it builds natively against glibc,
+not for a musl target. The headless screen, a screen in memory for
+`--gfx=headless` ([headless-screen](design/headless-screen.md)), is linked
+into every build with graphics; `-Dgfx=headless` is a build with only it.
+`-Dgfx=none` leaves graphics out. The backend tests use the `-Dgfx` build's
+headless screen, or a headless-only build with `none`, so `zig build test
+-Dgfx=x11 -Dtarget=x86_64-linux-gnu` runs the `[gfx]` cases beside a
+window backend. `zig build web`
 always builds `web`, the browser host's canvas backend
 ([browser-gfx](design/epoch-0/browser-gfx.md)), unless `-Dgfx=none` leaves it
 out.
@@ -367,7 +372,7 @@ development builds report `git describe` (`-Dversion=V` overrides it).
 | Path | Contents |
 | --- | --- |
 | `src/main.zig`, `src/cli.zig`, `src/stdin.zig`, `src/hostsig.zig`, `src/tools.zig` | CLI: entry point, flag parsing with no I/O, the host stdin reader (cancellable, for the console's reader thread), Ctrl-C, hangup, and raw mode on the host terminal, and `--check`/`--version` |
-| `src/gfx.zig`, `src/kern/gfx*.c`, `src/kern/nogfx.c` | `--gfx`: the window claim and `h9.gfx.main`, the kernel glue around drawterm's GUI backends (lazy `#i`, the kbdfs `/dev/kbd`, the clipboard), the headless test backend, and the stubs for builds without graphics |
+| `src/gfx.zig`, `src/kern/gfx*.c`, `src/kern/nogfx.c` | `--gfx`: the window claim and `h9.gfx.main`, the kernel glue around drawterm's GUI backends (lazy `#i`, the kbdfs `/dev/kbd`, `/dev/screen`, `/dev/mousein`, `/dev/kbdin`, the clipboard, and the choice of screen), the headless screen, and the stubs for builds without graphics |
 | `src/root.zig` | library root; [docs/embedding.md](docs/embedding.md) explains using it |
 | `docs/` | guides that go further than the manual; `docs/embedding/embed.zig` is the embedding guide's example program |
 | `src/machine.zig` | one machine: builds its namespace, runs a process, and serves its syscalls |

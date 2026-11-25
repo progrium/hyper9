@@ -274,8 +274,8 @@ there names the problem (see the table below). The `backend emu` line names
 the emulator's tier: `hcpu (jit)`, or `hcpu (interpreter)` where the JIT
 can't run. `auto` is the backend h9 uses unless you pass `--backend`; with
 `--backend`, only that one is checked. The vCPU count is the hypervisor's
-limit (see chapter 8). The `gfx` line says whether `--gfx` can open a window
-(chapter 17). The version is `git describe` for a development build
+limit (see chapter 8). The `gfx` lines say whether `--gfx` can open a window,
+and that `--gfx=headless` has a screen in memory (chapter 17). The version is `git describe` for a development build
 and the release's version for a release. The root line shows the root with
 symlinks resolved, so `root` appears as `root-11952`, the release it came
 from.
@@ -933,7 +933,7 @@ kernel has. `intro(3)` introduces them, and each has its own page in section
 | `#H` | htools | `/bin`, after the root's | h9's own commands: small rc scripts built into h9 that wrap its devices, read-only. Masked under `--no-guest-tools`. |
 | `#L` | lfd | | Host file descriptors as channels; h9 uses it for unix-socket roots and an embedder's `.fd` mounts |
 | `#a`, `#D` | tls, ssl | | TLS and SSL record layers, for `tlsclient` and friends |
-| `#i`, `#m`, `#b` | draw, mouse, kbd | `/dev`, with `--gfx` | The window, its mouse and cursor, and its keyboard (chapter 17). Masked without `--gfx`. |
+| `#i`, `#m`, `#b` | draw, mouse, kbd | `/dev`, with `--gfx` | The window (or the headless screen), its mouse and cursor, and its keyboard, with `/dev/screen`, `/dev/mousein`, and `/dev/kbdin` (chapter 17). Masked without `--gfx`. |
 | `#A` | audio | | Present, but there's no sound to drive |
 | `#L` | linux | A Linux process's `/` | The Linux view: `/9`, `/tmp`, `/mnt/term`, `/dev`, `/proc`, and `/sys`, with the Linux root unioned after them (chapter 20) |
 | `#ε` | eventfd | | Linux `eventfd`, `epoll`, and `signalfd` instances |
@@ -1852,7 +1852,8 @@ the run ends.
   and `#b` are masked, so a guest can't open one.
 - Linux builds have no window code unless built with `-Dgfx=x11`; `h9
   --version` says which (`gfx:`), and `h9 --check` says whether `$DISPLAY`
-  opens. Without it, or without a display, `--gfx` exits 125.
+  opens. Without it, or without a display, `--gfx` exits 125. Every build
+  has `--gfx=headless`, below.
 - rio needs `/mnt/temp` in the root tree; `zig build mkroot` makes it, and
   adds it to a tree it built before.
 - `--print` shows a `gfx:` line, and lists the clipboard and the guest's
@@ -1888,6 +1889,63 @@ Worker, and rio and acme draw on it. The demo page's **rio** button runs
   by default; other fonts need a fuller root. `h9-node` has no canvas, so
   `--gfx` there exits 125 as a build without graphics does.
 
+**Reading the screen, typing, and clicking.** With any `--gfx`, three more
+files are on `/dev`, with 9front's names and formats, so a script written for
+9front runs unchanged:
+
+- `/dev/screen` is the screen as an uncompressed image(6) file, so `topng`,
+  `page`, and `crop` read it. Each open takes a copy of one whole frame.
+- `/dev/mousein` takes mouse events, one per write, in `/dev/mouse`'s format:
+  `A x y buttons msec` puts the pointer at x, y, `m x y buttons msec` moves it
+  by x, y, and `a` scales x and y from 0 to 2³¹ across the screen. A msec of 0
+  is now. They move the machine's pointer, never the host's.
+- `/dev/kbdin` takes keys as kbdfs's `kbdin` does: text is typed rune by rune,
+  each pressed and then released, and a write ending in a NUL is kbdfs's
+  messages (`r` and `R` with a rune pressed or released, and `k` and `K` lines
+  passed to `/dev/kbd`'s reader as they are), which is how Ctrl and the other
+  modifiers go in. Keys typed while nothing reads `/dev/kbd` are dropped.
+
+On a real window, these reach only the guest's own screen and input queues:
+`/dev/screen` never holds other host windows, and injected events don't move
+the host's pointer or reach other host windows.
+
+**The headless screen.** `--gfx=headless` gives the machine a screen in memory
+instead of a window, in every build but the browser host's
+([headless-screen](design/headless-screen.md)). It never opens a window or
+touches the host's display, clipboard, or window system, so it works in CI
+and over SSH, and on Linux in the static release build. `/dev/snarf` is a
+buffer in the h9 process.
+
+- `--gfx-size WxH` sets its size, `1024x768` by default. Given without
+  `--gfx=headless`, it's a usage error (exit 2), as are `--gfx-scale` and
+  `--gfx=noclip` with it.
+- There's no close button: the run ends when its program does.
+- `--print`'s `gfx:` line says `headless WxH`.
+- Only one screen per h9 process: once a machine has opened the headless
+  screen, a later machine can't have a window, and the other way around.
+- In a `-Dgfx=none` build, and on the browser host, `--gfx=headless` exits
+  125.
+
+A GUI test is then an ordinary run: rio starts a window, and a script types
+into it with `/dev/kbdin`, clicks with `/dev/mousein`, and saves the screen
+with `topng` when something fails. `topng`, `page`, and `crop` are in a full
+9front root (`zig build mkroot`), not the slim root.
+
+```
+host$ cat test.rc
+window -r 0 0 600 400 rc
+sleep 2
+echo 'echo hi >/dev/snarf' >/dev/kbdin
+sleep 1
+~ `{cat /dev/snarf} hi || topng </dev/screen >/mnt/term/cwd/fail.png
+host$ h9 --gfx=headless rio -i 'rc /mnt/term/cwd/test.rc'
+```
+
+A host-side client mounts the same files over `--serve` (chapter 16), since
+`/dev` is bound in the machine's namespace. Embedders pick the headless
+screen with `Machine.Options.gfx.screen = .headless`, and `h9.gfx.headless`
+injects keys and mouse events and reads the pixels from Zig.
+
 The plumber starts and serves `/mnt/plumb`, and `sam -d` and `ed` edit text
 without graphics.
 
@@ -1897,6 +1955,7 @@ without graphics.
 host$ h9 --gfx rio
 host$ h9 --gfx rio -i 'window acme'
 host$ h9 --gfx=noclip rio
+host$ h9 --gfx=headless --rc 'read -c 60 </dev/screen; echo'
 ```
 
 In rio, hold button 3 on the grey background and choose New, then sweep out
@@ -2344,7 +2403,9 @@ Debugging (chapter 28):
 | `--trace[=FILE]` | Log every system call, and the registers and symbolized PC when a program faults, to standard error or to `FILE` |
 | `-v`, `--verbose` | Notes on standard error about how the run went: for now, how each metadata index was found and checked, and the 9P requests it saved. `-v` is the one short flag, and only before the program. |
 | `--gfx[=noclip]` | Give the machine a host window, with `/dev/snarf` as the host clipboard, or private with `=noclip` (chapter 17) |
+| `--gfx=headless` | Give the machine a screen in memory instead of a window: no display, and `/dev/snarf` private (chapter 17) |
 | `--gfx-scale N` | The window's scale on macOS: 1 points, 0 backing pixels, N backing pixels divided by N |
+| `--gfx-size WxH` | The headless screen's size, `1024x768` by default; only with `--gfx=headless` |
 
 Tools:
 

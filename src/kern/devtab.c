@@ -19,11 +19,13 @@ extern Dev drawdevtab;
 #define h9drawdevtab drawdevtab
 #define h9consdevtab consdevtab
 #define h9kbddevtab kbddevtab
+#define h9mousedevtab mousedevtab
 #else
 /* devdraw opening the screen lazily, and devcons's snarf limited to the machine with it (gfx.c) */
 extern Dev h9drawdevtab;
 extern Dev h9consdevtab;
-extern Dev h9kbddevtab;	/* devkbd, serving kbdfs's format */
+extern Dev h9kbddevtab;	/* devkbd, serving kbdfs's format, and kbdin */
+extern Dev h9mousedevtab;	/* devmouse, and mousein */
 #endif
 extern Dev ipdevtab;
 extern Dev fsdevtab;
@@ -133,7 +135,7 @@ Dev *devtab[] = {
 	&pipedevtab,
 	&ssldevtab,
 	&tlsdevtab,
-	&mousedevtab,
+	&h9mousedevtab,
 	&h9drawdevtab,
 	&ipdevtab,
 	&fsdevtab,

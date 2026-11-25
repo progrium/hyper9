@@ -779,7 +779,9 @@ fn pin(pins: []const u8, comptime name: []const u8) []const u8 {
 pub const Gfx = enum {
     /// No screen: src/kern/nogfx.c, and --gfx fails with GfxNotBuilt.
     none,
-    /// A screen in memory, for tests (src/kern/gfx-headless.c).
+    /// Only the screen in memory (src/kern/gfx-headless.c,
+    /// design/headless-screen.md): --gfx=headless, and no window. The
+    /// window backends below link it too.
     headless,
     /// drawterm's gui-x11, against a glibc target and the system's libX11.
     x11,
@@ -796,7 +798,9 @@ pub const Gfx = enum {
             .macos => .cocoa,
             .windows => .win32,
             .wasi => .web,
-            else => .none,
+            // Static Linux builds can't have a window, but can have the
+            // headless screen (design/headless-screen.md).
+            else => .headless,
         };
     }
 
@@ -907,11 +911,19 @@ fn addGfxSources(b: *std.Build, kern: *std.Build.Step.Compile, gfx: Gfx, flags: 
         return;
     }
     m.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"gfx.c"}, .flags = flags });
+    // The headless screen (design/headless-screen.md) is linked into every
+    // native build with graphics, beside the window backend if there is
+    // one; src/kern/gfx.c calls one or the other per machine.
+    if (gfx != .web) {
+        m.addCMacro("H9_GFX_HEADLESS", "1");
+        m.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"gfx-headless.c"}, .flags = flags });
+    }
+    if (gfx != .web and gfx != .headless) m.addCMacro("H9_GFX_WINDOW", "1");
     const gui = std.mem.concat(b.allocator, []const u8, &.{ flags, &.{ "-include", pathFromRoot(b, "src/kern/gfx-gui.h") } }) catch @panic("OOM");
     const gui_exit = std.mem.concat(b.allocator, []const u8, &.{ gui, &.{"-DH9_GUI_EXIT"} }) catch @panic("OOM");
     switch (gfx) {
         .none => unreachable,
-        .headless => m.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"gfx-headless.c"}, .flags = flags }),
+        .headless => {},
         .web => m.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"gfx-web.c"}, .flags = flags }),
         .x11 => {
             m.addCMacro("H9_GFX_X11", "1");
@@ -962,7 +974,7 @@ pub fn build(b: *std.Build) void {
         (optimize == .debug or optimize == .safe);
     const no_jit = b.option(bool, "no-jit", "The emulator's interpreter tier only, as on hosts that forbid generated code") orelse false;
 
-    const gfx_opt = b.option(Gfx, "gfx", "GUI backend for --gfx (design/epoch-0/gfx.md): cocoa, win32, x11, web, headless (tests) or none (default: cocoa on macOS, win32 on Windows, web for zig build web, none elsewhere)");
+    const gfx_opt = b.option(Gfx, "gfx", "GUI backend for --gfx (design/epoch-0/gfx.md): cocoa, win32, x11, web, headless (only --gfx=headless) or none (default: cocoa on macOS, win32 on Windows, web for zig build web, headless elsewhere); the window backends also link the headless screen");
     const gfx = gfx_opt orelse Gfx.default(target.result);
     // zig build web's: web, the browser host's only GUI backend, unless
     // -Dgfx=none leaves graphics out (design/epoch-0/browser-gfx.md).
@@ -1051,8 +1063,10 @@ pub fn build(b: *std.Build) void {
     // The h9 module, with the -Dgfx backend: h9, embedders and the tools.
     const mod = addH9Module(b, parts, gfx, true);
     kern_step.dependOn(&mod.kern.step);
-    // The tests' module, with the headless backend for the [gfx] cases.
-    const test_mod = if (gfx == .headless) mod else addH9Module(b, parts, .headless, false);
+    // The tests' module, with the headless screen for the [gfx] cases:
+    // the -Dgfx build's own when it has one (design/headless-screen.md),
+    // so a window backend's build runs them beside its window.
+    const test_mod = if (gfx != .none and gfx != .web) mod else addH9Module(b, parts, .headless, false);
 
     // The browser host (design/epoch-0/browser-host.md): h9 for wasm32-wasi
     // with its JS host and a demo page, in zig-out/web.

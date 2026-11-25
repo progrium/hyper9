@@ -428,7 +428,13 @@ pub const Machine = struct {
         for (opts.mounts) |mt| if (mt.kind == .builtin) {
             in.builtin_note = try builtin_root.describe(arena);
         };
-        if (opts.gfx) |g| in.gfx = .{ .backend = @tagName(gfx.backend), .clipboard = g.clipboard, .scale = g.scale };
+        if (opts.gfx) |g| {
+            in.gfx = .{ .backend = @tagName(gfx.backend), .clipboard = g.clipboard, .scale = g.scale };
+            if (g.screen == .headless) {
+                const sz = g.size orelse gfx.default_size;
+                in.gfx.?.headless = .{ .dx = sz.dx, .dy = sz.dy };
+            }
+        }
         if (opts.root_index != null) {
             var any = false;
             for (opts.mounts) |mt| if (mt.kind == .url or mt.kind == .fd) if (mt.stack()) |st| if (st[0] == .root) {
