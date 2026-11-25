@@ -22,7 +22,7 @@ h9's kernel calls the host OS directly, by path and by address, and the sandbox 
 - **Checks are hooks in vendored code.** `third_party/drawterm/kern/devfs-posix.c` has 57 references to h9's policy functions, and `devfs-win32.c` has 29. devip has its own for dials and listens. Each is a place where a path or an address is checked just before a host call, and a call added without its check is a hole.
 - **Path checks need care to be sound.** [spec/sandbox.md](../spec/sandbox.md) has sections on path resolution, symbolic links, and contained trees, because checking a path and then opening it by name races with whoever can rename it.
 - **Two designs.** On the web host there's no ambient file system: WASI gives h9 preopened directories, and everything else is a JavaScript import. The native hosts have ambient everything and subtract.
-- **[host-sandbox](host-sandbox.md)** would confine the h9 process from outside with Seatbelt, Landlock and seccomp, or an AppContainer. It has to be derived from the same policy, and it's simplest to derive when the set of things h9 opens is known up front.
+- **[host-sandbox](host-sandbox.md)** confines the h9 process from outside: Seatbelt on macOS, Landlock and seccomp on Linux, and process mitigation policies on Windows. It's derived from the same policy, and it depends on this proposal, since it's simplest to derive when the set of things h9 opens is known up front.
 
 [kernel-port](kernel-port.md) comes first because a kernel that's a value takes its host as an argument, and because the devices that touch the host have to be h9's own code to change.
 
@@ -120,4 +120,3 @@ This is a security change. The guest can reach nothing new. What changes is how 
 
 - Whether `spawn` belongs here or stays with [host-cmd](host-cmd.md), which is still being built.
 - `--host-fs`, which binds the whole host tree. As written it's one read-write handle on `/`, which is what it means.
-- Whether [host-sandbox](host-sandbox.md) should depend on this. It would be simpler after, but it doesn't need it.
