@@ -112,6 +112,12 @@ fn unspin(sh: *abi.Sched) void {
     _ = @atomicRmw(i32, &sh.busy, .Sub, 1, .seq_cst);
 }
 
+/// Takes one out of `busy` unless it's zero already.
+fn unspinClamped(sh: *abi.Sched) void {
+    var cur = @atomicLoad(i32, &sh.busy, .seq_cst);
+    while (cur > 0) cur = @cmpxchgWeak(i32, &sh.busy, cur, cur - 1, .seq_cst, .seq_cst) orelse return;
+}
+
 /// Whether a spinning h9 thread, counted in `busy`, may go on: as
 /// `trySpin`.
 fn maySpin(sh: *abi.Sched) bool {
@@ -407,9 +413,15 @@ const Stub = struct {
             const rc = linux.syscall5(.waitid, @intFromEnum(linux.P.PID), @intCast(s.pid), @intFromPtr(&info), linux.W.EXITED | __WALL, 0);
             if (linux.errno(rc) != .INTR) break;
         }
-        // Its threads that were awake count in `busy` no longer.
+        // Its threads that were awake count in `busy` no longer. A thread
+        // killed between its flag and the count (setAwake in
+        // native_stub.zig) is taken out though the count never had it, so
+        // `busy` would drop one below the truth for good. It can't go
+        // below zero, so that much of the error is clamped away: with no
+        // other thread spinning, as when the last stub stops, the count
+        // comes out exact.
         if (sched) |sh| for (s.ctls) |*c| {
-            if (@atomicLoad(u32, &c.awake, .seq_cst) != 0) _ = @atomicRmw(i32, &sh.busy, .Sub, 1, .seq_cst);
+            if (@atomicLoad(u32, &c.awake, .seq_cst) != 0) unspinClamped(sh);
         };
         std.posix.munmap(@as([*]align(std.heap.page_size_min) u8, @ptrCast(@alignCast(s.ctls)))[0..abi.ctls_size]);
     }
