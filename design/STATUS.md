@@ -8,7 +8,7 @@ Every proposal at the top of [design/](README.md), in the order they were writte
 | --- | --- | --- | --- | --- |
 | [hide-host-paths](hide-host-paths.md) |  | superseded |  | Hide host paths in /proc/n/ns |
 | [host-sandbox](host-sandbox.md) |  | draft | needs host-handles | Host self-sandboxing |
-| [host-scripts](host-scripts.md) |  | draft |  | Running host scripts as the program |
+| [host-scripts](host-scripts.md) |  | implemented |  | Running host scripts as the program |
 | [credential-helpers](credential-helpers.md) | [#119](../../../issues/119) | implemented |  | Credential helpers for WebSocket 9P |
 | [audio](audio.md) |  | draft |  | Audio (--audio) |
 | [host-cmd](host-cmd.md) |  | draft | in progress on host-cmd | Rethinking host commands |
@@ -49,7 +49,7 @@ flowchart LR
   classDef closed fill:#eee,stroke:#999,color:#777
   p_hide_host_paths["hide-host-paths<br/>superseded"]:::closed
   p_host_sandbox["host-sandbox<br/>draft"]:::draft
-  p_host_scripts["host-scripts<br/>draft"]:::draft
+  p_host_scripts["host-scripts<br/>implemented"]:::implemented
   p_credential_helpers["credential-helpers<br/>implemented"]:::implemented
   p_audio["audio<br/>draft"]:::draft
   p_host_cmd["host-cmd<br/>draft"]:::draft
