@@ -30,8 +30,9 @@ built.
 9. [Hardening already done](#9-hardening-already-done)
 10. [Known gaps and accepted risks](#10-known-gaps-and-accepted-risks)
 11. [Suggested focus](#11-suggested-focus)
-12. [Building, running, and testing](#12-building-running-and-testing)
-13. [Reference map](#13-reference-map)
+12. [An audit plan](#12-an-audit-plan)
+13. [Building, running, and testing](#13-building-running-and-testing)
+14. [Reference map](#14-reference-map)
 
 ## 1. What h9 is
 
@@ -725,7 +726,228 @@ In rough order of expected value:
 9. **Design review** of virtual-loopback, file-watch, and plan-format before
    they land.
 
-## 12. Building, running, and testing
+## 12. An audit plan
+
+This is how we would run the audit if we were the auditors: the order of
+work, the methods for each boundary, what each phase delivers, and how we'd
+know we were done. It assumes two auditors for about six weeks, with access
+to a macOS arm64 machine (HVF), a Linux x86\_64 machine with KVM on bare
+metal, a Linux arm64 machine with KVM, and a Windows x86\_64 machine with WHP.
+A smaller engagement keeps the phases and their order and cuts the depth of
+phases 3 and 4.
+
+### Ground rules
+
+- **Pin a commit.** Audit one commit of `main` (see [Revision](#revision)),
+  and diff anything that lands during the audit against it, so findings
+  name a tree that exists.
+- **Prove escapes, not just bugs.** For each boundary, set up a canary the
+  guest must not reach, and count a finding as an escape only when a guest
+  (or a server, for A2) reaches it. The canaries:
+  - a host file outside every policy path, and one under `--read-deny`
+    inside a bound tree, each holding a random token;
+  - a read-only host file whose hash is checked after the run;
+  - a TCP listener on the host's 127.0.0.1, one on a LAN address, and a
+    fake metadata endpoint on 169.254.169.254 (in a network namespace or
+    VM), each logging any connection;
+  - a host environment variable holding a token;
+  - a second machine in the same process (through the embedding API or
+    `tests/backends.zig`'s harness) holding its own token in `/tmp` and
+    `/srv`;
+  - for code execution in h9, a host file h9 would have to create
+    (`/tmp/pwned`) that no guest path maps to.
+- **Write every finding as a test.** A proof of concept is a guest program
+  or rc script plus the h9 flags, written so it can become an integration
+  case tagged with the proposal it breaks, as h9's own cases are
+  ([spec/testing.md](../spec/testing.md)).
+- **Severity by what's reached**, highest first: code execution in the h9
+  process; reading or writing a host file outside the plan; reaching a
+  network destination the plan refuses; crossing between machines; denial
+  of service of the host beyond the plan's limits; information disclosure.
+  A bug that needs a malicious server (A2) or a racing host process (A5)
+  is rated by what it reaches, with the precondition stated.
+
+### Phase 0: set up (days 1 to 3)
+
+1. Build h9 on each host in Debug and ReleaseSafe, fetch the roots, and run
+   `zig build test`, `zig build integration`, and `zig build proposal
+   -Dp=baseline` on every backend, so failures later are ours and not the
+   environment's. Record `h9 --check` on each host.
+2. Build an instrumented h9 on Linux x86\_64: check whether the C kernel is
+   already built with UBSan (Zig enables C's undefined-behaviour checks in
+   Debug), and add AddressSanitizer for `src/kern/` and
+   `third_party/drawterm/kern/` where the toolchain allows it. Run the
+   integration suite under it once as a baseline.
+3. Write the canary harness above as a script that runs a guest command
+   under given flags and reports which canaries it reached, and add the
+   `--print` output for each profile under test to the audit's notes.
+4. Walk through sections 1 to 6 of this brief with the maintainer, and
+   agree the threat model, the severity scale, and how to report a
+   critical finding mid-audit.
+
+**Delivers:** working builds on each host, the canary harness, and the
+agreed threat model.
+
+### Phase 1: map and model (week 1)
+
+1. **Read the seam.** Trace a syscall end to end on each backend: the
+   shim's entry, the exit, `src/machine.zig`'s loop, `src/syscall.zig` or
+   `src/linux/sys.zig`, `GuestBuf`, the `sys*` wrapper in `sysfile.c`, the
+   device, and back. Note every place a guest value becomes a host pointer,
+   a length, an index, or a path.
+2. **Enumerate guest-reachable entry points**: the 9front syscall table,
+   the Linux table in `src/linux/nr.zig` (marking each call as served,
+   refused, or `ENOSYS`), every device's walk, open, read, write, and wstat,
+   every `ctl` message (`#ℓ`, `#ℏ`, `#O`'s clone, devproc, devip), and every
+   ioctl the Linux layer serves.
+3. **Enumerate host-side inputs** from A2 and A3: every 9P message type each
+   side of `src/dotl/` parses, index and event records, HTTP responses and
+   WebSocket frames, and the listeners' request parsing.
+4. **Grep for patterns** that need a look wherever they appear: `@ptrFromInt`,
+   `@intCast` and `@truncate` on guest values, slices built from guest
+   lengths, `memcpy` and `memmove` in C, `waserror` near Zig frames (seam
+   rule 1), `validaddr`, and locks dropped around host calls.
+5. **Turn sections 4 and 6 into a threat model per boundary**, as attack
+   trees from each adversary to each canary.
+
+**Delivers:** the entry-point inventory and the attack trees, which drive
+phases 2 to 4.
+
+### Phase 2: the policy as specified (week 2)
+
+Test what the spec promises before hunting for memory bugs, since a logic
+bypass is cheaper to find and as severe.
+
+- **File system (B4).** For each profile and `--write` mode, try to reach
+  the file canaries: `..` past a bind and a contained tree's top; absolute
+  and relative symlinks, link loops, and links swapped in by a host process
+  between walk and open (a loop of `rename(2)` on the host while the guest
+  walks); hardlinks inside a writable path; rename of a directory above a
+  rule; the overlay's copy-up, whiteout, and rename paths; Linux `chroot`
+  followed by `..`, `fchdir`, `/proc/self/fd/N`, and exec; and on Windows,
+  case, 8.3 names, trailing dots and spaces, alternate data streams,
+  junctions, and UNC and device paths. Repeat each through a 9front
+  program and a Linux program, since their walks differ.
+- **Devices (B4, B8).** Try to attach every masked device by every
+  spelling (`#U`, `#U!c`, `#I0`, a `#` path through a bind, a namespace file
+  replayed by the guest's own `newns`), and to reach another machine's
+  union numbers, `/srv` posts, pids, and `#ℏ` conversations.
+- **Network (B5).** For each `--net` mode and a set of `--net-allow`
+  patterns, try to reach the network canaries: IPv4-mapped and other IPv6
+  spellings of v4 addresses, decimal and octal address forms, `0.0.0.0`,
+  broadcast, dial strings with odd separators or empty fields, UDP `sendto`
+  to an unconnected address, Linux sockets on a mounted `/net`, `cs` with a
+  name that resolves to a refused address, the resolved-name table after it
+  evicts, `/net/ws` with a URL whose host differs from its `Host` header,
+  and link-local DNS servers on ports other than 53.
+- **Environment, identity, and limits.** Check that no host variable reaches
+  the guest by any path (`/env`, `/proc`, a Linux `envp`, `#c`), and that
+  `--memory`, `--pids`, `--cpus`, and `--timeout` hold under fork bombs,
+  thread bombs, overlay writes, page-cache fills, and stuck host calls.
+- **The plan.** Check that `--print` matches what's enforced for every
+  profile and flag combination we test, and that every line `--print`
+  writes replays through `--ns` to the same namespace.
+
+**Delivers:** findings against the policy, and a table of each promise in
+section 2 with the cases that test it.
+
+### Phase 3: memory safety at the seam (weeks 3 and 4)
+
+- **Syscall fuzzing from inside the guest.** Build a guest-side fuzzer, a
+  static Linux program and a 9front program, that makes random and
+  structure-aware calls (valid fds and paths from a pool, buffers that
+  straddle unmapped pages, lengths near powers of two and 2³¹, pointers into
+  text, and concurrent `munmap`, `mprotect`, and `mremap` from other
+  threads during blocking calls). Run it under the instrumented h9 on KVM
+  and the emulator, with the canary harness watching, for days. Syzkaller's
+  Linux descriptions are a good source of argument shapes.
+- **Differential testing.** Run the Linux fixtures and the fuzzer's corpus
+  under h9 and under a real Linux kernel, and 9front programs under h9 and
+  under 9front in QEMU, and look at where results differ around memory,
+  signals, and errors: a difference there is often a missing check.
+- **Manual review**, in the order of section 11: `GuestBuf` and every caller
+  that bypasses it; `src/linux/mm.zig`'s chunk reference counts, copy-on-write
+  and shootdown ordering; `src/linux/signal.zig`'s frames and
+  `rt_sigreturn`; `src/kern/devoverlay.c`'s allocator and node lifetimes;
+  devproc's `mem` and `regs` against a running target; and the
+  `src/cpupool.zig` handoff.
+- **The shims and CPU state.** On KVM and HVF, write user-mode probes that
+  try to read and write the kernel half, the doorbell, and the per-vCPU
+  shared page; that fault inside the shim's paths (a bad stack, a
+  non-canonical return address, a pending trap flag); and that race a kick
+  against a syscall. Read the CPU state the host sets (`src/vmm/x86.zig`,
+  `pt_amd64.zig`, `pt_arm64.zig`) against the architecture manuals for
+  anything user mode can change or see.
+- **The emulator.** Extend the existing lockstep fuzzers toward memory:
+  accesses that cross pages and regions, self-modifying code across
+  threads, and stores into code pages racing their execution, with the
+  arena's neighbours as canaries.
+
+**Delivers:** memory-safety findings with proofs of concept, and the
+fuzzer, its corpus, and its harness, handed over so h9 can keep running
+them.
+
+### Phase 4: hostile servers and clients (week 5)
+
+- **A malicious 9P server.** Write a server that speaks 9P2000, 9P2000.L,
+  and 9P2000.L.Z and misbehaves on purpose: wrong tags and fids, replies to
+  requests never sent, oversized counts and strings, directory entries that
+  don't parse, symlink targets that climb or loop, a `9P-Uid` and
+  `9P-User` that collide, `Rlerror` with odd errnos, disconnects at every
+  step of a reconnect, and `Trebind` replies that disagree. Mount it as a
+  root, as a namespace-file mount, and from inside the guest with
+  `dotlfs`, and fuzz `src/dotl/` and `src/rootindex/` with it under ASan.
+- **Indexes, events, and static trees.** Fuzz index text and compiled cache
+  files (a tampered cache entry with a valid-looking trailer), event
+  streams, and static-tree responses (wrong lengths, `Range` replies that
+  overlap, hashes that don't match, redirects).
+- **Streams and helpers.** Fuzz the WebSocket client and server framing and
+  the HTTP handshake parsing in `src/ws.zig` and `src/hstream.zig`, proxy
+  responses, and credential-helper output.
+- **Serving.** Attack each `--serve` listener as A3: authentication and
+  `Origin` checks, slow and half-open connections against the 32-connection
+  and 8-process caps, and requests through `src/dotl/server.zig` that try
+  to leave `--serve-root`.
+
+**Delivers:** findings against A2 and A3, and the hostile server, kept as a
+test fixture.
+
+### Phase 5: design review, retest, and report (week 6)
+
+1. Review the drafts that change the sandbox (virtual-loopback, file-watch,
+   plan-format, host-sandbox, and linux-dns) against the threat model, and
+   write what each should test before it lands.
+2. Retest every fix the maintainer made during the audit, on every backend
+   it touches.
+3. Write the report: a summary for a reader who won't read the rest; each
+   finding with its boundary, adversary, severity, preconditions, proof of
+   concept, root cause, and a suggested fix; the promises in section 2 with
+   what was tested against each and what wasn't; and the residual risks,
+   including the known gaps in section 10 we agree with and any we'd rate
+   higher.
+4. Hand over the canary harness, the fuzzers and their corpora, the hostile
+   server, and the proofs of concept as integration cases.
+
+### What we'd leave out, and say so
+
+The hypervisors and CPUs themselves, side channels, the native backend
+beyond confirming its documented status, guest binaries in the root, the
+sibling repositories, and the browser host beyond a review of the Worker's
+message handling and h9-node's preopen. The report would list each
+exclusion so a later audit can pick it up.
+
+### How we'd know we were done
+
+- Every promise in section 2 has at least one case that would fail if it
+  broke, run on every backend that's a boundary.
+- Every entry point in the phase 1 inventory has been fuzzed, reviewed, or
+  listed as not covered, with a reason.
+- The guest fuzzer and the hostile server have run for an agreed time with
+  no new crash, under the instrumented build.
+- Every critical and high finding is fixed and retested, or accepted in
+  writing by the maintainer.
+
+## 13. Building, running, and testing
 
 [DEVELOPING.md](../DEVELOPING.md) is the full guide. In short, with Zig
 0.16.x:
@@ -790,7 +1012,7 @@ CI ([.github/workflows/ci.yml](../.github/workflows/ci.yml)) runs the design
 check on every PR, and the unit and integration tests on PRs from proposal
 branches.
 
-## 13. Reference map
+## 14. Reference map
 
 | For | Read |
 | --- | --- |
