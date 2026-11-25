@@ -1,4 +1,5 @@
-# Checks PRs (design/README.md, Checks). Every job starts at once.
+# Checks PRs (design/README.md, Checks). Every job starts at once, except
+# the ones that wait a few seconds for `runners` to pick their runner.
 #
 # `check` runs on every PR: it's the only thing that enforces the proposal
 # rules, and it takes seconds. The tests run only on PRs from a proposal's
@@ -37,9 +38,43 @@ jobs:
           version: 0.17.1
       - run: zig build design -- check
 
-  test:
+  # Which runner each job below gets. While an AWS test host is up, it
+  # serves its own self-hosted runners (h9-kvm-amd64, h9-kvm-arm64, and
+  # h9-whp, real KVM and WHP), and the jobs that would run on the hosted
+  # runner it stands in for go to it instead. A stopped host has none
+  # online, so its jobs fall back to GitHub's. A fork's PR always gets
+  # GitHub's, and has no secrets to ask with anyway. RUNNER_STATUS_TOKEN
+  # is a fine-grained token with Administration: Read-only on this repo;
+  # without it, everything runs on GitHub's.
+  runners:
     if: github.event_name == 'workflow_dispatch' || !startsWith(github.head_ref, 'claude/')
     runs-on: ubuntu-latest
+    outputs:
+      map: ${{ steps.pick.outputs.map }}
+    steps:
+      - id: pick
+        env:
+          GH_TOKEN: ${{ secrets.RUNNER_STATUS_TOKEN }}
+          FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        run: |
+          online=
+          if [ "$FORK" != true ] && [ -n "$GH_TOKEN" ]; then
+            online=$(gh api "repos/$GITHUB_REPOSITORY/actions/runners?per_page=100" \
+              --jq '.runners[] | select(.status == "online") | .labels[].name') || online=
+          fi
+          pick() { if grep -qx "$2" <<<"$online"; then echo "$2"; else echo "$1"; fi; }
+          map=$(jq -nc \
+            --arg amd64 "$(pick ubuntu-latest h9-kvm-amd64)" \
+            --arg arm64 "$(pick ubuntu-24.04-arm h9-kvm-arm64)" \
+            --arg windows "$(pick windows-latest h9-whp)" \
+            '{"ubuntu-latest": $amd64, "ubuntu-24.04-arm": $arm64, "windows-latest": $windows}')
+          echo "map=$map" >>"$GITHUB_OUTPUT"
+          echo "$map"
+
+  test:
+    if: github.event_name == 'workflow_dispatch' || !startsWith(github.head_ref, 'claude/')
+    needs: runners
+    runs-on: ${{ fromJSON(needs.runners.outputs.map)['ubuntu-latest'] }}
     steps:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
@@ -71,14 +106,17 @@ jobs:
   # mkroot's QEMU boot.
   integration:
     if: github.event_name == 'workflow_dispatch' || !startsWith(github.head_ref, 'claude/')
-    runs-on: ubuntu-latest
+    needs: runners
+    runs-on: ${{ fromJSON(needs.runners.outputs.map)['ubuntu-latest'] }}
     steps:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.1
-      # Hosted runners have /dev/kvm, but only root can open it.
+      # Hosted runners have /dev/kvm, but only root can open it. The test
+      # hosts' runner user is in the kvm group.
       - name: Let the runner open /dev/kvm
+        if: ${{ !startsWith(runner.name, 'h9-') }}
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
           sudo udevadm control --reload-rules
@@ -156,12 +194,12 @@ jobs:
 
   hcpu:
     if: github.event_name == 'workflow_dispatch'
-    needs: hcpu-roots
+    needs: [runners, hcpu-roots]
     strategy:
       fail-fast: false
       matrix:
         os: [macos-latest, ubuntu-24.04-arm, ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ fromJSON(needs.runners.outputs.map)[matrix.os] || matrix.os }}
     timeout-minutes: 340
     defaults:
       run:
@@ -204,11 +242,12 @@ jobs:
   # are for a real Mac.
   hcpu-fuzz:
     if: github.event_name == 'workflow_dispatch'
+    needs: runners
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04-arm, ubuntu-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ fromJSON(needs.runners.outputs.map)[matrix.os] }}
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
@@ -221,12 +260,12 @@ jobs:
 
   hcpu-demos:
     if: github.event_name == 'workflow_dispatch'
-    needs: hcpu-roots
+    needs: [runners, hcpu-roots]
     strategy:
       fail-fast: false
       matrix:
         os: [macos-latest, ubuntu-24.04-arm]
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ fromJSON(needs.runners.outputs.map)[matrix.os] || matrix.os }}
     defaults:
       run:
         shell: bash
