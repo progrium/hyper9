@@ -116,6 +116,21 @@ Integration cases tagged `[linux-threads]`:
 - [x] `test "a thread spinning without syscalls doesn't starve the others on the emulator [linux-threads]"`
 - [x] `test "Go GC with a goroutine in a call-free loop, at 1 ms slices [linux-threads]"`
 
+The [go-compat](go-compat.md) cases' Go behaviors, with a Linux Go program (`tests/fixtures/linux/go/gocompat`), on each engine:
+
+- [x] `test "a Linux Go hello world prints and exits 0 [linux-threads]"`
+- [x] `test "Linux Go goroutines sleep 100 ms and the elapsed time is right [linux-threads]"`
+- [x] `test "Linux Go time.Now has sub-second resolution and matches the host [linux-threads]"`
+- [x] `test "Linux Go runtime.NumCPU follows --cpus [linux-threads]"`
+- [x] `test "Linux Go os.Getpid and os.Getppid match /proc [linux-threads]"`
+- [x] `test "Linux Go CPU-bound goroutines run on several threads [linux-threads]"`
+- [x] `test "Linux Go os/exec runs a child and gets its exit status [linux-threads]"`
+- [x] `test "a Linux Go nil dereference becomes a panic that recover catches [linux-threads]"`
+- [x] `test "Linux Go os/signal receives interrupt on Ctrl-C [linux-threads]"`
+- [x] `test "Linux Go os.Exit(3) exits with status 3 [linux-threads]"`
+- [x] `test "Linux Go net/http fetches from a listener the test opens [linux-threads]"`
+- [x] `test "Linux Go syscall.Gettimeofday has microsecond resolution [linux-threads]"`
+
 Demo: a Go program built with `GOOS=linux GOARCH=arm64` runs natively on HVF.
 
 ## Implementation
@@ -150,3 +165,6 @@ Demo: a Go program built with `GOOS=linux GOARCH=arm64` runs natively on HVF.
   - The block hook is always installed. A busybox `sh` loop counting to 300,000 on arm64 took 96–102 s with it and 83–86 s without, about 15% slower; installing it only while a process has more than one thread is the follow-up named in Open issues.
   - The 9front Go case that spins four goroutines on `--cpus 1` is slow on the emulator before and after this work (13–50 s here against its 30 s limit): the `--cpus` slot, unlike the guest lock, isn't time-sliced, so a spinner holds it until its next syscall.
 - 2026-11-08: A thread's children are now the group's, as on Linux. Go's `os/exec` forks on one thread and waits on whichever thread the goroutine runs on next, so `go build` failed with "waitid: no child processes". A thread is forked with `RFLXTHREAD` (an h9 flag beside `RFNOWAIT`), which gives it the leader as its waiter: its forks are the leader's children, with the leader's pid as their parent, and its Linux waits read the leader's wait records. Several threads can wait at once, each sleeping on its own `Rendez` on the leader's list and woken whenever a record or child count changes, and each takes only a record that matches its pid (`h9_linux_await` in `src/kern/linux.c`). `waitid` takes `WNOWAIT`, which leaves the record for the `wait4` Go makes next. A process-group wait still keeps a record it doesn't want in its own thread's list. A thread joins its group before its kernel process exists, so an `exit_group` in that window posted its kill note to nothing, and on HVF the new thread ran on and its group never ended; a new thread now checks whether its group is ending before it first runs. If the leader ends with `pthread_exit` while other threads go on, their children's records are lost, since the leader's kernel process is gone.
+- 2026-11-26: The [go-compat](go-compat.md) cases have Linux Go versions, through one program, `tests/fixtures/linux/go/gocompat`, with a mode per case. Linux Go is the Go that h9's users run, and its runtime is the more stable of the two: the plan9 port's Ctrl-C case still loses a note about once in 150 runs under load, in its own lock code. Porting them found two bugs:
+  - `execve` of `/proc/self/exe` ran the `/proc` entry, not the program, so it failed with `ENOEXEC` (a shell read it as a script). It now execs the link's target, as `open` and `stat` already did. Go's `os/exec` of `os.Executable()` and re-exec patterns depend on it.
+  - `getppid` gave 1 for a machine's first process, which is pid 1, while `/proc/1/status` gave 0. It's 0 now, as for Linux's init or a container's first process.

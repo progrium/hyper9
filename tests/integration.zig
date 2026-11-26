@@ -8681,6 +8681,230 @@ test "a Linux program in raw mode gets Enter as CR without ICRNL, polls with VMI
     }
 }
 
+// The go-compat cases' Go behaviors as a Linux program,
+// tests/fixtures/linux/go/gocompat, one mode per case, on each engine.
+
+/// Runs gocompat with h9 flags `flags` and arguments `args` on `engine`.
+fn runGoCompat(all: *const LinuxEnv, engine: []const u8, flags: []const []const u8, args: []const []const u8) !Result {
+    var le = all.*;
+    le.engines = engine;
+    try goLinux(&le);
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try argv.appendSlice(gpa, flags);
+    try argv.append(gpa, "/mnt/term/cwd/go/gocompat");
+    try argv.appendSlice(gpa, args);
+    return runLinux(&le, false, argv.items);
+}
+
+fn expectGoCompatOk(engine: []const u8, r: Result) !void {
+    errdefer std.debug.print("engine {s}\nstdout: {s}\nstderr: {s}\n", .{ engine, r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "a Linux Go hello world prints and exits 0 [linux-threads]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    var it = std.mem.tokenizeScalar(u8, le.engines, ',');
+    while (it.next()) |engine| {
+        const r = try runGoCompat(&le, engine, &.{}, &.{"hello"});
+        defer r.deinit();
+        try expectGoCompatOk(engine, r);
+        try std.testing.expectEqualStrings("hello from go\n", r.out);
+        try std.testing.expectEqualStrings("", r.err);
+    }
+}
+
+test "Linux Go goroutines sleep 100 ms and the elapsed time is right [linux-threads]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    var it = std.mem.tokenizeScalar(u8, le.engines, ',');
+    while (it.next()) |engine| {
+        const r = try runGoCompat(&le, engine, &.{}, &.{"sleep"});
+        defer r.deinit();
+        try expectGoCompatOk(engine, r);
+        const ms = try lineInt(u32, r.out, 0);
+        errdefer std.debug.print("engine {s}: elapsed {d} ms\n", .{ engine, ms });
+        try std.testing.expect(ms >= 100 and ms < slow(200));
+    }
+}
+
+test "Linux Go time.Now has sub-second resolution and matches the host [linux-threads]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    var it = std.mem.tokenizeScalar(u8, le.engines, ',');
+    while (it.next()) |engine| {
+        const before = std.Io.Timestamp.now(std.testing.io, .real).nanoseconds;
+        const r = try runGoCompat(&le, engine, &.{}, &.{"clock"});
+        defer r.deinit();
+        const after = std.Io.Timestamp.now(std.testing.io, .real).nanoseconds;
+        try expectGoCompatOk(engine, r);
+        errdefer std.debug.print("engine {s}: stdout: {s}\n", .{ engine, r.out });
+        const now = try lineInt(i96, r.out, 0);
+        // The guest's reading is between the host's, give or take a second.
+        try std.testing.expect(now > before - std.time.ns_per_s and now < after + std.time.ns_per_s);
+        try std.testing.expect(try lineInt(i64, r.out, 1) >= 10 * std.time.ns_per_ms);
+    }
+}
+
+test "Linux Go runtime.NumCPU follows --cpus [linux-threads]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    var it = std.mem.tokenizeScalar(u8, le.engines, ',');
+    while (it.next()) |engine| {
+        const r = try runGoCompat(&le, engine, &.{ "--cpus", "2" }, &.{"numcpu"});
+        defer r.deinit();
+        try expectGoCompatOk(engine, r);
+        try std.testing.expectEqualStrings("2 2\n", r.out);
+    }
+}
+
+test "Linux Go os.Getpid and os.Getppid match /proc [linux-threads]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    var it = std.mem.tokenizeScalar(u8, le.engines, ',');
+    while (it.next()) |engine| {
+        const r = try runGoCompat(&le, engine, &.{}, &.{"pid"});
+        defer r.deinit();
+        try expectGoCompatOk(engine, r);
+        errdefer std.debug.print("engine {s}: stdout: {s}\n", .{ engine, r.out });
+        // Line 1 is Getpid and Getppid; line 2 is the Name and PPid in
+        // /proc/<Getpid>/status, which are this program's only if the
+        // pid is right.
+        var lines = std.mem.splitScalar(u8, r.out, '\n');
+        var ids = std.mem.tokenizeScalar(u8, lines.next().?, ' ');
+        _ = ids.next().?;
+        const ppid = ids.next().?;
+        var proc = std.mem.tokenizeScalar(u8, lines.next().?, ' ');
+        try std.testing.expectEqualStrings("gocompat", proc.next().?);
+        try std.testing.expectEqualStrings(ppid, proc.next().?);
+    }
+}
+
+test "Linux Go CPU-bound goroutines run on several threads [linux-threads]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    var it = std.mem.tokenizeScalar(u8, le.engines, ',');
+    while (it.next()) |engine| {
+        {
+            const r = try runGoCompat(&le, engine, &.{ "--cpus", "4", "--env", "GOMAXPROCS=4" }, &.{"spin"});
+            defer r.deinit();
+            try expectGoCompatOk(engine, r);
+            errdefer std.debug.print("engine {s}: threads: {s}\n", .{ engine, r.out });
+            try std.testing.expect(try lineInt(u32, r.out, 0) >= 4);
+        }
+        // More goroutines than CPUs still finish: the runtime preempts them.
+        const r = try runGoCompat(&le, engine, &.{ "--cpus", "1", "--env", "GOMAXPROCS=4" }, &.{"spin"});
+        defer r.deinit();
+        try expectGoCompatOk(engine, r);
+    }
+}
+
+test "Linux Go os/exec runs a child and gets its exit status [linux-threads]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    var it = std.mem.tokenizeScalar(u8, le.engines, ',');
+    while (it.next()) |engine| {
+        const r = try runGoCompat(&le, engine, &.{}, &.{"exec"});
+        defer r.deinit();
+        try expectGoCompatOk(engine, r);
+        try std.testing.expectEqualStrings("child ok\nstatus 7\n", r.out);
+    }
+}
+
+test "a Linux Go nil dereference becomes a panic that recover catches [linux-threads]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    var it = std.mem.tokenizeScalar(u8, le.engines, ',');
+    while (it.next()) |engine| {
+        const r = try runGoCompat(&le, engine, &.{}, &.{"nilpanic"});
+        defer r.deinit();
+        try expectGoCompatOk(engine, r);
+        try std.testing.expectEqualStrings("recovered: runtime error: invalid memory address or nil pointer dereference\n", r.out);
+    }
+}
+
+test "Linux Go os/signal receives interrupt on Ctrl-C [linux-threads]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try goLinux(&le);
+    var it = std.mem.tokenizeScalar(u8, le.engines, ',');
+    while (it.next()) |engine| {
+        errdefer std.debug.print("engine {s}\n", .{engine});
+        var t = try Term.spawn(gpa, &.{ le.h9, "--engine", engine, "--arch", le.arch, "--dir", le.lmount, "--cwd", le.fixtures, "--timeout", "60s", "/mnt/term/cwd/go/gocompat", "signal" });
+        defer t.deinit();
+        try t.expect("ready", slow(30_000));
+        try t.send("\x03");
+        try t.expect("got interrupt", slow(10_000));
+        try std.testing.expectEqual(0, try t.wait(slow(10_000)));
+    }
+}
+
+test "Linux Go os.Exit(3) exits with status 3 [linux-threads]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    var it = std.mem.tokenizeScalar(u8, le.engines, ',');
+    while (it.next()) |engine| {
+        const r = try runGoCompat(&le, engine, &.{}, &.{ "exit", "3" });
+        defer r.deinit();
+        errdefer std.debug.print("engine {s}: stderr: {s}\n", .{ engine, r.err });
+        try std.testing.expectEqualStrings("exiting 3\n", r.out);
+        try std.testing.expectEqualStrings("", r.err);
+        try std.testing.expectEqual(3, r.code);
+    }
+}
+
+test "Linux Go net/http fetches from a listener the test opens [linux-threads]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    const io = std.testing.io;
+    var it = std.mem.tokenizeScalar(u8, le.engines, ',');
+    while (it.next()) |engine| {
+        var srv = try listenLocal();
+        defer srv.deinit(io);
+        var url_buf: [64]u8 = undefined;
+        const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/x", .{srv.socket.address.getPort()});
+        const t = try std.Thread.spawn(.{}, serveOneHttp, .{&srv});
+        defer t.join();
+        const r = try runGoCompat(&le, engine, &.{}, &.{ "http", url });
+        defer r.deinit();
+        try expectGoCompatOk(engine, r);
+        try std.testing.expectEqualStrings("200\nhi from host\n", r.out);
+    }
+}
+
+/// Answers one HTTP request on `s` with "hi from host".
+fn serveOneHttp(s: *std.Io.net.Server) void {
+    const io = std.testing.io;
+    const c = deadline.accept(s, io) catch return;
+    defer c.close(io);
+    var rbuf: [1024]u8 = undefined;
+    var r = c.reader(io, &rbuf);
+    // The request ends with an empty line.
+    while (r.interface.takeDelimiterExclusive('\n')) |line| {
+        r.interface.toss(1);
+        if (std.mem.trimEnd(u8, line, "\r").len == 0) break;
+    } else |_| return;
+    var wbuf: [256]u8 = undefined;
+    var w = c.writer(io, &wbuf);
+    w.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: close\r\n\r\nhi from host\n") catch return;
+    w.interface.flush() catch {};
+}
+
+test "Linux Go syscall.Gettimeofday has microsecond resolution [linux-threads]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    var it = std.mem.tokenizeScalar(u8, le.engines, ',');
+    while (it.next()) |engine| {
+        const r = try runGoCompat(&le, engine, &.{}, &.{"timeofday"});
+        defer r.deinit();
+        try expectGoCompatOk(engine, r);
+        errdefer std.debug.print("engine {s}: stdout: {s}\n", .{ engine, r.out });
+        // Five readings 1 ms apart: whole seconds would give one distinct value.
+        try std.testing.expect(try lineInt(u32, r.out, 0) >= 4);
+    }
+}
+
 test "Go linux binary starts goroutines and sleeps [linux-threads]" {
     var all: LinuxEnv = undefined;
     try linuxEnv(@src(), &all);
