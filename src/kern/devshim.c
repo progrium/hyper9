@@ -3,8 +3,9 @@
  * a C device's functions, and a C Devgen, through these, which catch the
  * device's error() and return -1, with the error string on the process
  * as error() left it, or 0 with the function's result in *r. They're
- * the only waserror the Zig kernel runs under, and src/kern/dev.zig's
- * switch is their one caller.
+ * the only waserror the Zig kernel runs under: src/kern/dev.zig's switch
+ * calls the first of them, and the Zig that calls other C that can raise
+ * calls the rest.
  */
 #include "u.h"
 #include "lib.h"
@@ -168,6 +169,45 @@ h9_dev_gen(Devgen *gen, Chan *c, char *name, Dirtab *tab, int ntab, int i, Dir *
 	if(waserror())
 		return -1;
 	*r = gen(c, name, tab, ntab, i, dp);
+	poperror();
+	return 0;
+}
+
+/*
+ * What else the Zig calls that can raise: h9's hooks in chan.zig,
+ * devfs's anchored attach and reading a Linux symbolic link's target
+ * (src/kern/fscheck.h), and sysfile.zig's mount of a 9P conversation
+ * (devmnt.c's mntattach).
+ */
+extern void h9_fs_anchor(Chan*);
+extern int h9_fs_chanreadlink(Chan*, char*, int);
+
+int
+h9_shim_fs_anchor(Chan *c)
+{
+	if(waserror())
+		return -1;
+	h9_fs_anchor(c);
+	poperror();
+	return 0;
+}
+
+int
+h9_shim_fs_chanreadlink(Chan *c, char *buf, int nbuf, int *r)
+{
+	if(waserror())
+		return -1;
+	*r = h9_fs_chanreadlink(c, buf, nbuf);
+	poperror();
+	return 0;
+}
+
+int
+h9_shim_mntattach(Chan *c, Chan *ac, char *spec, int flags, Chan **r)
+{
+	if(waserror())
+		return -1;
+	*r = mntattach(c, ac, spec, flags);
 	poperror();
 	return 0;
 }

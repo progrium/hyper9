@@ -17,6 +17,8 @@
 const std = @import("std");
 const port = @import("port.zig");
 const qio = @import("qio.zig");
+const chan = @import("chan.zig");
+const sysfile = @import("sysfile.zig");
 const c = port.c;
 const up = port.up;
 const Error = port.Error;
@@ -143,7 +145,7 @@ pub fn devshutdown() void {}
 
 pub fn devattach(tc: c_int, spec_: ?[*:0]const u8) *Chan {
     const spec: [*:0]const u8 = spec_ orelse "";
-    const ch: *Chan = c.newchan();
+    const ch: *Chan = chan.newchan();
     mkqid(&ch.qid, 0, 0, c.QTDIR);
     ch.type = @intCast(devno(tc));
     // snprint(buf, n, "#%C%s", tc, spec)
@@ -153,7 +155,7 @@ pub fn devattach(tc: c_int, spec_: ?[*:0]const u8) *Chan {
     var r: c.Rune = @intCast(tc);
     const k: usize = @intCast(c.runetochar(buf + 1, &r));
     @memcpy(buf[1 + k ..][0 .. std.mem.len(spec) + 1], spec[0 .. std.mem.len(spec) + 1]);
-    ch.path = c.newpath(buf);
+    ch.path = chan.newpath(@ptrCast(buf));
     c.free(buf);
     return ch;
 }
@@ -162,7 +164,7 @@ pub fn devclone(ch: *Chan) *Chan {
     if (ch.flag & c.COPEN != 0)
         port.kpanic("clone of open file type %C", .{of(ch).dc});
 
-    const nc: *Chan = c.newchan();
+    const nc: *Chan = chan.newchan();
 
     nc.type = ch.type;
     nc.dev = ch.dev;
@@ -191,19 +193,19 @@ pub fn qids(wq: *Walkqid) [*]Qid {
 /// its first name.
 pub fn devwalk(ch: *Chan, nc_: ?*Chan, name: [*]const [*:0]const u8, nname: c_int, tab: ?[*]Dirtab, ntab: c_int, gen: *const Devgen) Error!?*Walkqid {
     if (nname > 0)
-        try isdir(ch);
+        try chan.isdir(ch);
 
     const alloc = nc_ == null;
     const wq = walkqid(@intCast(nname));
     walk(ch, nc_, name, nname, tab, ntab, gen, wq) catch {
         if (alloc and wq.libclone != null)
-            c.cclose(wq.libclone);
+            chan.cclose(wq.libclone);
         c.free(wq);
         return null;
     };
     if (wq.nqid < nname) {
         if (alloc)
-            c.cclose(wq.libclone);
+            chan.cclose(wq.libclone);
         wq.libclone = null;
     } else if (@as(?*Chan, wq.libclone)) |cl| {
         // attach cloned channel to same device
@@ -262,7 +264,7 @@ fn walk(ch: *Chan, nc_: ?*Chan, name: [*]const [*:0]const u8, nname: c_int, tab:
                     // Notfound:
                     if (j == 0)
                         return port.kerror(&port.Enonexist);
-                    c.kstrcpy(up().errstr, @constCast(&port.Enonexist), port.ERRMAX);
+                    chan.kstrcpy(up().errstr, &port.Enonexist, port.ERRMAX);
                     return;
                 },
                 0 => continue,
@@ -385,7 +387,7 @@ pub fn devopen(ch: *Chan, omode: c_int, tab: ?[*]Dirtab, ntab: c_int, gen: *cons
     ch.offset = 0;
     if ((ch.qid.type & c.QTDIR != 0) and omode != c.OREAD)
         return port.kerror(&port.Eperm);
-    ch.mode = @intCast(try openmode(@bitCast(omode)));
+    ch.mode = @intCast(try sysfile.openmode(@bitCast(omode)));
     ch.flag |= c.COPEN;
     return ch;
 }
@@ -426,24 +428,6 @@ pub fn devpower(a: c_int) Error!void {
 pub fn devconfig(a: c_int, b: [*c]u8, cf: ?*c.DevConf) Error!c_int {
     _ = .{ a, b, cf };
     return port.kerror(&port.Eperm);
-}
-
-// What dev.c uses from chan.c and sysfile.c that raises, for the Zig
-// until those are ported (they move there).
-
-pub fn isdir(ch: *Chan) Error!void {
-    if (ch.qid.type & c.QTDIR != 0)
-        return;
-    return port.kerror(&port.Enotdir);
-}
-
-pub fn openmode(o_: c_uint) Error!c_int {
-    const o = o_ & ~@as(c_uint, c.OTRUNC | c.OCEXEC | c.ORCLOSE);
-    if (o > c.OEXEC)
-        return port.kerror(&port.Ebadarg);
-    if (o == c.OEXEC)
-        return c.OREAD;
-    return @intCast(o);
 }
 
 /// strcmp(a, b) == 0.
@@ -710,14 +694,14 @@ test "devwalk walks a Dirtab, and stops short at a name that isn't there [kernel
     _ = try kt.begin();
     var tab = testTab();
     const ch = testChan();
-    defer c.cclose(ch);
+    defer chan.cclose(ch);
 
     const one = [_][*:0]const u8{"file"};
     const wq = (try devwalk(ch, null, &one, 1, &tab, tab.len, &c_devgen)).?;
     try testing.expectEqual(1, wq.nqid);
     try testing.expectEqual(1, qids(wq)[0].path);
     try testing.expectEqual(ch.type, wq.libclone.*.type);
-    c.cclose(wq.libclone);
+    chan.cclose(wq.libclone);
     c.free(wq);
 
     // Past a file: the qids so far, and no clone.
@@ -742,7 +726,7 @@ test "devwalk walks a Dirtab, and stops short at a name that isn't there [kernel
 
     // A walk from a file is an error, not nil.
     const file = devclone(ch);
-    defer c.cclose(file);
+    defer chan.cclose(file);
     file.qid = tab[1].qid;
     try testing.expectError(error.Kernel, devwalk(file, null, &none, 1, &tab, tab.len, &c_devgen));
     try expectErrstr(&port.Enotdir);
@@ -752,7 +736,7 @@ test "devstat, devdirread, and devopen find a chan's entry in its Dirtab [kernel
     _ = try kt.begin();
     var tab = testTab();
     const ch = testChan();
-    defer c.cclose(ch);
+    defer chan.cclose(ch);
 
     // The root isn't in its own list (devgen skips "."), so devstat
     // makes its entry up.
@@ -766,7 +750,7 @@ test "devstat, devdirread, and devopen find a chan's entry in its Dirtab [kernel
     try testing.expectEqualStrings("", std.mem.sliceTo(d.name, 0));
 
     const file = devclone(ch);
-    defer c.cclose(file);
+    defer chan.cclose(file);
     file.qid = tab[1].qid;
     n = try devstat(file, &buf, buf.len, &tab, tab.len, &c_devgen);
     try testing.expect(c.convM2D(&buf, @intCast(n), &d, &strs) != 0);
@@ -775,7 +759,7 @@ test "devstat, devdirread, and devopen find a chan's entry in its Dirtab [kernel
 
     // A file not in the table.
     const gone = devclone(ch);
-    defer c.cclose(gone);
+    defer chan.cclose(gone);
     gone.qid = .{ .path = 9, .vers = 0, .type = 0 };
     try testing.expectError(error.Kernel, devstat(gone, &buf, buf.len, &tab, tab.len, &c_devgen));
     try expectErrstr(&port.Enonexist);
@@ -821,7 +805,7 @@ test "the switch hands a C function's error() back as an error union [kernel-por
     _ = try kt.begin();
     var tab = testTab();
     const ch = testChan();
-    defer c.cclose(ch);
+    defer chan.cclose(ch);
     const depth = up().nerrlab;
 
     var buf: [256]u8 = undefined;
@@ -841,14 +825,14 @@ test "the switch reads and writes a C device, a pipe [kernel-port]" {
     _ = try kt.begin();
     const pipe = table()[@intCast(devno('|'))].?;
     const root = try attach(pipe, "");
-    defer c.cclose(root);
+    defer chan.cclose(root);
     var ends: [2]*Chan = undefined;
     for (&ends, [_][*:0]const u8{ "data", "data1" }) |*e, name| {
         const wq = (try walkdev(pipe, root, null, &[_][*:0]const u8{name}, 1)).?;
         defer c.free(wq);
         e.* = try open(pipe, wq.libclone, c.ORDWR);
     }
-    defer for (ends) |e| c.cclose(e);
+    defer for (ends) |e| chan.cclose(e);
 
     try testing.expectEqual(5, try write(pipe, ends[0], "hello", 5, 0));
     var buf: [16]u8 = undefined;

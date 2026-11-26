@@ -10,6 +10,10 @@
 //!   sleep and wakeup.
 //! - `dev.zig`: dev.c, the helpers devices are built from, and the
 //!   device switch, which calls C devices through src/kern/devshim.c.
+//! - `pgrp.zig`: pgrp.c, mount tables, and file descriptor groups.
+//! - `chan.zig`: chan.c, channels, paths, mounts, walks, and namec.
+//! - `sysfile.zig`: sysfile.c, file descriptors and the file system
+//!   calls.
 //!
 //! This file is the root the kernel builds compile (build.zig's addKern,
 //! and src/nskernel.zig), and holds what the ported files share: the C
@@ -23,11 +27,17 @@ pub const c = @import("kern_c");
 pub const qio = @import("qio.zig");
 pub const sync = @import("sync.zig");
 pub const dev = @import("dev.zig");
+pub const pgrp = @import("pgrp.zig");
+pub const chan = @import("chan.zig");
+pub const sysfile = @import("sysfile.zig");
 
 comptime {
     qio.exportC();
     sync.exportC();
     dev.exportC();
+    pgrp.exportC();
+    chan.exportC();
+    sysfile.exportC();
 }
 
 test {
@@ -37,6 +47,9 @@ test {
     _ = qio;
     _ = sync;
     _ = dev;
+    _ = pgrp;
+    _ = chan;
+    _ = sysfile;
 }
 
 /// A kernel error. The Plan 9 error string is on the process, in
@@ -110,13 +123,13 @@ pub extern const Eismtpt: [0:0]u8;
 /// C's error(msg) for Zig: stores msg as the process's error string, and
 /// returns the error for the caller to return.
 pub fn kerror(msg: [*:0]const u8) error{Kernel} {
-    c.kstrcpy(up().errstr, @constCast(msg), ERRMAX);
+    chan.kstrcpy(up().errstr, msg, ERRMAX);
     return error.Kernel;
 }
 
 /// error(Eintr), for a sleep a note broke.
 pub fn interrupted() error{Interrupted} {
-    c.kstrcpy(up().errstr, @constCast(&Eintr), ERRMAX);
+    chan.kstrcpy(up().errstr, &Eintr, ERRMAX);
     return error.Interrupted;
 }
 
@@ -130,6 +143,13 @@ pub fn raise(err: Error) noreturn {
     }
     c.nexterror();
     unreachable;
+}
+
+/// drawterm's malloc (kern/alloc.c), which clears what it allocates.
+/// The Zig's c.malloc got uncleared memory (libc's, or the compiler's
+/// idea of malloc), so the Zig allocates with mallocz.
+pub fn malloc(n: usize) ?*anyopaque {
+    return c.mallocz(@intCast(n), 1);
 }
 
 /// drawterm's panic, which doesn't return.
@@ -205,6 +225,25 @@ pub const testing = struct {
     /// The process's error string.
     pub fn errstr() []const u8 {
         return std.mem.sliceTo(up().errstr, 0);
+    }
+
+    /// begin, and a namespace of the process's own: a new mount table
+    /// and file descriptors, with / and dot at the root device's root.
+    /// Each call starts the namespace again.
+    pub fn namespace() !*c.Proc {
+        const p = try begin();
+        if (@as(?*c.Pgrp, p.pgrp)) |old| pgrp.closepgrp(old);
+        p.pgrp = try pgrp.newpgrp();
+        p.fgrp = try pgrp.dupfgrp(null);
+        if (p.rgrp == null) p.rgrp = try pgrp.newrgrp();
+        if (@as(?*c.Chan, p.slash)) |s| chan.cclose(s);
+        if (@as(?*c.Chan, p.dot)) |d| chan.cclose(d);
+        const slash = try chan.namec("#/", c.Atodir, 0, 0);
+        chan.pathclose(slash.path);
+        slash.path = chan.newpath("/");
+        p.slash = slash;
+        p.dot = try chan.cclone(slash);
+        return p;
     }
 };
 

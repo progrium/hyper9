@@ -21,12 +21,12 @@ pub const Cond = *const fn (?*anyopaque) callconv(.c) c_int;
 
 /// The process waits until another unparks it. Callers have taken
 /// themselves off whatever lock they queued on.
-fn park() void {
+pub fn park() void {
     c.procsleep();
 }
 
 /// Lets a parked process (or one about to park) go on.
-fn unpark(p: *c.Proc) void {
+pub fn unpark(p: *c.Proc) void {
     c.procwakeup(p);
 }
 
