@@ -11,17 +11,13 @@ Every proposal at the top of [design/](README.md), in the order they were writte
 | [host-cmd](host-cmd.md) |  | draft | in progress on host-cmd | Rethinking host commands |
 | [child-machines](child-machines.md) | [#109](../../../issues/109) | proposed |  | Child machines |
 | [wine-draw](wine-draw.md) | [#158](../../../issues/158) | proposed | in progress on wine-draw | Wine windows through draw |
-| [namespace-kernel](namespace-kernel.md) |  | implemented |  | A namespace-only kernel build |
 | [baseline-1](baseline-1.md) |  | draft |  | Baseline 1 (h9 at the end of epoch 0) |
 | [file-interface](file-interface.md) |  | draft | needs kernel-port | A wider file interface inside the kernel, with 9P2000 as a view |
 | [host-handles](host-handles.md) |  | draft | needs kernel-port | Host access through handles |
 | [kernel-port](kernel-port.md) |  | draft | needs baseline-1 | Port the kernel core to Zig, as an instance |
 | [memory-model](memory-model.md) |  | draft | needs baseline-1 | One memory model under both ABIs |
 | [plan-format](plan-format.md) |  | draft | needs baseline-1, child-machines | The plan as a file, and the one way in |
-| [renames](renames.md) |  | implemented |  | Rename the parts, to ABI, engine, sud, and hcpu |
 | [scheduler](scheduler.md) |  | draft | needs kernel-port | A scheduler, with processes on per-core executors |
-| [upper-layers](upper-layers.md) |  | implemented |  | Writable layers on the host |
-| [headless-screen](headless-screen.md) |  | implemented |  | Headless screen (--gfx=headless) |
 | [file-watch](file-watch.md) |  | draft |  | Watching files for changes, on the host and in the guest |
 | [virtual-loopback](virtual-loopback.md) |  | draft |  | A loopback network per machine |
 | [linux-dns](linux-dns.md) |  | draft |  | Name patterns for a Linux guest's DNS |
@@ -37,26 +33,20 @@ flowchart LR
   p_host_cmd["host-cmd<br/>draft"]:::draft
   p_child_machines["child-machines<br/>proposed"]:::draft
   p_wine_draw["wine-draw<br/>proposed"]:::draft
-  p_namespace_kernel["namespace-kernel<br/>implemented"]:::implemented
   p_baseline_1["baseline-1<br/>draft"]:::draft
   p_file_interface["file-interface<br/>draft"]:::draft
   p_host_handles["host-handles<br/>draft"]:::draft
   p_kernel_port["kernel-port<br/>draft"]:::draft
   p_memory_model["memory-model<br/>draft"]:::draft
   p_plan_format["plan-format<br/>draft"]:::draft
-  p_renames["renames<br/>implemented"]:::implemented
   p_scheduler["scheduler<br/>draft"]:::draft
-  p_upper_layers["upper-layers<br/>implemented"]:::implemented
-  p_headless_screen["headless-screen<br/>implemented"]:::implemented
   p_file_watch["file-watch<br/>draft"]:::draft
   p_virtual_loopback["virtual-loopback<br/>draft"]:::draft
   p_linux_dns["linux-dns<br/>draft"]:::draft
   p_host_handles --> p_host_sandbox
-  p_renames --> p_baseline_1
   p_kernel_port --> p_file_interface
   p_kernel_port --> p_host_handles
   p_baseline_1 --> p_kernel_port
-  p_namespace_kernel --> p_kernel_port
   p_baseline_1 --> p_memory_model
   p_baseline_1 --> p_plan_format
   p_child_machines --> p_plan_format
@@ -118,13 +108,17 @@ Archived in [epoch-0/](epoch-0/).
 | [hcpu](epoch-0/hcpu.md) | [#174](../../../issues/174) | implemented | hcpu, h9's own CPUs for the emulator |
 | [proposal-flow](epoch-0/proposal-flow.md) |  | implemented | A proposal lifecycle for building first, branches, Done criteria, and easier signing |
 | [kernel-serve](epoch-0/kernel-serve.md) |  | implemented | A 9P server in the kernel |
+| [namespace-kernel](epoch-0/namespace-kernel.md) |  | implemented | A namespace-only kernel build |
 | [port-streams](epoch-0/port-streams.md) |  | implemented | 9P over a MessagePort |
 | [linux-fifo](epoch-0/linux-fifo.md) |  | implemented | Linux named pipes |
 | [linux-pty](epoch-0/linux-pty.md) |  | implemented | Linux pseudoterminals |
 | [mounts](epoch-0/mounts.md) |  | implemented | Mounts, binds, and a Plan 9 root |
 | [epochs](epoch-0/epochs.md) |  | implemented | Epochs, and archiving closed proposals |
 | [linux-symlinks](epoch-0/linux-symlinks.md) |  | implemented | Linux symlinks resolved in the guest's namespace |
+| [renames](epoch-0/renames.md) |  | implemented | Rename the parts, to ABI, engine, sud, and hcpu |
 | [retire-unicorn](epoch-0/retire-unicorn.md) |  | implemented | Retire Unicorn as an engine |
 | [spec-split](epoch-0/spec-split.md) |  | implemented | Splitting SPEC.md into files under spec/ |
 | [fd-mounts](epoch-0/fd-mounts.md) |  | implemented | Mounting a 9P connection from a host descriptor |
+| [upper-layers](epoch-0/upper-layers.md) |  | implemented | Writable layers on the host |
+| [headless-screen](epoch-0/headless-screen.md) |  | implemented | Headless screen (--gfx=headless) |
 | [linux-chroot](epoch-0/linux-chroot.md) |  | implemented | chroot for Linux programs |
