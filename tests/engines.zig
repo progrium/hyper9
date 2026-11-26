@@ -2898,12 +2898,15 @@ fn gfxRoot(buf: []u8) ?[]const u8 {
     var map = std.testing.environ.createMap(std.testing.allocator) catch return null;
     defer map.deinit();
     const v = map.get("H9_TEST_ROOT") orelse return null;
-    const path = std.Io.Dir.cwd().realPathFile(std.testing.io, v, buf) catch return null;
-    const p = buf[0..path];
+    var hb: [std.fs.max_path_bytes]u8 = undefined;
+    const path = std.Io.Dir.cwd().realPathFile(std.testing.io, v, &hb) catch return null;
+    const p = hb[0..path];
     var lb: [std.fs.max_path_bytes + 32]u8 = undefined;
     const rio = std.fmt.bufPrint(&lb, "{s}/arm64/bin/rio", .{p}) catch return null;
     std.Io.Dir.cwd().access(std.testing.io, rio, .{}) catch return null;
-    return p;
+    // The machine's root is a #U path: /C:/a/b on Windows.
+    if (p.len + 1 > buf.len) return null;
+    return kernPath(buf, p);
 }
 
 test "rio starts, and a window's rc runs a command typed into it [gfx]" {
