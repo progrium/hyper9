@@ -5,7 +5,8 @@ const guesttree = @import("tools/guesttree.zig");
 const drawterm = "third_party/drawterm";
 
 // drawterm's kern/Makefile OFILES with AUDIO=none, without devtab.c and
-// devenv.c (src/kern/ has our own), devcmd.c (host commands live on the
+// devenv.c (src/kern/ has our own), procinit.c (src/kern/proc.c has it,
+// for the one process record), devcmd.c (host commands live on the
 // host-cmd branch while design/host-cmd.md rethinks them), or the files
 // ported to Zig (design/kernel-port.md, src/kern/port.zig): allocb.c,
 // chan.c, dev.c, devmnt.c, devpipe.c, devroot.c, pgrp.c, qio.c, qlock.c,
@@ -14,8 +15,7 @@ const kern_sources = [_][]const u8{
     "alloc.c",    "data.c",     "devaudio.c", "devaudio-none.c",
     "devcons.c",  "devdraw.c",  "devip.c",    "devkbd.c",
     "devmouse.c", "devssl.c",   "devtls.c",   "error.c",
-    "parse.c",    "procinit.c", "stub.c",     "term.c",
-    "waserror.c",
+    "parse.c",    "stub.c",     "term.c",     "waserror.c",
 };
 // OS=posix (Make.unix), and OS=win32 with FS=fs-win32 (Make.win64).
 const kern_posix = [_][]const u8{ "devfs-posix.c", "devip-posix.c", "devlfd-posix.c", "posix.c" };
@@ -751,8 +751,7 @@ fn addWeb(b: *std.Build, optimize: std.lang.Optimize, parts: ModuleParts, gfx: G
 // programs. src/kern/nstab.c is its device table and stands in for what
 // the left-out files would define.
 const nskern_sources = [_][]const u8{
-    "alloc.c",    "data.c", "error.c",    "parse.c",
-    "procinit.c", "stub.c", "waserror.c",
+    "alloc.c", "data.c", "error.c", "parse.c", "stub.c", "waserror.c",
 };
 const nskern_h9 = [_][]const u8{
     "glue.c",       "proc.c",    "ns.c",     "devns.c",  "nstab.c",   "devoverlay.c", "devsrv.c",

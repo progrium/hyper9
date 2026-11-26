@@ -9,6 +9,7 @@
 #include "dat.h"
 #include "fns.h"
 #include "error.h"
+#include "devx.h"
 
 extern Dev rootdevtab;
 extern Dev pipedevtab;
@@ -39,6 +40,20 @@ Dev *devtab[] = {
 #endif
 #ifdef H9_NSKERNEL_HOSTFS
 	&fsdevtab,
+#endif
+	0
+};
+
+/* Their optional operations (design/file-interface.md, src/kern/devx.h). */
+extern Devx overlaydevx;
+#ifdef H9_NSKERNEL_HOSTFS
+extern Devx fsdevx;
+#endif
+
+Devx *devxtab[] = {
+	&overlaydevx,
+#ifdef H9_NSKERNEL_HOSTFS
+	&fsdevx,
 #endif
 	0
 };
@@ -144,17 +159,18 @@ int h9_fs_linkwalk(void) { return 0; }
 int h9_fs_atroot(Chan *c) { USED(c); return 0; }
 void h9_fs_markroot(Chan *c, int lx) { USED(c, lx); }
 
+/* devhidx.c's: no mount indexes. */
+int h9_hidx_wide(Chan *c) { USED(c); return 0; }
+
 /* linuxnet.c's: no Linux sockets to wake. */
 void h9_qwake(Queue *q) { USED(q); }
 
 #ifndef H9_NSKERNEL_HOSTFS
 /* devfs and fscheck.c's: no host tree under an overlay. */
 void h9_fs_anchor(Chan *c) { USED(c); }
-void h9_fs_symlink(Chan *c, char *name, char *target) { USED(c, name, target); error(Eperm); }
+
 void h9_fs_mkfifo(Chan *c, char *name, ulong perm) { USED(c, name, perm); error(Eperm); }
 int h9_fs_isfifo(Chan *c) { USED(c); return 0; }
-int h9_fs_rename(Chan *c, Chan *dir, char *name) { USED(c, dir, name); return 0; }
-int h9_fs_chanreadlink(Chan *c, char *buf, int nbuf) { USED(c, buf, nbuf); return -1; }
-void h9_fs_mntsymlink(Chan *dir, char *name, char *target) { USED(dir, name, target); error(Eperm); }
+
 int h9_fs_chanisfifo(Chan *c) { USED(c); return 0; }
 #endif
