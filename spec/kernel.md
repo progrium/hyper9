@@ -134,7 +134,7 @@ A process takes its record's `debug` lock to swap its fd group, namespace, or do
 
 Serves `/fd/N`.
 
-#### The Linux view `#L` (`src/kern/devlinux.c`, `#λ` before [mounts](../design/epoch-0/mounts.md)), eventfds `#ε` (`src/kern/linuxnet.c`), and ptys `#τ` (`src/kern/devpty.c`)
+#### The Linux view `#L` (`src/kern/devlinux.c`, `#λ` before [mounts](../design/epoch-0/mounts.md)), eventfds `#ε` (`src/kern/linuxnet.c`), and ptys `#τ` (`src/kern/dev/pty.zig`)
 
 A Linux process's `/`, its eventfd, epoll, and signalfd instances, and its pseudoterminals (see Linux ABI).
 
@@ -149,6 +149,8 @@ drawterm's `pgrp.c` is `src/kern/pgrp.zig` (mount tables, and file descriptor an
 drawterm's `devmnt.c` is `src/kern/devmnt.zig`, the 9P client and the first native device: the switch calls its walk, open, read, and the rest directly, and `mntdevtab`, which the device tables name, holds the C wrappers. `mntversion`, `mntauth`, `mntattach`, and `muxclose` are exported for the C that calls them (`glue.c` and `devoverlay.c`). A process waiting for its reply sleeps in `sync.zig`, and a note that interrupts it sends `Tflush` as before. The reply parser (`mntrpcread`) and the check of a directory read from a server (`mntdirsfix`) are fuzzed in `zig build kern-test`.
 
 drawterm's `devpipe.c` and `devroot.c` are `src/kern/dev/pipe.zig` and `src/kern/dev/root.zig`, native devices too. The pipe keeps h9's Linux FIFOs (one queue that every open reads and writes, `h9_fifopipe` and `h9_fiforefs` for `src/kern/fifo.c`) and `h9_pipeq` for Linux poll, and a write on a pipe whose reader closed still posts the note through `h9_postnote`, unless the pipe carries a mount's 9P. A native device's own `Devgen` is Zig that doesn't raise, so the switch calls it directly. Of drawterm's `kern/`, the build now compiles no file the proposal ports.
+
+h9's own C is ported the same way, a file at a time. `src/kern/devpty.c` is `src/kern/dev/pty.zig`, a native device, with `h9_ptyq` and the `h9_pty_*` calls the Linux ABI makes exported for their callers.
 
 The rest of the kernel is C, so each ported file exports drawterm's functions under their C names (`qread`, `qlock`, `ksleep`, which `lib.h` renames `sleep` to, and the rest) with their C semantics: an exported function that gets an error from the Zig raises it with `nexterror()`, from its own frame, which has nothing to undo. A queue's kick and bypass functions are called from the Zig, so they must not raise; nothing in h9 sets them. Every place a process waits in the Zig is `park` in `sync.zig` (posix.c's `procsleep`), and every place one is let go is `unpark`. `zig build kern-test` runs their cases, on the native namespace kernel.
 

@@ -16,6 +16,7 @@
 //!   calls.
 //! - `devmnt.zig`: devmnt.c, the 9P client.
 //! - `dev/pipe.zig` and `dev/root.zig`: devpipe.c and devroot.c.
+//! - `dev/pty.zig`: h9's src/kern/devpty.c, the Linux ABI's ptys.
 //!
 //! This file is the root the kernel builds compile (build.zig's addKern,
 //! and src/nskernel.zig), and holds what the ported files share: the C
@@ -35,6 +36,7 @@ pub const sysfile = @import("sysfile.zig");
 pub const devmnt = @import("devmnt.zig");
 pub const devpipe = @import("dev/pipe.zig");
 pub const devroot = @import("dev/root.zig");
+pub const devpty = @import("dev/pty.zig");
 
 comptime {
     qio.exportC();
@@ -46,6 +48,7 @@ comptime {
     devmnt.exportC();
     devpipe.exportC();
     devroot.exportC();
+    devpty.exportC();
 }
 
 test {
@@ -61,6 +64,7 @@ test {
     _ = devmnt;
     _ = devpipe;
     _ = devroot;
+    _ = devpty;
 }
 
 /// A kernel error. The Plan 9 error string is on the process, in

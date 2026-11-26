@@ -482,7 +482,7 @@ fn devbreadOpt(ch: *Chan, n: c_int, offset: c_uint) Error!?*Block {
 /// A native device: `ops`, which the switch calls directly, and `dev`,
 /// the C Dev the device table names, whose functions raise for C
 /// callers.
-pub fn Native(comptime dc: u8, comptime name: [:0]const u8, comptime o: Ops) type {
+pub fn Native(comptime dc: c_int, comptime name: [:0]const u8, comptime o: Ops) type {
     return struct {
         pub const ops = o;
 
@@ -559,6 +559,7 @@ const natives = .{
     @import("devmnt.zig").Device,
     @import("dev/pipe.zig").Device,
     @import("dev/root.zig").Device,
+    @import("dev/pty.zig").Device,
 };
 
 /// d's functions, if it's native.

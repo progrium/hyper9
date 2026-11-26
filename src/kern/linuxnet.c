@@ -26,7 +26,7 @@
 #include "hostsock.h"
 
 extern Queue*	h9_pipeq(Chan*, int);		/* src/kern/dev/pipe.zig */
-extern Queue*	h9_ptyq(Chan*, int);		/* devpty.c */
+extern Queue*	h9_ptyq(Chan*, int);		/* src/kern/dev/pty.zig */
 extern int	h9_ip_sfd(Chan*, int*);		/* kern/devip.c */
 extern long	h9_ip_ctl(Chan*, char*);	/* kern/devip.c */
 extern int	h9_cons_poll(ulong);		/* src/kern.zig */
@@ -55,7 +55,7 @@ enum {
 	LPOLLRDHUP = 0x2000,
 
 	Epsilon = 0x3B5,	/* #ε */
-	Tau = 0x3C4,	/* #τ, ptys (devpty.c) */
+	Tau = 0x3C4,	/* #τ, ptys (src/kern/dev/pty.zig) */
 };
 
 typedef struct Poller Poller;

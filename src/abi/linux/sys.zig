@@ -3474,7 +3474,7 @@ fn defaultTermios() [60]u8 {
     return b;
 }
 
-// Pseudoterminals (design/epoch-0/linux-pty.md): #τ, src/kern/devpty.c, keeps
+// Pseudoterminals (design/epoch-0/linux-pty.md): #τ, src/kern/dev/pty.zig, keeps
 // each pair's queues and state, and applies its termios as a line
 // discipline; the ioctls are served here from it, and VMIN 0 reads.
 
