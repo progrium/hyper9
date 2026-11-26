@@ -27,6 +27,9 @@ pub const supported = builtin.os.tag != .windows and !web.enabled and builtin.os
 
 pub const Transport = enum { udp, tcp };
 
+/// A host socket.
+const Fd = if (supported) std.c.fd_t else c_int;
+
 /// How long a forwarded query waits for the nameservers, all told.
 pub const forward_timeout_ms = 5000;
 /// How long the resolver keeps an idle TCP connection from the guest.
@@ -211,12 +214,12 @@ pub const Resolver = struct {
         r: *Resolver,
         kind: Transport,
         from: HostNet.Peer,
-        fd: std.c.fd_t,
+        fd: Fd,
         len: usize,
         msg: [512]u8,
     };
 
-    fn spawn(r: *Resolver, kind: Transport, msg: []const u8, from: HostNet.Peer, fd: std.c.fd_t) void {
+    fn spawn(r: *Resolver, kind: Transport, msg: []const u8, from: HostNet.Peer, fd: Fd) void {
         if (msg.len > 512 or r.workers.load(.acquire) >= max_workers) {
             if (fd >= 0) HostNet.close(fd);
             return;
@@ -252,7 +255,7 @@ pub const Resolver = struct {
 
     /// Answers a TCP connection's queries, each with its two-byte length,
     /// until it closes or goes idle.
-    fn serveTcp(r: *Resolver, fd: std.c.fd_t, lport: u16, out: []u8) void {
+    fn serveTcp(r: *Resolver, fd: Fd, lport: u16, out: []u8) void {
         defer HostNet.close(fd);
         var q: [65535]u8 = undefined;
         while (true) {
@@ -267,7 +270,7 @@ pub const Resolver = struct {
         }
     }
 
-    fn readAll(r: *Resolver, fd: std.c.fd_t, buf: []u8, ms: i64) bool {
+    fn readAll(r: *Resolver, fd: Fd, buf: []u8, ms: i64) bool {
         const deadline = monoMs() + ms;
         var got: usize = 0;
         while (got < buf.len) {
@@ -308,7 +311,7 @@ fn forwardTcp(srv: Server, query: []const u8, out: []u8, until: i64) ?[]const u8
     return out[0..n];
 }
 
-fn readUntil(fd: std.c.fd_t, buf: []u8, until: i64) bool {
+fn readUntil(fd: Fd, buf: []u8, until: i64) bool {
     var got: usize = 0;
     while (got < buf.len) {
         const left = until - monoMs();
@@ -337,7 +340,7 @@ fn sleepMs(ms: u32) void {
 /// here alone so they can move onto other host handles without changing
 /// how queries are answered.
 pub const HostNet = struct {
-    pub const Listener = struct { fd: std.c.fd_t = -1, port: u16 = 0 };
+    pub const Listener = struct { fd: Fd = -1, port: u16 = 0 };
     /// A peer's address, as devip keeps it, and port.
     pub const Peer = struct { addr: [16]u8, port: u16, sa: Sockaddr, len: std.c.socklen_t };
 
@@ -362,7 +365,7 @@ pub const HostNet = struct {
     }
 
     /// Dials a nameserver for one query, by `until` (monotonic ms).
-    pub fn dial(kind: Transport, srv: Server, until: i64) ?c.fd_t {
+    pub fn dial(kind: Transport, srv: Server, until: i64) ?Fd {
         var sa: Sockaddr = undefined;
         const len = toSockaddr(&srv.addr, srv.port, &sa);
         const fam: c_uint = if (len == @sizeOf(c.sockaddr.in)) c.AF.INET else c.AF.INET6;
@@ -383,7 +386,7 @@ pub const HostNet = struct {
         return fd;
     }
 
-    pub fn recvFrom(fd: c.fd_t, buf: []u8, from: *Peer) ?usize {
+    pub fn recvFrom(fd: Fd, buf: []u8, from: *Peer) ?usize {
         from.len = @sizeOf(Sockaddr);
         const n = c.recvfrom(fd, buf.ptr, buf.len, 0, &from.sa.any, &from.len);
         if (n < 0) return null;
@@ -391,11 +394,11 @@ pub const HostNet = struct {
         return @intCast(n);
     }
 
-    pub fn sendTo(fd: c.fd_t, buf: []const u8, to: Peer) void {
+    pub fn sendTo(fd: Fd, buf: []const u8, to: Peer) void {
         _ = c.sendto(fd, buf.ptr, buf.len, 0, &to.sa.any, to.len);
     }
 
-    pub fn accept(fd: c.fd_t, from: *Peer) ?c.fd_t {
+    pub fn accept(fd: Fd, from: *Peer) ?Fd {
         from.len = @sizeOf(Sockaddr);
         const nfd = c.accept(fd, &from.sa.any, &from.len);
         if (nfd < 0) return null;
@@ -404,12 +407,12 @@ pub const HostNet = struct {
         return nfd;
     }
 
-    pub fn read(fd: c.fd_t, buf: []u8) ?usize {
+    pub fn read(fd: Fd, buf: []u8) ?usize {
         const n = c.read(fd, buf.ptr, buf.len);
         return if (n < 0) null else @intCast(n);
     }
 
-    pub fn writeAll(fd: c.fd_t, buf: []const u8, until: i64) bool {
+    pub fn writeAll(fd: Fd, buf: []const u8, until: i64) bool {
         var off: usize = 0;
         while (off < buf.len) {
             const n = c.send(fd, buf[off..].ptr, buf.len - off, c.MSG.NOSIGNAL);
@@ -423,13 +426,13 @@ pub const HostNet = struct {
     }
 
     /// Whether fd is ready for `events` within `ms`.
-    pub fn wait(fd: c.fd_t, events: i16, ms: i64) bool {
+    pub fn wait(fd: Fd, events: i16, ms: i64) bool {
         if (ms <= 0) return false;
         var fds = [_]c.pollfd{.{ .fd = fd, .events = events, .revents = 0 }};
         return c.poll(&fds, 1, @intCast(@min(ms, 60_000))) > 0;
     }
 
-    pub fn close(fd: c.fd_t) void {
+    pub fn close(fd: Fd) void {
         if (fd >= 0) _ = c.close(fd);
     }
 
@@ -807,7 +810,7 @@ test "the resolver refuses a name no pattern covers, forwards the rest, and reco
     const ns = try HostNet.listenLoopback(.udp);
     defer HostNet.close(ns.fd);
     const Stub = struct {
-        fn run(fd: std.c.fd_t, seen: *std.atomic.Value(u32)) void {
+        fn run(fd: Fd, seen: *std.atomic.Value(u32)) void {
             var buf: [512]u8 = undefined;
             var out: [1024]u8 = undefined;
             if (!HostNet.wait(fd, std.c.POLL.IN, 5000)) return;
