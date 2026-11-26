@@ -9,6 +9,15 @@ const c = std.c;
 
 pub const supported = builtin.os.tag != .windows;
 
+/// A socket. Windows has no stub (start skips there), but the cases that
+/// use one still compile, so the type can't be std.c.fd_t, which is a
+/// HANDLE on Windows.
+const Fd = if (supported) c.fd_t else i32;
+
+fn closeFd(fd: Fd) void {
+    if (supported) _ = c.close(fd);
+}
+
 /// A name the stub answers: an A record, or a CNAME to another name.
 pub const Record = struct { name: []const u8, a: ?[4]u8 = null, cname: ?[]const u8 = null };
 
@@ -17,8 +26,8 @@ pub const Stub = struct {
     /// Names whose UDP answers are truncated, with no records, so the
     /// client asks again over TCP.
     truncate: []const []const u8 = &.{},
-    udp: c.fd_t = -1,
-    tcp: c.fd_t = -1,
+    udp: Fd = -1,
+    tcp: Fd = -1,
     port: u16 = 0,
     udp_queries: std.atomic.Value(u32) = .init(0),
     tcp_queries: std.atomic.Value(u32) = .init(0),
@@ -27,7 +36,10 @@ pub const Stub = struct {
     ns_buf: [32]u8 = undefined,
 
     pub fn start(s: *Stub) !void {
-        if (!supported) return error.SkipZigTest;
+        if (comptime !supported) return error.SkipZigTest else return s.startPosix();
+    }
+
+    fn startPosix(s: *Stub) !void {
         var tries: u32 = 0;
         while (true) : (tries += 1) {
             s.udp = try bindLoopback(c.SOCK.DGRAM, 0);
@@ -46,8 +58,8 @@ pub const Stub = struct {
     pub fn stop(s: *Stub) void {
         s.stopping.store(true, .release);
         if (s.thread) |t| t.join();
-        _ = c.close(s.udp);
-        _ = c.close(s.tcp);
+        closeFd(s.udp);
+        closeFd(s.tcp);
     }
 
     /// `127.0.0.1!PORT`, as Machine.Options.nameservers and
@@ -227,14 +239,17 @@ fn portOf(fd: c.fd_t) !u16 {
 
 /// A TCP service on 127.0.0.1 that writes "hello\n" to each connection.
 pub const Service = struct {
-    fd: c.fd_t = -1,
+    fd: Fd = -1,
     port: u16 = 0,
     conns: std.atomic.Value(u32) = .init(0),
     stopping: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
 
     pub fn start(s: *Service) !void {
-        if (!supported) return error.SkipZigTest;
+        if (comptime !supported) return error.SkipZigTest else return s.startPosix();
+    }
+
+    fn startPosix(s: *Service) !void {
         s.fd = try bindLoopback(c.SOCK.STREAM, 0);
         s.port = try portOf(s.fd);
         if (c.listen(s.fd, 16) != 0) return error.Listen;
@@ -244,7 +259,7 @@ pub const Service = struct {
     pub fn stop(s: *Service) void {
         s.stopping.store(true, .release);
         if (s.thread) |t| t.join();
-        _ = c.close(s.fd);
+        closeFd(s.fd);
     }
 
     fn loop(s: *Service) void {
