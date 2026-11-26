@@ -121,7 +121,7 @@ A listening socket's bound file `stat`s as `S_IFSOCK`. `sendmsg` and `recvmsg` c
 
 `AF_NETLINK` with `NETLINK_ROUTE` answers the link and address dumps (`RTM_GETLINK`, `RTM_GETADDR`) from the host's interfaces (`src/abi/linux/netlink.zig`), which `getifaddrs` and Go's `net.Interfaces` make. `recvmmsg` and `sendmmsg` loop over the single-message calls, and `IPV6_V6ONLY` is passed to the host socket, so an IPv4 and an IPv6 wildcard listener can share a port.
 
-Readiness is kernel code (`src/kern/linuxnet.c`): `h9_poll` asks each fd's channel whether it would block (qio queues, the console, host sockets with a zero-timeout `poll`; files and 9P are always ready) and sleeps on a wake generation that qio's wakeups (a hook in `qio.c`), the console reader and a host-socket watcher thread bump.
+Readiness is kernel code (`src/kern/linuxnet.c`): `h9_poll` asks each fd's channel whether it would block (qio queues, the console, host sockets with a zero-timeout `poll`; files and 9P are always ready) and sleeps on a wake generation that qio's wakeups (a hook in `src/kern/qio.zig`), the console reader and a host-socket watcher thread bump.
 
 `poll`, `ppoll`, `select` and `pselect6` use it, `epoll` keeps interest lists in the Linux layer (edge-triggered by generation), and `#ε` serves eventfd and epoll instances. `O_NONBLOCK` asks first and returns `EAGAIN`, and a blocking socket read waits in `h9_poll` so a signal can interrupt it. A Linux pipe read takes everything queued.
 ### Threads

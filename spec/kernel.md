@@ -78,9 +78,9 @@ We vendor 9front drawterm's `kern/`, its libraries (libc, libdraw, libmemdraw, l
 
 ### Reused as-is
 
-These are reused as-is: chan/dev/mount machinery, devroot, devcons (for everything but `cons` itself), devmnt (the 9P client), devlfd (`#φ`, for unix socket servers and embedders' descriptors), devfs-posix, and devfs-win32 (the host filesystem, with h9's sandbox hook calls), devpipe (with a FIFO mode for the Linux ABI's named pipes: one queue that every open reads and writes, with opens counted by mode), devip (with h9's network hook calls), devtls, devssl, devdraw, devmouse, devaudio, qio, and the auth code.
+These are reused as-is: chan/dev/mount machinery, devroot, devcons (for everything but `cons` itself), devmnt (the 9P client), devlfd (`#φ`, for unix socket servers and embedders' descriptors), devfs-posix, and devfs-win32 (the host filesystem, with h9's sandbox hook calls), devpipe (with a FIFO mode for the Linux ABI's named pipes: one queue that every open reads and writes, with opens counted by mode), devip (with h9's network hook calls), devtls, devssl, devdraw, devmouse, devaudio, and the auth code.
 
-We compile drawterm's `.c` files but not its `kern/devtab.c` or `kern/devenv.c`; our own copies live in `src/kern/`. The vendored tree's few changes are small and marked: the sandbox hooks (see Sandbox policy) and `Chan.srvname`, which `kern/chan.c`'s `chanfree` frees, as on 9front.
+We compile drawterm's `.c` files but not its `kern/devtab.c` or `kern/devenv.c`, whose own copies live in `src/kern/`, or the files [kernel-port](../design/kernel-port.md) has ported to Zig (see Ported to Zig). The vendored tree's few changes are small and marked: the sandbox hooks (see Sandbox policy) and `Chan.srvname`, which `kern/chan.c`'s `chanfree` frees, as on 9front.
 
 ### Added by us
 
@@ -132,11 +132,17 @@ Serves `/fd/N`.
 
 A Linux process's `/`, its eventfd, epoll, and signalfd instances, and its pseudoterminals (see Linux ABI).
 
+#### Ported to Zig (`src/kern/port.zig`)
+
+drawterm's `qio.c` and `allocb.c` are `src/kern/qio.zig`, and its `qlock.c`, `rwlock.c`, and `sleep.c` are `src/kern/sync.zig`: close translations, with the same functions in the same order, and error unions (`error.Kernel`, and `error.Interrupted` from a sleep a note broke) in place of `waserror`, with the error string on the process as `error()` leaves it. qio keeps h9's two changes to it: the readiness hook (`h9_qwake`, which wakes Linux pollers), and reader and writer locks that wait in `tsleep`, so a note interrupts a reader queued behind another. `src/kern/port.zig` is the root of the kernel's Zig, which the kern library and the namespace kernel build: it holds the C kernel's types, translated from `src/kern/port.h` with the kernel's own flags so the layouts agree, `up`, and the error helpers.
+
+The rest of the kernel is C, so each ported file exports drawterm's functions under their C names (`qread`, `qlock`, `ksleep`, which `lib.h` renames `sleep` to, and the rest) with their C semantics: an exported function that gets an error from the Zig raises it with `nexterror()`, from its own frame, which has nothing to undo. A queue's kick and bypass functions are called from the Zig, so they must not raise; nothing in h9 sets them. Every place a process waits in the Zig is `park` in `sync.zig` (posix.c's `procsleep`), and every place one is let go is `unpark`. `zig build kern-test` runs their cases, on the native namespace kernel.
+
 #### `tsleep` (`src/kern/tsleep.c`)
 
-drawterm's `sleep` has no timeout. `tsleep` has 9front's contract and uses only drawterm's public `sleep` and `wakeup`: it puts a timer on its own stack into a list sorted by host monotonic time, and the timer kproc wakes it at the deadline.
+drawterm's `sleep` has no timeout. `tsleep` has 9front's contract and uses only the kernel's public `sleep` and `wakeup`: it puts a timer on its own stack into a list sorted by host monotonic time, and the timer kproc wakes it at the deadline.
 
-The list is guarded by a host lock (`glue.c`, `glue-win32.c`) that the kproc holds while it calls `wakeup`, and `tsleep` always takes its timer out under that lock before returning, so no Proc fields are needed.
+The list is guarded by a host lock (`glue.c`, `glue-win32.c`) that the kproc holds while it calls `wakeup`, and `tsleep` always takes its timer out under that lock before returning, so no Proc fields are needed. `h9_tsleepintr` is the same sleep for the Zig, returning -1 where `tsleep` raises; it sleeps through `h9_sleepintr`, `sync.zig`'s sleep for C callers that don't raise.
 
 #### Semaphores and `rendezvous` (`src/kern/sema.c`)
 
@@ -248,9 +254,9 @@ A missing architecture gets the skeleton only, with a warning; `-Drelease` fails
 
 ### Zig/C seam rules
 
-1. drawterm raises errors with `waserror()`/`error()`, built on setjmp/longjmp. A longjmp across a Zig frame skips its `defer` and `errdefer`. So Zig code never sits between a `waserror` and an `error`.
+1. drawterm raises errors with `waserror()`/`error()`, built on setjmp/longjmp. A longjmp across a Zig frame skips its `defer` and `errdefer`. So Zig code never sits between a `waserror` and an `error`, with one exception: the kernel's ported Zig (`src/kern/port.zig`), whose exported functions raise from their own outermost frame, with no `defer` pending, after the Zig under them has returned its error and cleaned up.
 2. drawterm already provides the seam. Each `sysX` wrapper in `kern/sysfile.c` (`sysopen`, `syspread`, `sysbind`, `sysmount`, and so on) runs `waserror`; on error it stores the string for `errstr` and returns -1. Zig calls these directly and turns -1 into an error union. New process and segment calls get wrappers in the same style.
-3. C calls Zig only for leaf work that cannot fail into the kernel: the engine layer, page allocation, the a.out parser, console I/O. A leaf returns a status, and the C side raises any kernel error.
+3. C calls Zig only for leaf work that cannot fail into the kernel: the engine layer, page allocation, the a.out parser, console I/O. A leaf returns a status, and the C side raises any kernel error. The ported kernel's functions (rule 1) are the exception: they're the kernel, and raise as the C they replace did.
 4. drawterm's `up` (`_getproc()`, per host thread) stays authoritative. Every guest thread is created through drawterm's kproc path (`h9_kern_spawn`), so `up` is set before any kernel call. Zig never uses bare `std.Thread` for anything that touches the kernel, and never boots the kernel on a caller's thread. The one exception is `--gfx` on macOS, where AppKit needs the main thread: `h9.gfx.main` boots the kernel on it and adopts it as a kernel Proc (`h9_kern_adopt`, through drawterm's clone path) before handing it to AppKit.
 5. drawterm's Proc has no parent, note group, segments, or Egrp. We add these fields, plus a pointer to the Zig-side process record.
 6. The build uses `zig build`: C sources go through `addCSourceFiles` with drawterm's flags, and one `build.zig` produces binaries for every host.

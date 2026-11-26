@@ -124,3 +124,13 @@ No new reach for a guest. Real address checks close a class of bug where a guest
 ## Updates
 
 **2026-11-26, the conformance check.** `zig build conformance` runs [tests/conformance/ns.rc](../tests/conformance/ns.rc) on h9 and compares it with a transcript recorded on 9front, [tests/conformance/9front.out](../tests/conformance/9front.out), so it runs in CI and anywhere else with no QEMU, which settles the second open issue. `zig build conformance -- --oracle` records the transcript again: it boots the arm64 image that `zig build mkroot` boots, under QEMU (TCG is fine, and takes under a minute), and runs the script there. The script compiles a small C helper in the guest for `ORCLOSE`, which rc can't ask for, and tests flush by interrupting a read blocked in exportfs, through `srvfs`. Today's C kernel matches 9front's transcript on sud and hcpu, with no differences to note.
+
+**2026-11-26, qio and sync.** `src/kern/qio.zig` (from `qio.c` and `allocb.c`) and `src/kern/sync.zig` (from `qlock.c`, `rwlock.c`, and `sleep.c`) are built in place of the C, under `src/kern/port.zig`, the root of the kernel's Zig, which the kern library and the namespace kernel compile. Some things the port found:
+
+- **The C kernel's types come from translate-c.** `src/kern/port.h` is translated with the kernel's own `-D` flags, so `Lock` (a pthread mutex with `PTHREAD`), `Proc`, and `Label` have the C compiler's layout on every target. It reads `char Eintr[]` as a pointer, so error.c's strings are declared by hand, and on the web it needs `__wasm_exception_handling__` defined for wasi-libc's `setjmp.h`.
+- **`lib.h` renames `sleep` and `wakeup`** to `ksleep` and `kwakeup`, which are the symbols C calls, and a `Proc`'s `sleep` field is `ksleep` too.
+- **drawterm's `malloc` clears** (`kern/alloc.c`), so a `Queue` starts zeroed, locks included; the port allocates it with `mallocz(n, 1)`.
+- **`tsleep` gains a form that returns.** qio's interruptible reader and writer locks wait in `tsleep`, so `src/kern/tsleep.c` has `h9_tsleepintr`, which returns -1 on a note, built on `h9_sleepintr`, the Zig sleep's form for C that returns, and `tsleep` raises from it. That removes a `waserror` from tsleep.c.
+- **The `waserror` around `qread`'s and `qwrite`'s copies goes**: in 9front it catches a fault on a user buffer, and h9 copies guest memory outside the kernel.
+- **Kick and bypass functions mustn't raise**, since they're called from the Zig. No caller in h9 sets either.
+- **The blocking points** are `park` and `unpark` in `sync.zig` (posix.c's `procsleep` and `procwakeup`): qlock's queue, sleep, and so `qwait`, `qflow`, and `qlockintr` in qio, which each wait in one small function. [scheduler](scheduler.md) changes those two.
