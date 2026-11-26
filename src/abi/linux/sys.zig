@@ -2779,7 +2779,7 @@ fn isListeningUnix(d: *const attr.Dir) bool {
 }
 
 /// devlinux's device character and the qid bit it sets on its devices
-/// (src/kern/devlinux.c).
+/// (src/kern/dev/linux.zig).
 pub const devlinux_dc: u16 = 'L';
 pub const devlinux_chr_bit: u64 = 1 << 40;
 
@@ -2990,7 +2990,7 @@ fn synced(p: *Process, fd: i32, n: i64) i64 {
     return if (r < 0) r else n;
 }
 
-/// syncfs: the host file system behind fd's channel (src/kern/linux.c).
+/// syncfs: the host file system behind fd's channel (src/kern/linux.zig).
 fn syncfs(fd: i32) i64 {
     if (fd < 0) return -E.BADF;
     const info = kc.fdInfo(fd) catch return -E.BADF;

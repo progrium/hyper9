@@ -1,5 +1,5 @@
 //! The kernel leaves the Linux ABI uses beyond src/kern.zig's:
-//! src/kern/linux.c. Stubs stand in where kern isn't built.
+//! src/kern/linux.zig. Stubs stand in where kern isn't built.
 
 const std = @import("std");
 const kern = @import("../../kern.zig");
@@ -59,7 +59,7 @@ const real = struct {
     extern fn h9_pty_setsig(f: PtySig) void;
 };
 
-/// devlinux's hook for its text files (src/kern/devlinux.c): the file's
+/// devlinux's hook for its text files (src/kern/dev/linux.zig): the file's
 /// name, the process's `aux` for /proc/n files (null for the machine's
 /// own), into buf; returns the length or -1.
 pub const Gen = *const fn (aux: ?*anyopaque, name: [*:0]const u8, pid: c_ulong, buf: [*]u8, n: c_int) callconv(.c) c_int;
@@ -493,7 +493,7 @@ pub fn fifoJoin(fd: i32, mode: c_int, nonblock: bool) Error!void {
 }
 
 /// syncfs(2): syncs the host file system behind fd's channel, if it's on
-/// one (src/kern/linux.c).
+/// one (src/kern/linux.zig).
 pub fn syncfs(fd: i32) Error!void {
     _ = try check(c.h9_linux_syncfs(fd));
 }

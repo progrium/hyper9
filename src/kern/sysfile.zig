@@ -32,7 +32,7 @@ const Mount = c.Mount;
 const Dir = c.Dir;
 const Path = c.Path;
 
-extern fn h9_linux_inview() c_int; // h9: src/kern/linux.c
+extern fn h9_linux_inview() c_int; // h9: src/kern/linux.zig
 
 fn unlockfgrp(f: *Fgrp) void {
     const ex = f.exceed;
@@ -591,7 +591,7 @@ fn restat(nc: *Chan, buf: *?[*]u8, nbuf: *c_int, name: [*]const u8, nname: c_int
     return l;
 }
 
-/// h9: kread's work on a channel, for kserve (src/kern/kserve.c,
+/// h9: kread's work on a channel, for kserve (src/kern/kserve.zig,
 /// design/epoch-0/kernel-serve.md), so its directory reads of unions and mount
 /// points are sysread's.
 pub fn chanread(ch: *Chan, p: [*]u8, n: c_int, offp: ?*i64) Error!c_int {
@@ -788,7 +788,7 @@ pub fn fstat(fd: c_int, s: [*]u8, n: c_int) Error!c_int {
     return r;
 }
 
-/// h9: fstat's work on a channel, for kserve (src/kern/kserve.c).
+/// h9: fstat's work on a channel, for kserve (src/kern/kserve.zig).
 pub fn chanstat(ch: *Chan, s: [*]u8, n: c_int) Error!c_int {
     var r = try dev.stat(dev.of(ch), ch, s, n);
     if (pathlast(ch.path)) |name| if (name[0] != 0) {
