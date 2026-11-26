@@ -985,7 +985,7 @@ pub fn semrelease(addr: *i32, count: i32) Error!i32 {
 }
 
 /// The sandbox plan devfs and devip check for the calling thread's
-/// process (see src/kern/fscheck.c and src/kern/netcheck.h). Each guest
+/// process (see src/host/fscheck.c and src/kern/netcheck.h). Each guest
 /// process runs on its own thread, so the
 /// plan is per thread; kernel threads without one aren't restricted.
 threadlocal var fs_plan: ?*const policy.Plan = null;

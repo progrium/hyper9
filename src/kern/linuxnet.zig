@@ -44,10 +44,12 @@ const S_TCP = 0;
 const S_UDP = 1;
 const H9_NETCONNECT = 0;
 
-extern fn h9_ip_sfd(ch: *Chan, udp: ?*c_int) c_int; // kern/devip.c
+// devip's (src/host/devip.zig).
+const ip = @import("host_dev").ip;
+const h9_ip_sfd = ip.sfd;
 extern fn h9_net_check(op: c_int, proto: c_int, addr: *const [IPaddrlen]u8, port: c_int) c_int; // src/kern.zig
 
-// src/kern/hostsock.h: the host's sockets.
+// src/host/hostsock.h: the host's sockets.
 extern fn h9so_ready(fd: c_int, events: c_int) c_int;
 extern fn h9so_soerror(fd: c_int) c_int;
 extern fn h9so_nread(fd: c_int) c_int;
@@ -57,9 +59,6 @@ extern fn h9so_watchinit() void;
 extern fn h9so_watch(fd: c_int, events: c_int, owner: ?*anyopaque) void;
 extern fn h9so_unwatch(owner: ?*anyopaque) void;
 
-// devip's h9_ip_ctl, which raises, so it's called through dev.zig's
-// `raising`.
-extern fn h9_ip_ctl(ch: [*c]Chan, msg: [*c]u8) c_int;
 
 /// A call that failed: its error string becomes the process's
 /// syserrstr, as errstr(2) reads it, and -1, as proc.c's syserr does.
@@ -181,9 +180,9 @@ fn again(r: c_int) c_int {
     return r;
 }
 
-/// devip's readiness (src/kern/devtab.c's Devx for #I): a conversation's
-/// host socket's, and always for the rest.
-fn h9_ip_ready(ch: *Chan, ev: c_int) callconv(.c) c_int {
+/// devip's readiness (src/host/devip.zig's ready): a conversation's host
+/// socket's, and always for the rest.
+pub fn ipready(ch: *Chan, ev: c_int) c_int {
     const s = h9_ip_sfd(ch, null);
     if (s < 0)
         return dev.readydefault(ev); // not a conversation, or no socket yet
@@ -194,9 +193,7 @@ fn ipunhook(w: *rd.Watch) callconv(.c) void {
     h9so_unwatch(w);
 }
 
-fn h9_ip_watch(ch: *Chan, ev: c_int, wv: ?*anyopaque, wkv: ?*anyopaque) callconv(.c) void {
-    const w: *rd.Watch = @ptrCast(@alignCast(wv.?));
-    const wk: *rd.Waker = @ptrCast(@alignCast(wkv.?));
+pub fn ipwatch(ch: *Chan, ev: c_int, w: *rd.Watch, wk: *rd.Waker) void {
     const s = h9_ip_sfd(ch, null);
     rd.add(&hostwatch, w, wk);
     if (s < 0 or ev & Pedge != 0)
@@ -740,7 +737,7 @@ fn sockctl(fd: c_int, msg: [*:0]const u8) Error!void {
         return rctl(id, msg);
     if (dev.of(ch).dc != 'I')
         return port.kerror("not a socket");
-    _ = try dev.raising(&h9_ip_ctl, .{ ch, @constCast(msg) });
+    _ = try ip.ctl(ch, msg);
 }
 
 fn h9_linux_sockctl(fd: c_int, msg: [*:0]const u8) callconv(.c) c_int {
@@ -757,8 +754,6 @@ pub fn exportC() void {
     @export(&h9_lockwait, .{ .name = "h9_lockwait" });
     @export(&h9_poll, .{ .name = "h9_poll" });
     @export(&h9_fdready, .{ .name = "h9_fdready" });
-    @export(&h9_ip_ready, .{ .name = "h9_ip_ready" });
-    @export(&h9_ip_watch, .{ .name = "h9_ip_watch" });
     @export(&h9_linux_sockrecv, .{ .name = "h9_linux_sockrecv" });
     @export(&h9_linux_socksend, .{ .name = "h9_linux_socksend" });
     @export(&h9_linux_pipequeued, .{ .name = "h9_linux_pipequeued" });

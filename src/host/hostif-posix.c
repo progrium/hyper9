@@ -1,6 +1,6 @@
 /*
  * h9: the host's interface addresses for the Linux layer's netlink
- * (src/kern/hostsock.h, design/epoch-0/linux-net.md). Kept apart from
+ * (src/host/hostsock.h, design/epoch-0/linux-net.md). Kept apart from
  * hostsock-posix.c because getifaddrs's headers and drawterm's don't
  * mix.
  */

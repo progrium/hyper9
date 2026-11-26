@@ -164,7 +164,7 @@ escape.
 | B1 | Guest CPU and memory vs. the h9 process | The hypervisor's stage-2 tables and h9's page tables (`src/engine/{hvf,kvm,whp}.zig`, `pt_arm64.zig`, `pt_amd64.zig`, `gphys.zig`); on the emulator, hcpu's software TLB and region checks (`src/engine/hcpu/interp/mem.zig`, `src/engine/hcpu/jit/`) | Every exit, every page fault, `AddressSpace.translate` and `copy` |
 | B2 | Guest kernel mode (the shim) vs. guest user mode | The shim's entry and restore paths (`src/arch/{amd64,arm64}/shim.S`), the host-set CPU state (`src/engine/x86.zig`), `arch.sanitize` (`src/arch/*.zig`) | Syscalls, faults, notes, `noted`, `rt_sigreturn`, `/proc/n/regs` writes |
 | B3 | Syscall arguments vs. the kernel | `src/abi/plan9/syscall.zig` (9front) and `src/abi/linux/sys.zig`, `mm.zig`, `signal.zig`, and the rest of `src/abi/linux/`; `GuestBuf` (see [kernel.md](../spec/kernel.md#errors-calls-across-the-edge-and-guest-memory)) | Every syscall |
-| B4 | The guest's namespace vs. the host's file system | The namespace builder (`src/newns.zig`, `src/mount.zig`, `src/machine.zig`), the device mask, and devfs's hooks into `src/kern/fscheck.c` and `h9_policy_check` in `src/policy.zig` | Walks, opens, creates, removes, renames, wstats, directory reads on `#U` |
+| B4 | The guest's namespace vs. the host's file system | The namespace builder (`src/newns.zig`, `src/mount.zig`, `src/machine.zig`), the device mask, and devfs's hooks into `src/host/fscheck.c` and `h9_policy_check` in `src/policy.zig` | Walks, opens, creates, removes, renames, wstats, directory reads on `#U` |
 | B5 | The guest's network vs. the host's | devip's hooks (`h9_net_check`, `h9_net_lookup`, `h9_net_resolved`) into `src/kern/netcheck.zig` and `src/policy.zig`; devhstream's connect check; the Linux socket layer (`src/kern/linuxnet.zig`) | `connect`, `announce`, `cs` lookups, `sendto`, `/net/ws` |
 | B6 | Remote servers' bytes vs. h9's parsers | `src/dotl/` (`wire.zig`, `client.zig`, `server.zig`, `attr.zig`), `src/rootindex/`, `src/rootindex.zig`, `src/statictree.zig`, `src/hstream.zig`, `src/ws.zig`, and drawterm's devmnt | Every 9P reply, index, event record, HTTP response, and WebSocket frame |
 | B7 | Network clients vs. a served machine | `src/serve.zig`, `src/ws.zig`'s server side, `src/dotl/server.zig`, exportfs in the guest | Connections to `--serve` listeners |
@@ -356,7 +356,7 @@ The vendored files h9 changed, each change marked, are `chan.c`, `devcons.c`,
 ### 6.6 The host file system
 
 The rules are in [spec/sandbox.md](../spec/sandbox.md#access-rules), and the
-code is `src/kern/fscheck.c` (about 1,500 lines) and `h9_policy_check` in
+code is `src/host/fscheck.c` (about 1,500 lines) and `h9_policy_check` in
 `src/policy.zig`.
 
 - **Access rules.** The root, the cwd, each `--readable`, `--writable`, and
@@ -712,7 +712,7 @@ In rough order of expected value:
 3. **Untrusted 9P and index parsing** (`src/dotl/`, `src/rootindex/`,
    devmnt), as A2: malformed messages, tag and fid confusion, reconnect
    replay, oversized fields.
-4. **devfs path checks** (`src/kern/fscheck.c`), as A1 and A5 together:
+4. **devfs path checks** (`src/host/fscheck.c`), as A1 and A5 together:
    links, `..`, contained trees, Windows path aliases, renames, and the
    overlay's copy-up and whiteout paths in `dev/overlay.zig`.
 5. **The shims and CPU state** on KVM and HVF: what user mode can reach in

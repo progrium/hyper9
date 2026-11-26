@@ -934,11 +934,11 @@ fn oNofollow(a: engine.Arch) u32 {
 const OTRUNC = 16;
 const OCEXEC = 32;
 const DMDIR: u32 = 0x80000000;
-/// The mode bit that marks a FIFO's Dir (src/kern/fscheck.h's H9_DMFIFO,
+/// The mode bit that marks a FIFO's Dir (src/host/fscheck.h's H9_DMFIFO,
 /// 9P2000.u's DMNAMEDPIPE), since Plan 9 has no file types.
 const DMFIFO: u32 = 0x00200000;
 /// 9P2000.u's DMSYMLINK: a link a Linux process's walk stopped at
-/// (design/epoch-0/linux-symlinks.md, src/kern/fscheck.h).
+/// (design/epoch-0/linux-symlinks.md, src/host/fscheck.h).
 const DMSYMLINK: u32 = 0x02000000;
 
 fn serve(p: *Process, s: Sys, c: Call, u: *const engine.Ureg) Err!Outcome {

@@ -73,7 +73,7 @@ export fn h9_ns_log(buf: [*]const u8, n: c_int) c_int {
 /// The C runtime's write on Windows, where std.c.write takes a HANDLE.
 extern "c" fn _write(fd: c_int, buf: [*]const u8, n: c_uint) c_int;
 
-/// drawterm's win32.c asks src/kern/hostsock-win32.c for a Winsock
+/// drawterm's win32.c asks src/host/hostsock-win32.c for a Winsock
 /// error's text, and the namespace kernel has no host sockets: Windows's
 /// own text it is.
 fn h9so_errstr(e: c_int) callconv(.c) ?[*:0]const u8 {

@@ -623,7 +623,10 @@ const natives = .{
     @import("dev/srv.zig").Device,
     @import("dev/overlay.zig").Device,
     @import("dev/dotl.zig").Device,
-} ++ (if (port.options.nskernel) .{
+} ++ (if (port.options.hostfs) .{
+    // The host's tree (src/host/devfs.zig).
+    @import("host_dev").fs.Device,
+} else .{}) ++ (if (port.options.nskernel) .{
     @import("dev/ns.zig").Device,
 } else .{
     // h9's own, which the namespace kernel doesn't build.
@@ -633,6 +636,8 @@ const natives = .{
     @import("dev/env.zig").Device,
     @import("dev/hidx.zig").Device,
     @import("dev/linux.zig").Device,
+    // The host's network (src/host/devip.zig).
+    @import("host_dev").ip.Device,
 }) ++ (if (port.options.gfx) .{
     @import("dev/gfx.zig").Draw,
     @import("dev/gfx.zig").Cons,

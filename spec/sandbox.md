@@ -53,7 +53,7 @@ Sandboxing is a `Policy` in `Machine.Options`: a set of capabilities, host paths
 
 The policy lives in Zig. drawterm's devfs and devip call it through leaf functions, which return a status and never raise.
 
-devfs-posix and devfs-win32 call `h9_fs_check(path, op)` (in `src/kern/fscheck.c`) before each walk, open, create, remove, wstat, and directory entry. It resolves the host path and asks the Zig leaf `h9_policy_check` for a verdict: allowed, hidden (the walk fails, or the entry is left out of the listing) or read-only ("permission denied").
+devfs-posix and devfs-win32 call `h9_fs_check(path, op)` (in `src/host/fscheck.c`) before each walk, open, create, remove, wstat, and directory entry. It resolves the host path and asks the Zig leaf `h9_policy_check` for a verdict: allowed, hidden (the walk fails, or the entry is left out of the listing) or read-only ("permission denied").
 
 devip calls `h9_net_check(op, proto, addr, port)` (declared in `src/kern/netcheck.h`) when a ctl file's `connect` or `announce` is parsed, before a port is bound or the host is dialed, and raises "permission denied" on a refusal. It asks the machine's host ([host-handles](../design/host-handles.md), `src/host/host.zig`): a `connect` its dialer (`Dial.allows`, then `Dial.probe`), an `announce` its listener (`Listen.allows`), and a host without one refuses. The host a plan describes (`src/host/planned.zig`) answers with the plan's verdicts, so what's allowed is unchanged.
 
@@ -124,7 +124,7 @@ A bind from `#U!c/path` ([symlinks-in-root](../design/epoch-0/symlinks-in-root.m
 
 The tree's top is where namec's walk from the `#U!c` attach ends (`h9_fs_anchor`, called from `namec` in `src/kern/chan.zig`), canonicalised.
 
-Each later walk looks names up one at a time with `lstat` (`h9_fs_resolvein` in `src/kern/fscheck.c`; on Windows `h9_fs_resolveinw`, which reads symlinks and junctions with `FSCTL_GET_REPARSE_POINT` and refuses other reparse points and UNC targets): a link's target is read, an absolute one starts again at the top (on Windows, with its drive dropped), a relative one from the link's directory, `..` at the top stays there, and more than 40 links in one walk is "too many symbolic links".
+Each later walk looks names up one at a time with `lstat` (`h9_fs_resolvein` in `src/host/fscheck.c`; on Windows `h9_fs_resolveinw`, which reads symlinks and junctions with `FSCTL_GET_REPARSE_POINT` and refuses other reparse points and UNC targets): a link's target is read, an absolute one starts again at the top (on Windows, with its drive dropped), a relative one from the link's directory, `..` at the top stays there, and more than 40 links in one walk is "too many symbolic links".
 
 The resolved path, which holds no links, is checked against the access rules as any other path is, so `--read-deny` and partly allowed trees still apply, and kept on the chan with the link's own path beside it: stat shows the link's name, remove and rename act on the link, and open, read, and wstat on its target.
 

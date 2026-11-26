@@ -540,7 +540,7 @@ pub fn chanPut(ch: *anyopaque) void {
     c.h9_linux_chanput(ch);
 }
 
-/// One of the host's interface addresses (src/kern/hostsock.h's
+/// One of the host's interface addresses (src/host/hostsock.h's
 /// H9ifaddr): `addr` is devip's 16 bytes, IPv4 mapped.
 pub const IfAddr = extern struct {
     name: [16]u8,
@@ -559,7 +559,7 @@ pub fn hostIfAddrs(buf: []IfAddr) []IfAddr {
     return buf[0..@intCast(@max(n, 0))];
 }
 
-/// Whether the host can make IPv6 sockets (src/kern/hostsock.h).
+/// Whether the host can make IPv6 sockets (src/host/hostsock.h).
 pub fn hostHasV6() bool {
     return c.h9so_hasv6() != 0;
 }

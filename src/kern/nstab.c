@@ -44,15 +44,11 @@ Dev *devtab[] = {
 	0
 };
 
-/* Their optional operations (design/file-interface.md, src/kern/devx.h). */
-#ifdef H9_NSKERNEL_HOSTFS
-extern Devx fsdevx;
-#endif
-
+/*
+ * Their optional operations (design/file-interface.md, src/kern/devx.h):
+ * none in C. devfs's are its own (src/host/devfs.zig).
+ */
 Devx *devxtab[] = {
-#ifdef H9_NSKERNEL_HOSTFS
-	&fsdevx,
-#endif
 	0
 };
 
@@ -157,11 +153,6 @@ int h9_hidx_wide(Chan *c) { USED(c); return 0; }
 /* linuxnet.zig's: no Linux sockets to wake. */
 
 #ifndef H9_NSKERNEL_HOSTFS
-/* devfs's and fscheck.zig's: no host tree under an overlay. */
-void h9_fs_anchor(Chan *c) { USED(c); }
-
-void h9_fs_mkfifo(Chan *c, char *name, ulong perm) { USED(c, name, perm); error(Eperm); }
-int h9_fs_isfifo(Chan *c) { USED(c); return 0; }
-
+/* fscheck.zig's: no host tree under an overlay. */
 int h9_fs_chanisfifo(Chan *c) { USED(c); return 0; }
 #endif

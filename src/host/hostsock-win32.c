@@ -1,6 +1,6 @@
 /*
  * h9: host-socket calls for devip's h9 additions and the Linux socket
- * calls on Windows (src/kern/hostsock.h). The watcher selects with a
+ * calls on Windows (src/host/hostsock.h). The watcher selects with a
  * short timeout instead of a wake pipe.
  */
 
