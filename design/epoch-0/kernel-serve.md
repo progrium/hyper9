@@ -15,7 +15,7 @@ Nov 25, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially direct
 
 ## Abstract
 
-h9's kernel gets its own 9P2000 server, `src/kern/kserve.c`, and [serve](serve.md)'s per-connection path uses it in place of running 9front's `exportfs` as a guest process. Each connection is served by kernel coroutines (threads on native hosts) that work on kernel channels directly: a fid holds a `Chan`, walks and opens go through `namec`'s pieces and the devices, and directory reads of unions go through the same code `sysread` uses. So access rules, the policy hooks, and the namespace a client sees are unchanged. Serving no longer forks a guest process per connection or per blocking request, no longer needs `/bin/exportfs` from a root or the built-in box, no longer counts against `--pids`, and works on any build with a kernel, including the web host and [namespace-kernel](../namespace-kernel.md), which has no guest processes at all. A connection's attach name can choose which namespace it's served from, which is how namespace-kernel serves one namespace per task.
+h9's kernel gets its own 9P2000 server, `src/kern/kserve.c`, and [serve](serve.md)'s per-connection path uses it in place of running 9front's `exportfs` as a guest process. Each connection is served by kernel coroutines (threads on native hosts) that work on kernel channels directly: a fid holds a `Chan`, walks and opens go through `namec`'s pieces and the devices, and directory reads of unions go through the same code `sysread` uses. So access rules, the policy hooks, and the namespace a client sees are unchanged. Serving no longer forks a guest process per connection or per blocking request, no longer needs `/bin/exportfs` from a root or the built-in box, no longer counts against `--pids`, and works on any build with a kernel, including the web host and [namespace-kernel](namespace-kernel.md), which has no guest processes at all. A connection's attach name can choose which namespace it's served from, which is how namespace-kernel serves one namespace per task.
 
 ## Background
 
@@ -25,7 +25,7 @@ h9's kernel gets its own 9P2000 server, `src/kern/kserve.c`, and [serve](serve.m
   - A guest process, and often several, per client. The serving share of `--pids` and memory exists only because of that.
   - A dependency on finding an exportfs binary: `/bin/exportfs`, or `#Hroot/$cputype/bin/exportfs` from [builtin-root](builtin-root.md). A build without a 9front box for the machine's architecture can't serve.
   - Exportfs serves the namespace of the process it runs in, so one connection gets one namespace, fixed when serve's server Proc copies it.
-  - Nothing can serve where there are no guest processes. [namespace-kernel](../namespace-kernel.md) is a kernel build with none.
+  - Nothing can serve where there are no guest processes. [namespace-kernel](namespace-kernel.md) is a kernel build with none.
 - **Kernel-side serving already exists in drawterm.** `third_party/drawterm/exportfs/` (about 1.2k lines) is the exportfs drawterm runs in its own kernel, on kprocs, to export `/mnt/term` to a cpu server (`cpu.c`). h9's build leaves it out. It's path-based, as 9front's exportfs is: a fid is a path string, and each walk is a `dirstat` of the joined path. Its state (`fhash`, `fidfree`, `root`) is file-scope globals, so it serves one connection per process.
 - **The checks are in the kernel, not in exportfs.** devfs's `h9_fs_check` (`src/kern/fscheck.c`), `--read-deny`, overlay's write rules, and the device mask all run inside channel operations. exportfs reaches them only because it makes system calls that end in those operations. A server in the kernel that makes the same channel operations reaches the same checks.
 - **Some hooks are in the system calls, not the channel operations.** [file-watch](../file-watch.md) records the guest's own changes (its Source 1) with marked calls in `sysfile.c`'s wrappers, so a client's writes through exportfs reach the journal because exportfs makes those system calls. And [linux-chroot](linux-chroot.md) stops `..` at a process's root with a check in `walkl` (`h9_fs_atroot`), keyed on a `slash` marked as a chroot's root.
@@ -50,7 +50,7 @@ h9's kernel gets its own 9P2000 server, `src/kern/kserve.c`, and [serve](serve.m
 A Proc's namespace is its Pgrp, plus its `slash` and `dot`. A connection is served from a *source*:
 
 - **The plan's namespace,** copied once before the program starts, as serve does now: the server's Pgrp is a `pgrpcpy` of the first Proc's, with `/net` unmounted unless `--serve-net` is given. Every attach on every connection gets it. This is the only source in h9 machines, and it makes `--serve` behave exactly as it does today.
-- **Named namespaces,** for [namespace-kernel](../namespace-kernel.md): the attach name selects one of its namespaces by id, and `Tattach` of an unknown or freed id fails with "no such namespace". The source is an interface (`lookup(aname) → Pgrp, slash`), so this proposal doesn't depend on that one.
+- **Named namespaces,** for [namespace-kernel](namespace-kernel.md): the attach name selects one of its namespaces by id, and `Tattach` of an unknown or freed id fails with "no such namespace". The source is an interface (`lookup(aname) → Pgrp, slash`), so this proposal doesn't depend on that one.
 
 Each request runs with `up->pgrp`, `slash`, and `dot` set to its fid's namespace and the machine's user, so device code that reads `up` sees the same thing exportfs's process would have.
 
@@ -71,7 +71,7 @@ Step 3 of serve's Each connection becomes: the server Proc starts a kserve conne
 
 ## Rationale
 
-**A second 9P server to keep correct.** That's serve's objection, and it holds: kserve is new code with 9P's subtle parts (flush ordering, fid reuse, directory offsets). What changes the trade is that h9 now needs a server where no guest process can run ([namespace-kernel](../namespace-kernel.md), and port serving on the web host from [port-streams](port-streams.md)), and that one server can't pick a namespace per attach as exportfs is built. The access rules stay in one implementation, the kernel's, because kserve calls the same channel operations exportfs's system calls end in.
+**A second 9P server to keep correct.** That's serve's objection, and it holds: kserve is new code with 9P's subtle parts (flush ordering, fid reuse, directory offsets). What changes the trade is that h9 now needs a server where no guest process can run ([namespace-kernel](namespace-kernel.md), and port serving on the web host from [port-streams](port-streams.md)), and that one server can't pick a namespace per attach as exportfs is built. The access rules stay in one implementation, the kernel's, because kserve calls the same channel operations exportfs's system calls end in.
 
 **The chroot mark, not a check of kserve's own.** Stopping `..` in kserve would mean spotting it in each `Twalk` and comparing channels before calling `walk()`, which misses a `..` in the middle of a multi-element walk. linux-chroot already put that check where every walk passes, and keyed it on `slash`, which kserve sets per request anyway.
 
@@ -126,7 +126,7 @@ Step 3 of serve's Each connection becomes: the server Proc starts a kserve conne
 1. `kserve.c`: attach, walk, open, read, write, stat, clunk, over the plan's namespace, with one worker. Run serve's cases against it behind a build flag.
 2. Workers per connection, flush, create, remove, wstat, union reads, the policy rules, and the journal calls.
 3. Switch serve's per-connection path to kserve, drop the serving share of `--pids`, update `--print` and the plan's limits line.
-4. The named-namespace source interface, for [namespace-kernel](../namespace-kernel.md).
+4. The named-namespace source interface, for [namespace-kernel](namespace-kernel.md).
 5. `.fs/events` at the attach root, once file-watch's serving is built.
 6. spec/ninep.md, spec/kernel.md, and serve's Updates note.
 

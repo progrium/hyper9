@@ -180,7 +180,7 @@ drawterm's Cocoa on macOS and Win32 on Windows by default, `headless` on
 Linux. `-Dgfx=x11` builds the X11 backend for Linux, which links the host's
 libX11 (and needs the libXt headers), so it builds natively against glibc,
 not for a musl target. The headless screen, a screen in memory for
-`--gfx=headless` ([headless-screen](design/headless-screen.md)), is linked
+`--gfx=headless` ([headless-screen](design/epoch-0/headless-screen.md)), is linked
 into every build with graphics; `-Dgfx=headless` is a build with only it.
 `-Dgfx=none` leaves graphics out. The engine tests use the `-Dgfx` build's
 headless screen, or a headless-only build with `none`, so `zig build test

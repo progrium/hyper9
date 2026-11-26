@@ -1038,7 +1038,7 @@ Written against `main` at c0f71ec (Nov 24, 2026), after linux-chroot
 Update this brief when a change crosses a boundary in section 4, and give
 the auditor the commit it describes.
 
-Updated for [renames](../design/renames.md), which changed names and nothing
+Updated for [renames](../design/epoch-0/renames.md), which changed names and nothing
 else ([design/README.md](../design/README.md#old-names) has the table of old
 names): the ABIs are in `src/abi/plan9/` and `src/abi/linux/`, the engines in
 `src/engine.zig` and `src/engine/`, with hcpu's CPUs and JIT under

@@ -1117,7 +1117,7 @@ test "auto never selects sud; it stays an explicit opt-in [native-backend]" {
 }
 
 test "auto never selects sud, by either name [renames]" {
-    // `native` is an alias of `sud` for one release (design/renames.md), and
+    // `native` is an alias of `sud` for one release (design/epoch-0/renames.md), and
     // the rule that `auto` never picks it holds under both names: --check
     // says what auto uses, and only an explicit --engine runs on it.
     const e = try env(@src());
@@ -6533,7 +6533,7 @@ fn expectGfxNotBuilt(e: Env) !void {
     try std.testing.expect(std.mem.indexOf(u8, r.err, "graphics aren't built into this h9") != null);
 }
 
-// The headless screen (design/headless-screen.md): --gfx=headless gives a
+// The headless screen (design/epoch-0/headless-screen.md): --gfx=headless gives a
 // screen in memory, and /dev/screen, /dev/mousein and /dev/kbdin read it
 // and type and click into it, from rc.
 
@@ -9221,7 +9221,7 @@ test "--tmp makes an empty writable tree [mounts]" {
     try std.testing.expectEqualStrings("      0\ny\n", r.out);
 }
 
-// design/upper-layers.md: an up member takes a stack's changes as an OCI
+// design/epoch-0/upper-layers.md: an up member takes a stack's changes as an OCI
 // layer on the host, and every member reads whiteouts.
 
 /// A scratch tree with `a`, a stack member, and an empty `up`, for a layer.

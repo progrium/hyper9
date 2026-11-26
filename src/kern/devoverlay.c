@@ -204,7 +204,7 @@ struct Inst
 	int	memgen;		/* the next member's id */
 	Qmap	**qtab;		/* (device, dev, qid path) to the instance's qid path */
 	ulong	qmem;		/* bytes of qid table and snapshots, counted against the pool */
-	QLock	upql;		/* serializes changes to an up member's tree (design/upper-layers.md) */
+	QLock	upql;		/* serializes changes to an up member's tree (design/epoch-0/upper-layers.md) */
 	ulong	upgen;		/* counts directories made in the up member's tree; under ql */
 	QLock	wcl;		/* the walk cache's lock */
 	Wcache	*wc;		/* the walk cache (unstep), made on first use; under wcl */
@@ -1845,7 +1845,7 @@ untop(Unc *u)
 }
 
 /*
- * Whiteouts (design/upper-layers.md): in a union, a member's
+ * Whiteouts (design/epoch-0/upper-layers.md): in a union, a member's
  * .wh.NAME hides NAME in the members below it, and a directory holding
  * .wh..wh..opq isn't merged with the directories below it, as in an OCI
  * image layer. Neither shows in a directory read. A walk asks for the
@@ -2860,7 +2860,7 @@ unsnapshot(Chan *c)
 }
 
 /*
- * Up layers (design/upper-layers.md). A union's up member, always its
+ * Up layers (design/epoch-0/upper-layers.md). A union's up member, always its
  * first, is a writable tree over the others, as overlayfs's upperdir is:
  * a file from below is copied into it on its first change, a removed
  * name below gets a whiteout in it, and a directory made again over a
@@ -4349,7 +4349,7 @@ enum
 {
 	Uafter	= 1,	/* match h9_overlay_union's flags in src/kern.zig */
 	Ucreate	= 2,
-	Uup	= 4,	/* the union's up layer (design/upper-layers.md) */
+	Uup	= 4,	/* the union's up layer (design/epoch-0/upper-layers.md) */
 };
 
 static void
@@ -4651,7 +4651,7 @@ h9_overlay_unpin(char *name)
  *	add [-a|-b] [-c] PATH	PATH's directory as a member, on top (-b,
  *				the default) or at the bottom (-a); -c takes creates
  *	upper PATH		PATH's directory as the union's up layer, on top
- *				(design/upper-layers.md)
+ *				(design/epoch-0/upper-layers.md)
  *	del PATH		removes the member that is PATH's directory
  *	cow			a copy-on-write instance over the union, which
  *				attaching the union's number gives from then on

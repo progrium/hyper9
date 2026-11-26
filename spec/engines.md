@@ -197,7 +197,7 @@ On HVF on an M3 Max, the same loop takes 0.27 s, a `pwrite` round trip about 1.1
 
 So syscall-heavy work such as rc pipelines runs at hypervisor speed or better, and compute runs a few times slower; that's fine for tests, and tolerable for self-hosted builds.
 
-By default `h9` uses the host's hypervisor when it's available, and otherwise falls back to hcpu with a warning; it never selects the sud engine, which shares h9's process and isn't a security boundary. `--engine hvf|kvm|whp|sud|hcpu` forces a choice, and `--engine sud` warns on a terminal that it isn't a security boundary. For one release, `--backend` is an alias of `--engine`, and `native`, `emu`, and `v86` (the web host's old backend, [browser-host](../design/epoch-0/browser-host.md)) are aliases of `sud`, `hcpu`, and `hcpu` ([renames](../design/renames.md)).
+By default `h9` uses the host's hypervisor when it's available, and otherwise falls back to hcpu with a warning; it never selects the sud engine, which shares h9's process and isn't a security boundary. `--engine hvf|kvm|whp|sud|hcpu` forces a choice, and `--engine sud` warns on a terminal that it isn't a security boundary. For one release, `--backend` is an alias of `--engine`, and `native`, `emu`, and `v86` (the web host's old backend, [browser-host](../design/epoch-0/browser-host.md)) are aliases of `sud`, `hcpu`, and `hcpu` ([renames](../design/epoch-0/renames.md)).
 
 ## Guest shims
 

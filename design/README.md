@@ -147,7 +147,7 @@ Archiving isn't part of finishing a proposal. The PR that finishes one leaves it
 
 ## Old names
 
-[renames](renames.md) renamed some of h9's parts at the end of epoch 0. Proposals keep the words they were written in, so an epoch-0 proposal may use these:
+[renames](epoch-0/renames.md) renamed some of h9's parts at the end of epoch 0. Proposals keep the words they were written in, so an epoch-0 proposal may use these:
 
 | Old name | Now |
 | --- | --- |
