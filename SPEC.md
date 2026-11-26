@@ -1,6 +1,6 @@
 # Design: h9, a namespace kernel for Plan 9 and Linux executables
 
-Nov 2, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
+Nov 25, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
 
 This describes h9 as built. Changes to it go through proposals in [design/](design/README.md); the record of how h9 got here is in its baselines: [baseline](design/epoch-0/baseline.md) for the work before proposals, and [baseline-1](design/baseline-1.md) for epoch 0.
 
