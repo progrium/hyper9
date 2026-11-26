@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <ifaddrs.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
@@ -730,6 +731,48 @@ static void udp_twice(int port) {
 	printf("ok udp_twice\n");
 }
 
+/* getaddrinfo's route probes under a name pattern (design/linux-dns.md):
+ * NAME has an A record for 127.0.0.1 and an AAAA record with no route.
+ * musl ranks the answers by connecting a UDP socket to each, so the IPv4
+ * address must come first. A UDP socket connected to it, to PORT, which
+ * no pattern allows for UDP, is a probe: the connect and getsockname
+ * work, and send, write, and sendto fail with EACCES. */
+static void udp_probe(const char *name, const char *port) {
+	struct addrinfo hints = {.ai_family = AF_UNSPEC, .ai_socktype = SOCK_STREAM}, *ai;
+	CHECK("udp_probe", getaddrinfo(name, port, &hints, &ai) == 0);
+	CHECK("udp_probe", ai->ai_family == AF_INET && ai->ai_next != NULL);
+	struct sockaddr_in a = *(struct sockaddr_in *)ai->ai_addr, l;
+	freeaddrinfo(ai);
+	int s = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+	socklen_t n = sizeof l;
+	CHECK("udp_probe", s >= 0 && connect(s, (void *)&a, sizeof a) == 0);
+	CHECK("udp_probe", getsockname(s, (void *)&l, &n) == 0 && l.sin_addr.s_addr == htonl(INADDR_LOOPBACK));
+	errno = 0;
+	CHECK("udp_probe", send(s, "probe", 5, MSG_NOSIGNAL) == -1 && errno == EACCES);
+	errno = 0;
+	CHECK("udp_probe", write(s, "probe", 5) == -1 && errno == EACCES);
+	errno = 0;
+	CHECK("udp_probe", sendto(s, "probe", 5, MSG_NOSIGNAL, (void *)&a, sizeof a) == -1 && errno == EACCES);
+	close(s);
+	/* A sendto on a socket that isn't connected tries the same. */
+	s = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+	errno = 0;
+	CHECK("udp_probe", sendto(s, "probe", 5, MSG_NOSIGNAL, (void *)&a, sizeof a) == -1 && errno == EACCES);
+	close(s);
+	printf("ok udp_probe\n");
+}
+
+/* A UDP connect to ADDR!PORT, an address no lookup recorded, is refused. */
+static void udp_refused(const char *addr, int port) {
+	struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons(port)};
+	CHECK("udp_refused", inet_pton(AF_INET, addr, &a.sin_addr) == 1);
+	int s = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+	errno = 0;
+	CHECK("udp_refused", s >= 0 && connect(s, (void *)&a, sizeof a) == -1 && errno == EACCES);
+	close(s);
+	printf("ok udp_refused\n");
+}
+
 static void many(void) {
 	int port;
 	int l = listener(&port);
@@ -1018,6 +1061,8 @@ int main(int argc, char **argv) {
 		if (!strcmp(n, "ifaddrs")) ifaddrs();
 		if (!strcmp(n, "netlink_peek")) netlink_peek();
 		if (!strcmp(n, "udp_twice") && i + 1 < argc) udp_twice(atoi(argv[++i]));
+		if (!strcmp(n, "udp_probe") && i + 2 < argc) { udp_probe(argv[i + 1], argv[i + 2]); i += 2; }
+		if (!strcmp(n, "udp_refused") && i + 2 < argc) { udp_refused(argv[i + 1], atoi(argv[i + 2])); i += 2; }
 	}
 	return failed;
 }

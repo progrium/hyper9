@@ -8,6 +8,7 @@ This describes, as built, h9's security stance and the sandbox policy: what a gu
 - [Sandbox policy](#sandbox-policy)
   - [Vendor hooks](#vendor-hooks)
   - [Network rules](#network-rules)
+    - [Route probes](#route-probes)
   - [The machine's resolver](#the-machines-resolver)
   - [Access rules](#access-rules)
   - [Path resolution](#path-resolution)
@@ -57,7 +58,7 @@ devip calls `h9_net_check(op, proto, addr, port)` (declared in `src/kern/netchec
 
 Its `cs` calls `h9_net_lookup(proto, name, port)` before the host's resolver, raising "no translation for host found" for a name no pattern covers, and `h9_net_resolved` after it.
 
-Its connect calls `h9_net_redirect(proto, addr, &port, &sfd, opts)` right after `h9_net_check`, which may replace the address and port it dials with the machine's resolver's ([linux-dns](../design/linux-dns.md), under [The machine's resolver](#the-machines-resolver)), and raises "permission denied" when it would and can't. It's the one hook in devip for the resolver; the rest, in `src/kern/netcheck.c`, binds the conversation's host socket on the loopback first (making it if there's none) and tells the resolver its host port, through the Zig leaves `h9_dns_target` and `h9_dns_register`.
+Its connect calls `h9_net_redirect(proto, addr, &port, &sfd, opts)` right after `h9_net_check`, which may replace the address and port it dials with the machine's resolver's ([linux-dns](../design/linux-dns.md), under [The machine's resolver](#the-machines-resolver)), and raises "permission denied" when it would and can't. It's the one hook in devip for the resolver; the rest, in `src/kern/netcheck.c`, binds the conversation's host socket on the loopback first (making it if there's none) and tells the resolver its host port, through the Zig leaves `h9_dns_target` and `h9_dns_register`. For a UDP connect that isn't redirected, it also marks the conversation's host socket probe-only or not (see [Route probes](#route-probes)), making the socket first for a probe; devip's write to a conversation's `data` calls `h9_net_send(sfd)` before it sends, and raises "permission denied" on a probe-only one. That call is the other hook in devip's send path; `h9so_close` forgets a socket's mark before it closes it.
 
 The machine's compiled plan is set per host thread, because each guest process runs on its own thread. The leaves return an int and never raise kernel errors themselves.
 
@@ -72,6 +73,10 @@ With patterns, the patterns are the whole policy: a `connect` must match one, by
 A name pattern (`api.example.com`, or `*.example.com` for one or more labels) can't be checked at `connect`, whose message is numeric, so `cs` resolves only names a pattern covers and records what each returned in the machine's resolved-name table (the 1024 most recent entries). A later `connect` to a recorded address is allowed if its name matches a name pattern with that protocol and port.
 
 A resolved-name entry from the machine's resolver has no protocol or port, so it takes the connect's, which the name patterns then decide: a name allowed as `tcp!api.example.com!443` allows TCP port 443 to its addresses only, whichever lookup recorded them.
+
+#### Route probes
+
+getaddrinfo, musl's and glibc's alike, ranks the addresses it got by RFC 6724: it connects a UDP socket to each, which sends nothing, and reads the source address with `getsockname`, so an address the host has no route to ranks last. Its probe's port is the service's, so a TCP name pattern doesn't cover it. A UDP `connect` to an address the resolved-name table recorded for a name some name pattern covers, with any protocol and port, is therefore allowed as a probe (`Plan.netProbe`, and `NameTable.recorded`): `h9_net_check` returns 1 for it rather than 0, and the connect is made on the host, so its result (success, or ENETUNREACH for a family with no route) and its source address are the host's, as with the network open. Such a conversation is probe-only: every send on it, a write to `data`, or a Linux `send`, `write`, or `sendto` to any address, fails with "permission denied" (EACCES), so nothing reaches the address that the allowlist didn't allow. Its host socket is marked in a table in `src/kern/netcheck.c`, one for the process since host sockets are, set or cleared at each connect, so a conversation that connects again to an address the allowlist allows for UDP sends as any other. A UDP connect to an address that isn't recorded, and a TCP connect, are checked as before, and a `sendto`'s address must be allowed outright, not as a probe.
 
 A `/net/ws` `connect` is checked as a TCP dial to the URL's host and port: a name goes through the same lookup check and resolved-name table, and each address it resolves to through the connect check.
 

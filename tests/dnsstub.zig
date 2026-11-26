@@ -15,8 +15,9 @@ const windows = builtin.os.tag == .windows;
 const Fd = if (windows) usize else std.c.fd_t;
 const none: Fd = if (windows) ~@as(usize, 0) else -1;
 
-/// A name the stub answers: an A record, or a CNAME to another name.
-pub const Record = struct { name: []const u8, a: ?[4]u8 = null, cname: ?[]const u8 = null };
+/// A name the stub answers: an A record, an AAAA record, or both, or a
+/// CNAME to another name.
+pub const Record = struct { name: []const u8, a: ?[4]u8 = null, aaaa: ?[16]u8 = null, cname: ?[]const u8 = null };
 
 pub const Stub = struct {
     records: []const Record,
@@ -108,9 +109,9 @@ pub const Stub = struct {
         return null;
     }
 
-    /// The answer to query `q`: the name's CNAMEs and A record for an A
-    /// query, nothing for another type, and NXDOMAIN for a name it
-    /// doesn't know.
+    /// The answer to query `q`: the name's CNAMEs, and its A record for an
+    /// A query or its AAAA record for an AAAA query, nothing for another
+    /// type, and NXDOMAIN for a name it doesn't know.
     fn reply(s: *Stub, q: []const u8, udp: bool, out: []u8) []const u8 {
         if (q.len < 17) return out[0..0];
         var i: usize = 12;
@@ -146,6 +147,10 @@ pub const Stub = struct {
             }
             if (qtype == 1) if (r.a) |a| {
                 n = rr(out, n, cur, 1, &a);
+                an += 1;
+            };
+            if (qtype == 28) if (r.aaaa) |a| {
+                n = rr(out, n, cur, 28, &a);
                 an += 1;
             };
             break;
@@ -224,6 +229,13 @@ fn portOf(fd: Fd) !u16 {
     return std.mem.bigToNative(u16, sa.port);
 }
 
+/// Whether the host has a route to IPv6 address `addr`: a UDP connect to
+/// it works, as getaddrinfo's ranking probe asks. False without IPv6.
+pub fn routes6(addr: [16]u8) bool {
+    if (comptime !supported) return false;
+    return sock.routes6(addr);
+}
+
 /// A TCP service on 127.0.0.1 that writes "hello\n" to each connection.
 pub const Service = struct {
     fd: Fd = none,
@@ -258,9 +270,9 @@ pub const Service = struct {
     }
 };
 
-/// The stub's socket calls on this host, IPv4 only. They differ in the
-/// socket type, and in how sockets are waited for: poll here, select on
-/// Windows.
+/// The stub's socket calls on this host, IPv4 but for routes6. They
+/// differ in the socket type, and in how sockets are waited for: poll
+/// here, select on Windows.
 const sock = if (windows) winsock else posix;
 
 const posix = struct {
@@ -309,6 +321,13 @@ const posix = struct {
     fn close(fd: Fd) void {
         _ = c.close(fd);
     }
+    fn routes6(addr: [16]u8) bool {
+        const fd = c.socket(c.AF.INET6, c.SOCK.DGRAM, 0);
+        if (fd < 0) return false;
+        defer _ = c.close(fd);
+        const sa: c.sockaddr.in6 = .{ .port = std.mem.nativeToBig(u16, 9), .flowinfo = 0, .addr = addr, .scope_id = 0 };
+        return c.connect(fd, @ptrCast(&sa), @sizeOf(c.sockaddr.in6)) == 0;
+    }
 };
 
 const winsock = struct {
@@ -324,6 +343,7 @@ const winsock = struct {
         extern "ws2_32" fn closesocket(s: usize) callconv(.winapi) c_int;
         extern "ws2_32" fn bind(s: usize, sa: *const anyopaque, len: c_int) callconv(.winapi) c_int;
         extern "ws2_32" fn listen(s: usize, backlog: c_int) callconv(.winapi) c_int;
+        extern "ws2_32" fn connect(s: usize, sa: *const anyopaque, len: c_int) callconv(.winapi) c_int;
         extern "ws2_32" fn getsockname(s: usize, sa: *anyopaque, len: *c_int) callconv(.winapi) c_int;
         extern "ws2_32" fn accept(s: usize, sa: ?*anyopaque, len: ?*c_int) callconv(.winapi) usize;
         extern "ws2_32" fn recvfrom(s: usize, buf: [*]u8, len: c_int, flags: c_int, sa: *anyopaque, salen: *c_int) callconv(.winapi) c_int;
@@ -336,11 +356,15 @@ const winsock = struct {
 
     var started: std.atomic.Value(bool) = .init(false);
 
-    fn socket(kind: c_int) ?Fd {
+    fn start() void {
         if (!started.load(.acquire)) {
             var data: [400]u8 align(8) = undefined;
             if (api.WSAStartup(0x0202, &data) == 0) started.store(true, .release);
         }
+    }
+
+    fn socket(kind: c_int) ?Fd {
+        start();
         // Overlapped, as socket() makes them, and not inherited by the h9
         // the case runs, which would hold a connection open past close.
         const fd = api.WSASocketW(ws2.AF.INET, kind, 0, null, 0, 0x01 | 0x80);
@@ -390,5 +414,13 @@ const winsock = struct {
     }
     fn close(fd: Fd) void {
         _ = api.closesocket(fd);
+    }
+    fn routes6(addr: [16]u8) bool {
+        start();
+        const fd = api.WSASocketW(ws2.AF.INET6, SOCK.DGRAM, 0, null, 0, 0x01 | 0x80);
+        if (fd == none) return false;
+        defer close(fd);
+        const sa: ws2.sockaddr.in6 = .{ .port = std.mem.nativeToBig(u16, 9), .flowinfo = 0, .addr = addr, .scope_id = 0 };
+        return api.connect(fd, &sa, @sizeOf(ws2.sockaddr.in6)) == 0;
     }
 };

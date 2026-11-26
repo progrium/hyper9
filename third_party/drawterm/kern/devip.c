@@ -665,6 +665,8 @@ ipwrite(Chan *ch, void *a, long n, vlong offset)
 	case Qdata:
 		x = &proto[PROTO(ch->qid)];
 		c = x->conv[CONV(ch->qid)];
+		if(h9_net_send(c->sfd) < 0)	/* h9: a probe-only connect sends nothing */
+			error(Eperm);
 		r = so_send(c->sfd, a, n, 0);
 		if(r < 0){
 			oserrstr();

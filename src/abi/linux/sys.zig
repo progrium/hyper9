@@ -5554,6 +5554,7 @@ fn sendCall(p: *Process, fd: i32, buf_va: u64, len_in: u64, flags: u32, to_va: u
 
 fn sendBuf(p: *Process, fd: i32, s: *Sock, data: []const u8, flags: u32, to_va: u64, to_len: u64) Err!i64 {
     var to: ?kc.NetAddr = null;
+    var implicit = false;
     if (to_va != 0 and s.stype == SOCK_DGRAM) {
         to = switch (try readSockaddr(p, to_va, to_len)) {
             .addr => |a| a,
@@ -5570,6 +5571,7 @@ fn sendBuf(p: *Process, fd: i32, s: *Sock, data: []const u8, flags: u32, to_va: 
             s.connected = true;
             s.peer = to;
             to = null;
+            implicit = true;
         } else if (to != null and s.connected) {
             if (s.peer) |pa| if (std.meta.eql(pa, to.?)) {
                 to = null;
@@ -5584,6 +5586,13 @@ fn sendBuf(p: *Process, fd: i32, s: *Sock, data: []const u8, flags: u32, to_va: 
         }
         const r = kc.sockSend(fd, data, true, if (to) |*t| t else null);
         if (r == -E.AGAIN and !dontwait) continue;
+        // The connect above may have been allowed only as a route probe
+        // (design/linux-dns.md), which can't send: the socket isn't the
+        // program's connected one, so its next sendto connects again.
+        if (r == -E.ACCES and implicit) {
+            s.connected = false;
+            s.peer = null;
+        }
         if (r == -E.PIPE and flags & MSG_NOSIGNAL == 0) _ = p.host.kill(p.host.ctx, p, p.pid, sig.SIGPIPE, .{});
         return r;
     }

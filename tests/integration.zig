@@ -7968,6 +7968,46 @@ test "a connect by address without a lookup is refused [linux-dns]" {
     try std.testing.expectEqual(0, d.svc.conns.load(.acquire));
 }
 
+// getaddrinfo's route probes (design/linux-dns.md, Updates): svc.test
+// also has an AAAA record for a documentation address (RFC 3849), which
+// no route reaches, so musl must rank the A record first, as it does
+// with the network open. On a host that routes it, the AAAA record
+// would rightly come first, so those cases skip there.
+const v6_doc = [16]u8{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
+const dual_records = [_]dnsstub.Record{.{ .name = "svc.test", .a = .{ 127, 0, 0, 1 }, .aaaa = v6_doc }};
+
+test "an unroutable AAAA record ranks after a reachable A record under a name pattern [linux-dns]" {
+    if (dnsstub.routes6(v6_doc)) return error.SkipZigTest;
+    var d: DnsCase = undefined;
+    try d.init(@src(), &dual_records, &.{});
+    defer d.deinit();
+    try d.expect(&.{ "--net-allow", try d.allow("svc.test"), "sh", "-c", try d.script("nc svc.test {[port]d}") }, "hello\n");
+}
+
+test "a UDP connect to a looked-up address is a probe, which can't send [linux-dns]" {
+    if (dnsstub.routes6(v6_doc)) return error.SkipZigTest;
+    var d: DnsCase = undefined;
+    try d.init(@src(), &dual_records, &.{});
+    defer d.deinit();
+    // A second stub stands for a UDP service on 127.0.0.1, which no
+    // pattern allows UDP to: it must see no datagram.
+    var sink: dnsstub.Stub = .{ .records = &.{} };
+    try sink.start();
+    defer sink.stop();
+    var port_buf: [8]u8 = undefined;
+    const port = try std.fmt.bufPrint(&port_buf, "{d}", .{sink.port});
+    try d.expect(&.{ "--net-allow", try d.allow("svc.test"), "/mnt/term/cwd/net", "udp_probe", "svc.test", port }, "ok udp_probe\n");
+    try std.testing.expectEqual(0, sink.queries());
+}
+
+test "a UDP connect to an address no lookup recorded is refused [linux-dns]" {
+    var d: DnsCase = undefined;
+    try d.init(@src(), &svc_records, &.{});
+    defer d.deinit();
+    // svc.test's lookup records 127.0.0.1, and not 127.0.0.2.
+    try d.expect(&.{ "--net-allow", try d.allow("svc.test"), "sh", "-c", try d.script("nc svc.test {[port]d} && /mnt/term/cwd/net udp_refused 127.0.0.2 {[port]d}") }, "hello\nok udp_refused\n");
+}
+
 test "a CNAME's addresses are recorded under the question's name [linux-dns]" {
     var d: DnsCase = undefined;
     try d.init(@src(), &.{

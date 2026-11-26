@@ -321,6 +321,19 @@ pub const Plan = struct {
         return false;
     }
 
+    /// Whether a UDP connect that `netCheck` refuses is allowed as a
+    /// probe (design/linux-dns.md, Updates): one to an address the
+    /// resolved-name table recorded for a name a pattern covers, with any
+    /// protocol and port. getaddrinfo connects a UDP socket to each
+    /// address it got, which sends nothing, to rank them by whether the
+    /// host has a route; the conversation it makes may not send.
+    pub fn netProbe(p: *const Plan, proto: ?NetProto, addr: *const [16]u8) bool {
+        if (p.net == .disable or p.net_allow.len == 0) return false;
+        if (proto != .udp) return false;
+        const names = p.names orelse return false;
+        return names.recorded(p.net_allow, addr);
+    }
+
     /// Whether devip's cs may resolve `name` for proto and port.
     pub fn netLookup(p: *const Plan, proto: ?NetProto, name: []const u8, port: u16) bool {
         if (p.net == .disable) return false;
@@ -1372,6 +1385,11 @@ pub const NetPattern = struct {
     /// Whether the pattern allows cs to resolve `name`.
     pub fn matchName(pat: NetPattern, proto: NetProto, name: []const u8, port: u16) bool {
         if (!pat.matchProtoPort(proto, port)) return false;
+        return pat.matchHostName(name);
+    }
+
+    /// Whether the pattern's host covers `name`, for any protocol and port.
+    pub fn matchHostName(pat: NetPattern, name: []const u8) bool {
         const n = std.mem.trimEnd(u8, name, ".");
         return switch (pat.host) {
             .any => true,
@@ -1606,6 +1624,22 @@ pub const NameTable = struct {
             if (!std.mem.eql(u8, &e.addr, addr)) continue;
             for (pats) |pat| switch (pat.host) {
                 .name, .suffix => if (pat.matchName(proto, e.name(), port)) return true,
+                else => {},
+            };
+        }
+        return false;
+    }
+
+    /// Whether addr is recorded for a name a name pattern covers, with
+    /// any protocol and port: what `Plan.netProbe` allows a UDP probe to.
+    pub fn recorded(nt: *NameTable, pats: []const NetPattern, addr: *const [16]u8) bool {
+        nt.acquire();
+        defer nt.lock.unlock();
+        const n = @min(nt.count, capacity);
+        for (nt.entries[0..n]) |*e| {
+            if (!std.mem.eql(u8, &e.addr, addr)) continue;
+            for (pats) |pat| switch (pat.host) {
+                .name, .suffix => if (pat.matchHostName(e.name())) return true,
                 else => {},
             };
         }
@@ -2790,6 +2824,29 @@ test "an entry without a protocol or port takes the connect's, which the pattern
     // An entry cs recorded still needs its own protocol and port.
     nt.record(.tcp, &tip("10.0.0.9"), 80, "api.example.com");
     try t.expect(!nt.allows(&pats, .tcp, &tip("10.0.0.9"), 443));
+}
+
+test "a UDP connect to a recorded address is allowed as a probe, and nothing else is [linux-dns]" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    var msg: []const u8 = "";
+    const p = try compile(arena.allocator(), .{ .mounts = &r_mounts, .cwd = "/w", .arch = .arm64 }, .{ .net_allow = &.{"tcp!registry.example.com!443"} }, &msg);
+    const v6 = tip("2001:db8::1");
+    p.names.?.record(null, &tip("10.0.0.7"), null, "registry.example.com");
+    p.names.?.record(null, &v6, null, "registry.example.com");
+    p.names.?.record(.tcp, &tip("10.0.0.6"), 443, "registry.example.com");
+    p.names.?.record(null, &tip("10.0.0.8"), null, "other.example.com");
+    // The probe's port matches no pattern, so netCheck refuses it.
+    try t.expect(!p.netCheck(.connect, .udp, &tip("10.0.0.7"), 9));
+    try t.expect(p.netProbe(.udp, &tip("10.0.0.7")));
+    try t.expect(p.netProbe(.udp, &v6));
+    try t.expect(p.netProbe(.udp, &tip("10.0.0.6")));
+    // TCP, an address recorded for a name no pattern covers, and one
+    // never recorded aren't probes.
+    try t.expect(!p.netProbe(.tcp, &tip("10.0.0.7")));
+    try t.expect(!p.netProbe(null, &tip("10.0.0.7")));
+    try t.expect(!p.netProbe(.udp, &tip("10.0.0.8")));
+    try t.expect(!p.netProbe(.udp, &tip("10.0.0.9")));
 }
 
 test "net: --print shows patterns and caveats" {
