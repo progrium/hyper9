@@ -495,6 +495,10 @@ pub const Ops = struct {
     /// Whether getattr says more than stat for ch, if it doesn't always,
     /// so a stat needn't ask twice where it says no more.
     hasattr: ?*const fn (*Chan) bool = null,
+    /// ch's Dir, from the Attr its getattr just gave, into a buffer of
+    /// n: its length, or null where a stat says more (or differs), so a
+    /// stat with attributes asks the device once.
+    attrstat: ?*const fn (*Chan, *const Attr, [*]u8, c_int) ?c_int = null,
 
     // Readiness (ready.zig, Part 1).
 
@@ -859,6 +863,14 @@ pub fn hasgetattr(ch: *Chan) bool {
     }
     const x = devx(d) orelse return false;
     return x.getattr != null;
+}
+
+/// ch's Dir from a, which ch's getattr gave, if the device makes one
+/// (attrstat), or null for a stat.
+pub fn attrstat(ch: *Chan, a: *const Attr, dir: [*]u8, n: c_int) ?c_int {
+    const o = nativeOps(of(ch)) orelse return null;
+    const f = o.attrstat orelse return null;
+    return f(ch, a, dir, n);
 }
 
 /// ch's attributes, what mask asks for and whatever else the device

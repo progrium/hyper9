@@ -8334,6 +8334,25 @@ test "exec closing a child's last close-on-exec fd of a file releases its flock 
     try netCase(&le, &.{ "/mnt/term/cwd/files", "flock_exec" }, "ok flock_exec\n");
 }
 
+/// Runs the files fixture's case `name` in $DIR on a .L mount of the
+/// in-memory server `d` (started by the caller, for its counts), on one
+/// engine.
+fn dotlFiles(le: *const LinuxEnv, d: *DotlServer, name: []const u8) !void {
+    var allow_buf: [64]u8 = undefined;
+    const allow = try std.fmt.bufPrint(&allow_buf, "tcp!127.0.0.1!{d}", .{d.port()});
+    var cmd_buf: [512]u8 = undefined;
+    const cmd = try std.fmt.bufPrint(&cmd_buf, "mkdir -p /n/l; dotlfs {s} /n/l || exit mount; '#L/bin/busybox' env 'DIR=/9/n/l/usr' /mnt/term/cwd/files {s}", .{ d.dial(), name });
+    var one = le.*;
+    var it = std.mem.tokenizeScalar(u8, le.engines, ',');
+    one.engines = it.next() orelse "auto";
+    const r = try runLinux(&one, true, &.{ "--net-allow", allow, "--rc", cmd });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    var want_buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&want_buf, "ok {s}\n", .{name}), r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
 test "fsync reaches a .L server as Tfsync [file-interface]" {
     // fsync and fdatasync on a .L mount are the device's fsync, a Tfsync
     // with datasync, not a null wstat the translator turns into one.
@@ -8343,21 +8362,23 @@ test "fsync reaches a .L server as Tfsync [file-interface]" {
     var d: DotlServer = undefined;
     try d.startShared(std.testing.io, dotlTree, "9P2000.L");
     defer d.finish(std.testing.io);
-    var allow_buf: [64]u8 = undefined;
-    const allow = try std.fmt.bufPrint(&allow_buf, "tcp!127.0.0.1!{d}", .{d.port()});
-    var cmd_buf: [512]u8 = undefined;
-    const cmd = try std.fmt.bufPrint(&cmd_buf, "mkdir -p /n/l; dotlfs {s} /n/l || exit mount; '#L/bin/busybox' env 'DIR=/9/n/l/usr' /mnt/term/cwd/files fsync_file", .{d.dial()});
-    var one = le;
-    var it = std.mem.tokenizeScalar(u8, le.engines, ',');
-    one.engines = it.next() orelse "auto";
-    const r = try runLinux(&one, true, &.{ "--net-allow", allow, "--rc", cmd });
-    defer r.deinit();
-    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
-    try std.testing.expectEqualStrings("ok fsync_file\n", r.out);
-    try std.testing.expectEqual(0, r.code);
+    try dotlFiles(&le, &d, "fsync_file");
     const s = d.lock();
     defer d.unlock();
     try std.testing.expectEqual([2]u32{ 1, 1 }, s.fsyncs);
+}
+
+test "chmod, truncate, and utimensat on a .L mount are its Tsetattr, with nanoseconds [file-interface]" {
+    // The Linux ABI calls the device's setattr, so a Linux process on a
+    // .L mount translates once: a time keeps its nanoseconds, which the
+    // wstat it used to send can't carry.
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    if (le.nine == null) return error.SkipZigTest;
+    var d: DotlServer = undefined;
+    try d.startShared(std.testing.io, dotlTree, "9P2000.L");
+    defer d.finish(std.testing.io);
+    try dotlFiles(&le, &d, "setattr_ns");
 }
 
 test "a blocked fcntl lock wakes without polling [file-interface]" {

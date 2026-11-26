@@ -27,6 +27,7 @@ pub const Node = struct {
     uid: u32 = 1000,
     gid: u32 = 1000,
     mtime: u64 = 0,
+    mtime_ns: u64 = 0,
     data: std.ArrayList(u8) = .empty,
     target: []u8 = &.{},
     parent: ?*Node = null,
@@ -60,7 +61,7 @@ pub const Node = struct {
             .link => attr.S_IFLNK,
             .fifo => attr.S_IFIFO,
         };
-        return .{ .qid = n.qid(), .mode = fmt | n.mode, .uid = n.uid, .gid = n.gid, .nlink = n.nlink, .size = if (n.kind == .link) n.target.len else n.data.items.len, .mtime_sec = n.mtime };
+        return .{ .qid = n.qid(), .mode = fmt | n.mode, .uid = n.uid, .gid = n.gid, .nlink = n.nlink, .size = if (n.kind == .link) n.target.len else n.data.items.len, .mtime_sec = n.mtime, .mtime_nsec = n.mtime_ns };
     }
 
     pub fn child(n: *const Node, name: []const u8) ?*Node {
@@ -568,7 +569,10 @@ pub const Server = struct {
                     const len: usize = @intCast(sa.size);
                     if (f.node.inode().data.items.len < len) try f.node.inode().data.appendNTimes(a, 0, len - f.node.inode().data.items.len) else f.node.inode().data.items.len = len;
                 }
-                if (sa.valid & L.SETATTR_MTIME_SET != 0) f.node.mtime = sa.mtime_sec;
+                if (sa.valid & L.SETATTR_MTIME_SET != 0) {
+                    f.node.mtime = sa.mtime_sec;
+                    f.node.mtime_ns = sa.mtime_nsec;
+                }
                 try s.send(tag, l.Rsetattr{});
             },
             .Tfsync => |fs| {

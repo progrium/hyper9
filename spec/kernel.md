@@ -174,7 +174,7 @@ An `Attr` has a mask of what it holds (`Amode`, `Anlink`, `Auid`, `Agid`, `Ardev
 | `#U`, POSIX (`devfs-posix.c`) | `readlink`, `symlink`, `link` (`linkat`, the new name checked like a create), `getattr` (the host's `stat`, with nanoseconds and the real link count), and `rename` (`rename(2)`) |
 | `#U`, Windows (`devfs-win32.c`) | `readlink`, `rename`, and `symlink`, which is "permission denied" there; `link` is the default copy |
 | `#O` (`dev/overlay.zig`) | `readlink` and `symlink` (its own `Nlink` nodes, or the tree a name is in), `getattr` (its `Dir`, with what the lower tree's `getattr` adds), and `rename` (`h9_overlay_move`); `link` is the default copy |
-| devmnt | all six, as 9P2000.L requests, on a mount whose server is a `#ℓ` conversation translating to 9P2000.L (see [spec/ninep.md](ninep.md)); the defaults elsewhere |
+| devmnt | all six, as 9P2000.L requests, on a mount whose server is a `#ℓ` conversation translating to 9P2000.L (see [spec/ninep.md](ninep.md)); the defaults elsewhere. Its `attrstat` builds a stat's `Dir` from the `Attr` its `getattr` brought, so a Linux `stat` there (`h9_getattr`, which wants both) is one `Tgetattr`, a Linux process on a .L root translating once |
 
 #### Readiness ([file-interface](../design/file-interface.md), Part 1)
 

@@ -1168,6 +1168,35 @@ fn mnthasattr(ch: *Chan) bool {
     return wideof(ch) != null;
 }
 
+/// A wide mount's Dir, from its Tgetattr's Attr: what the translator's
+/// Tstat would have made of a Tgetattr of its own (src/dotl/attr.zig),
+/// with the machine's user as the owner, so a Linux stat is one request.
+fn mntattrstat(ch: *Chan, a: *const Attr, dp: [*]u8, n: c_int) ?c_int {
+    if (wideof(ch) == null or a.valid & c.Abasic != c.Abasic)
+        return null;
+    var d: c.Dir = undefined;
+    dev.nulldir(&d);
+    d.type = 0;
+    d.dev = 0;
+    d.qid = a.qid;
+    // As dirFromStat derives them: a Plan 9 client reads QTDIR as DMDIR.
+    d.qid.type = if (a.mode & c.DMDIR != 0) c.QTDIR else if (a.mode & DMSYMLINK != 0) QTSYMLINK else 0;
+    d.mode = a.mode;
+    d.atime = @intCast(std.math.clamp(a.atime, 0, std.math.maxInt(u32)));
+    d.mtime = @intCast(std.math.clamp(a.mtime, 0, std.math.maxInt(u32)));
+    d.length = if (a.mode & (c.DMDIR | DMFIFO) != 0) 0 else @bitCast(a.size);
+    d.name = @constCast("");
+    const user: [*c]u8 = @ptrCast(&up().user);
+    d.uid = user;
+    d.gid = user;
+    d.muid = user;
+    const k = c.convD2M(&d, dp, @intCast(n));
+    if (k <= BIT16SZ)
+        return null;
+    mntdirfix(dp, ch);
+    return @intCast(k);
+}
+
 // Linux's file types, for a Tgetattr's mode.
 const S_IFMT = 0o170000;
 const S_IFDIR = 0o040000;
@@ -1722,6 +1751,7 @@ pub const Device = dev.Native('M', "mnt", .{
     .setattr = mntsetattr,
     .rename = mntrename,
     .hasattr = mnthasattr,
+    .attrstat = mntattrstat,
     .fsync = mntfsync,
     .ready = mntready,
     .watch = mntwatch,

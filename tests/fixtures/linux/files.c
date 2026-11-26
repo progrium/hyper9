@@ -359,6 +359,27 @@ static void fsync_file(void) {
 	printf("ok fsync_file\n");
 }
 
+/* chmod, truncate, and utimensat on a file in $DIR, which the
+ * [file-interface] case puts on a .L mount: each is the device's setattr,
+ * so the server keeps a time's nanoseconds, which a wstat can't carry. */
+static void setattr_ns(void) {
+	int fd = fresh("setattrf");
+	CHECK("setattr_ns", fd >= 0 && write(fd, "hello", 5) == 5);
+	struct timespec ts[2] = {{.tv_nsec = UTIME_OMIT}, {.tv_sec = 1234567890, .tv_nsec = 123456789}};
+	CHECK("setattr_ns", utimensat(AT_FDCWD, path, ts, 0) == 0);
+	CHECK("setattr_ns", chmod(path, 0600) == 0 && truncate(path, 3) == 0);
+	struct stat st;
+	CHECK("setattr_ns", stat(path, &st) == 0);
+	CHECK("setattr_ns", (st.st_mode & 0777) == 0600 && st.st_size == 3);
+	CHECK("setattr_ns", st.st_mtim.tv_sec == 1234567890 && st.st_mtim.tv_nsec == 123456789);
+	ts[1].tv_nsec = 5;
+	CHECK("setattr_ns", futimens(fd, ts) == 0 && ftruncate(fd, 1) == 0 && fchmod(fd, 0640) == 0);
+	CHECK("setattr_ns", fstat(fd, &st) == 0);
+	CHECK("setattr_ns", (st.st_mode & 0777) == 0640 && st.st_size == 1 && st.st_mtim.tv_nsec == 5);
+	close(fd);
+	printf("ok setattr_ns\n");
+}
+
 static void fsync_rusage(void) {
 	int fd = fresh("sync");
 	CHECK("fsync_rusage", fd >= 0 && write(fd, "x", 1) == 1 && fsync(fd) == 0 && fdatasync(fd) == 0);
@@ -1125,6 +1146,7 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "prctl_name")) prctl_name();
 		if (all || !strcmp(n, "fsync_rusage")) fsync_rusage();
 		if (!strcmp(n, "fsync_file")) fsync_file();
+		if (!strcmp(n, "setattr_ns")) setattr_ns();
 		if (all || !strcmp(n, "dir_sync")) dir_sync();
 		if (all || !strcmp(n, "sync_open")) sync_open();
 		if (all || !strcmp(n, "read_cache")) read_cache();

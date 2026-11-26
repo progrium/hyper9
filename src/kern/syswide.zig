@@ -169,11 +169,15 @@ pub fn fgetattr(fd: c_int, mask: u64, a: *Attr, dir: [*]u8, ndir: c_int) Error!c
 }
 
 fn chanattr(ch: *Chan, mask: u64, a: *Attr, dir: [*]u8, ndir: c_int) Error!c_int {
-    const n = try sysfile.chanstat(ch, dir, ndir);
     if (dev.hasgetattr(ch)) {
         try dev.getattr(ch, mask, a);
-        return n;
+        // A .L mount's Dir is its getattr's, so a Linux stat there is
+        // one Tgetattr, not a Tstat the translator makes one of too.
+        if (dev.attrstat(ch, a, dir, ndir)) |n|
+            return sysfile.channame(ch, dir, n, ndir);
+        return sysfile.chanstat(ch, dir, ndir);
     }
+    const n = try sysfile.chanstat(ch, dir, ndir);
     // The default, from the Dir already read.
     var d: c.Dir = undefined;
     const strs: [*]u8 = @ptrCast(c.smalloc(@intCast(n)));

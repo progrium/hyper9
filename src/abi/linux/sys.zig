@@ -1896,8 +1896,7 @@ fn openAt(p: *Process, dirfd: i32, path_va: u64, flags: u32, mode: u32) Err!i64 
                 return -E.TXTBSY;
             }
             if (trunc) {
-                var w: [64]u8 = undefined;
-                if (fileKey(fd)) |k| if (kern.fwstat(fd, (Wstat{ .length = 0 }).encode(&w))) |_| {
+                if (fileKey(fd)) |k| if (kern.fsetattr(fd, kern.Attr.size_bit, &.{ .size = 0 })) |_| {
                     _ = file_writes.fetchAdd(1, .monotonic);
                     shmfile.truncated(k, 0);
                     pagecache.changed(k);
@@ -3164,8 +3163,7 @@ fn chmodFd(p: *Process, fd: i32, mode: u32) Err!i64 {
     var b: [1024]u8 = undefined;
     const n = kern.fstat(@intCast(fd), &b) catch return kerr();
     const d, _ = attr.Dir.parse(b[0..n]) orelse return -E.IO;
-    var w: [64]u8 = undefined;
-    _ = kern.fwstat(@intCast(fd), (Wstat{ .mode = (d.mode & ~@as(u32, 0o777)) | (mode & 0o777) }).encode(&w)) catch return kerr();
+    kern.fsetattr(@intCast(fd), kern.Attr.mode_bit, &.{ .mode = (d.mode & ~@as(u32, 0o777)) | (mode & 0o777) }) catch return kerr();
     return 0;
 }
 
@@ -3175,50 +3173,55 @@ fn chmodAt(p: *Process, dirfd: i32, path_va: u64, mode: u32) Err!i64 {
     var b: [1024]u8 = undefined;
     const n = at(dirfd, path, usize, kern.stat, .{ path, &b }) catch return kerr();
     const d, _ = attr.Dir.parse(b[0..n]) orelse return -E.IO;
-    var w: [64]u8 = undefined;
-    _ = at(dirfd, path, usize, kern.wstat, .{ path, (Wstat{ .mode = (d.mode & ~@as(u32, 0o777)) | (mode & 0o777) }).encode(&w) }) catch return kerr();
+    const a: kern.Attr = .{ .mode = (d.mode & ~@as(u32, 0o777)) | (mode & 0o777) };
+    at(dirfd, path, void, kern.setattr, .{ path, kern.Attr.mode_bit, &a }) catch return kerr();
     return 0;
 }
 
 fn utimens(p: *Process, dirfd: i32, path_va: u64, times: u64) Err!i64 {
     const UTIME_NOW = (1 << 30) - 1;
     const UTIME_OMIT = (1 << 30) - 2;
-    const now: u32 = @intCast(@divTrunc(kern.wallNs(), std.time.ns_per_s));
-    var ws: Wstat = .{ .atime = now, .mtime = now };
+    // The device's setattr: a .L mount takes the nanoseconds, and the
+    // default wstat whole seconds.
+    var a: kern.Attr = .{ .atimens = kern.now_ns, .mtimens = kern.now_ns };
+    var mask: u64 = kern.Attr.atime_bit | kern.Attr.mtime_bit;
     if (times != 0) {
         var b: [32]u8 = undefined;
         // Two timespecs, 32-bit for i386's utimensat (not _time64).
         const t32 = p.is32() and p.time32;
         try p.readMem(times, if (t32) b[0..16] else &b);
-        const fields = [2]*?u32{ &ws.atime, &ws.mtime };
+        const fields = [2]struct { *i64, *i64, u64 }{ .{ &a.atime, &a.atimens, kern.Attr.atime_bit }, .{ &a.mtime, &a.mtimens, kern.Attr.mtime_bit } };
         for (fields, 0..) |f, i| {
             const sec: i64 = if (t32) std.mem.readInt(i32, b[i * 8 ..][0..4], .little) else std.mem.readInt(i64, b[i * 16 ..][0..8], .little);
             const nsec: i64 = if (t32) std.mem.readInt(i32, b[i * 8 + 4 ..][0..4], .little) else std.mem.readInt(i64, b[i * 16 + 8 ..][0..8], .little);
-            f.* = if (nsec == UTIME_OMIT) null else if (nsec == UTIME_NOW) now else @intCast(std.math.clamp(sec, 0, std.math.maxInt(u32) - 1));
+            if (nsec == UTIME_OMIT) {
+                mask &= ~f[2];
+            } else if (nsec != UTIME_NOW) {
+                f[0].* = std.math.clamp(sec, 0, std.math.maxInt(u32) - 1);
+                f[1].* = std.math.clamp(nsec, 0, std.time.ns_per_s - 1);
+            }
         }
     }
-    var w: [64]u8 = undefined;
-    const msg = ws.encode(&w);
+    if (mask == 0) return 0;
     if (path_va == 0) {
         if (dirfd < 0) return -E.BADF;
-        _ = kern.fwstat(@intCast(dirfd), msg) catch return kerr();
+        kern.fsetattr(@intCast(dirfd), mask, &a) catch return kerr();
         return 0;
     }
     const path = try pathArg(p, path_va, &p.name_buf);
     if (path.len == 0) {
         if (dirfd < 0) return -E.NOENT;
-        _ = kern.fwstat(@intCast(dirfd), msg) catch return kerr();
+        kern.fsetattr(@intCast(dirfd), mask, &a) catch return kerr();
         return 0;
     }
-    _ = at(dirfd, path, usize, kern.wstat, .{ path, msg }) catch return kerr();
+    at(dirfd, path, void, kern.setattr, .{ path, mask, &a }) catch return kerr();
     return 0;
 }
 
 fn truncateFd(p: *Process, fd: i32, len: u64) Err!i64 {
     _ = p;
     if (fd < 0) return -E.BADF;
-    var w: [64]u8 = undefined;
-    _ = kern.fwstat(@intCast(fd), (Wstat{ .length = len }).encode(&w)) catch return kerr();
+    kern.fsetattr(@intCast(fd), kern.Attr.size_bit, &.{ .size = len }) catch return kerr();
     _ = file_writes.fetchAdd(1, .monotonic);
     if (fileKey(fd)) |k| {
         shmfile.truncated(k, len);
@@ -3254,8 +3257,7 @@ fn truncatePath(p: *Process, path_va: u64, len: u64) Err!i64 {
         defer kern.close(fd) catch {};
         if (busy.has(fd)) return -E.TXTBSY;
     } else |_| {};
-    var w: [64]u8 = undefined;
-    _ = kern.wstat(path, (Wstat{ .length = len }).encode(&w)) catch return kerr();
+    kern.setattr(path, kern.Attr.size_bit, &.{ .size = len }) catch return kerr();
     _ = file_writes.fetchAdd(1, .monotonic);
     return 0;
 }
@@ -6862,6 +6864,8 @@ pub const EpEntry = struct {
     data: u64,
     /// The wake generation of the last report, for EPOLLET.
     last_gen: u64 = std.math.maxInt(u64),
+    /// The events that held when it was last looked at, for EPOLLET.
+    last_rev: u32 = 0,
     /// Reported once under EPOLLONESHOT; rearmed by EPOLL_CTL_MOD.
     disarmed: bool = false,
 };
@@ -6982,14 +6986,21 @@ fn epollWait(p: *Process, epfd: i32, events_va: u64, maxevents: i32, timeout_ms:
             defer p.g.lock.unlock();
             for (snap.items, 0..) |s, k| {
                 const rev: u32 = @as(u16, @bitCast(pf.items[k].revents));
-                if (rev == 0 or s.disarmed) continue;
+                if (s.disarmed or (rev == 0 and s.events & EPOLLET == 0)) continue;
                 // The live entry, unless another thread removed or changed it.
                 const e = for (ep.entries.items) |*e| {
                     if (e.fd == s.fd and e.events == s.events and e.data == s.data) break e;
                 } else continue;
                 if (e.disarmed) continue;
                 if (e.events & EPOLLET != 0) {
-                    if (e.last_gen == gen) continue;
+                    // An edge: a wake since the last report, or an event
+                    // that didn't hold when this last looked (a remote
+                    // conversation's server changes it with no wake here
+                    // while nothing watches it).
+                    if (rev != 0 and out >= @as(usize, @intCast(maxevents))) break;
+                    const fresh = rev & ~e.last_rev;
+                    e.last_rev = rev;
+                    if (rev == 0 or (e.last_gen == gen and fresh == 0)) continue;
                     e.last_gen = gen;
                 }
                 if (out >= @as(usize, @intCast(maxevents))) break;
