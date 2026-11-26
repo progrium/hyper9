@@ -22,14 +22,22 @@ h9_net_proto(char *name)
 	return -1;
 }
 
-/* The host port of sfd, bound to addr (the resolver's loopback) if it has none. */
+/*
+ * The host port of sfd, bound to addr (the resolver's loopback) if it has
+ * none. A socket that isn't bound has port 0 on POSIX hosts, but on
+ * Windows getsockname fails on it (WSAEINVAL), so a failure is port 0 too.
+ */
 static int
 dnslport(int sfd, uchar *addr)
 {
 	uchar laddr[IPaddrlen];
 	ushort lport;
 
-	so_getsockname(sfd, laddr, &lport);
+	lport = 0;
+	if(!waserror()){
+		so_getsockname(sfd, laddr, &lport);
+		poperror();
+	}
 	if(lport == 0){
 		so_bind(sfd, 0, 0, addr);
 		so_getsockname(sfd, laddr, &lport);
