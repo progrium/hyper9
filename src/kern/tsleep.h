@@ -1,12 +1,10 @@
 /*
- * tsleep (tsleep.c) and the host side of its timer kproc: a lock, a
+ * tsleep (tsleep.zig) and the host side of its timer kproc: a lock, a
  * condition variable and the monotonic clock (glue.c on POSIX hosts,
  * glue-win32.c on Windows).
  */
 
 void	tsleep(Rendez*, int (*)(void*), void*, ulong);
-int	h9_tsleepintr(Rendez*, int (*)(void*), void*, ulong);	/* -1 if interrupted, in place of raising */
-int	h9_sleepintr(Rendez*, int (*)(void*), void*);		/* sleep's, from src/kern/sync.zig */
 void	h9_tsleepinit(void);
 
 void	h9_tinit(void);

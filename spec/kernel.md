@@ -44,7 +44,7 @@ Every process's memory, 9front's and Linux's, is an `Mm` (`src/kern/mm.zig`, [me
 
 A 9front process's address space (`segment.Space`, `src/segment.zig`) is two Mms in one engine address space: one holding text, data, bss, the heap, and segattach's segments, which `RFMEM` siblings share and which is mapped into each of their address spaces, and the process's own stack. `rfork` without `RFMEM` forks both, so what `RFMEM` siblings share is still copy-on-write for a plain fork child, as on 9front. Text and the initialized part of data are private mappings of the a.out, filled from a copy of its bytes on first touch; bss, the heap, and the stack (its whole 16 MiB) are anonymous; and a `shared` segment is a shared mapping with its own pages, so fork shares them even in a chunk that private mappings also use. Each mapping carries its segment's class and slot as a label, which `/proc/n/segment`, `segbrk`, and `segdetach` go by. `segment.zig` keeps only what's Plan 9's own: segment names and classes, segattach's placement, and the `seg*` calls and `/proc/n/segment` as calls on the Mms.
 
-The boot also starts one kernel thread of its own, the timer kproc (`src/kern/tsleep.c`), which idles on a host condition variable until the earliest `tsleep` deadline.
+The boot also starts one kernel thread of its own, the timer kproc (`src/kern/tsleep.zig`), which idles on a host condition variable until the earliest `tsleep` deadline.
 
 ### Several machines per host process
 
@@ -152,11 +152,11 @@ drawterm's `devpipe.c` and `devroot.c` are `src/kern/dev/pipe.zig` and `src/kern
 
 The rest of the kernel is C, so each ported file exports drawterm's functions under their C names (`qread`, `qlock`, `ksleep`, which `lib.h` renames `sleep` to, and the rest) with their C semantics: an exported function that gets an error from the Zig raises it with `nexterror()`, from its own frame, which has nothing to undo. A queue's kick and bypass functions are called from the Zig, so they must not raise; nothing in h9 sets them. Every place a process waits in the Zig is `park` in `sync.zig` (posix.c's `procsleep`), and every place one is let go is `unpark`. `zig build kern-test` runs their cases, on the native namespace kernel.
 
-#### `tsleep` (`src/kern/tsleep.c`)
+#### `tsleep` (`src/kern/tsleep.zig`)
 
 drawterm's `sleep` has no timeout. `tsleep` has 9front's contract and uses only the kernel's public `sleep` and `wakeup`: it puts a timer on its own stack into a list sorted by host monotonic time, and the timer kproc wakes it at the deadline.
 
-The list is guarded by a host lock (`glue.c`, `glue-win32.c`) that the kproc holds while it calls `wakeup`, and `tsleep` always takes its timer out under that lock before returning, so no Proc fields are needed. `h9_tsleepintr` is the same sleep for the Zig, returning -1 where `tsleep` raises; it sleeps through `h9_sleepintr`, `sync.zig`'s sleep for C callers that don't raise.
+The list is guarded by a host lock (`glue.c`, `glue-win32.c`) that the kproc holds while it calls `wakeup`, and `tsleep` always takes its timer out under that lock before returning, so no Proc fields are needed. It's Zig, ported from h9's C under [kernel-port](../design/kernel-port.md): `tsleep.zig`'s `tsleep` returns `error.Interrupted` when a note arrives, and the `tsleep` it exports for C raises it.
 
 #### Semaphores and `rendezvous` (`src/kern/sema.c`)
 
