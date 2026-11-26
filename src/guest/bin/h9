@@ -112,15 +112,18 @@ for(a in $prog){
 {
 	n=`{read <[0=3]}
 	d=/dev/machine/$n
+	# Before the exec, so a note sent while it starts is passed on.
+	fn sigint { test -e $d/note && echo interrupt >$d/note }
+	fn sighup { test -e $d/note && echo hangup >$d/note }
 	for(l in $ctl) echo $l >$d/ctl || exit ctl
 	if(~ $print yes){
 		cat $d/plan || exit plan
 		exit ''
 	}
 	echo stderr >$d/ctl
-	echo exec $x >$d/ctl || exit exec
-	fn sigint { test -e $d/note && echo interrupt >$d/note }
-	fn sighup { test -e $d/note && echo hangup >$d/note }
+	# In a note group of its own, so an interrupt doesn't stop the exec
+	# halfway; it reaches the child once it runs.
+	@{rfork s; echo exec $x >$d/ctl} || exit exec
 	cat <[0=4] >$d/data >[2]/dev/null &
 	incat=$apid
 	cat $d/stderr >[1=2] &
