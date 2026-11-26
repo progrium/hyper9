@@ -1540,8 +1540,11 @@ pub const NameTable = struct {
     pub const max_name = 255;
 
     pub const Entry = struct {
-        proto: NetProto,
-        port: u16,
+        /// Null in an entry the machine's resolver recorded from a DNS
+        /// answer, which has neither (design/linux-dns.md): it matches
+        /// any connect's, which the patterns then decide.
+        proto: ?NetProto,
+        port: ?u16,
         addr: [16]u8,
         name_len: u8,
         name_buf: [max_name]u8,
@@ -1555,7 +1558,7 @@ pub const NameTable = struct {
         while (!nt.lock.tryLock()) std.atomic.spinLoopHint();
     }
 
-    pub fn record(nt: *NameTable, proto: NetProto, addr: *const [16]u8, port: u16, name: []const u8) void {
+    pub fn record(nt: *NameTable, proto: ?NetProto, addr: *const [16]u8, port: ?u16, name: []const u8) void {
         if (name.len > max_name) return;
         nt.acquire();
         defer nt.lock.unlock();
@@ -1566,13 +1569,16 @@ pub const NameTable = struct {
     }
 
     /// Whether a name that resolved to addr for proto and port matches a
-    /// name pattern.
+    /// name pattern. An entry without a protocol or port takes the
+    /// connect's.
     pub fn allows(nt: *NameTable, pats: []const NetPattern, proto: NetProto, addr: *const [16]u8, port: u16) bool {
         nt.acquire();
         defer nt.lock.unlock();
         const n = @min(nt.count, capacity);
         for (nt.entries[0..n]) |*e| {
-            if (e.proto != proto or e.port != port or !std.mem.eql(u8, &e.addr, addr)) continue;
+            if (e.proto) |ep| if (ep != proto) continue;
+            if (e.port) |ept| if (ept != port) continue;
+            if (!std.mem.eql(u8, &e.addr, addr)) continue;
             for (pats) |pat| switch (pat.host) {
                 .name, .suffix => if (pat.matchName(proto, e.name(), port)) return true,
                 else => {},
@@ -1855,6 +1861,21 @@ test "net: the resolved-name table keeps the most recent entries" {
     // A name that no longer matches a pattern allows nothing.
     nt.record(.tcp, &tip("10.2.0.1"), 443, "other.org");
     try t.expect(!nt.allows(&pats, .tcp, &tip("10.2.0.1"), 443));
+}
+
+test "an entry without a protocol or port takes the connect's, which the patterns decide [linux-dns]" {
+    const nt = try t.allocator.create(NameTable);
+    defer t.allocator.destroy(nt);
+    nt.* = .{};
+    const pats = [_]NetPattern{try tpat("tcp!api.example.com!443")};
+    nt.record(null, &tip("10.0.0.7"), null, "api.example.com");
+    try t.expect(nt.allows(&pats, .tcp, &tip("10.0.0.7"), 443));
+    try t.expect(!nt.allows(&pats, .tcp, &tip("10.0.0.7"), 80));
+    try t.expect(!nt.allows(&pats, .udp, &tip("10.0.0.7"), 443));
+    try t.expect(!nt.allows(&pats, .tcp, &tip("10.0.0.8"), 443));
+    // An entry cs recorded still needs its own protocol and port.
+    nt.record(.tcp, &tip("10.0.0.9"), 80, "api.example.com");
+    try t.expect(!nt.allows(&pats, .tcp, &tip("10.0.0.9"), 443));
 }
 
 test "net: --print shows patterns and caveats" {
