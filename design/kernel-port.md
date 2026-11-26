@@ -100,7 +100,7 @@ No new reach for a guest. Real address checks close a class of bug where a guest
 - [x] `git grep -l waserror src/` finds nothing, and the build compiles none of `chan.c`, `pgrp.c`, `dev.c`, `devmnt.c`, `qio.c`, `devpipe.c`, `devroot.c`, or `sysfile.c` from `third_party/drawterm/kern/`.
 - [ ] `test "two machines don't share /srv [kernel-port]"` and `test "two machines don't share devcmd conversations [kernel-port]"` pass with two machines in one process.
 - [x] `test "a bad guest pointer is a fault, not a host crash [kernel-port]"` passes for read, write, and stat buffers.
-- [ ] `zig build bench` shows system call round trips within 5% of before the port.
+- [x] `zig build bench` shows system call round trips within 5% of before the port.
 - [x] [spec/kernel.md](../spec/kernel.md) describes the kernel as built, with no seam rules.
 
 ## Implementation
@@ -240,3 +240,11 @@ No new reach for a guest. Real address checks close a class of bug where a guest
 - **`win32.c`** (13): socket error strings as POSIX names them.
 
 **2026-11-26, the bench.** `zig build bench -- syscall` runs only the system call rows. Here (an x86-64 Linux host with no KVM, so the arm64 rows on hcpu), one-byte `pwrite` round trips take 0.70 to 0.80 µs on dev and on this branch alike, and 0.54 to 0.59 µs on main, about 30% less, so that Done item stays open. The difference isn't the kernel's: a profile of the round trip shows [memory-model](memory-model.md)'s `Mm.pin` allocating, and `src/abi/plan9/syscall.zig`'s `io` freeing, a record per call (about 16 million of each in the run), which main, without memory-model, doesn't do, while the kernel's own path (`fdtochan`, the switch, and #y's write) is a few percent of it. The amd64 row on sud doesn't finish on this host, on main either.
+
+**2026-11-26, round trips back to main's.** The `syscall-perf` branch takes the per-call costs out that came in beside the port, and `zig build bench -- syscall --engine hcpu --arch arm64` now shows one-byte `pwrite` round trips within about 1% of main's, so that Done item is checked. Medians of seven interleaved runs, each the fastest of three, on this host: main 0.546 and 0.527 µs (T0 and T1), dev before 0.865 and 0.821, dev with [scheduler](scheduler.md) merged 0.879 and 0.745, and the branch 0.552 and 0.533. `nsec` is 229 and 235 ns on main, 333 and 338 on dev, and 265 and 269 on the branch. What it changed:
+- **[memory-model](memory-model.md)'s pin.** `Mm.Pinned` holds its first four page references in place, so a pin allocates nothing, and a buffer in one present chunk, in one mapping that allows the access, is pinned straight from the chunk under one hold of the `Mm`'s lock (`Mm.pinOneChunk`), where it took the lock four times and filled, owned, and translated what was already there. Unpinning drops a reference that isn't the last without the lock.
+- **Arguments.** A 9front call's argument slots are copied at entry with one translate, as 9front copies its `Sargs`, rather than read with one each; `pread` and `pwrite` read each argument once.
+- **The device switch** finds a native device's functions with one table lookup on its character, not a search of the list.
+- **The executors** no longer read the clock as they enter and leave guest code, three reads per call: the monitor times slices and blocked calls by its own clock.
+
+The kernel's own path is still about 150 instructions a call more than drawterm's C (`fdtochan`, `cclose`, and the error-contract adapters), which the other changes more than make up. `nsec`, which does no I/O, stays about 15% over main's: what's left is the executors' own work per run (finding the executor and task, the run and kick locks, and the registers through the lease), [scheduler](scheduler.md)'s to weigh. The amd64 rows still don't finish here, on sud or on hcpu, on main too.
