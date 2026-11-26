@@ -22,6 +22,7 @@ Every proposal at the top of [design/](README.md), in the order they were writte
 | [file-watch](file-watch.md) | [#316](../../../issues/316) | proposed |  | Watching files for changes, on the host and in the guest |
 | [linux-dns](linux-dns.md) |  | draft |  | Name patterns for a Linux guest's DNS |
 | [libh9](libh9.md) |  | draft | in progress on claude/project-thread-prxykq | libh9, machines behind a C ABI |
+| [linux-window-tty](linux-window-tty.md) |  | draft |  | Linux terminals in 9front windows |
 
 ```mermaid
 flowchart LR
@@ -45,6 +46,7 @@ flowchart LR
   p_file_watch["file-watch<br/>proposed"]:::draft
   p_linux_dns["linux-dns<br/>draft"]:::draft
   p_libh9["libh9<br/>draft"]:::draft
+  p_linux_window_tty["linux-window-tty<br/>draft"]:::draft
   p_host_handles --> p_host_sandbox
   p_kernel_port --> p_file_interface
   p_kernel_port --> p_host_handles
