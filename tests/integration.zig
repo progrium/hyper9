@@ -7241,6 +7241,11 @@ fn runLinux(le: *const LinuxEnv, with_nine: bool, args: []const []const u8) !Res
 
 /// runLinux, with the environment `environ` if it isn't null.
 fn runLinuxEnv(le: *const LinuxEnv, with_nine: bool, args: []const []const u8, environ: ?*const std.process.Environ.Map) !Result {
+    return runLinuxFor(le, with_nine, args, environ, 120_000);
+}
+
+/// runLinuxEnv, with each engine's run given `timeout_ms`.
+fn runLinuxFor(le: *const LinuxEnv, with_nine: bool, args: []const []const u8, environ: ?*const std.process.Environ.Map, timeout_ms: u32) !Result {
     if (with_nine and le.nine == null) return error.SkipZigTest;
     var first: ?Result = null;
     errdefer if (first) |f| f.deinit();
@@ -7252,7 +7257,7 @@ fn runLinuxEnv(le: *const LinuxEnv, with_nine: bool, args: []const []const u8, e
         if (with_nine) try argv.appendSlice(gpa, &.{ "--dir", le.nine.? });
         try argv.appendSlice(gpa, &.{ "--cwd", le.fixtures });
         try argv.appendSlice(gpa, args);
-        const p = try runProcessWith(argv.items, null, environ, 120_000);
+        const p = try runProcessWith(argv.items, null, environ, timeout_ms);
         const code = switch (p.term) {
             .exited => |c| c,
             else => {
@@ -9287,7 +9292,13 @@ test "a store or read(2) racing another thread's mprotect in the same chunk neit
 test "threads faulting pages in while others munmap don't fault twice on a mapped page [native-backend]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
-    try threadCase(&le, "fault_race");
+    // Its 20,000 mmaps and munmaps take 90 to 100 s alone on hcpu's
+    // arm64 and on WHP, and longer beside the other shards: five minutes.
+    const r = try runLinuxFor(&le, false, &.{ "/mnt/term/cwd/threads", "fault_race" }, null, 300_000);
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqualStrings("ok fault_race\n", r.out);
+    try std.testing.expectEqual(0, r.code);
 }
 
 test "exit_group kills every thread [linux-threads]" {
