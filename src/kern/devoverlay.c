@@ -6001,7 +6001,7 @@ static void
 ovgetattr(Chan *c, uvlong mask, Attr *a)
 {
 	Chan *volatile l;
-	uchar buf[STATFIXLEN+4*KNAMELEN];
+	uchar buf[Attrstatlen];
 	char strs[sizeof buf];
 	Attr la;
 	Dir d;

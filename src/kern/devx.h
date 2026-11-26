@@ -61,6 +61,10 @@ enum
 	Abasic	= 0x7ff,
 
 	Anow	= (1<<30)-1,	/* a setattr's atimens or mtimens: the time now */
+
+	/* A stat buffer for a getattr made from one: room for a Linux name
+	 * (NAME_MAX, 255) and the ids, which KNAMELEN's 28 isn't. */
+	Attrstatlen	= STATFIXLEN+1024,
 };
 
 struct Devx

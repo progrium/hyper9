@@ -818,7 +818,7 @@ pub fn getattr(ch: *Chan, mask: u64, a: *Attr) Error!void {
 /// The default getattr: from stat.
 pub fn getattrdefault(ch: *Chan, a: *Attr) Error!void {
     const d = of(ch);
-    var buf: [c.STATFIXLEN + 4 * c.KNAMELEN]u8 = undefined;
+    var buf: [c.Attrstatlen]u8 = undefined;
     const n = try stat(d, ch, &buf, buf.len);
     var dir: Dir = undefined;
     var strs: [buf.len]u8 = undefined;
