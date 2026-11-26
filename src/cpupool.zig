@@ -14,6 +14,11 @@
 //! or pooled, on every engine: a process waits for a slot before each run,
 //! in ticket order, and a waiter kicks the longest run after a slice.
 //!
+//! A child machine (design/child-machines.md) has a pool of its own, over
+//! its parent's: its `cpus` caps its own runs, each run takes a slot in
+//! its parent's pool too, and its vCPUs are owned and pooled in the root
+//! machine's, which holds the engine's limit.
+//!
 //! On the emulator there's no vCPU limit (each engine is host memory), nor
 //! on the sud engine (each vCPU is a thread in its address space's
 //! stub process), so every process owns one.
@@ -58,6 +63,9 @@ pub const Pool = struct {
     workers: std.ArrayList(web.Thread) = .empty,
     worker_count: u32 = 0,
     stopping: std.atomic.Value(bool) = .init(false),
+    /// A child machine's pool's parent: its runs take slots there too,
+    /// and its vCPUs are the root pool's.
+    parent: ?*Pool = null,
 
     const Runner = struct { l: *Lease, since_ns: i96 };
 
@@ -78,6 +86,18 @@ pub const Pool = struct {
         return .{ .gpa = gpa, .io = io, .engine = eng, .own_limit = own_limit_override orelse own_limit, .cpus = cpus };
     }
 
+    /// A child machine's pool over `parent`'s, with its own cap.
+    pub fn initChild(parent: *Pool, cpus: ?u32) Pool {
+        return .{ .gpa = parent.gpa, .io = parent.io, .engine = parent.engine, .own_limit = null, .cpus = cpus, .parent = parent };
+    }
+
+    /// The root machine's pool, which owns the vCPUs.
+    fn top(p: *Pool) *Pool {
+        var r = p;
+        while (r.parent) |q| r = q;
+        return r;
+    }
+
     /// Stops the pool threads. Every process must be done with the pool.
     pub fn deinit(p: *Pool) void {
         p.stopping.store(true, .release);
@@ -95,8 +115,9 @@ pub const Pool = struct {
 
     /// Gets a process a way to run: its own vCPU if one is free, or a lease
     /// on the pool. Call on the process's thread.
-    pub fn acquire(p: *Pool, l: *Lease) engine.CreateError!void {
-        l.* = .{ .pool = p };
+    pub fn acquire(p_in: *Pool, l: *Lease) engine.CreateError!void {
+        l.* = .{ .pool = p_in };
+        const p = p_in.top();
         const own = blk: {
             p.lockSpin();
             defer p.lock.unlock();
@@ -138,6 +159,11 @@ pub const Pool = struct {
     /// end for a whole slice kicks the runs in progress, which end with
     /// `.interrupted` and queue again.
     fn enter(p: *Pool, l: *Lease) void {
+        p.enter1(l);
+        if (p.parent) |q| q.enter(l);
+    }
+
+    fn enter1(p: *Pool, l: *Lease) void {
         const cap = p.cpus orelse return;
         const ticket = p.next_ticket.fetchAdd(1, .acq_rel);
         while (true) {
@@ -170,6 +196,11 @@ pub const Pool = struct {
     }
 
     fn leave(p: *Pool, l: *Lease) void {
+        if (p.parent) |q| q.leave(l);
+        p.leave1(l);
+    }
+
+    fn leave1(p: *Pool, l: *Lease) void {
         if (p.cpus == null) return;
         {
             p.lockSpin();
@@ -264,9 +295,10 @@ pub const Lease = struct {
         l.owned = false;
         l.kick_lock.unlock();
         l.vcpu.destroy();
-        p.lockSpin();
-        p.owned -= 1;
-        p.lock.unlock();
+        const r = p.top();
+        r.lockSpin();
+        r.owned -= 1;
+        r.lock.unlock();
     }
 
     pub fn setAddressSpace(l: *Lease, as: engine.AddressSpace) engine.Error!void {
@@ -314,14 +346,15 @@ pub const Lease = struct {
         }
         // Hand off to a pool thread and wait for the exit.
         l.done.store(0, .release);
+        const r = p.top();
         {
-            p.lockSpin();
-            defer p.lock.unlock();
-            if (p.worker_count == 0) return error.HypervisorFailed;
-            p.queue.append(p.gpa, l) catch return error.OutOfGuestMemory;
+            r.lockSpin();
+            defer r.lock.unlock();
+            if (r.worker_count == 0) return error.HypervisorFailed;
+            r.queue.append(r.gpa, l) catch return error.OutOfGuestMemory;
         }
-        _ = p.work_seq.fetchAdd(1, .release);
-        p.io.futexWake(u32, &p.work_seq.raw, 1);
+        _ = r.work_seq.fetchAdd(1, .release);
+        r.io.futexWake(u32, &r.work_seq.raw, 1);
         while (l.done.load(.acquire) == 0) p.io.futexWaitUncancelable(u32, &l.done.raw, 0);
         return l.result;
     }

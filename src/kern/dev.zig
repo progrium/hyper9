@@ -633,6 +633,7 @@ const natives = .{
     @import("dev/env.zig").Device,
     @import("dev/hidx.zig").Device,
     @import("dev/linux.zig").Device,
+    @import("dev/machine.zig").Device,
 }) ++ (if (port.options.gfx) .{
     @import("dev/gfx.zig").Draw,
     @import("dev/gfx.zig").Cons,

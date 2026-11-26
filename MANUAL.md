@@ -952,6 +952,7 @@ kernel has. `intro(3)` introduces them, and each has its own page in section
 | `#s` | srv | `/srv` | 9front's service registry, one per machine |
 | `#\|` | pipe | | Pipes |
 | `#I` | ip | `/net` | The network, through the host's own stack: `cs`, `tcp`, `udp`. Masked under `--net=disable`. |
+| `#μ` | machine | `/dev`, after `#c` | Child machines, as `/dev/machine` (chapter 24); masked without `--children` and under `--profile=tight` |
 | `#ℏ` | hstream | `/net`, after `#I` | WebSockets, as `/net/ws` (chapter 16), and the connection behind a WebSocket root; on the web host, the page's ports too, as `/net/port`. Masked under `--net=disable`. |
 | `#M` | mnt | | The 9P client behind every `mount` |
 | `#U` | fs | `/`, `/mnt/term/...` | The host's file system, through the sandbox's checks. Masked after startup. |
@@ -2439,6 +2440,7 @@ Files and sandbox (chapters 22 and 23):
 | `--serve-token @FILE` | The token WebSocket listeners require |
 | `--serve-origin ORIGIN` | An `Origin` WebSocket listeners accept, or `*` with a token; repeatable |
 | `--serve-net` | Export `/net` too |
+| `--children` | Let the machine start child machines with its own `h9` (chapter 24); off by default, and masked under `--profile=tight` |
 | `--host-fs` | Show the whole host file system, read-only, at `/mnt/term` |
 | `--no-guest-tools` | Leave h9's own commands (`#H/bin`) off `/bin`, and mask `#H` |
 | `--print` | Print the plan the flags compile to, and as comments what h9 builds from it, and exit without running (chapter 23) |
@@ -2694,6 +2696,7 @@ tight with a network.
 | `res.memory` | Guest memory capped | `--memory` |
 | `res.pids` | Live processes capped | `--pids` |
 | `res.cpu` | Running vCPUs capped | `--cpus` |
+| `proc.children` | The machine can start child machines, which share its kernel | `--children` |
 | `proc.timeout` | A deadline for the machine | `--timeout`, `tight` |
 
 **Reading `--print`.** `--print` compiles the flags and prints the plan they
@@ -2865,6 +2868,68 @@ memory, the stacks, shared segments, and the files in `/tmp` and ephemeral
 overlays. A page counts once it's touched, and pages a fork shares count
 once. `--memory 8m` is enough for `echo`; a Go program needs several hundred
 MB.
+
+#### Child machines
+
+Under `--children`, a machine can start machines of its own with `h9`, the
+guest-tools script in `/bin`. It takes the host's sandbox, limit, mount,
+`--ns`, `--env`, `--cwd`, and `--print` flags, and runs the child on the
+same engine and kernel, in the same host process:
+
+```sh
+host$ h9 --children --memory 1g --rc 'h9 --memory 256m --rc ''cat /dev/sysname'''
+h9
+host$ h9 --children --net=disable --rc 'h9 --net enable --rc date'
+echo: write error: net enable widens the plan, which has net disable
+```
+
+(rc reads an unquoted `=` as an assignment, so inside `--rc` give a flag
+its value as the next word, or quote it.)
+
+A child is bounded by the machine that started it:
+
+- **Files.** Every path a child's flags name is a path in the caller's
+  namespace, not on the host: `--readable /usr/glenda` binds the caller's
+  `/usr/glenda` at the same path, `--dir /n/alpine` makes the caller's
+  `/n/alpine` the child's root, and with no mount on `/` the child's root is
+  the caller's. Its cwd is the caller's, writable unless the profile is
+  `tight`. The child reaches each through the caller's own namespace, with
+  the caller's rights: it never sees a host path the caller can't, and a
+  path the caller can't write is read-only whatever `--writable` says. A
+  path the child only reads is under an overlay of its own, so its writes
+  there stay in its memory, as a root's do.
+- **Memory.** A child's `--memory` is reserved from what its parent has
+  left when it starts, and returned when it ends; without one, it gets
+  half. Asking for more than is left is refused.
+- **Processes, CPUs, and time.** A child's processes count against every
+  ancestor's `--pids`, its CPUs against the parent's `--cpus`, and its
+  `--timeout` can't outlast the parent's.
+- **The rest.** The network policy, the device mask, and the profile can
+  only narrow, as a flag after `--plan` does (chapter 23). A child has
+  child machines of its own only with `--children`, and only if its parent
+  has them.
+
+A refused child is an error on `h9`'s stderr and exit status `exec`; one
+that ran exits with its program's status, as a host run does. An interrupt
+goes to the child, and a child never outlives the machine that started it.
+`h9 --print` prints a child's plan, its caller's paths marked `parent`.
+Host-only flags, such as `--engine`, `--serve`, and `--gfx`, are usage
+errors. Without `--children`, `h9` says `h9: child machines are off in this
+machine (the h9 that started it needs --children)`.
+
+`h9` is a script over `#μ`, at `/dev/machine`. Opening
+`/dev/machine/clone` makes a conversation `N` and reads as its number.
+Plan lines (design/plan-format.md) written to `N/ctl` set its options, each
+checked as it's written, and `exec PROGRAM ARGS...`, in plan quoting,
+starts it. `N/data` is its console, `N/stderr` its standard error after a
+`stderr` line, `N/wait` its exit status once it ends, and `N/plan` its
+compiled plan, and a write to `N/note` posts a note to it. Closing the last
+fd on a conversation kills its child. A Linux program can run `/9/bin/h9`.
+
+A child shares the parent's kernel, so the boundary between them is the
+kernel's per-namespace state, not a second kernel: `--children` is for
+sandboxing a step of a job you trust, not for code you'd only run in a
+separate h9.
 
 ### 25. Namespace files with `--ns`
 

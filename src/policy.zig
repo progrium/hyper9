@@ -70,6 +70,10 @@ pub const Policy = struct {
     cwd_writable: ?bool = null,
     /// Expose all of the host filesystem at /mnt/term.
     host_fs: bool = false,
+    /// Let the guest start child machines through `#μ`
+    /// (design/child-machines.md), `--children`. The tight profile masks
+    /// it whatever this says.
+    children: bool = false,
 };
 
 /// How a bound tree can be changed: not at all, on the host, in an
@@ -77,8 +81,10 @@ pub const Policy = struct {
 /// root's server decides (`9p`, design/epoch-0/ninep-roots.md), or never, as
 /// constant data in the h9 binary (`builtin`, design/epoch-0/builtin-root.md),
 /// or as the writable layer over what's beneath it, which is only read
-/// (`up`, design/epoch-0/upper-layers.md).
-pub const Access = enum { ro, rw, eph, up, @"9p", builtin };
+/// (`up`, design/epoch-0/upper-layers.md), or, in a child machine, as the
+/// channel of the process that started it allows (`parent`,
+/// design/child-machines.md).
+pub const Access = enum { ro, rw, eph, up, @"9p", builtin, parent };
 
 /// The built-in root's device path.
 pub const builtin_dev = "#Hroot";
@@ -151,6 +157,14 @@ pub const Bind = struct {
     fd_write: ?std.posix.fd_t = null,
     /// The flag this line came from, for errors (`--dir ./x:/app`).
     what: ?[]const u8 = null,
+    /// In a child machine (design/child-machines.md): the path, in the
+    /// namespace of the process that started it, whose channel `from` (or
+    /// `lower`) names, as `#μsN`. The plan prints it in `from`'s place.
+    parent: ?[]const u8 = null,
+    /// With `parent`: a fresh `#O` overlay over the channel takes its
+    /// place, so the child's writes stay in its memory and never reach
+    /// the caller's files.
+    parent_cow: bool = false,
 
     pub const Flag = enum { repl, before, after };
 };
@@ -238,6 +252,10 @@ pub const hidx_dev = "ι";
 /// Where a 9P root's connection is posted, and the board name it's under.
 pub const root_srv = "#s/root";
 
+/// The machine device, `#μ` (design/child-machines.md), whose tree is
+/// the guest's /dev/machine.
+pub const machine_dev = "μ";
+
 /// Capabilities this build knows, in the order the plan prints them.
 pub const Capability = enum {
     @"env.scrub",
@@ -251,6 +269,7 @@ pub const Capability = enum {
     @"net.allow",
     @"net.disable",
     @"net.outbound",
+    @"proc.children",
     @"proc.timeout",
     @"res.cpu",
     @"res.memory",
@@ -414,8 +433,8 @@ pub const Plan = struct {
             const q = if (b.to.len > 0 and b.to[0] == '#') "'" else "";
             // A URL's query can hold a token, so it's elided, as in the
             // note.
-            const from = if (b.url != null and b.url.?.kind == .ws) if (std.mem.indexOfScalar(u8, b.from, '?')) |i| b.from[0 .. i + 1] else b.from else b.from;
-            lw.print(" '{s}{s}{s}{s}' {s}{s}{s}", .{ from, if (from.len < b.from.len) "…" else "", if (b.console) "<id>" else "", if (b.cons_file) "/cons" else "", q, b.to, q }) catch return error.WriteFailed;
+            const from = if (b.parent) |pp| (if (b.lower != null) b.from else pp) else if (b.url != null and b.url.?.kind == .ws) if (std.mem.indexOfScalar(u8, b.from, '?')) |i| b.from[0 .. i + 1] else b.from else b.from;
+            lw.print(" '{s}{s}{s}{s}' {s}{s}{s}", .{ from, if (b.parent == null and from.len < b.from.len) "…" else "", if (b.console) "<id>" else "", if (b.cons_file) "/cons" else "", q, b.to, q }) catch return error.WriteFailed;
             // Always written for a mount, '' when empty, so newns can tell
             // the spec from the access column.
             if (b.mount) lw.print(" '{s}'", .{b.spec}) catch return error.WriteFailed;
@@ -435,11 +454,18 @@ pub const Plan = struct {
                 try w.splatByteAll(' ', pad + 1);
                 try w.print("{t}", .{a});
             }
-            if (b.lower orelse b.note) |l| try w.print("  # {s}", .{l});
+            if (b.parent) |pp| {
+                if (b.lower != null) try w.print("  # over the caller's {s}", .{pp}) else if (b.parent_cow) try w.writeAll("  # copy-on-write: the child's writes stay in its memory");
+            } else if (b.lower orelse b.note) |l| try w.print("  # {s}", .{l});
             try w.writeAll("\n");
         }
         if (p.rules.len > 0) {
-            try w.writeAll("access:\n");
+            const child = for (p.binds) |b| {
+                if (b.parent != null) break true;
+            } else false;
+            // A child's are its parent's: what the caller's paths reach
+            // on the host is checked against them.
+            try w.writeAll(if (child) "access:   # the parent's, for the host files the caller's paths reach\n" else "access:\n");
             for (p.rules) |r| try w.print("  {s} {s}\n", .{ switch (r.kind) {
                 .allow_ro => "ro  ",
                 .allow_rw => "rw  ",
@@ -582,6 +608,12 @@ pub const Inputs = struct {
     builtin_note: ?[]const u8 = null,
     /// `--serve` listeners (design/epoch-0/serve.md).
     serve: ?Serve = null,
+    /// A child machine's plan (design/child-machines.md): the mounts' and
+    /// paths' sources are paths in the namespace of the process that
+    /// starts it, not host paths, and `fromCaller` turns the `#U` binds
+    /// into its channels. A readable path is bound at its own path, not
+    /// under /mnt/term, and there's no cwd.
+    caller: bool = false,
 };
 
 /// Whether host path `path` is one `--writable` names, and writing is allowed.
@@ -599,6 +631,9 @@ pub const linux_view = "#L";
 /// Conflict.
 pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]const u8) CompileError!Plan {
     const tight = pol.profile == .tight;
+    // Child machines (design/child-machines.md) only with --children, and
+    // never under the tight profile.
+    const children = pol.children and !tight;
     const write_req = pol.write orelse .overlay;
     const net = pol.net orelse (if (tight) NetMode.disable else .outbound);
 
@@ -759,6 +794,9 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
 
     try binds.append(arena, .{ .from = "#c", .to = "/dev", .optional = true });
     try binds.append(arena, .{ .from = "#y", .to = "/dev", .flag = .before, .console = true });
+    // The machine's children (design/child-machines.md): #μ's `machine`
+    // directory, at /dev/machine.
+    if (children) try binds.append(arena, .{ .from = "#" ++ machine_dev, .to = "/dev", .flag = .after, .optional = true, .note = "child machines, under --children" });
     // The window's devices (design/epoch-0/gfx.md), after the console so
     // /dev/cons stays the terminal.
     if (in.gfx != null) for ([_][]const u8{ "#i", "#m", "#b" }) |d| {
@@ -802,7 +840,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     // paths and their ancestors.
     var need_mnt_term = pol.host_fs;
     for ([_][]const []const u8{ pol.readable, pol.writable }) |list| for (list) |p| {
-        if (guestPlace(in, p) == .mnt_term) need_mnt_term = true;
+        if (guestPlace(in, p) == .mnt_term and !in.caller) need_mnt_term = true;
     };
     // --host-fs shows the whole host read-only; --writable still applies.
     if (pol.host_fs) try rules.append(arena, .{ .path = "/", .kind = .allow_ro });
@@ -813,7 +851,17 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     var guest_cwd: ?[]const u8 = null;
     if (in.cwd) |cwd| {
         try rules.append(arena, .{ .path = cwd, .kind = acc.rule(cwd_rw) });
-        if (has_root) {
+        // A child's cwd is the caller's path, at the same path
+        // (design/child-machines.md): writable as a host machine's is,
+        // where the caller can write it. The caller's `/` is already the
+        // child's root.
+        if (in.caller) {
+            if (has_root and !std.mem.eql(u8, cwd, "/")) {
+                var b = try acc.bind(arena, cwd, cwd, cwd_rw);
+                b.make = true;
+                try binds.append(arena, b);
+            }
+        } else if (has_root) {
             var b = try acc.bind(arena, cwd, "/mnt/term/cwd", cwd_rw);
             b.fallback = "/mnt/term";
             b.make = true;
@@ -830,9 +878,12 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
             .root_top, .cwd_top => continue,
             .root => |rel| try std.fmt.allocPrint(arena, "/{s}", .{rel}),
             .cwd => |rel| try std.fmt.allocPrint(arena, "/mnt/term/cwd/{s}", .{rel}),
-            .mnt_term => try std.fmt.allocPrint(arena, "/mnt/term{s}", .{p}),
+            .mnt_term => if (in.caller) p else try std.fmt.allocPrint(arena, "/mnt/term{s}", .{p}),
         };
-        try binds.append(arena, try acc.bind(arena, p, to, rw));
+        var b = try acc.bind(arena, p, to, rw);
+        // A child's is made in its root's overlay, as a mount's is.
+        if (in.caller) b.make = true;
+        try binds.append(arena, b);
     };
 
     for (pol.read_deny) |p| try rules.append(arena, .{ .path = p, .kind = .deny });
@@ -902,6 +953,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     // Without a window, a guest can neither open one nor reach the screen
     // another machine in the process has.
     if (in.gfx == null) try devmask.appendSlice(arena, "bim");
+    if (!children) try devmask.appendSlice(arena, machine_dev);
 
     var enforces: CapSet = .initMany(&.{ .@"env.scrub", .@"ipc.restrict", .@"kernel.isolation", .@"fs.write.scope" });
     if (write == .overlay or eph) enforces.insert(.@"fs.write.overlay");
@@ -916,6 +968,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     if (pol.cpus != null) enforces.insert(.@"res.cpu");
     const timeout = pol.timeout_ns orelse (if (tight) tight_timeout_ns else null);
     if (timeout != null) enforces.insert(.@"proc.timeout");
+    if (children) enforces.insert(.@"proc.children");
 
     // Overlaid paths never reach the host, so the hardlink and res.disk
     // caveats are only for paths writable on the host.
@@ -1003,6 +1056,8 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
             try caveats.append(arena, try std.fmt.allocPrint(arena, "/net served on {s}: clients can dial out from the host's address, under --net={t}", .{ l.addr, net }));
         };
     }
+    if (children) try caveats.append(arena, "child machines share this machine's kernel and host process: a kernel bug one can trigger affects them all");
+    if (in.caller) try caveats.append(arena, "a path from the caller is reached through its channel, with the caller's rights; one the child only reads is under an overlay, so the child's writes to it stay in memory");
     try caveats.append(arena, "/proc/n/ns shows the host paths of bound host trees");
     try caveats.append(arena, "the h9 process itself is not host-sandboxed");
 
@@ -1195,7 +1250,8 @@ fn guestPlace(in: Inputs, p: []const u8) Place {
             in_root = rel;
         }
     }
-    const in_cwd = if (in.cwd) |c| relUnder(c, p) else null;
+    // A child's cwd is bound at its own path, so a path in it is too.
+    const in_cwd = if (in.caller) null else if (in.cwd) |c| relUnder(c, p) else null;
     if (in_cwd != null and (in_root == null or in.cwd.?.len >= root.?.len)) {
         return if (in_cwd.?.len == 0) .cwd_top else .{ .cwd = in_cwd.? };
     }
@@ -1833,6 +1889,7 @@ pub const Spec = struct {
         try w.writeAll("devices");
         if (p.host_fs) try w.writeAll(" host-fs");
         if (s.guest_tools) try w.writeAll(" guest-tools");
+        if (p.children) try w.writeAll(" children");
         try w.writeAll("\n");
     }
 
@@ -2085,13 +2142,16 @@ const PlanParser = struct {
             } else return p.fail("{s} '{s}': not {s}", .{ cmd, w[1], if (allow) "read or write" else "read" });
         } else if (std.mem.eql(u8, cmd, "devices")) {
             pol.host_fs = false;
+            pol.children = false;
             p.s.guest_tools = false;
             for (w[1..]) |d| {
                 if (std.mem.eql(u8, d, "host-fs")) {
                     pol.host_fs = true;
                 } else if (std.mem.eql(u8, d, "guest-tools")) {
                     p.s.guest_tools = true;
-                } else return p.fail("devices '{s}': not host-fs or guest-tools", .{d});
+                } else if (std.mem.eql(u8, d, "children")) {
+                    pol.children = true;
+                } else return p.fail("devices '{s}': not host-fs, guest-tools, or children", .{d});
             }
             p.s.lines.devices = p.line;
         } else if (std.mem.eql(u8, cmd, "memory")) {
@@ -2393,6 +2453,8 @@ const Narrowing = struct {
 
         // Devices: only left out.
         if (by.policy.host_fs and !base.policy.host_fs) return n.widens("devices host-fs", base.lines.devices, "no host-fs");
+        if (by.policy.children and !base.policy.children) return n.widens("devices children", base.lines.devices, "no children");
+        if (by.lines.devices > 0 and !by.policy.children) r.policy.children = false;
         if (!by.guest_tools) r.guest_tools = false;
 
         // Mounts: only ones the plan has, with an access no wider.
@@ -2511,6 +2573,40 @@ const Narrowing = struct {
     }
 };
 
+/// A child machine's plan's sources (design/child-machines.md): each bind
+/// of a `#U` path, which `compile` makes from a mount or a path when
+/// `Inputs.caller` is set, becomes a bind of `#μsN`, the channel the
+/// caller's path `paths[N]` names, which the machine device walks in the
+/// caller's namespace when the child starts. A source only read is a
+/// copy-on-write overlay over it in the child (`parent_cow`). The binds
+/// are copied into `arena`.
+pub fn fromCaller(arena: std.mem.Allocator, plan: *Plan, paths: *std.ArrayList([]const u8)) error{OutOfMemory}!void {
+    const bs = try arena.dupe(Bind, plan.binds);
+    for (bs) |*b| {
+        const host: ?[]const u8 = if (b.lower) |l| l else if (std.mem.startsWith(u8, b.from, "#U")) b.from[2..] else null;
+        var p = host orelse continue;
+        if (std.mem.startsWith(u8, p, "!c")) p = p[2..];
+        if (p.len == 0) p = "/";
+        const at = for (paths.items, 0..) |q, i| {
+            if (std.mem.eql(u8, q, p)) break i;
+        } else blk: {
+            try paths.append(arena, p);
+            break :blk paths.items.len - 1;
+        };
+        const dev = try std.fmt.allocPrint(arena, "#" ++ machine_dev ++ "s{d}", .{at});
+        if (b.lower != null) {
+            b.lower = dev;
+            b.contained = false;
+        } else {
+            b.from = dev;
+            b.parent_cow = b.access != .rw and b.access != .up;
+        }
+        b.parent = p;
+        b.access = .parent;
+    }
+    plan.binds = bs;
+}
+
 fn lineAt(lines: []const u32, i: usize) u32 {
     return if (i < lines.len) lines[i] else 0;
 }
@@ -2581,13 +2677,13 @@ test "compile: default and tight profiles" {
     const d = try compile(arena.allocator(), in, .{}, &msg);
     try t.expectEqual(Verdict.allow, d.check("/w/f", .create));
     try t.expectEqual(Verdict.read_only, d.check("/r/f", .create));
-    try t.expectEqualStrings("CU" ++ hidx_dev ++ "bim", d.devmask);
+    try t.expectEqualStrings("CU" ++ hidx_dev ++ "bim" ++ machine_dev, d.devmask);
     try t.expect(!d.enforces.contains(.@"net.disable"));
     try t.expectEqual(@as(?u64, null), d.timeout_ns);
 
     const tt = try compile(arena.allocator(), in, .{ .profile = .tight }, &msg);
     try t.expectEqual(Verdict.read_only, tt.check("/w/f", .create));
-    try t.expectEqualStrings("CI" ++ hstream_dev ++ "U" ++ hidx_dev ++ "bim", tt.devmask);
+    try t.expectEqualStrings("CI" ++ hstream_dev ++ "U" ++ hidx_dev ++ "bim" ++ machine_dev, tt.devmask);
     try t.expect(tt.enforces.contains(.@"net.disable"));
     try t.expect(tt.enforces.contains(.@"proc.timeout"));
 

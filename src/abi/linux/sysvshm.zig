@@ -52,9 +52,7 @@ pub fn unlock() void {
 }
 
 fn engineId(b: engine.Engine) usize {
-    return switch (b) {
-        inline else => |p| @intFromPtr(p),
-    };
+    return b.id();
 }
 
 pub const IPC_PRIVATE: i32 = 0;

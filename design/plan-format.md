@@ -107,7 +107,7 @@ A plan file is as trusted as a command line: whoever writes it decides what the 
 - [x] `test "an unknown plan line is an error with its line number [plan-format]"` passes.
 - [x] `test "Machine.init from a plan equals Machine.init from Options [plan-format]"` passes.
 - [x] `await test('createMachine({ plan }) runs rc [plan-format]', ...)` passes in `tests/web/`.
-- [ ] `test "a child's ctl takes plan lines, bounded by its parent [plan-format]"` passes.
+- [x] `test "a child's ctl takes plan lines, bounded by its parent [plan-format]"` passes.
 - [x] `test "a pinned root with a different index is refused [plan-format]"` passes.
 - [x] [spec/cli.md](../spec/cli.md) documents each flag by its plan line, [spec/sandbox.md](../spec/sandbox.md) documents the format, and [docs/recipes.md](../docs/recipes.md) has each recipe as a plan.
 
@@ -137,3 +137,4 @@ A plan file is as trusted as a command line: whoever writes it decides what the 
   - Narrowing an `engine`: the plan's, any under no `engine` line, and any but `sud` under `auto`. An `arch`: the plan's, or any under no `arch` line. A mount, bind, or namespace line given with `--plan` widens it, as h9 can't tell which add reach.
   - Pinned roots: h9 checks the index it reads on the host before the tree is used, an `index=` file or URL or a static tree's `/.fs/index`. A 9P server's own `.fs/index` is read inside `#ι` once the connection is in use, so a pinned mount with only that, or under `--index none`, is refused rather than taken unchecked.
   - `createMachine({ plan })` fetches the plan's `archive` URLs and rewrites each to a `dir` line in place, so line numbers stay the plan's; a plan with no mount lines gets `root.h9a` as a first line, so h9's line numbers are one more. `mounts` and `binds` beside a plan are an error, as they'd widen it.
+- 2026-11-26: A child's `ctl` is on the `child-machines` branch ([child-machines](child-machines.md)): it takes plan lines, each parsed as it's written, and `exec` narrows them against the caller's plan, with what's left of its limits, through `policy.narrow`; `devices` gained a `children` word.

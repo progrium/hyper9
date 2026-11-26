@@ -47,6 +47,7 @@ extern Dev hidxdevtab;
 extern Dev linuxdevtab;
 extern Dev evdevtab;
 extern Dev ptydevtab;
+extern Dev machinedevtab;	/* #μ, child machines (src/kern/dev/machine.zig) */
 
 #ifdef H9_WEB
 /*
@@ -157,6 +158,7 @@ Dev *devtab[] = {
 	&linuxdevtab,
 	&evdevtab,
 	&ptydevtab,
+	&machinedevtab,
 	0
 };
 
