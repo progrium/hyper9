@@ -1302,8 +1302,16 @@ h9_linux_socksend(int fd, void *buf, long n, int dontwait, uchar *raddr, ushort 
 	poperror();
 	if(s < 0)
 		return raddr != nil ? -89 : -107;	/* EDESTADDRREQ, ENOTCONN */
-	if(raddr != nil && h9_net_check(H9_NETCONNECT, udp ? S_UDP : S_TCP, raddr, rport) < 0)
+	/*
+	 * A probe-only conversation sends nothing, even to an address it
+	 * names, since a host may send a connected socket's datagrams to its
+	 * peer whatever the address. A sendto's address must be allowed
+	 * outright, not as a probe (design/linux-dns.md).
+	 */
+	if(h9_net_send(s) < 0)
 		return -13;	/* EACCES */
+	if(raddr != nil && h9_net_check(H9_NETCONNECT, udp ? S_UDP : S_TCP, raddr, rport) != 0)
+		return -13;
 	/* Port 53 may go to the machine's resolver, as devip's connect does (design/linux-dns.md). */
 	if(raddr != nil){
 		memmove(to, raddr, IPaddrlen);

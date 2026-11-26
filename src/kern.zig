@@ -1614,7 +1614,13 @@ fn h9_net_check(op: c_int, proto: c_int, addr: [*]const u8, port: c_int) callcon
     // layer's sendto redirect it right after this, through
     // h9_dns_target, which refuses it if there's no resolver.
     if (p.resolves and o == .connect and pt == 53 and netProto(proto) != null and p.net != .disable) return 0;
-    return if (p.netCheck(o, netProto(proto), addr[0..16], pt)) 0 else -1;
+    if (p.netCheck(o, netProto(proto), addr[0..16], pt)) return 0;
+    // A UDP connect to an address recorded for an allowed name is
+    // getaddrinfo's route probe (design/linux-dns.md, Updates): allowed,
+    // but h9_net_redirect marks the conversation probe-only and
+    // h9_net_send refuses its sends.
+    if (o == .connect and p.netProbe(netProto(proto), addr[0..16])) return 1;
+    return -1;
 }
 
 fn dnsKind(proto: c_int) ?resolver.Transport {

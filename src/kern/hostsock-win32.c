@@ -19,6 +19,7 @@
 
 #include "devip.h"
 #include "hostsock.h"
+#include "netcheck.h"
 
 #undef listen
 #undef accept
@@ -157,6 +158,7 @@ h9so_connect_nb(int fd, unsigned char *raddr, unsigned short rport)
 void
 h9so_close(int fd)
 {
+	h9_net_closed(fd);	/* so a later socket with its number isn't probe-only */
 	closesocket(fd);
 }
 
