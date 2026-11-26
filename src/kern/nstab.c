@@ -147,12 +147,6 @@ pprint(char *fmt, ...)
 	return h9_ns_log(buf, n);
 }
 
-/* src/kern/dev/env.zig's environment groups: the namespace kernel has no environment. */
-void *h9_egrpnew(void) { return nil; }
-void *h9_egrpcopy(void *e) { USED(e); return nil; }
-void h9_egrpincref(void *e) { USED(e); }
-void h9_egrpclose(void *e) { USED(e); }
-
 /* linux.c's: no Linux processes, so no Linux view, links, or chroots. */
 int h9_linux_inview(void) { return 0; }
 int h9_fs_linkwalk(void) { return 0; }
@@ -162,11 +156,11 @@ void h9_fs_markroot(Chan *c, int lx) { USED(c, lx); }
 /* src/kern/dev/hidx.zig's: no mount indexes. */
 int h9_hidx_wide(Chan *c) { USED(c); return 0; }
 
-/* linuxnet.c's: no Linux sockets to wake. */
+/* linuxnet.zig's: no Linux sockets to wake. */
 void h9_qwake(Queue *q) { USED(q); }
 
 #ifndef H9_NSKERNEL_HOSTFS
-/* devfs and fscheck.c's: no host tree under an overlay. */
+/* devfs's and fscheck.zig's: no host tree under an overlay. */
 void h9_fs_anchor(Chan *c) { USED(c); }
 
 void h9_fs_mkfifo(Chan *c, char *name, ulong perm) { USED(c, name, perm); error(Eperm); }

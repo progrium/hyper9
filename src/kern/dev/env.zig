@@ -73,14 +73,8 @@ fn ROUND(s: c_int, sz: c_int) c_int {
     return (s + (sz - 1)) & ~(sz - 1);
 }
 
-// src/kern/devshim.c's, since proc.c's h9_upegrp raises when the
-// process has no group.
-extern fn h9_shim_upegrp(r: *?*anyopaque) c_int;
-
 fn upegrp() Error!*HEgrp {
-    var r: ?*anyopaque = null;
-    try dev.caught(h9_shim_upegrp(&r));
-    return @ptrCast(@alignCast(r.?));
+    return @ptrCast(@alignCast(try @import("../proc.zig").upegrp()));
 }
 
 fn hcloseegrp(eg_: ?*HEgrp) void {
@@ -426,27 +420,18 @@ pub const Device = dev.Native('e', "env", .{
     .gens = &.{&envgen},
 });
 
-// The C names, for proc.c: h9_egrpnew and h9_egrpcopy raise.
+/// A reference to a process's group, for proc.zig.
+pub fn egrpincref(eg: *HEgrp) void {
+    _ = chan.incref(&eg.ref);
+}
 
-fn h9_egrpnew() callconv(.c) ?*anyopaque {
-    return egrpnew() catch |e| port.raise(e);
-}
-fn h9_egrpincref(eg: ?*anyopaque) callconv(.c) void {
-    _ = chan.incref(&@as(*HEgrp, @ptrCast(@alignCast(eg))).ref);
-}
-fn h9_egrpclose(eg: ?*anyopaque) callconv(.c) void {
-    hcloseegrp(@ptrCast(@alignCast(eg)));
-}
-fn h9_egrpcopy(from: ?*anyopaque) callconv(.c) ?*anyopaque {
-    return egrpcopy(@ptrCast(@alignCast(from))) catch |e| port.raise(e);
+/// Drops a reference to a process's group, for proc.zig.
+pub fn egrpclose(eg: *HEgrp) void {
+    hcloseegrp(eg);
 }
 
 pub fn exportC() void {
     @export(&Device.dev, .{ .name = "envdevtab" });
-    @export(&h9_egrpnew, .{ .name = "h9_egrpnew" });
-    @export(&h9_egrpincref, .{ .name = "h9_egrpincref" });
-    @export(&h9_egrpclose, .{ .name = "h9_egrpclose" });
-    @export(&h9_egrpcopy, .{ .name = "h9_egrpcopy" });
 }
 
 // Cases (zig build kern-test), on a group of their own: a chan whose aux

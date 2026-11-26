@@ -409,10 +409,6 @@ fn syserr() c_int {
     return -1;
 }
 
-fn h9_semainit() callconv(.c) void {
-    semainit();
-}
-
 fn h9_semacquire(addr: *c_int, block: c_int) callconv(.c) c_int {
     return @intFromBool(syssemacquire(addr, block != 0) catch return syserr());
 }
@@ -433,7 +429,6 @@ fn h9_rendezvous(tag: usize, new: usize) callconv(.c) usize {
 }
 
 pub fn exportC() void {
-    @export(&h9_semainit, .{ .name = "h9_semainit" });
     @export(&h9_semacquire, .{ .name = "h9_semacquire" });
     @export(&h9_tsemacquire, .{ .name = "h9_tsemacquire" });
     @export(&h9_semrelease, .{ .name = "h9_semrelease" });

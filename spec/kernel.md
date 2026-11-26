@@ -34,7 +34,7 @@ Each CLI invocation is one machine: one host process with one VM. Each Plan 9 pr
 
 ### Threads
 
-The kernel boots once per host process, on a private thread, because booting turns the calling thread into a Proc for good. Every guest process then runs on a kernel thread made by `h9_kern_spawn` in `src/kern/proc.c`, which works like drawterm's `kproc` but can be called from a thread that isn't a Proc: it clones from the boot Proc, and the new thread sets up its groups once `up` is set.
+The kernel boots once per host process, on a private thread, because booting turns the calling thread into a Proc for good. Every guest process then runs on a kernel thread made by `h9_kern_spawn` in `src/kern/proc.zig`, which works like drawterm's `kproc` but can be called from a thread that isn't a Proc: it clones from the boot Proc, and the new thread sets up its groups once `up` is set.
 
 That thread creates the process's vCPU, which HVF binds to its creating thread, and runs the exit loop. `Machine.run` starts the first process this way and waits for it to exit; `rfork` uses the same path.
 
@@ -94,7 +94,7 @@ Each piece below is new in h9, with the reason it's needed.
 
 #### Process model (Proc fields, segments, rfork/exec/await, notes)
 
-drawterm only ever ran its own kprocs. A process is one record, `Proc`, defined by h9 in `src/kern/h9proc.h`, which drawterm's `dat.h` includes in place of its own: drawterm's fields, then what 9front's Proc has and drawterm's lacks (the Egrp, the machine and its list, the machine-local pid, the note queue, the parent and wait records, and debugging state), and a pointer to the ABI's state (`src/machine.zig`'s Proc, with the address space). It's counted: the thread holds a reference until `pexit`, a child holds its parent's, and a lookup by pid takes one. drawterm's `procinit.c` (`newproc`, `kproc`, and `pexit`) is in `src/kern/proc.c`, and isn't built from drawterm. A kproc has no machine, and its pid is 0.
+drawterm only ever ran its own kprocs. A process is one record, `Proc`, defined by h9 in `src/kern/h9proc.h`, which drawterm's `dat.h` includes in place of its own: drawterm's fields, then what 9front's Proc has and drawterm's lacks (the Egrp, the machine and its list, the machine-local pid, the note queue, the parent and wait records, and debugging state), and a pointer to the ABI's state (`src/machine.zig`'s Proc, with the address space). It's counted: the thread holds a reference until `pexit`, a child holds its parent's, and a lookup by pid takes one. drawterm's `procinit.c` (`newproc`, `kproc`, and `pexit`) is in `src/kern/proc.zig`, and isn't built from drawterm. `proc.zig` is Zig, with error unions; its C names keep the C's contract, and the C it calls that can raise (devenv's `h9_egrpnew` and `h9_egrpcopy`, and the function `h9_kern_isolated` runs) it calls through `src/kern/procshim.c`, which catches their errors as `devshim.c` does. A kproc has no machine, and its pid is 0.
 
 #### `src/kern/devtab.c`
 
@@ -108,11 +108,11 @@ drawterm's `#c/cons` reads and writes the host's fds 0 and 1 directly. `#y<id>`,
 
 drawterm's has one machine-wide environment and imports the host process's environment on first attach, which breaks `env.scrub`. 9front's keeps one environment per Egrp, which `RFENVG` needs anyway. drawterm's Proc has no `egrp`, so h9's (`src/kern/h9proc.h`) has one. `#ec` isn't supported.
 
-#### devproc `#p`, from 9front (`src/kern/devproc.c`)
+#### devproc `#p`, from 9front (`src/kern/dev/proc.zig`)
 
 rc, kill, and ps need `/proc/n/{note,notepg,noteid,ctl,status,ns,fd,args,ppid,wait}`, and `segment` is served too; acid also needs `mem`, `regs`, `fpregs`, and `text` ([self-host](../design/epoch-0/self-host.md)).
 
-It serves h9's process records (`Proc`, in `src/kern/h9proc.h`, with `src/kern/proc.c`'s functions declared in `src/kern/hproc.h`), from each machine's list of processes rather than 9front's Proc table: a qid holds the machine-local pid, and every walk, open, read, and write looks it up in the caller's machine, so a machine can't see, signal, or kill another's processes.
+It serves h9's process records (`Proc`, in `src/kern/h9proc.h`, with `src/kern/proc.zig`'s functions declared in `src/kern/hproc.h`), from each machine's list of processes rather than 9front's Proc table: a qid holds the machine-local pid, and every walk, open, read, and write looks it up in the caller's machine, so a machine can't see, signal, or kill another's processes. It's a native device (`dev.Native`); its Devgen raises for a caller that isn't a guest process, as the C's did, so the switch calls that one through `devshim.c`. Its ctl messages are parsed with drawterm's `parsecmd` and a Zig `lookupcmd`.
 
 `status` has the 12 fields `ps` reads: the user is the machine's user (the guest's `$user`), the state is the syscall being served (as 9front's `psstate`, so `Await`, `Sleep`, `Pread`) or `Running`, memory is the bytes of the process's pages that are allocated (shared pages count in each process that maps them), and the user and system times read 0 until there's per-thread CPU accounting.
 
@@ -134,7 +134,7 @@ A process takes its record's `debug` lock to swap its fd group, namespace, or do
 
 Serves `/fd/N`.
 
-#### The Linux view `#L` (`src/kern/devlinux.c`, `#λ` before [mounts](../design/epoch-0/mounts.md)), eventfds `#ε` (`src/kern/linuxnet.c`), and ptys `#τ` (`src/kern/devpty.c`)
+#### The Linux view `#L` (`src/kern/devlinux.c`, `#λ` before [mounts](../design/epoch-0/mounts.md)), eventfds `#ε` (`src/kern/dev/eventfd.zig`), and ptys `#τ` (`src/kern/dev/pty.zig`)
 
 A Linux process's `/`, its eventfd, epoll, and signalfd instances, and its pseudoterminals (see Linux ABI).
 
@@ -146,9 +146,11 @@ drawterm's `dev.c` is `src/kern/dev.zig`: the helpers devices are built from (`d
 
 drawterm's `pgrp.c` is `src/kern/pgrp.zig` (mount tables, and file descriptor and rendezvous groups), its `chan.c` is `src/kern/chan.zig` (channels, paths, mounts, walks, and `namec`), and its `sysfile.c` is `src/kern/sysfile.zig`, the file system calls. There is no `sys*` wrapper layer in the Zig: `sysfile.zig`'s `open`, `bind`, `pread`, and the rest return error unions, and the C names (`sysopen`, `sysbind`, `syspread`, and the rest) are small exported adapters for the C callers, which return -1 with the error in `syserrstr` as drawterm's did. Inside a call `nerrlab` is 0, so `werrstr` and `%r` in C that the Zig calls see `syserrstr`. `werrstr` stays C (`src/kern/werrstr.c`), since it's variadic. The h9 hooks that `namec` and `walk` call and that can raise (the devfs policy's anchor check) go through `devshim.c` the same way the device switch does. The Zig allocates with `port.malloc`, drawterm's `malloc`, which clears what it returns.
 
-drawterm's `devmnt.c` is `src/kern/devmnt.zig`, the 9P client and the first native device: the switch calls its walk, open, read, and the rest directly, and `mntdevtab`, which the device tables name, holds the C wrappers. `mntversion`, `mntauth`, `mntattach`, and `muxclose` are exported for the C that calls them (`glue.c` and `devoverlay.c`). A process waiting for its reply sleeps in `sync.zig`, and a note that interrupts it sends `Tflush` as before. The reply parser (`mntrpcread`) and the check of a directory read from a server (`mntdirsfix`) are fuzzed in `zig build kern-test`.
+drawterm's `devmnt.c` is `src/kern/devmnt.zig`, the 9P client and the first native device: the switch calls its walk, open, read, and the rest directly, and `mntdevtab`, which the device tables name, holds the C wrappers. `mntversion`, `mntauth`, `mntattach`, and `muxclose` are exported for the C that calls them (`devoverlay.c`, and `glue.zig` calls `mntauth`). A process waiting for its reply sleeps in `sync.zig`, and a note that interrupts it sends `Tflush` as before. The reply parser (`mntrpcread`) and the check of a directory read from a server (`mntdirsfix`) are fuzzed in `zig build kern-test`.
 
 drawterm's `devpipe.c` and `devroot.c` are `src/kern/dev/pipe.zig` and `src/kern/dev/root.zig`, native devices too. The pipe keeps h9's Linux FIFOs (one queue that every open reads and writes, `fifopipe` and `fiforefs` for `src/kern/fifo.zig`) and `h9_pipeq` for Linux poll, and a write on a pipe whose reader closed still posts the note through `h9_postnote`, unless the pipe carries a mount's 9P. A native device's own `Devgen` is Zig that doesn't raise, so the switch calls it directly. Of drawterm's `kern/`, the build now compiles no file the proposal ports.
+
+h9's own C is ported the same way, a file at a time. `src/kern/devpty.c` is `src/kern/dev/pty.zig`, a native device, with `h9_ptyq` and the `h9_pty_*` calls the Linux ABI makes exported for their callers. `src/kern/netcheck.c` is `src/kern/netcheck.zig`, and the kernel's half of `src/kern/fscheck.c` (FIFOs by path, through overlays and 9P2000.L mounts) is `src/kern/fscheck.zig`; the host's half, the policy checks on host paths, stays C, since it never sets an error label. The C they call that raises (devip's socket calls, and devoverlay's and devfs's FIFOs) goes through `devshim.c`. `src/kern/devns.c` is `src/kern/dev/ns.zig`, the namespace kernel's `#N`, native there only, with `pgrpcpy` and `h9_srvpost` called through `devshim.c`. `src/kern/linuxnet.c` is three files: `src/kern/linuxnet.zig`, readiness (`h9_poll` and its wake generation) and the Linux socket calls; `src/kern/dev/eventfd.zig`, `#ε`; and `src/kern/rconv.zig`, the read-ahead for remote conversations, kept apart since file-interface replaces it. The devices of `src/kern/gfx.c` (`#i` opening the screen lazily with `/dev/screen`, `#c`'s `/dev/snarf` limit, `#b`'s kbdfs format and `/dev/kbdin`, and `#m`'s `/dev/mousein`) are `src/kern/dev/gfx.zig`, native wrappers around drawterm's C devices, in builds with a screen; the screen interface the backends call and are called by stays C in `gfx.c`, since it never sets an error label, with the two calls that need the screen's image (`h9_gfx_screenshot` and `h9_gfx_mousein`) beside it. Files only one kernel has export their C names only there (`kern_options`, from the build).
 
 The rest of the kernel is C, so each ported file exports drawterm's functions under their C names (`qread`, `qlock`, `ksleep`, which `lib.h` renames `sleep` to, and the rest) with their C semantics: an exported function that gets an error from the Zig raises it with `nexterror()`, from its own frame, which has nothing to undo. A queue's kick and bypass functions are called from the Zig, so they must not raise; nothing in h9 sets them. Every place a process waits in the Zig is `park` in `sync.zig` (posix.c's `procsleep`), and every place one is let go is `unpark`. `zig build kern-test` runs their cases, on the native namespace kernel.
 
@@ -178,7 +180,7 @@ An `Attr` has a mask of what it holds (`Amode`, `Anlink`, `Auid`, `Agid`, `Ardev
 
 drawterm's `sleep` has no timeout. `tsleep` has 9front's contract and uses only the kernel's public `sleep` and `wakeup`: it puts a timer on its own stack into a list sorted by host monotonic time, and the timer kproc wakes it at the deadline.
 
-The list is guarded by a host lock (`glue.c`, `glue-win32.c`) that the kproc holds while it calls `wakeup`, and `tsleep` always takes its timer out under that lock before returning, so no Proc fields are needed. It's Zig, ported from h9's C under [kernel-port](../design/kernel-port.md): `tsleep.zig`'s `tsleep` returns `error.Interrupted` when a note arrives, and the `tsleep` it exports for C raises it.
+The list is guarded by a host lock (`glue.zig`, `glue-win32.c`) that the kproc holds while it calls `wakeup`, and `tsleep` always takes its timer out under that lock before returning, so no Proc fields are needed. It's Zig, ported from h9's C under [kernel-port](../design/kernel-port.md): `tsleep.zig`'s `tsleep` returns `error.Interrupted` when a note arrives, and the `tsleep` it exports for C raises it.
 
 #### Semaphores and `rendezvous` (`src/kern/sema.zig`)
 
@@ -188,7 +190,7 @@ drawterm has no semaphores. 9front's code is ported closely, with the wait lists
 
 `rendezvous` is 9front's on drawterm's Rgrp, so `procinterrupt` still pulls a process out of it, but it also checks for a note that arrived before the process was on the list.
 
-#### Sandbox hooks (`src/kern/fscheck.c`, `src/kern/netcheck.c`)
+#### Sandbox hooks (`src/kern/fscheck.c` and `src/kern/fscheck.zig`, `src/kern/netcheck.zig`)
 
 The C side of the policy checks devfs and devip call; see Sandbox policy, "Vendor hooks".
 
@@ -200,7 +202,7 @@ A write of an fd number goes through `fdtochan`, then the post itself (the in-us
 
 Posting sets the channel's `srvname` to its `/srv` path, which `/proc/n/ns` prints for a mount of it, as 9front does.
 
-The machine's last process to release its groups (`h9_kern_release` in `src/kern/proc.c`) closes every posted channel, as closing a lease does, while the machine is still there; the boards go with the machine.
+The machine's last process to release its groups (`h9_kern_release` in `src/kern/proc.zig`) closes every posted channel, as closing a lease does, while the machine is still there; the boards go with the machine.
 
 #### Host-stream device `#ℏ` (`src/kern/dev/hstream.zig`, `src/hstream.zig`)
 
@@ -216,7 +218,7 @@ On the web host it also serves `port/clone` and `port/N/{ctl,data,remote,status}
 
 Received data is queued in the machine's pages, up to 16 MiB unread per stream.
 
-A guest `connect` asks the net policy as a TCP dial would, through the same `netLookup`, `netResolved`, and `netCheck` as devip and `cs`. The machine's end closes its streams (`h9_hstream_machend`, from `src/kern/proc.c`).
+A guest `connect` asks the net policy as a TCP dial would, through the same `netLookup`, `netResolved`, and `netCheck` as devip and `cs`. The machine's end closes its streams (`h9_hstream_machend`, from `src/kern/proc.zig`).
 
 #### 9P2000.L device `#ℓ` (`src/kern/devdotl.c`, `src/dotl/`)
 
@@ -230,7 +232,7 @@ The translator is `src/dotl/`: `wire.zig` encodes and bounds-checks 9P2000, 9P20
 
 #### 9P2000 server (`src/kern/kserve.c`)
 
-`--serve` needs a 9P server, and running exportfs as a guest process cost a process per connection and per blocking request, needed an exportfs binary, and can't run where there are no guest processes ([kernel-serve](../design/epoch-0/kernel-serve.md)). kserve serves a channel of 9P2000 messages from kernel channels directly: a fid holds a `Chan`, walks use chan.c's `walk()`, opens and creates cross mounts as namec does (with chan.c's `findmount` and `createdir`), and directory reads go through sysfile.c's `kread`, which h9 splits so it runs on a channel (`h9_chanread`, and `h9_chanstat` for `fstat`'s naming). Its reader and worker kprocs act for the process that started serving, through records of their own in its machine (`h9_kprocshare` in `src/kern/proc.c`) and its thread-local plan and pages (`h9_kern_locals` in `src/kern.zig`), so the sandbox hooks and devices that look up the caller's machine see the server Proc's. It's C under `waserror`, since it sits between channels and devices; Zig hands it a connection through `kern.Kserve`. See [Serving](ninep.md#serving).
+`--serve` needs a 9P server, and running exportfs as a guest process cost a process per connection and per blocking request, needed an exportfs binary, and can't run where there are no guest processes ([kernel-serve](../design/epoch-0/kernel-serve.md)). kserve serves a channel of 9P2000 messages from kernel channels directly: a fid holds a `Chan`, walks use chan.c's `walk()`, opens and creates cross mounts as namec does (with chan.c's `findmount` and `createdir`), and directory reads go through sysfile.c's `kread`, which h9 splits so it runs on a channel (`h9_chanread`, and `h9_chanstat` for `fstat`'s naming). Its reader and worker kprocs act for the process that started serving, through records of their own in its machine (`h9_kprocshare` in `src/kern/proc.zig`) and its thread-local plan and pages (`h9_kern_locals` in `src/kern.zig`), so the sandbox hooks and devices that look up the caller's machine see the server Proc's. It's C under `waserror`, since it sits between channels and devices; Zig hands it a connection through `kern.Kserve`. See [Serving](ninep.md#serving).
 
 #### Index device `#ι` (`src/kern/dev/hidx.zig`, `src/rootindex/`)
 

@@ -18,9 +18,28 @@
 //!   link, rename, getattr, and setattr (design/file-interface.md).
 //! - `devmnt.zig`: devmnt.c, the 9P client.
 //! - `dev/pipe.zig` and `dev/root.zig`: devpipe.c and devroot.c.
+//! - `dev/pty.zig`: h9's src/kern/devpty.c, the Linux ABI's ptys.
+//! - `netcheck.zig`: h9's src/kern/netcheck.c, devip's sandbox hooks.
+//! - `dev/ns.zig`: h9's src/kern/devns.c, the namespace kernel's #N.
+//! - `fscheck.zig`: the kernel's half of h9's src/kern/fscheck.c, FIFOs
+//!   by path for the Linux ABI.
+//! - `linuxnet.zig`, `dev/eventfd.zig`, and `rconv.zig`: h9's
+//!   src/kern/linuxnet.c, the Linux ABI's readiness and socket calls, #ε,
+//!   and the read-ahead for remote conversations.
+//! - `dev/gfx.zig`: the devices of h9's src/kern/gfx.c, #i, #c, #b, and
+//!   #m over drawterm's, in builds with a screen (`options.gfx`).
+//!
+//! The files only the full kernel has (devip's hooks, the Linux ABI, and
+//! the screen) export their C names only there: `options.nskernel` says
+//! the namespace kernel is being built.
 //!
 //! And h9's own C, as it's ported:
 //!
+//! - `glue.zig`: glue.c, booting the kernel, and the Zig side's small
+//!   calls into it.
+//! - `proc.zig`: proc.c, the process record, notes, rfork, and wait
+//!   records, with drawterm's procinit.c.
+//! - `dev/proc.zig`: devproc.c, #p.
 //! - `tsleep.zig`: tsleep.c, sleep with a timeout.
 //! - `sema.zig`: sema.c, semaphores and rendezvous for guests.
 //! - `dev/hcons.zig`: devhcons.c, #y, a machine's console.
@@ -39,6 +58,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 pub const c = @import("kern_c");
+pub const options = @import("kern_options");
 pub const qio = @import("qio.zig");
 pub const sync = @import("sync.zig");
 pub const dev = @import("dev.zig");
@@ -49,6 +69,17 @@ pub const syswide = @import("syswide.zig");
 pub const devmnt = @import("devmnt.zig");
 pub const devpipe = @import("dev/pipe.zig");
 pub const devroot = @import("dev/root.zig");
+pub const devpty = @import("dev/pty.zig");
+pub const netcheck = @import("netcheck.zig");
+pub const fscheck = @import("fscheck.zig");
+pub const devns = @import("dev/ns.zig");
+pub const linuxnet = @import("linuxnet.zig");
+pub const rconv = @import("rconv.zig");
+pub const deveventfd = @import("dev/eventfd.zig");
+pub const devgfx = @import("dev/gfx.zig");
+pub const glue = @import("glue.zig");
+pub const process = @import("proc.zig");
+pub const devproc = @import("dev/proc.zig");
 pub const tsleep = @import("tsleep.zig");
 pub const sema = @import("sema.zig");
 pub const devhcons = @import("dev/hcons.zig");
@@ -74,6 +105,18 @@ comptime {
     devmnt.exportC();
     devpipe.exportC();
     devroot.exportC();
+    devpty.exportC();
+    if (!options.nskernel) {
+        netcheck.exportC();
+        linuxnet.exportC();
+    }
+    // Without devfs, nstab.c stands in for these.
+    if (options.hostfs) fscheck.exportC();
+    if (options.nskernel) devns.exportC();
+    if (options.gfx) devgfx.exportC();
+    glue.exportC();
+    process.exportC();
+    if (!nskernel) devproc.exportC();
     tsleep.exportC();
     sema.exportC();
     if (!nskernel) devhcons.exportC();
@@ -98,6 +141,16 @@ test {
     _ = devmnt;
     _ = devpipe;
     _ = devroot;
+    _ = devpty;
+    _ = netcheck;
+    _ = fscheck;
+    _ = devns;
+    _ = linuxnet;
+    _ = rconv;
+    _ = deveventfd;
+    _ = glue;
+    _ = process;
+    _ = devproc;
     _ = tsleep;
     _ = sema;
     _ = devhcons;

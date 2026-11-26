@@ -55,7 +55,7 @@ const real = struct {
     extern fn h9_pty_get(fd: c_int, s: *PtyState) c_int;
     extern fn h9_pty_set(fd: c_int, s: *const PtyState, what: c_int, excl: c_int) c_int;
     extern fn h9_pty_bysid(sid: c_ulong) c_int;
-    extern fn h9_pty_queued(fd: c_int, wr: c_int, flush: c_int) c_long;
+    extern fn h9_pty_queued(fd: c_int, wr: c_int, flush: c_int) c_int;
     extern fn h9_pty_setsig(f: PtySig) void;
 };
 
@@ -191,13 +191,13 @@ const stub = struct {
     fn h9_pty_bysid(_: c_ulong) c_int {
         return -1;
     }
-    fn h9_pty_queued(_: c_int, _: c_int, _: c_int) c_long {
+    fn h9_pty_queued(_: c_int, _: c_int, _: c_int) c_int {
         return -1;
     }
     fn h9_pty_setsig(_: PtySig) void {}
 };
 
-/// A pty pair's state (src/kern/devpty.c's Ptystate): the termios as
+/// A pty pair's state (src/kern/dev/pty.zig's Ptystate): the termios as
 /// the ABI keeps it, the window size (rows, cols, xpixel,
 /// ypixel), the foreground group and session (0 for none), the lock,
 /// and, read only, the pair's number, whether the fd is its master, and
@@ -264,7 +264,7 @@ pub fn setPtySig(f: PtySig) void {
     c.h9_pty_setsig(f);
 }
 
-/// Linux's struct pollfd, which h9_poll fills in (src/kern/linuxnet.c).
+/// Linux's struct pollfd, which h9_poll fills in (src/kern/linuxnet.zig).
 pub const PollFd = extern struct { fd: i32, events: i16, revents: i16 };
 
 pub const POLLIN = 1;
@@ -387,7 +387,7 @@ pub fn soError(fd: i32) u32 {
 }
 
 /// Attaches a conversation from a mounted /net (not devip's), open on
-/// `data` and `ctl`, to the kernel's read-ahead (src/kern/linuxnet.c),
+/// `data` and `ctl`, to the kernel's read-ahead (src/kern/rconv.zig),
 /// under the Linux layer's `id`. `open`: it's connected already.
 pub fn rattach(data: i32, ctl: i32, id: u32, udp: bool, open: bool) Error!void {
     _ = try check(c.h9_linux_rattach(data, ctl, @intCast(id), @intFromBool(udp), @intFromBool(open)));

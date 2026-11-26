@@ -159,7 +159,7 @@ pub fn checkb(b: *Block, msg: [*:0]const u8) void {
 
 // qio.c
 
-/// h9: wakes Linux pollers (src/kern/linuxnet.c).
+/// h9: wakes Linux pollers (src/kern/linuxnet.zig).
 extern fn h9_qwake(q: *Queue) void;
 
 /// h9: qlock for a queue's reader or writer lock, which a note

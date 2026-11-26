@@ -67,7 +67,7 @@ extern fn h9_pollwake() void;
 fn h9_cons_wake(id: c_ulong) callconv(.c) void {
     if (id < Maxcons)
         _ = sync.wakeup(&hcons[id].r);
-    h9_pollwake(); // a Linux poll or epoll on the console (linuxnet.c)
+    h9_pollwake(); // a Linux poll or epoll on the console (linuxnet.zig)
 }
 
 fn taketurn(h: *Hcons) Error!void {

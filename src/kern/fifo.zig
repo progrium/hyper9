@@ -34,15 +34,15 @@ const dev = @import("dev.zig");
 const chan = @import("chan.zig");
 const sysfile = @import("sysfile.zig");
 const devpipe = @import("dev/pipe.zig");
+const fscheck = @import("fscheck.zig");
 const c = port.c;
 const up = port.up;
 const Error = port.Error;
 
 const Chan = c.Chan;
 
-// src/kern/devshim.c's, since what they call can raise.
+// src/kern/devshim.c's, since devoverlay.c's h9_overlay_lower can raise.
 extern fn h9_shim_overlay_lower(ch: *Chan, r: *?*Chan) c_int;
-extern fn h9_shim_fs_chanisfifo(ch: *Chan, r: *c_int) c_int;
 
 const Fifo = struct {
     next: ?*Fifo,
@@ -146,9 +146,10 @@ pub fn isfifo(fd: c_int) Error!bool {
     defer chan.cclose(ch);
     if (ch.qid.type & c.QTDIR != 0)
         return false;
-    var r: c_int = 0;
-    try dev.caught(h9_shim_fs_chanisfifo(ch, &r));
-    return r != 0;
+    // Without devfs, nstab.c's h9_fs_chanisfifo says no.
+    if (!port.options.hostfs)
+        return false;
+    return fscheck.chanisfifo(ch);
 }
 
 /// Replaces fd, an open FIFO file, with an open of its pipe in mode

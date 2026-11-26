@@ -6,7 +6,7 @@
 //!
 //! One timer kproc per kernel, started from h9_proc_boot, keeps a list of
 //! deadlines sorted by host monotonic time, and waits on a host condition
-//! variable (glue.c, glue-win32.c) until the earliest one or until an
+//! variable (glue.zig, glue-win32.c) until the earliest one or until an
 //! earlier one is added. tsleep puts a timer on its own stack into the
 //! list and sleeps until the timer has fired or its condition is true. At
 //! the deadline the timer kproc marks the timer fired and calls wakeup on
@@ -116,10 +116,6 @@ pub fn tsleep(r: *c.Rendez, f: Cond, arg: ?*anyopaque, ms: c_uint) Error!void {
 
 // The C kernel's names.
 
-fn c_h9_tsleepinit() callconv(.c) void {
-    tsleepinit();
-}
-
 /// tsleep for C: like sleep, it raises "interrupted" if a note arrives.
 fn c_tsleep(r: *c.Rendez, f: Cond, arg: ?*anyopaque, ms: c_uint) callconv(.c) void {
     tsleep(r, f, arg, ms) catch |e| port.raise(e);
@@ -179,7 +175,6 @@ fn h9_kern_nanomono() callconv(.c) u64 {
 }
 
 pub fn exportC() void {
-    @export(&c_h9_tsleepinit, .{ .name = "h9_tsleepinit" });
     @export(&c_tsleep, .{ .name = "tsleep" });
     @export(&h9_tflag_new, .{ .name = "h9_tflag_new" });
     @export(&h9_tflag_free, .{ .name = "h9_tflag_free" });

@@ -22,7 +22,7 @@ extern Dev drawdevtab;
 #define h9kbddevtab kbddevtab
 #define h9mousedevtab mousedevtab
 #else
-/* devdraw opening the screen lazily, and devcons's snarf limited to the machine with it (gfx.c) */
+/* devdraw opening the screen lazily, and devcons's snarf limited to the machine with it (src/kern/dev/gfx.zig) */
 extern Dev h9drawdevtab;
 extern Dev h9consdevtab;
 extern Dev h9kbddevtab;	/* devkbd, serving kbdfs's format, and kbdin */
