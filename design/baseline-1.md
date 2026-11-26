@@ -1,12 +1,12 @@
 ---
 slug: baseline-1
 title: Baseline 1 (h9 at the end of epoch 0)
-status: draft
+status: implemented
 created: 2026-11-21
 authors: [progrium]
 depends: [renames, cow-fork, retire-unicorn]
 areas: [process]
-branch: [claude/project-thread-zhebn2]
+branch: [main]
 ---
 
 # Proposal: Baseline 1
@@ -211,8 +211,8 @@ None. It's a record.
 - [x] [renames](epoch-0/renames.md), [cow-fork](epoch-0/cow-fork.md), and [retire-unicorn](epoch-0/retire-unicorn.md) are implemented.
 - [x] `zig build design -- archive --dry-run` reports nothing to archive, with the current epoch still 0.
 - [x] This file has the commit, the statement of what h9 is, the table of epoch 0's proposals with every proposal in `design/epoch-0/` on a line, and the carried-over list.
-- [ ] SPEC.md has the new title and overview, its decisions table matches what's built, and it's signed by the person who reviewed it as a whole.
-- [ ] `zig build design -- check` passes, and `zig build design -- status` shows an Epoch 0 table and an empty Epoch 1.
+- [x] SPEC.md has the new title and overview, its decisions table matches what's built, and it's signed by the person who reviewed it as a whole.
+- [x] `zig build design -- check` passes, and `zig build design -- status` shows an Epoch 0 table and an empty Epoch 1.
 
 ## Implementation
 
