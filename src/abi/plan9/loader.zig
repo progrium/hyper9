@@ -71,7 +71,7 @@ const AoutSrc = struct {
     adata: u64,
 
     fn fill(s: *kmm.Src, dst: []u8, va: u64) usize {
-        const a: *AoutSrc = @fieldParentPtr("src", s);
+        const a: *AoutSrc = @alignCast(@fieldParentPtr("src", s));
         @memset(dst, 0);
         piece(dst, va, a.utzero, a.bytes[0..@intCast(a.ntext)]);
         piece(dst, va, a.adata, a.bytes[@intCast(a.ntext)..]);
@@ -87,7 +87,7 @@ const AoutSrc = struct {
     }
 
     fn free(s: *kmm.Src) void {
-        const a: *AoutSrc = @fieldParentPtr("src", s);
+        const a: *AoutSrc = @alignCast(@fieldParentPtr("src", s));
         a.gpa.free(a.bytes);
         a.gpa.destroy(a);
     }

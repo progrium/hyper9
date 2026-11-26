@@ -286,7 +286,7 @@ pub const Space = struct {
         var pg: [page]u8 = undefined;
         while (true) {
             const at = va +% out.items.len;
-            const n = page - at % page;
+            const n: usize = @intCast(page - at % page);
             try s.read(at, pg[0..n]);
             if (std.mem.indexOfScalar(u8, pg[0..n], 0)) |z| {
                 if (out.items.len + z > max) return error.BadAddress;
