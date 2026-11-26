@@ -25,6 +25,14 @@ enum
 
 struct Proc
 {
+	/*
+	 * First, so it is at offset 0 for the C and the Zig alike. MinGW's
+	 * jmp_buf is 16-aligned (SETJMP_FLOAT128) and Zig's translation of
+	 * it only 8-aligned, so anywhere else the two put errlab, and every
+	 * field after it, at different offsets on Windows. The array's size
+	 * is a multiple of 16 (proc.zig checks), so the fields after it agree.
+	 */
+	Label	errlab[NERR];
 	Ref	ref;
 	uint	state;
 
@@ -46,7 +54,6 @@ struct Proc
 	Proc	*rendhash;	/* Hash list for tag values */
 
 	int	nerrlab;
-	Label	errlab[NERR];
 	char	user[KNAMELEN];
 	char	*syserrstr;	/* last error from a system call, errbuf0 or 1 */
 	char	*errstr;	/* reason we're unwinding the error stack, errbuf1 or 0 */
