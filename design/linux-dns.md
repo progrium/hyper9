@@ -11,6 +11,8 @@ branch: []
 
 # Proposal: Name patterns for a Linux guest's DNS
 
+Nov 25, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
+
 ## Abstract
 
 Make `--net-allow` name patterns work for Linux programs. A Linux program resolves names with its own DNS client and then connects by address, so h9 never sees the name, and every name pattern refuses the connect. Under an allowlist with a name pattern, h9 answers the machine's DNS itself: each query to port 53 goes to a resolver h9 runs for the machine, which refuses names no pattern covers, forwards the rest to the host's DNS servers, and records the addresses in each answer in the machine's resolved-name table before the guest sees them. A later connect to one of those addresses is then allowed as it is after `cs` resolves the name. The guest's DNS servers no longer need patterns of their own, and the guarantee [net-policy](epoch-0/net-policy.md) gives 9front programs, that the guest can't make the host resolve names the allowlist doesn't cover, holds for Linux programs too.
