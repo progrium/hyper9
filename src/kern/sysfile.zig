@@ -1,6 +1,6 @@
 //! drawterm's sysfile.c (design/kernel-port.md): file descriptors and
 //! the file system calls. A close translation: the same functions in the
-//! same order, with error unions in place of waserror, and h9's patches
+//! same order, with error unions in place of C's error labels, and h9's patches
 //! kept: kserve's chanread and chanstat (h9_chanread and h9_chanstat),
 //! Linux's F_DUPFD (h9_dupfrom), and no fd warning for a Linux process.
 //!
@@ -755,7 +755,7 @@ pub fn validstat(s_: [*]const u8, n: c_int) Error!void {
     s += c.STATFIXLEN - 4 * c.BIT16SZ; // location of first string
     // s now points at count for first string. if it's too long, let the
     // server decide; this is only for his protection anyway. otherwise
-    // we'd have to allocate and waserror.
+    // we'd have to allocate and set an error label.
     const m = gbit16(s);
     s += c.BIT16SZ;
     var buf: [64:0]u8 = undefined;
@@ -919,7 +919,7 @@ pub fn fwstat(fd: c_int, s: [*]u8, l: c_int) Error!c_int {
     return wstatChan(ch, s, l);
 }
 
-/// A call's start: no waserror is pending (starterror).
+/// A call's start: no error label is pending (starterror).
 fn starterror() void {
     port.assert(up().nerrlab == 0);
 }

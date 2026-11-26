@@ -1,7 +1,7 @@
-//! Zig side of the drawterm kern seam (SPEC.md, "Kernel: drawterm kern/
-//! and the Zig seam"). Each call goes through one of kern's `sys*` wrappers,
-//! which catch kernel errors with waserror and return -1; `errstr` then
-//! holds the message. No Zig frame sits between a waserror and an error.
+//! The kernel as the rest of h9 calls it (spec/kernel.md). Each call is
+//! one of the kernel's functions under its C name (src/kern/sysfile.zig's
+//! `sysopen`, `syspread`, and the rest), which returns -1 on an error;
+//! `errstr` then holds the message.
 //!
 //! The kernel boots once per host process, on a private thread. Each guest
 //! process runs on a thread made by `Kernel.spawn` (or `fork`) in its

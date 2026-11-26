@@ -277,25 +277,10 @@ fn h9_linux_chanput(v: *anyopaque) callconv(.c) void {
     chan.cclose(@ptrCast(@alignCast(v)));
 }
 
-// devfs's syncs (src/kern/fscheck.h), which raise the host's error.
-// They're called as a C Devgen is, through dev.zig's callgen and so the
-// shim's error label (src/kern/devshim.c), which leaves the error on the
-// process.
-extern fn h9_fs_syncfs(ch: *Chan) void;
+// devfs's syncs (src/kern/fscheck.h), which raise the host's error, so
+// they're called through dev.zig's `raising`.
+extern fn h9_fs_syncfs(ch: [*c]Chan) void;
 extern fn h9_fs_sync() void;
-
-fn syncfsgen(ch: [*c]Chan, name: [*c]u8, tab: [*c]c.Dirtab, ntab: c_int, i: c_int, dp: [*c]c.Dir) callconv(.c) c_int {
-    _ = .{ name, tab, ntab, dp };
-    if (i == 0) h9_fs_syncfs(ch) else h9_fs_sync();
-    return 0;
-}
-
-/// h9_fs_syncfs(ch), or with ch nil h9_fs_sync().
-fn fssync(ch: ?*Chan) Error!void {
-    var dir: c.Dir = undefined;
-    var dummy: Chan = undefined;
-    _ = try dev.callgen(&syncfsgen, ch orelse &dummy, null, null, 0, @intFromBool(ch == null), &dir);
-}
 
 /// syncfs(2): syncs the host file system behind fd's channel. Only devfs
 /// has one; other devices, and 9P servers, have nothing to sync.
@@ -303,13 +288,13 @@ fn h9_linux_syncfs(fd: c_int) callconv(.c) c_int {
     const ch = sysfile.fdtochan(fd, -1, false, true) catch return syserr();
     defer chan.cclose(ch);
     if (dev.of(ch).dc == 'U')
-        fssync(ch) catch return syserr();
+        dev.raising(&h9_fs_syncfs, .{ch}) catch return syserr();
     return 0;
 }
 
 /// sync(2): syncs every host file system.
 fn h9_linux_sync() callconv(.c) c_int {
-    fssync(null) catch return syserr();
+    dev.raising(&h9_fs_sync, .{}) catch return syserr();
     return 0;
 }
 

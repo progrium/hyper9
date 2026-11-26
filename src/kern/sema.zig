@@ -1,7 +1,7 @@
 //! h9's rendezvous and semaphores (src/kern/sema.c, design/kernel-port.md).
 //! See design/epoch-0/semaphores.md. A close translation of the C: the
 //! same functions in the same order, with error unions in place of
-//! waserror.
+//! C's error labels.
 //!
 //! The semaphore code is 9front's (port/sysproc.c at the pinned release),
 //! ported closely, races and comments included, since it was checked with

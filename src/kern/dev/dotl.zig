@@ -1,6 +1,6 @@
 //! h9's devdotl.c (design/kernel-port.md): `#ℓ`, 9P2000.L translation
 //! (design/epoch-0/dotl.md). A close translation: the same functions in
-//! the same order, with error unions in place of waserror. A native
+//! the same order, with error unions in place of C's error labels. A native
 //! device (dev.zig's `Native`).
 //!
 //! A conversation puts the translator (src/dotl/client.zig) between

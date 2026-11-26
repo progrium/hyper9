@@ -1,14 +1,14 @@
 //! drawterm's chan.c (design/kernel-port.md): channels, paths, the mount
 //! table's heads, mounts, walks across mount points and through unions,
 //! and namec. A close translation: the same functions in the same order,
-//! with error unions in place of waserror, and h9's patches kept: the
+//! with error unions in place of C's error labels, and h9's patches kept: the
 //! #O overlay's lower directories in findmount, Linux symbolic links in
 //! walkl (followlink), a Linux chroot's .. and #L in namec, and devfs's
 //! anchored attach.
 //!
 //! namec is the one function here with a lot to undo on an error, and
-//! keeps C's shape: each waserror is a function whose caller does what
-//! the C's error branch did.
+//! keeps C's shape: each of C's error labels is a function whose caller
+//! does what the C's error branch did.
 
 const std = @import("std");
 const port = @import("port.zig");
@@ -685,8 +685,8 @@ fn ccloneAt(ch: *Chan, pc: usize) Error!*Chan {
 // h9: src/kern/dev/overlay.zig
 extern fn h9_overlay_lowerdev(c_int, c_int, Qid, *c_int, *c_int) c_int;
 // h9: devfs-posix.c and devfs-win32.c (src/kern/fscheck.h), through
-// src/kern/devshim.c, since they raise.
-extern fn h9_shim_fs_anchor(*Chan) c_int;
+// dev.zig's `raising`, since they raise.
+extern fn h9_fs_anchor([*c]Chan) void;
 // h9: Linux symlinks (design/epoch-0/linux-symlinks.md, src/kern/fscheck.h)
 extern fn h9_fs_linkwalk() c_int;
 extern fn h9_fs_nofollowing() c_int;
@@ -1371,7 +1371,7 @@ fn namec1(cp: **Chan, e: *Elemlist, name: [*:0]const u8, nomount: bool, nlinks: 
 
     // h9: a contained #U attach's tree is where its walk ends (devfs).
     if (nomount and dev.of(cp.*).dc == 'U')
-        try dev.caught(h9_shim_fs_anchor(cp.*));
+        try dev.raising(&h9_fs_anchor, .{cp.*});
 
     if (e.mustbedir and (cp.*.qid.type & c.QTDIR) == 0)
         return port.kerror("not a directory");

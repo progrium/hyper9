@@ -3,6 +3,8 @@ const frontmatter = @import("tools/frontmatter.zig");
 const guesttree = @import("tools/guesttree.zig");
 
 const drawterm = "third_party/drawterm";
+// h9's C at the edge of drawterm's (third_party/drawterm-glue/catch.c).
+const drawterm_glue = "third_party/drawterm-glue";
 
 // drawterm's kern/Makefile OFILES with AUDIO=none, without devtab.c and
 // devenv.c (src/kern/dev/env.zig is our own), procinit.c (src/kern/proc.c has it,
@@ -614,9 +616,11 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.O
     });
     kern.root_module.addCSourceFiles(.{
         .root = b.path("src/kern"),
-        .files = &.{ "procshim.c", "devtab.c", "devdup.c", "devhtools.c", "fscheck.c", "consx.c", "devshim.c", "werrstr.c" },
+        .files = &.{ "devtab.c", "devdup.c", "devhtools.c", "fscheck.c", "consx.c", "werrstr.c" },
         .flags = flags,
     });
+    // The one label the Zig calls drawterm's raising C under.
+    kern.root_module.addCSourceFiles(.{ .root = b.path(drawterm_glue), .files = &.{"catch.c"}, .flags = flags });
     // The Linux ABI (design/epoch-0/linux-personality.md) and its host
     // sockets (design/epoch-0/linux-net.md).
     if (web) {
@@ -773,10 +777,7 @@ fn addWeb(b: *std.Build, optimize: std.lang.Optimize, parts: ModuleParts, gfx: G
 const nskern_sources = [_][]const u8{
     "alloc.c", "data.c", "error.c", "parse.c", "stub.c", "waserror.c",
 };
-const nskern_h9 = [_][]const u8{
-    "procshim.c", "nstab.c",
-    "devshim.c", "werrstr.c",
-};
+const nskern_h9 = [_][]const u8{ "nstab.c", "werrstr.c" };
 // libc's files the kernel subset uses, from kern_libs' list.
 const nskern_libc_skip = [_][]const u8{ "pushssl.c", "pushtls.c", "crypt.c", "dial.c" };
 
@@ -820,6 +821,7 @@ fn addNsKernel(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.la
     root.addImport("kern_port", port);
     m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/kern"), .files = &nskern_sources, .flags = flags });
     m.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &nskern_h9, .flags = flags });
+    m.addCSourceFiles(.{ .root = b.path(drawterm_glue), .files = &.{"catch.c"}, .flags = flags });
     var libc: std.ArrayList([]const u8) = .empty;
     for (kern_libs[0].files) |f| {
         for (nskern_libc_skip) |skip| {

@@ -2,13 +2,14 @@
 //! built from (devattach, devwalk, devstat, devdirread, devopen, and the
 //! rest), and the device switch, through which the Zig kernel calls a
 //! device. A close translation: the same functions in the same order,
-//! with error unions in place of waserror.
+//! with error unions in place of C's error labels.
 //!
 //! The switch is the bottom half of this file. A device is still a C
 //! `Dev` in `devtab` (src/kern/devtab.c, or nstab.c in the namespace
 //! kernel), and the switch calls a C device's functions, and a C Devgen,
-//! through src/kern/devshim.c, which catches the device's error() and
-//! hands it back as an error union. A device ported to Zig is a `Native`
+//! through `raising`, which catches the device's error() under the one
+//! label h9 sets (third_party/drawterm-glue/catch.c) and hands it back
+//! as an error union. A device ported to Zig is a `Native`
 //! in `natives`, and the switch calls its Zig functions directly.
 //!
 //! drawterm's devtab.c is h9's own src/kern/devtab.c and nstab.c, which
@@ -225,8 +226,8 @@ pub fn devwalk(ch: *Chan, nc_: ?*Chan, name: [*]const [*:0]const u8, nname: c_in
     return wq;
 }
 
-/// devwalk's loop: the names it walks, into wq. An error is devwalk's
-/// waserror, and a short walk returns.
+/// devwalk's loop: the names it walks, into wq. An error is what
+/// devwalk's error label caught, and a short walk returns.
 fn walk(ch: *Chan, nc_: ?*Chan, name: [*]const [*:0]const u8, nname: c_int, tab: ?[*]Dirtab, ntab: c_int, gen: *const Devgen, wq: *Walkqid) Error!void {
     const nc = nc_ orelse blk: {
         const n = devclone(ch);
@@ -627,25 +628,36 @@ fn nativeOps(d: *Dev) ?*const Ops {
     return null;
 }
 
-// src/kern/devshim.c.
-extern fn h9_dev_reset(d: *Dev) c_int;
-extern fn h9_dev_init(d: *Dev) c_int;
-extern fn h9_dev_shutdown(d: *Dev) c_int;
-extern fn h9_dev_attach(d: *Dev, spec: [*c]u8, r: *[*c]Chan) c_int;
-extern fn h9_dev_walk(d: *Dev, ch: *Chan, nc: ?*Chan, name: [*]const [*:0]const u8, nname: c_int, r: *[*c]Walkqid) c_int;
-extern fn h9_dev_stat(d: *Dev, ch: *Chan, db: [*]u8, n: c_int, r: *c_int) c_int;
-extern fn h9_dev_open(d: *Dev, ch: *Chan, omode: c_int, r: *[*c]Chan) c_int;
-extern fn h9_dev_create(d: *Dev, ch: *Chan, name: [*:0]const u8, omode: c_int, perm: c_uint, r: *[*c]Chan) c_int;
-extern fn h9_dev_close(d: *Dev, ch: *Chan) c_int;
-extern fn h9_dev_read(d: *Dev, ch: *Chan, a: ?*anyopaque, n: c_int, off: i64, r: *c_int) c_int;
-extern fn h9_dev_bread(d: *Dev, ch: *Chan, n: c_int, off: c_uint, r: *[*c]Block) c_int;
-extern fn h9_dev_write(d: *Dev, ch: *Chan, a: ?*const anyopaque, n: c_int, off: i64, r: *c_int) c_int;
-extern fn h9_dev_bwrite(d: *Dev, ch: *Chan, b: *Block, off: c_uint, r: *c_int) c_int;
-extern fn h9_dev_remove(d: *Dev, ch: *Chan) c_int;
-extern fn h9_dev_wstat(d: *Dev, ch: *Chan, db: [*]u8, n: c_int, r: *c_int) c_int;
-extern fn h9_dev_gen(gen: *const Devgen, ch: *Chan, name: ?[*:0]const u8, tab: ?[*]Dirtab, ntab: c_int, i: c_int, dp: *Dir, r: *c_int) c_int;
+// third_party/drawterm-glue/catch.c: f(arg), or -1 if it raised, with
+// the error string on the process.
+extern fn h9_catch(f: *const fn (?*anyopaque) callconv(.c) void, arg: ?*anyopaque) c_int;
 
-/// The error a C function the shim called raised, which is on the
+fn Result(comptime F: type) type {
+    const P = @typeInfo(F).pointer.child;
+    return @typeInfo(P).@"fn".return_type.?;
+}
+
+/// f(args...), for C that can raise: drawterm's devices and the rest of
+/// its code h9 builds. The call runs under drawterm-glue's label, and an
+/// error() in it comes back as an error union. f is a C function
+/// pointer, and the trampoline between the label and it is a Zig frame
+/// with nothing to undo.
+pub fn raising(f: anytype, args: anytype) Error!Result(@TypeOf(f)) {
+    const Call = struct {
+        f: @TypeOf(f),
+        args: @TypeOf(args),
+        r: Result(@TypeOf(f)) = undefined,
+        fn run(p: ?*anyopaque) callconv(.c) void {
+            const call: *@This() = @ptrCast(@alignCast(p.?));
+            call.r = @call(.auto, call.f, call.args);
+        }
+    };
+    var call: Call = .{ .f = f, .args = args };
+    try caught(h9_catch(&Call.run, &call));
+    return call.r;
+}
+
+/// The error a C function `raising` called raised, which is on the
 /// process: Interrupted if it was Eintr.
 pub fn caught(rc: c_int) Error!void {
     if (rc == 0) return;
@@ -655,105 +667,85 @@ pub fn caught(rc: c_int) Error!void {
 
 pub fn reset(d: *Dev) Error!void {
     if (nativeOps(d)) |o| return o.reset();
-    try caught(h9_dev_reset(d));
+    try raising(d.reset.?, .{});
 }
 
 pub fn init(d: *Dev) Error!void {
     if (nativeOps(d)) |o| return o.init();
-    try caught(h9_dev_init(d));
+    try raising(d.init.?, .{});
 }
 
 pub fn shutdown(d: *Dev) Error!void {
     if (nativeOps(d)) |o| return o.shutdown();
-    try caught(h9_dev_shutdown(d));
+    try raising(d.shutdown.?, .{});
 }
 
 pub fn attach(d: *Dev, spec: [*:0]const u8) Error!*Chan {
     if (nativeOps(d)) |o| return o.attach(spec);
-    var r: [*c]Chan = null;
-    try caught(h9_dev_attach(d, @constCast(spec), &r));
-    return r;
+    return try raising(d.attach.?, .{@constCast(spec)});
 }
 
 /// A device's walk, which returns nil (with the error string set) for a
 /// walk that failed at its first name.
 pub fn walkdev(d: *Dev, ch: *Chan, nc: ?*Chan, name: [*]const [*:0]const u8, nname: c_int) Error!?*Walkqid {
     if (nativeOps(d)) |o| return o.walk(ch, nc, name, nname);
-    var r: [*c]Walkqid = null;
-    try caught(h9_dev_walk(d, ch, nc, name, nname, &r));
-    return r;
+    return try raising(d.walk.?, .{ ch, nc, @as([*c][*c]u8, @ptrCast(@constCast(name))), nname });
 }
 
 pub fn stat(d: *Dev, ch: *Chan, db: [*]u8, n: c_int) Error!c_int {
     if (nativeOps(d)) |o| return o.stat(ch, db, n);
-    var r: c_int = 0;
-    try caught(h9_dev_stat(d, ch, db, n, &r));
-    return r;
+    return try raising(d.stat.?, .{ ch, db, n });
 }
 
 pub fn open(d: *Dev, ch: *Chan, omode: c_int) Error!*Chan {
     if (nativeOps(d)) |o| return o.open(ch, omode);
-    var r: [*c]Chan = null;
-    try caught(h9_dev_open(d, ch, omode, &r));
-    return r;
+    return try raising(d.open.?, .{ ch, omode });
 }
 
 pub fn create(d: *Dev, ch: *Chan, name: [*:0]const u8, omode: c_int, perm: c_uint) Error!*Chan {
     if (nativeOps(d)) |o| return o.create(ch, name, omode, perm);
-    var r: [*c]Chan = null;
-    try caught(h9_dev_create(d, ch, name, omode, perm, &r));
-    return r;
+    return try raising(d.create.?, .{ ch, @constCast(name), omode, perm });
 }
 
 pub fn close(d: *Dev, ch: *Chan) Error!void {
     if (nativeOps(d)) |o| return o.close(ch);
-    try caught(h9_dev_close(d, ch));
+    try raising(d.close.?, .{ch});
 }
 
 pub fn read(d: *Dev, ch: *Chan, a: ?*anyopaque, n: c_int, off: i64) Error!c_int {
     if (nativeOps(d)) |o| return o.read(ch, a, n, off);
-    var r: c_int = 0;
-    try caught(h9_dev_read(d, ch, a, n, off, &r));
-    return r;
+    return try raising(d.read.?, .{ ch, a, n, off });
 }
 
 pub fn bread(d: *Dev, ch: *Chan, n: c_int, off: c_uint) Error!?*Block {
     if (nativeOps(d)) |o| return o.bread(ch, n, off);
-    var r: [*c]Block = null;
-    try caught(h9_dev_bread(d, ch, n, off, &r));
-    return r;
+    return try raising(d.bread.?, .{ ch, n, off });
 }
 
 pub fn write(d: *Dev, ch: *Chan, a: ?*const anyopaque, n: c_int, off: i64) Error!c_int {
     if (nativeOps(d)) |o| return o.write(ch, a, n, off);
-    var r: c_int = 0;
-    try caught(h9_dev_write(d, ch, a, n, off, &r));
-    return r;
+    return try raising(d.write.?, .{ ch, @constCast(a), n, off });
 }
 
 /// A device's bwrite, which frees b, whatever happens.
 pub fn bwrite(d: *Dev, ch: *Chan, b: *Block, off: c_uint) Error!c_int {
     if (nativeOps(d)) |o| return o.bwrite(ch, b, off);
-    var r: c_int = 0;
-    try caught(h9_dev_bwrite(d, ch, b, off, &r));
-    return r;
+    return try raising(d.bwrite.?, .{ ch, b, off });
 }
 
 pub fn remove(d: *Dev, ch: *Chan) Error!void {
     if (nativeOps(d)) |o| return o.remove(ch);
-    try caught(h9_dev_remove(d, ch));
+    try raising(d.remove.?, .{ch});
 }
 
 pub fn wstat(d: *Dev, ch: *Chan, db: [*]u8, n: c_int) Error!c_int {
     if (nativeOps(d)) |o| return o.wstat(ch, db, n);
-    var r: c_int = 0;
-    try caught(h9_dev_wstat(d, ch, db, n, &r));
-    return r;
+    return try raising(d.wstat.?, .{ ch, db, n });
 }
 
 // The optional operations (design/file-interface.md, src/kern/devx.h).
 // A native device has them in its Ops, and a C device in a Devx in
-// devxtab, called through the shim. Each one a device lacks has a
+// devxtab, called through `raising`. Each one a device lacks has a
 // default here, or in sysfile.zig's path calls for those that need a
 // walk or a create.
 
@@ -770,12 +762,6 @@ fn devx(d: *Dev) ?*c.Devx {
     return null;
 }
 
-extern fn h9_dev_readlink(x: *c.Devx, ch: *Chan, buf: [*]u8, nbuf: c_int, r: *c_int) c_int;
-extern fn h9_dev_symlink(x: *c.Devx, ch: *Chan, name: [*:0]const u8, target: [*:0]const u8) c_int;
-extern fn h9_dev_link(x: *c.Devx, ch: *Chan, dir: *Chan, name: [*:0]const u8, r: *c_int) c_int;
-extern fn h9_dev_getattr(x: *c.Devx, ch: *Chan, mask: u64, a: *Attr) c_int;
-extern fn h9_dev_setattr(x: *c.Devx, ch: *Chan, mask: u64, a: *const Attr) c_int;
-extern fn h9_dev_rename(x: *c.Devx, ch: *Chan, dir: *Chan, name: [*:0]const u8, r: *c_int) c_int;
 
 /// Linux's EXDEV, as src/dotl/attr.zig names it.
 pub const Exdev = "cross-device link";
@@ -797,8 +783,7 @@ pub fn readlink(ch: *Chan, buf: []u8) Error!?usize {
     }
     const x = devx(d) orelse return null;
     if (x.readlink == null) return null;
-    var r: c_int = -1;
-    try caught(h9_dev_readlink(x, ch, buf.ptr, @intCast(@min(buf.len, std.math.maxInt(c_int))), &r));
+    const r = try raising(x.readlink.?, .{ ch, buf.ptr, @as(c_int, @intCast(@min(buf.len, std.math.maxInt(c_int)))) });
     return if (r < 0) null else @intCast(r);
 }
 
@@ -812,7 +797,7 @@ pub fn symlink(ch: *Chan, name: [*:0]const u8, target: [*:0]const u8) Error!void
     }
     const x = devx(d) orelse return port.kerror(&port.Eperm);
     if (x.symlink == null) return port.kerror(&port.Eperm);
-    try caught(h9_dev_symlink(x, ch, name, target));
+    try raising(x.symlink.?, .{ ch, @constCast(name), @constCast(target) });
 }
 
 /// Makes name in the directory dir another name for ch's file: true, or
@@ -827,8 +812,7 @@ pub fn link(ch: *Chan, dir: *Chan, name: [*:0]const u8) Error!bool {
     }
     const x = devx(d) orelse return false;
     if (x.link == null) return false;
-    var r: c_int = 1;
-    try caught(h9_dev_link(x, ch, dir, name, &r));
+    const r = try raising(x.link.?, .{ ch, dir, @constCast(name) });
     return r == 0;
 }
 
@@ -851,7 +835,7 @@ pub fn getattr(ch: *Chan, mask: u64, a: *Attr) Error!void {
     a.* = std.mem.zeroes(Attr);
     const d = of(ch);
     if (nativeOps(d)) |o| if (o.getattr) |f| return f(ch, mask, a);
-    if (devx(d)) |x| if (x.getattr != null) return caught(h9_dev_getattr(x, ch, mask, a));
+    if (devx(d)) |x| if (x.getattr != null) return raising(x.getattr.?, .{ ch, mask, a });
     return getattrdefault(ch, a);
 }
 
@@ -884,7 +868,7 @@ pub fn attrfromdir(dir: *const Dir, a: *Attr) void {
 pub fn setattr(ch: *Chan, mask: u64, a: *const Attr) Error!void {
     const d = of(ch);
     if (nativeOps(d)) |o| if (o.setattr) |f| return f(ch, mask, a);
-    if (devx(d)) |x| if (x.setattr != null) return caught(h9_dev_setattr(x, ch, mask, a));
+    if (devx(d)) |x| if (x.setattr != null) return raising(x.setattr.?, .{ ch, mask, @constCast(a) });
     return setattrdefault(ch, mask, a);
 }
 
@@ -928,13 +912,12 @@ pub fn rename(ch: *Chan, dir: *Chan, name: [*:0]const u8) Error!bool {
     }
     const x = devx(d) orelse return false;
     if (x.rename == null) return false;
-    var r: c_int = 1;
-    try caught(h9_dev_rename(x, ch, dir, name, &r));
+    const r = try raising(x.rename.?, .{ ch, dir, @constCast(name) });
     return r == 0;
 }
 
 /// (*gen)(c, name, tab, ntab, i, dp): devgen, or a native device's own,
-/// directly, or a C device's own Devgen through the shim.
+/// directly, or a C device's own Devgen through `raising`.
 pub fn callgen(gen: *const Devgen, ch: *Chan, name: ?[*:0]const u8, tab: ?[*]Dirtab, ntab: c_int, i: c_int, dp: *Dir) Error!c_int {
     if (gen == &c_devgen)
         return devgen(ch, name, tab, ntab, i, dp);
@@ -944,9 +927,7 @@ pub fn callgen(gen: *const Devgen, ch: *Chan, name: ?[*:0]const u8, tab: ?[*]Dir
         for (N.ops.egens) |g| if (gen == g.c)
             return g.z(ch, name, tab, ntab, i, dp);
     }
-    var r: c_int = 0;
-    try caught(h9_dev_gen(gen, ch, name, tab, ntab, i, dp, &r));
-    return r;
+    return try raising(gen, .{ ch, @constCast(name), tab, ntab, i, dp });
 }
 
 /// devgen as a C Devgen, for a native device's devwalk, devstat, and the
@@ -1199,7 +1180,7 @@ test "the switch hands a C function's error() back as an error union [kernel-por
     badintr = true;
     defer badintr = false;
     try testing.expectError(error.Interrupted, devstat(ch, &buf, buf.len, &tab, tab.len, &badgen));
-    // A walk catches it, as devwalk's waserror did.
+    // A walk catches it, as devwalk's error label did.
     const names = [_][*:0]const u8{"file"};
     try testing.expect(try devwalk(ch, null, &names, 1, &tab, tab.len, &badgen) == null);
     // And the error stack is as it was.

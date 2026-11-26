@@ -1,7 +1,7 @@
 //! h9's devoverlay.c (design/kernel-port.md): `#O`, copy-on-write
 //! overlays (design/epoch-0/ephemeral-writes.md) and unions
 //! (design/epoch-0/mounts.md). A close translation: the same functions
-//! in the same order, with error unions in place of waserror. A native
+//! in the same order, with error unions in place of C's error labels. A native
 //! device (dev.zig's `Native`), with readlink, symlink, getattr, and
 //! rename as optional operations of its `dev.Ops`.
 //!
@@ -90,9 +90,8 @@ extern fn h9_fs_linkwalk() c_int;
 extern fn h9_clock_mono() i64;
 // devfs's (src/kern/fscheck.h), which doesn't raise.
 extern fn h9_fs_isfifo(ch: *Chan) c_int;
-// src/kern/devshim.c's: devfs's h9_fs_mkfifo, which raises, as a call
-// that returns -1 with the error set.
-extern fn h9_shim_fs_mkfifo(ch: *Chan, name: [*:0]const u8, perm: c_uint) c_int;
+// devfs's h9_fs_mkfifo, which raises, through dev.zig's `raising`.
+extern fn h9_fs_mkfifo(ch: [*c]Chan, name: [*c]u8, perm: c_uint) void;
 
 // src/kern/fscheck.h's.
 const H9_DMFIFO: c_uint = 0x00200000;
@@ -2643,7 +2642,7 @@ fn mklink(dir: *Chan, name: [*c]const u8, target: [*c]const u8) Error!void {
 /// As mklink, a FIFO.
 fn mkfifo1(dir: *Chan, name: [*c]const u8, perm: c_uint) Error!void {
     switch (dcof(dir)) {
-        'U' => try dev.caught(h9_shim_fs_mkfifo(dir, z(name), perm)),
+        'U' => try dev.raising(&h9_fs_mkfifo, .{ dir, @constCast(z(name)), perm }),
         'O' => try mkfifo(try chan.cclone(dir), name, perm),
         'M' => {
             // A 9P2000.L server's makes a create with H9_DMFIFO a Tmknod.

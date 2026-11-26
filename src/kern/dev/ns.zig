@@ -76,8 +76,6 @@ extern fn h9_overlay_nsunion(ch: *Chan, old: [*:0]const u8, buf: [*]u8, nbuf: c_
 extern fn h9_kserve_kns(pg: *Pgrp, slash: *Chan, put: *const fn (?*anyopaque) callconv(.c) void, arg: ?*anyopaque) ?*anyopaque;
 // src/nskernel.zig: runs one bind, mount, unmount or cd line in the calling process's namespace.
 extern fn h9_ns_ctl(ns: ?*anyopaque, line: [*]const u8, n: c_long, err: [*]u8) c_int;
-// src/kern/devshim.c: ns.c's pgrpcpy, which raises.
-extern fn h9_shim_pgrpcpy(to: *Pgrp, from: *Pgrp, flag: c_int) c_int;
 
 const Qtop = 0;
 const Qclone = 1;
@@ -719,7 +717,7 @@ fn unmountall(path: [*:0]const u8) void {
 fn nscopy(n: *Ns, pid: c_ulong) Error!void {
     const p = nsget(pid) orelse return port.kerror(Enons);
     defer nsput(p);
-    try dev.caught(h9_shim_pgrpcpy(n.pg, p.pg, RFNAMEG));
+    try pgrp.pgrpcpy(n.pg, p.pg, RFNAMEG);
     // pgrpcpy copied P's mask too: n's own stands.
     pgrp.devmask(n.pg, false, "Ns");
     c.lock(&p.lk);

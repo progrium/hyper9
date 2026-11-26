@@ -1,6 +1,6 @@
 //! The kernel's Zig (design/kernel-port.md): drawterm's kern/ ported a
 //! file at a time, as close translations, with error unions in place of
-//! waserror. The rest of the kernel is still C, so each ported file also
+//! C's error labels. The rest of the kernel is still C, so each ported file also
 //! exports drawterm's C functions under their own names, with their own
 //! semantics: a C caller sees no change, and an error becomes C's
 //! error() again at that boundary.
@@ -9,7 +9,7 @@
 //! - `sync.zig`: qlock.c, rwlock.c, and sleep.c, the kernel's locks and
 //!   sleep and wakeup.
 //! - `dev.zig`: dev.c, the helpers devices are built from, and the
-//!   device switch, which calls C devices through src/kern/devshim.c.
+//!   device switch, which calls C devices through `raising`.
 //! - `pgrp.zig`: pgrp.c, mount tables, and file descriptor groups.
 //! - `chan.zig`: chan.c, channels, paths, mounts, walks, and namec.
 //! - `sysfile.zig`: sysfile.c, file descriptors and the file system

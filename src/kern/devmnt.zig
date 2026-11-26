@@ -1,6 +1,6 @@
 //! drawterm's devmnt.c (design/kernel-port.md): the 9P client, `#M`. A
 //! close translation: the same functions in the same order, with error
-//! unions in place of waserror.
+//! unions in place of C's error labels.
 //!
 //! References are managed as follows:
 //! The channel to the server - a network connection or pipe - has one
@@ -363,7 +363,7 @@ fn mntchan() *Chan {
 }
 
 /// A walk that fails after its first check is nil, with the error
-/// string set, as devmnt.c's waserror returns.
+/// string set, as devmnt.c's error branch returns.
 fn mntwalk(ch: *Chan, nc_: ?*Chan, name: [*]const [*:0]const u8, nname: c_int) Error!?*Walkqid {
     if (nc_ != null)
         port.print("mntwalk: nc != nil\n", .{});
@@ -1380,6 +1380,8 @@ pub const Server = struct {
     }
 
     pub fn run(ch: *Chan) void {
+        // By fid modulo its length: fids are the kernel's chan numbers,
+        // which grow with every chan the test process has made.
         var fids: [32]i64 = @splat(-1);
         var in: [8192 + 24]u8 = undefined;
         var out: [8192 + 24]u8 = undefined;
@@ -1399,11 +1401,11 @@ pub const Server = struct {
                     r.version = @constCast("9P2000");
                 },
                 c.Tattach => {
-                    fids[f.fid] = 0;
+                    fids[f.fid % fids.len] = 0;
                     r.qid = .{ .path = 0, .vers = 0, .type = c.QTDIR };
                 },
                 c.Twalk => {
-                    var path = fids[f.fid];
+                    var path = fids[f.fid % fids.len];
                     var i: usize = 0;
                     while (i < f.nwname) : (i += 1) {
                         if (path != 0 or !std.mem.eql(u8, std.mem.span(f.wname[i]), "hello")) break;
@@ -1415,16 +1417,16 @@ pub const Server = struct {
                         r.ename = @constCast("file does not exist on the test server");
                     } else {
                         r.nwqid = @intCast(i);
-                        if (i == f.nwname) fids[f.newfid] = path;
+                        if (i == f.nwname) fids[f.newfid % fids.len] = path;
                     }
                 },
                 c.Topen => {
-                    const path: u64 = @intCast(fids[f.fid]);
+                    const path: u64 = @intCast(fids[f.fid % fids.len]);
                     r.qid = .{ .path = path, .vers = 0, .type = if (path == 0) c.QTDIR else 0 };
                 },
                 c.Tread => {
                     var n: usize = 0;
-                    if (fids[f.fid] == 0) {
+                    if (fids[f.fid % fids.len] == 0) {
                         if (f.offset == 0) n = dir(1, &data);
                     } else if (f.offset < hello.len) {
                         n = @min(hello.len - @as(usize, @intCast(f.offset)), f.count);
@@ -1434,10 +1436,10 @@ pub const Server = struct {
                     r.data = &data;
                 },
                 c.Tstat => {
-                    r.nstat = @intCast(dir(@intCast(fids[f.fid]), &data));
+                    r.nstat = @intCast(dir(@intCast(fids[f.fid % fids.len]), &data));
                     r.stat = &data;
                 },
-                c.Tclunk => fids[f.fid] = -1,
+                c.Tclunk => fids[f.fid % fids.len] = -1,
                 else => {
                     r.type = c.Rerror;
                     r.ename = @constCast("not on the test server");
