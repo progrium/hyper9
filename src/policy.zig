@@ -11,6 +11,7 @@ const std = @import("std");
 const aout = @import("abi/plan9/aout.zig");
 pub const mount = @import("mount.zig");
 const web = @import("web.zig").enabled;
+const resolver = @import("resolver.zig");
 
 pub const Profile = enum { default, tight };
 
@@ -264,6 +265,12 @@ pub const Plan = struct {
     net_allow: []const NetPattern = &.{},
     /// The machine's resolved-name table, when a pattern names hosts.
     names: ?*NameTable = null,
+    /// Whether the machine resolves for the guest (design/linux-dns.md):
+    /// a name pattern, and a network. Every connect to port 53 then goes
+    /// to the machine's resolver, `dns`, which the machine starts with a
+    /// run; without one it's refused.
+    resolves: bool = false,
+    dns: ?*resolver.Resolver = null,
     /// Device letters masked after the namespace is built.
     devmask: []const u8,
     binds: []const Bind,
@@ -921,7 +928,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     // servers (design/epoch-0/linux-net.md).
     var nameservers: std.ArrayList([16]u8) = .empty;
     if (has_linux and net != .disable) for (in.nameservers) |ns| {
-        if (parseIp(ns)) |a| try nameservers.append(arena, a);
+        if (resolver.parseServer(ns)) |s| try nameservers.append(arena, s.addr);
     };
     var ll_dns = false;
     for (nameservers.items) |*a| ll_dns = ll_dns or isLinkLocal(a);
@@ -936,6 +943,8 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
             try caveats.append(arena, "the guest can make the host resolve any name");
         }
         if (name_patterns) try caveats.append(arena, "name patterns trust the host's resolver: a name is allowed to reach whatever address it resolves to");
+        // The machine resolves for the guest (design/linux-dns.md).
+        if (name_patterns) try caveats.append(arena, "DNS queries to port 53 go to h9's resolver, which forwards names the allowlist covers to the host's DNS servers");
         if (net == .enable) try caveats.append(arena, "servers in the guest are reachable by anything that can reach the host's ports");
     }
     if (in.gfx) |g| {
@@ -976,6 +985,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         .cpus = pol.cpus,
         .net_allow = net_allow,
         .names = names,
+        .resolves = name_patterns and net != .disable and !web,
         .devmask = devmask.items,
         .binds = binds.items,
         .rules = rules.items,

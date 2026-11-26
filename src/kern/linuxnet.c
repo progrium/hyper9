@@ -1253,7 +1253,7 @@ sockof(int fd, int *udp)
 long
 h9_linux_sockrecv(int fd, void *buf, long n, int peek, int dontwait, uchar *raddr, ushort *rport)
 {
-	int s;
+	int s, udp;
 
 	Rconv *r;
 	long m;
@@ -1263,13 +1263,18 @@ h9_linux_sockrecv(int fd, void *buf, long n, int peek, int dontwait, uchar *radd
 		rput(r);
 		return m;
 	}
+	udp = 0;
 	if(waserror())
 		return -9;	/* EBADF */
-	s = sockof(fd, nil);
+	s = sockof(fd, &udp);
 	poperror();
 	if(s < 0)
 		return -107;	/* ENOTCONN */
-	return again(h9so_recvfrom(s, buf, n, peek, dontwait, raddr, rport));
+	m = again(h9so_recvfrom(s, buf, n, peek, dontwait, raddr, rport));
+	/* A reply from the machine's resolver comes from the address the guest asked (design/linux-dns.md). */
+	if(m >= 0 && raddr != nil)
+		h9_net_unredirect(udp ? S_UDP : S_TCP, s, raddr, rport);
+	return m;
 }
 
 /*
@@ -1279,7 +1284,8 @@ h9_linux_sockrecv(int fd, void *buf, long n, int peek, int dontwait, uchar *radd
 long
 h9_linux_socksend(int fd, void *buf, long n, int dontwait, uchar *raddr, ushort rport)
 {
-	int s, udp;
+	int s, udp, port;
+	uchar to[IPaddrlen];
 
 	Rconv *r;
 	long m;
@@ -1298,6 +1304,15 @@ h9_linux_socksend(int fd, void *buf, long n, int dontwait, uchar *raddr, ushort 
 		return raddr != nil ? -89 : -107;	/* EDESTADDRREQ, ENOTCONN */
 	if(raddr != nil && h9_net_check(H9_NETCONNECT, udp ? S_UDP : S_TCP, raddr, rport) < 0)
 		return -13;	/* EACCES */
+	/* Port 53 may go to the machine's resolver, as devip's connect does (design/linux-dns.md). */
+	if(raddr != nil){
+		memmove(to, raddr, IPaddrlen);
+		port = rport;
+		if(h9_net_redirectto(udp ? S_UDP : S_TCP, s, to, &port) < 0)
+			return -13;
+		raddr = to;
+		rport = port;
+	}
 	return again(h9so_sendto(s, buf, n, dontwait, raddr, rport));
 }
 

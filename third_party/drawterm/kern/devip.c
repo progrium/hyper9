@@ -521,17 +521,22 @@ setraddrport(Conv *c, char *str)
 {
 	char *p;
 	uchar addr[IPaddrlen];
+	int port;
 
 	p = strchr(str, '!');
 	if(p == 0)
 		return "malformed address";
 	*p++ = 0;
 	parseip(addr, str);
+	port = atoi(p);
 	/* h9: checked before a port is bound or the host is dialed */
-	if(h9_net_check(H9_NETCONNECT, c->p->stype, addr, atoi(p)) < 0)
+	if(h9_net_check(H9_NETCONNECT, c->p->stype, addr, port) < 0)
+		error(Eperm);
+	/* h9: port 53 may go to the machine's resolver instead */
+	if(h9_net_redirect(c->p->stype, addr, &port, &c->sfd, c->h9opts) < 0)
 		error(Eperm);
 	ipmove(c->raddr, addr);
-	c->rport = atoi(p);
+	c->rport = port;
 	p = strchr(p, '!');
 	if(p) {
 		if(strcmp(p, "!r") == 0)
