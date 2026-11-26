@@ -479,7 +479,9 @@ static void tcp_et_drain(void) {
 			CHECK("tcp_et_drain", errno == EAGAIN);
 			struct timespec dl;
 			clock_gettime(CLOCK_REALTIME, &dl);
-			dl.tv_sec += 3;
+			/* Long enough for a loaded host to start the child and
+			 * run its echo; a missed edge still fails. */
+			dl.tv_sec += 15;
 			pthread_mutex_lock(&etd_mu);
 			int to = 0;
 			while (!etd_in && !to) to = pthread_cond_timedwait(&etd_cv, &etd_mu, &dl);

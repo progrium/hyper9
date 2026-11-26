@@ -84,6 +84,11 @@ fn hconsready(ch: *Chan, ev: c_int) c_int {
     return r & ev;
 }
 
+fn hconswatchers(ch: *Chan) ?*dev.rd.Watchers {
+    if (ch.qid.path != Qcons or ch.dev >= Maxcons) return null;
+    return &hcons[ch.dev].watch;
+}
+
 fn hconswatch(ch: *Chan, ev: c_int, w: *dev.rd.Watch, wk: *dev.rd.Waker) void {
     _ = ev;
     if (ch.qid.path != Qcons or ch.dev >= Maxcons) return;
@@ -252,6 +257,7 @@ pub const Device = dev.Native('y', "hcons", .{
     .wstat = dev.devwstat,
     .ready = hconsready,
     .watch = hconswatch,
+    .watchers = hconswatchers,
 });
 
 pub fn exportC() void {

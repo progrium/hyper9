@@ -6862,7 +6862,8 @@ pub const EpEntry = struct {
     fd: i32,
     events: u32,
     data: u64,
-    /// The wake generation of the last report, for EPOLLET.
+    /// The generation of the fd's object at the last report
+    /// (kc.fdGen), for EPOLLET.
     last_gen: u64 = std.math.maxInt(u64),
     /// The events that held when it was last looked at, for EPOLLET.
     last_rev: u32 = 0,
@@ -6993,15 +6994,19 @@ fn epollWait(p: *Process, epfd: i32, events_va: u64, maxevents: i32, timeout_ms:
                 } else continue;
                 if (e.disarmed) continue;
                 if (e.events & EPOLLET != 0) {
-                    // An edge: a wake since the last report, or an event
+                    // An edge: a change to the fd's own object since the
+                    // last report (not to anything else, which would
+                    // report a socket still writable again), or an event
                     // that didn't hold when this last looked (a remote
                     // conversation's server changes it with no wake here
                     // while nothing watches it).
                     if (rev != 0 and out >= @as(usize, @intCast(maxevents))) break;
                     const fresh = rev & ~e.last_rev;
                     e.last_rev = rev;
-                    if (rev == 0 or (e.last_gen == gen and fresh == 0)) continue;
-                    e.last_gen = gen;
+                    if (rev == 0) continue;
+                    const fg: u64 = kc.fdGen(e.fd);
+                    if (e.last_gen == fg and fresh == 0) continue;
+                    e.last_gen = fg;
                 }
                 if (out >= @as(usize, @intCast(maxevents))) break;
                 var b: [16]u8 = @splat(0);
@@ -7033,7 +7038,9 @@ fn epollWait(p: *Process, epfd: i32, events_va: u64, maxevents: i32, timeout_ms:
             if (e.disarmed) continue;
             const all: u16 = @bitCast(pf.items[k].events);
             var want = all;
-            if (e.events & EPOLLET != 0 and e.last_gen == gen) want &= ~@as(u16, @bitCast(pf.items[k].revents));
+            // An edge-triggered entry ready now wasn't reported (it would
+            // have returned), so it waits for what doesn't hold yet.
+            if (e.events & EPOLLET != 0) want &= ~@as(u16, @bitCast(pf.items[k].revents));
             if (want == 0) want = all | kc.POLLEDGE;
             pf.items[waiting] = .{ .fd = e.fd, .events = @bitCast(want), .revents = 0 };
             waiting += 1;

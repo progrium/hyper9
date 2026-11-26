@@ -62,7 +62,15 @@ pub const Watch = extern struct {
 pub const Watchers = extern struct {
     lk: c.Lock = std.mem.zeroes(c.Lock),
     head: ?*Watch = null,
+    /// Moved by every notify: the object's own generation, which
+    /// edge-triggered epoll goes by (`changes`).
+    gen: u32 = 0,
 };
+
+/// ws's generation, which every notify of it moves.
+pub fn changes(ws: *Watchers) u32 {
+    return @atomicLoad(u32, &ws.gen, .seq_cst);
+}
 
 var generation = std.atomic.Value(c_uint).init(0);
 
@@ -75,6 +83,14 @@ pub fn gen() c_uint {
 pub fn bump() void {
     _ = generation.fetchAdd(1, .seq_cst);
 }
+
+/// Called after an fd is closed (sysfile.zig's fdclose). A poll holds
+/// the channels of the fds it watches, so without a word it would keep
+/// a closed fd's channel open, and the file with it (a conversation that
+/// doesn't hang up, a pipe whose reader never sees the end), until
+/// something else woke it: linuxnet.zig sets it to wake every poll to
+/// look its fds up again.
+pub var closed: ?*const fn () void = null;
 
 /// Puts w, with waker wk, on ws.
 pub fn add(ws: *Watchers, w: *Watch, wk: *Waker) void {
@@ -109,6 +125,7 @@ pub fn unwatch(w: *Watch) void {
 
 /// ws's object may have changed: wakes each watch on it.
 pub fn notify(ws: *Watchers) void {
+    _ = @atomicRmw(u32, &ws.gen, .Add, 1, .seq_cst);
     bump();
     if (@as(*volatile ?*Watch, &ws.head).* == null)
         return;

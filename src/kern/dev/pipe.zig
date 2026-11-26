@@ -373,6 +373,7 @@ pub const Device = dev.Native('|', "pipe", .{
     .gens = &.{&pipegen},
     .ready = pipeready,
     .watch = pipewatch,
+    .watchers = pipewatchers,
 });
 
 /// h9: readiness (design/file-interface.md): a data file's queues, and
@@ -380,6 +381,11 @@ pub const Device = dev.Native('|', "pipe", .{
 fn pipeready(ch: *Chan, ev: c_int) c_int {
     const rq = h9_pipeq(ch, 0) orelse return dev.readydefault(ev);
     return qio.qready(rq, h9_pipeq(ch, 1).?, ev);
+}
+
+fn pipewatchers(ch: *Chan) ?*dev.rd.Watchers {
+    if (h9_pipeq(ch, 0) == null) return null;
+    return &pipeof(ch).watch;
 }
 
 fn pipewatch(ch: *Chan, ev: c_int, w: *dev.rd.Watch, wk: *dev.rd.Waker) void {

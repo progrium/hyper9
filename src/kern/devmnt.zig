@@ -1420,6 +1420,11 @@ fn watchev(w: *rd.Watch) c_int {
     return @intCast(@intFromPtr(w.arg));
 }
 
+fn mntwatchers(ch: *Chan) ?*rd.Watchers {
+    const r = recget(ch) orelse return null;
+    return &r.ws;
+}
+
 fn mntwatch(ch: *Chan, ev: c_int, w: *rd.Watch, wk: *rd.Waker) void {
     const r = recget(ch) orelse return;
     w.arg = @ptrFromInt(@as(usize, @intCast(ev & 0xffff)));
@@ -1755,6 +1760,7 @@ pub const Device = dev.Native('M', "mnt", .{
     .fsync = mntfsync,
     .ready = mntready,
     .watch = mntwatch,
+    .watchers = mntwatchers,
 });
 
 // The C kernel's names, with its semantics: a function that fails raises

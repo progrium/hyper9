@@ -30,6 +30,7 @@ const real = struct {
     extern fn h9_poll(fds: [*]PollFd, n: c_int, ms: c_int, gen: ?*c_uint, once: c_int) c_int;
     extern fn h9_fdready(fd: c_int, events: c_int) c_int;
     extern fn h9_pollgen() c_uint;
+    extern fn h9_fdgen(fd: c_int) c_uint;
     extern fn h9_pollkick() void;
     extern fn h9_lockgen() c_uint;
     extern fn h9_lockwake() void;
@@ -137,6 +138,9 @@ const stub = struct {
         return -1;
     }
     fn h9_pollgen() c_uint {
+        return 0;
+    }
+    fn h9_fdgen(_: c_int) c_uint {
         return 0;
     }
     fn h9_pollkick() void {}
@@ -346,6 +350,12 @@ pub fn lockWake() void {
 /// signal interrupts it.
 pub fn lockWait(seen: u32) Error!void {
     _ = try check(c.h9_lockwait(seen));
+}
+
+/// The generation of what fd's readiness comes from, which each change
+/// to it moves: for edge-triggered epoll.
+pub fn fdGen(fd: i32) u32 {
+    return c.h9_fdgen(fd);
 }
 
 pub fn pollGen() u64 {

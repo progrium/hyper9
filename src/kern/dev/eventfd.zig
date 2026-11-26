@@ -64,6 +64,11 @@ pub fn evready(ch: *Chan, ev: c_int) c_int {
     return r & ev;
 }
 
+fn evwatchers(ch: *Chan) ?*dev.rd.Watchers {
+    const e = evof(ch) orelse return null;
+    return if (e.epoll) null else &e.watch;
+}
+
 fn evwatch(ch: *Chan, ev: c_int, w: *dev.rd.Watch, wk: *dev.rd.Waker) void {
     _ = ev;
     const e = evof(ch) orelse return;
@@ -205,6 +210,7 @@ pub const Device = dev.Native(Epsilon, "eventfd", .{
     .wstat = dev.devwstat,
     .ready = evready,
     .watch = evwatch,
+    .watchers = evwatchers,
 });
 
 pub fn exportC() void {
