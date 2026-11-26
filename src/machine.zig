@@ -365,6 +365,13 @@ pub const Machine = struct {
             try mounts.appendSlice(arena, s.mounts);
             for (o.mounts) |m| if (m.kind == .fd) try mounts.append(arena, m);
             r.mounts = mounts.items;
+            // The root's `index=`, which the CLI takes from its mounts
+            // too.
+            r.root_index = null;
+            for (s.mounts) |m| if (m.kind == .url) if (m.stack()) |st| if (st[0] == .root) {
+                if (m.index) |ix| r.root_index = rootIndexOf(ix);
+                break;
+            };
             r.binds = s.binds;
             r.ns = s.ns;
             r.policy = s.policy;
@@ -3878,13 +3885,25 @@ pub const Machine = struct {
         // server's `.fs/index`.
         var num: ?u32 = null;
         const first_root = is_root and !m.root_indexed;
+        // A pinned tree (design/plan-format.md, "Pinned roots") needs an
+        // index h9 checks: a static tree's, which serveStatic checked, or
+        // an `index=` one, which giveRootIndex checks. A server's own
+        // `.fs/index` is read in #ι, after the connection is made, so
+        // it's refused rather than taken unchecked.
+        if (r.b3 != null and !static) {
+            const given = if (first_root) m.opts.root_index != null else r.index == .given;
+            if (std.mem.startsWith(u8, b.to, "/srv/") or m.opts.index == .none or !given) {
+                kern.close(conn) catch {};
+                return m.fail("{s} {f}: b3=: pinned, but h9 checks only an index= index or a static tree's, and {s}", .{ what, shown, if (m.opts.index == .none) "this run is --index none" else "this has neither" });
+            }
+        }
         const fd = if (std.mem.startsWith(u8, b.to, "/srv/") or static) conn else if (first_root) blk: {
             m.root_indexed = true;
             break :blk try m.indexRoot(r, conn);
         } else switch (r.index) {
             // `index=` on a mount: the index it names, as the root's.
             .given => |g| blk: {
-                const got = m.giveRootIndex(what, r.addr, rootIndexOf(g.from)) catch |e| {
+                const got = m.giveRootIndex(what, r.addr, rootIndexOf(g.from), r.b3) catch |e| {
                     kern.close(conn) catch {};
                     return e;
                 };
@@ -4125,6 +4144,12 @@ pub const Machine = struct {
             else => null,
         }) orelse return m.fail(what ++ " {f}: no 9P server (the WebSocket handshake: {s}) and no static tree (/.fs/index: {s})", .{ shown, ws_said, why_buf[0..why_len] });
         defer gpa.free(text);
+        if (r.b3) |want| {
+            var got: [32]u8 = undefined;
+            std.crypto.hash.Blake3.hash(text, &got, .{});
+            if (!std.mem.eql(u8, &got, &want))
+                return m.fail(what ++ " {f}: b3=: its index has hash {x}…, not the pinned {x}…", .{ shown, got[0..8], want[0..8] });
+        }
         const tree = statictree.Tree.create(gpa, m.io, url, text, opts) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return m.fail(what ++ " {f}: static tree: /.fs/index: bad index", .{shown}),
@@ -4184,7 +4209,7 @@ pub const Machine = struct {
         if (m.opts.index == .none and !m.opts.verbose) return conn;
         var arg: [std.fs.max_path_bytes + 64]u8 = undefined;
         const ctl = if (m.opts.index == .none) "" else if (m.opts.root_index) |given| blk: {
-            const got = m.giveRootIndex("root", r.addr, given) catch |e| {
+            const got = m.giveRootIndex("root", r.addr, given, r.b3) catch |e| {
                 kern.close(conn) catch {};
                 return e;
             };
@@ -4200,18 +4225,25 @@ pub const Machine = struct {
 
     /// Reads, compiles, and hands `#ι` a 9P member's `index=` index (the
     /// root's, or a mount's), and returns its number; null when it's to be ignored. One that can't
-    /// be read fails the run, as an unreachable root does.
-    fn giveRootIndex(m: *Machine, what: []const u8, addr: []const u8, given: RootIndex) RunError!?u32 {
+    /// be read fails the run, as an unreachable root does. With `pin`,
+    /// `b3=`'s hash (design/plan-format.md, "Pinned roots"), the index's
+    /// text must have that BLAKE3 hash, and one that's ignored without a
+    /// pin fails the run, as one with another hash does.
+    fn giveRootIndex(m: *Machine, what: []const u8, addr: []const u8, given: RootIndex, pin: ?[32]u8) RunError!?u32 {
         const a = hidx.allocator;
         const from = switch (given) {
             inline else => |x| x,
         };
-        const cache: ?rootindex.cache.Cache = if (m.opts.index_cache) |d| .{ .gpa = a, .io = m.io, .dir = d } else null;
+        const pinned = "{s} {f}: b3=: its index ";
+        // The text is hashed, so it's fetched, not taken compiled from
+        // the cache.
+        const cache: ?rootindex.cache.Cache = if (pin != null) null else if (m.opts.index_cache) |d| .{ .gpa = a, .io = m.io, .dir = d } else null;
         var etag: ?[]u8 = null;
         defer if (etag) |e| a.free(e);
         const text: []u8 = switch (given) {
             .path => |path| std.Io.Dir.cwd().readFileAlloc(m.io, path, a, .limited(rootindex.max_text + 1)) catch |e| switch (e) {
                 error.StreamTooLong => {
+                    if (pin != null) return m.fail(pinned ++ "is larger than 256 MB", .{ what, ws.Url.elide(addr) });
                     m.indexNote("index: {s} is larger than 256 MB; ignored", .{path});
                     return null;
                 },
@@ -4223,13 +4255,20 @@ pub const Machine = struct {
                 .cache = if (cache) |*c| c else null,
             }, &m.msg_buf) catch |e| switch (e) {
                 error.TooBig => {
+                    if (pin != null) return m.fail(pinned ++ "is larger than 256 MB", .{ what, ws.Url.elide(addr) });
                     m.indexNote("index: {f} is larger than 256 MB; ignored", .{ws.Url.elide(url)});
                     return null;
                 },
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return m.fail("{s} {f}: index={f}: {s}", .{ what, ws.Url.elide(addr), ws.Url.elide(url), hstream.fetchError(e, &m.msg_buf) }),
             }) {
-                .compiled => |b| return m.giveCompiled(b, from, true),
+                .compiled => |b| {
+                    if (pin != null) {
+                        a.free(b);
+                        return m.fail(pinned ++ "came compiled, so its hash can't be checked", .{ what, ws.Url.elide(addr) });
+                    }
+                    return m.giveCompiled(b, from, true);
+                },
                 .text => |t| blk: {
                     etag = t.etag;
                     break :blk t.bytes;
@@ -4237,6 +4276,12 @@ pub const Machine = struct {
             },
         };
         defer a.free(text);
+        if (pin) |want| {
+            var got: [32]u8 = undefined;
+            std.crypto.hash.Blake3.hash(text, &got, .{});
+            if (!std.mem.eql(u8, &got, &want))
+                return m.fail(pinned ++ "has hash {x}…, not the pinned {x}…", .{ what, ws.Url.elide(addr), got[0..8], want[0..8] });
+        }
         var vbuf: [64]u8 = undefined;
         const version = rootindex.cache.textVersion(text, &vbuf);
         const hit = if (cache) |*c| c.lookup(rootindex.cache.text_key, version) else null;
@@ -4249,6 +4294,7 @@ pub const Machine = struct {
                     error.TooBig => m.indexNote("index: {f} is larger than 256 MB; ignored", .{ws.Url.elide(from)}),
                     error.BadIndex => m.indexNote("index: {f}: line {d}: {s}; ignored", .{ ws.Url.elide(from), diag.line, diag.msg }),
                 }
+                if (pin != null) return m.fail(pinned ++ "doesn't compile", .{ what, ws.Url.elide(addr) });
                 return null;
             };
             if (cache) |*c| c.store(rootindex.cache.text_key, version, b);

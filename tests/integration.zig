@@ -12776,3 +12776,67 @@ test "--plan names the line it can't read, and exits 2 [plan-format]" {
     try std.testing.expectEqual(2, r.code);
     try std.testing.expect(std.mem.indexOf(u8, r.err, "line 3: unknown line 'frobnicate'") != null);
 }
+
+test "a pinned root with a different index is refused [plan-format]" {
+    // design/plan-format.md, "Pinned roots": b3= is the BLAKE3 hash of the
+    // root's index. The index it pins runs, and an index with another
+    // hash, or a server's own .fs/index, which h9 can't check before the
+    // tree is used, is refused with exit 125.
+    const e = try env(@src());
+    var x: IndexRig = undefined;
+    try x.start(e, false);
+    defer x.stop();
+    try x.index(e);
+    const text = try x.mkindex(e);
+    defer gpa.free(text);
+    try x.write("x.h9index", text);
+    const file = try std.fs.path.join(gpa, &.{ x.s.path, "x.h9index" });
+    defer gpa.free(file);
+    var h: [32]u8 = undefined;
+    std.crypto.hash.Blake3.hash(text, &h, .{});
+    const right = std.fmt.bytesToHex(h, .lower);
+    var wrong = right;
+    wrong[0] = if (wrong[0] == '0') '1' else '0';
+    var ib: [std.Io.Dir.max_path_bytes + 160]u8 = undefined;
+
+    const ok = try x.run_(e, &.{ try std.fmt.bufPrint(&ib, "index={s},b3={s}", .{ file, &right }), "--rc", "ls /lib/x" });
+    defer ok.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{ok.err});
+    try std.testing.expectEqual(0, ok.code);
+    try std.testing.expectEqualStrings(x_listing, ok.out);
+
+    const bad = try x.run_(e, &.{ try std.fmt.bufPrint(&ib, "index={s},b3={s}", .{ file, &wrong }), "--rc", "ls /lib/x" });
+    defer bad.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{bad.err});
+    try std.testing.expectEqual(125, bad.code);
+    try std.testing.expectEqualStrings("", bad.out);
+    var wb: [200]u8 = undefined;
+    try expectIn(bad.err, try std.fmt.bufPrint(&wb, "b3=: its index has hash {s}…, not the pinned {s}…", .{ right[0..16], wrong[0..16] }));
+
+    // The server's .fs/index is the same text, but h9 reads it only once
+    // the tree is in use.
+    var ub: [std.Io.Dir.max_path_bytes + 200]u8 = undefined;
+    var db: [64]u8 = undefined;
+    const srv = try run(e, &.{ "--url", try std.fmt.bufPrint(&ub, "{s}:/:b3={s}", .{ dialUrl(&db, x.relay.dial()), &right }), "--rc", "ls /lib/x" });
+    defer srv.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{srv.err});
+    try std.testing.expectEqual(125, srv.code);
+    try std.testing.expectEqualStrings("", srv.out);
+    try expectIn(srv.err, "b3=: pinned, but h9 checks only");
+
+    // And from a plan, as --print writes it, on the engine it names.
+    const pin = try std.fmt.bufPrint(&ub, "{s}:/:index={s},b3={s}", .{ dialUrl(&db, x.relay.dial()), file, &wrong });
+    var it = std.mem.tokenizeScalar(u8, e.engines, ',');
+    while (it.next()) |engine| {
+        const p = try runOn(e, engine, &.{ "--url", pin, "--print", "true" }, null);
+        defer p.deinit();
+        try std.testing.expectEqual(0, p.code);
+        try expectIn(p.out, "pinned b3=");
+        var pb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const from_plan = try runOn(e, engine, &.{ "--plan", try scratchFile(&x.s, &pb, "plan", p.out) }, null);
+        defer from_plan.deinit();
+        errdefer std.debug.print("plan:\n{s}\nstderr: {s}\n", .{ p.out, from_plan.err });
+        try std.testing.expectEqual(125, from_plan.code);
+        try expectIn(from_plan.err, "not the pinned");
+    }
+}

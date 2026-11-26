@@ -179,6 +179,10 @@ pub const NinePRoot = struct {
     cred: ?[]const u8 = null,
     /// Its metadata index (design/epoch-0/mount-index.md), as the plan shows it.
     index: Index = .auto,
+    /// `b3=`: the BLAKE3 hash its index must have (design/plan-format.md,
+    /// "Pinned roots"); h9 refuses the tree when it has another, or when
+    /// there's no index h9 can check.
+    b3: ?[32]u8 = null,
     /// An `http://` or `https://` URL, or one without a scheme, as that:
     /// `addr` is its WebSocket form, and when the handshake is answered
     /// with anything but a 101, h9 fetches `http/.fs/index` for a static
@@ -490,6 +494,7 @@ pub fn rootNoteOf(arena: std.mem.Allocator, r: NinePRoot) error{OutOfMemory}![]c
             if (g.entries) |n| w.print(" {d} entries {d} dirs", .{ n, g.dirs orelse 0 }) catch break :blk error.WriteFailed;
         },
     }) catch return error.OutOfMemory;
+    if (r.b3) |h| w.print("  pinned b3={x}", .{&h}) catch return error.OutOfMemory;
     return out.written();
 }
 
@@ -1081,6 +1086,7 @@ fn memberBind(arena: std.mem.Allocator, in: Inputs, pol: Policy, m: mount.Mount,
             var r = if (m.kind == .url) try ninePConn(arena, m) else NinePRoot{ .kind = .unix, .addr = "fd", .spec = m.spec orelse "", .user = m.user };
             // The root's is set with the machine's options.
             if (m.index) |ix| r.index = .{ .given = .{ .from = ix } };
+            r.b3 = if (m.b3) |h| mount.pinHash(h) else null;
             return .{
                 // The URL h9 connects to, so a replay needs no scheme
                 // rule: an `http` one probes again.
@@ -1118,6 +1124,7 @@ fn upperBind(arena: std.mem.Allocator, m: mount.Mount, to: []const u8, linux: bo
         .url, .fd => {
             var r = if (m.kind == .url) try ninePConn(arena, m) else NinePRoot{ .kind = .unix, .addr = "fd", .spec = m.spec orelse "", .user = m.user };
             if (m.index) |ix| r.index = .{ .given = .{ .from = ix } };
+            r.b3 = if (m.b3) |h| mount.pinHash(h) else null;
             return .{
                 .from = if (r.kind == .ws) r.http orelse r.addr else if (r.kind == .port) r.addr else m.src,
                 .to = to,
