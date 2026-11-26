@@ -36,7 +36,7 @@ Each CLI invocation is one machine: one host process with one VM. Each Plan 9 pr
 
 The kernel boots once per host process, on a private thread, because booting turns the calling thread into a Proc for good. Every guest process then runs on a kernel thread made by `h9_kern_spawn` in `src/kern/proc.zig`, which works like drawterm's `kproc` but can be called from a thread that isn't a Proc: it clones from the boot Proc, and the new thread sets up its groups once `up` is set.
 
-On a machine with executors (every native build; the web host's processes are tasks on its one executor, `src/kern/sched/web.zig`, which os-wasm.c's `osproc` starts), `h9_kern_spawn` and `rfork` don't start a host thread: they hand the new Proc to the machine's scheduler (`Hmach.schedstart`), which runs its exit loop on a continuation. `Machine.run` starts the first process this way and waits for it to exit. A process forked with `RFHOSTTHREAD`, h9's own 9P and pty servers, gets a host thread of its own, and that thread creates its vCPU, which HVF binds to its creating thread.
+On a machine with executors (every native build; the web host's processes are tasks on its one executor, `src/kern/sched/web.zig`, which os-wasm.c's `osproc` starts), `h9_kern_spawn` and `rfork` don't start a host thread: they hand the new Proc to the machine's scheduler (`Hmach.schedstart`), which runs its exit loop on a continuation. `Machine.run` starts the first process this way and waits for it to exit. A process forked with `RFHOSTTHREAD`, h9's own 9P and pty servers, gets a host thread of its own.
 
 ### Executors
 
@@ -68,23 +68,15 @@ Because calls clear that flag as they return, a note posted while one call is fi
 
 ### vCPU limits
 
-Each process runs on one vCPU at a time, and hypervisors cap the live vCPUs per VM (`hv_vm_get_max_vcpu_count` on HVF, `KVM_CAP_MAX_VCPUS` on KVM). On HVF a vCPU is bound to its thread, so a process past the cap can't simply borrow one: it needs pool threads that run the guest on its behalf.
+Each process runs on one vCPU at a time, and hypervisors cap the live vCPUs per VM (`hv_vm_get_max_vcpu_count` on HVF, `KVM_CAP_MAX_VCPUS` on KVM). On HVF a vCPU is bound to its thread, so an executor makes its vCPU on its own thread.
 
 Measured on an M3 Max (macOS 15.8.1, 14 cores): `hv_vm_get_max_vcpu_count` reports 64, and the 65th live `hv_vcpu_create` fails with `HV_NO_RESOURCES`. Destroyed vCPUs free their slots, and a create takes about 120 µs. The emulator's limit is its own, 64 ([jit.md](jit.md#the-hcpu-engine-hcpu)).
 
-So on HVF 64 is a hard cap on *live* processes, not just running ones, and a pipeline of 65 stages or `mk -j` with many jobs reaches it.
+So a vCPU per process would cap *live* processes at 64 on HVF, not just running ones, which a pipeline of 65 stages or `mk -j` with many jobs reaches.
 
 KVM in a nested x86\_64 VM (Linux 6.12, Intel VT-x) reports 1024, and recycles its vCPUs (see KVM above), so its limit is on live vCPUs too; with fewer file descriptors it reports less.
 
-With executors a machine uses only `--cpus` vCPUs (one per process on sud, which has no limit), so the cap doesn't apply. On the web host, where each process is a task of its own, the answer (`src/cpupool.zig`) is a hybrid. A process creates and owns its vCPU on its own thread, as before, while the machine owns fewer than the limit less a reserve of 8.
-
-Processes beyond that run guest code through a pool of 8 pool threads, each with a vCPU: the process thread hands its Ureg, FP/SIMD registers, and thread pointer to a pool thread, which runs the guest to its next exit and hands them back. Kernel calls stay on the process's own thread, so pool threads never block in the kernel and the pool always makes progress.
-
-A handoff costs two thread wake-ups per syscall, so only the processes past the first 56 pay it.
-
-`--cpus` caps how many vCPUs run guest code at the same moment, owned or pooled, on every engine. Runs take slots in ticket order, so a process that exits for a syscall and runs again queues behind the others, and a run waiting 5 ms with no slot freed kicks the run that has held one longest, which ends with `interrupted` and queues again, so guest code that makes no kernel calls (a spinning goroutine) can't keep the rest out.
-
-The emulator and the sud engine have no vCPU limit, so every process owns an engine or a stub thread there.
+A machine's executors each make one vCPU, on their first guest run, so a machine uses only `--cpus` vCPUs and the cap doesn't apply; on sud, which has no limit, each process keeps a stub thread of its own. `--cpus` is how many executors run guest code at once. On the web host every process owns an h86 vCPU, made on its first run, and `--cpus` only sets `$NPROC`, since one executor runs them all.
 
 ## Kernel: h9's Zig and drawterm's C
 
@@ -239,7 +231,7 @@ A host-made stream has no path: `h9_hstream_fd` makes its channel, which is post
 
 Attached with no spec, the device serves `ws/clone` and `ws/N/{ctl,data,text,remote,status}`, listing only the caller's machine's conversations (at most 32); `bind -a '#ℏ' /net` puts them at `/net/ws`. `data` is the binary stream, `text` one text message per read or write.
 
-On the web host it also serves `port/clone` and `port/N/{ctl,data,remote,status}`, the page's ports ([port-streams](../design/epoch-0/port-streams.md)), sharing the conversation numbers: `open NAME` in `ctl` opens the port by name, `remote` is `port!NAME`, and `data` is the stream. A port stream is a host stream with `port` set: `connect` calls the JS host's `port_open`, which opens it at once with no handshake, and it's read and written through the WebSocket imports (`src/web/h9-web.js`). A `port!NAME` mount (`--url port://NAME[/SPEC]`, a namespace file's `mount port!NAME`) is a host-made port stream, its channel handed to a `#ℓ` conversation with `fd` and no redial, since a port is opened once. A port the page serves the machine on is an accepted stream, from the Suspending `port_accept`, whose first message goes through the dialect slot as a listener's does.
+On the web host it also serves `port/clone` and `port/N/{ctl,data,remote,status}`, the page's ports ([port-streams](../design/epoch-0/port-streams.md)), sharing the conversation numbers: `open NAME` in `ctl` opens the port by name, `remote` is `port!NAME`, and `data` is the stream. A port stream is a host stream with `port` set: `connect` calls the JS host's `port_open`, which opens it at once with no handshake, and it's read and written through the WebSocket imports (`src/web/h9-web.js`). A `port!NAME` mount (`--url port://NAME[/SPEC]`, a namespace file's `mount port!NAME`) is a host-made port stream, its channel handed to a `#ℓ` conversation with `fd` and no redial, since a port is opened once. A port the page serves the machine on is an accepted stream, from the `port_accept` op, whose first message goes through the dialect slot as a listener's does.
 
 Received data is queued in the machine's pages, up to 16 MiB unread per stream.
 

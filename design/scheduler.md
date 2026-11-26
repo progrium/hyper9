@@ -86,7 +86,7 @@ None for the guest's reach. The scheduler is new code in the trusted base, and a
 - [ ] `test "processes keep their own registers across executor switches [scheduler]"` passes on every engine.
 - [ ] `zig build integration`, `zig build integration -Dweb`, and `zig build web-test` pass, with the web host on one executor and no coroutine layer.
 - [ ] `zig build bench` shows a system call round trip no slower than before, and a `fork` and `exit` loop faster.
-- [ ] `src/cpupool.zig`, `src/web/coro.zig`, `src/web/coro.c`, and `src/kern/os-wasm.c`'s thread emulation are deleted.
+- [x] `src/cpupool.zig`, `src/web/coro.zig`, `src/web/coro.c`, and `src/kern/os-wasm.c`'s thread emulation are deleted.
 - [x] [spec/kernel.md](../spec/kernel.md)'s process model describes executors, parking, and slices.
 
 ## Implementation
@@ -134,3 +134,10 @@ Steps 6 and 7 are left. The web build needs Binaryen's `wasm-opt` for Asyncify, 
 - **Per-task state.** A switch saves and restores `errno`, the kernel's Zig threadlocals, and drawterm's `up`, as coro.c did around its parks. `H9_TEST_KSTACK` sets task stacks' size, rounded to 16 bytes rather than wasm's 64 KiB pages.
 
 `zig build web-test` needs Chromium and Playwright, which this step's checks didn't have.
+
+**2026-11-26, the pool and the coroutines removed.** `src/cpupool.zig` is gone: its `Lease`, a process's registers, FP state, and address space between runs, is `executor.Lease`, and the pool threads, the owned-vCPU limit, and the `--cpus` run slots went with it, since executors already did all three. Where a process keeps a vCPU of its own (sud, and the web host), the lease makes it on the first run. Machine.Options' `owned_vcpus` went too, and the pooled-vCPU engine cases run on one executor and on two instead. Some things stay:
+
+- **Three processes keep host threads.** h9's 9P server, pty server, and each pty's control process (`RFHOSTTHREAD`) wait in host calls for the machine's whole life (an accept, the host's pty queue), so on an executor they'd hold its thread anyway, after the monitor had started another in its place.
+- **KVM's vCPU recycling.** An executor that's taken for blocked in the host is replaced, and KVM can't destroy a vCPU, so the engine's free list of parked vCPUs is what keeps the count bounded.
+- **A child machine's CPUs.** A child machine (design/child-machines.md) has executors of its own, `--cpus` of them, so its runs aren't under its parent's `--cpus` as that proposal says; running a child's processes on its parent's executors is left.
+

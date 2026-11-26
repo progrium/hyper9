@@ -12,7 +12,7 @@
 //!   executor takes from the machine's queue, where new and yielded tasks
 //!   go, and steals from the others'.
 //! - **The vCPU.** A process's registers, FP/SIMD state, and address space
-//!   are its lease's (cpupool.Lease, scheduled), and are loaded into the
+//!   are its `Lease`'s, and are loaded into the
 //!   executor's vCPU when it runs there and another ran since. As a task
 //!   parks or yields, before it switches out, the FP/SIMD state is saved
 //!   back to its lease (`outHook`), so whichever executor resumes it
@@ -39,7 +39,6 @@ const builtin = @import("builtin");
 const engine = @import("engine.zig");
 const kern = @import("kern.zig");
 const web = @import("web.zig");
-const cpupool = @import("cpupool.zig");
 const cputime = @import("abi/linux/cputime.zig");
 
 /// How long a process runs while others wait.
@@ -50,12 +49,11 @@ pub const block_ns: i64 = 20 * std.time.ns_per_ms;
 /// How often the monitor looks.
 const tick_ns: i64 = 2 * std.time.ns_per_ms;
 
-/// Whether this build has executors: not the web host until step 6
-/// (design/scheduler.md), nor a build without the kernel.
+/// Whether this build has these executors: not the web host, which has
+/// one of its own (src/kern/sched/web.zig), nor a build without the kernel.
 pub const enabled = kern.available and !web.enabled;
 
 /// Whether a machine on this engine runs its processes on executors.
-/// The rest give each process a host thread and a vCPU (src/cpupool.zig).
 pub fn usable(kind: engine.Kind) bool {
     if (comptime !enabled) return false;
     return switch (kind) {
@@ -195,7 +193,7 @@ const Task = struct {
     last: ?*Exec = null,
     started: bool = false,
     /// Its lease, once it has run guest code.
-    lease: ?*cpupool.Lease = null,
+    lease: ?*Lease = null,
     /// Host CPU time it has used, and the host thread's reading when it
     /// last went on an executor.
     cpu: cputime.Times = .{},
@@ -230,7 +228,7 @@ pub const Exec = struct {
     q: Queue = .{},
     thread: std.Thread = undefined,
     /// The lease whose state the vCPU holds, if it's still there.
-    owner: std.atomic.Value(?*cpupool.Lease) = .init(null),
+    owner: std.atomic.Value(?*Lease) = .init(null),
     state: std.atomic.Value(State) = .init(.idle),
     /// When `state` last changed, in the machine's monotonic ns.
     since: std.atomic.Value(i64) = .init(0),
@@ -648,12 +646,100 @@ pub fn taskCpu() ?cputime.Times {
     return t.cpu.add(cputime.hostThread().since(t.mark));
 }
 
-// A scheduled lease (cpupool.Lease with `scheduled`): the process's state
-// is the lease's, and goes into whichever executor's vCPU runs it.
+/// How one process runs guest code: its registers, FP/SIMD state, and
+/// address space between runs, which go into whichever executor's vCPU
+/// runs it (`run`). Where processes keep vCPUs of their own (sud, and the
+/// web host, which has no executors here), it holds that vCPU, made on
+/// its first run.
+pub const Lease = struct {
+    eng: engine.Engine,
+    /// Whether `vcpu` is the process's own, made.
+    owned: bool = false,
+    vcpu: engine.Vcpu = undefined,
+    as: ?engine.AddressSpace = null,
+    as_dirty: bool = false,
+    /// Registers to run from, and after a run, as it left them.
+    ureg: engine.Ureg = undefined,
+    extra: engine.Extra = .{ .arm64 = .{} },
+    extra_dirty: bool = true,
+    /// The executor's vCPU running it, for `kick`. Guarded by `kick_lock`.
+    running_on: ?*engine.Vcpu = null,
+    kicked: bool = false,
+    kick_lock: std.atomic.Mutex = .unlocked,
+    /// The executor whose vCPU last took its state.
+    home: ?*anyopaque = null,
+
+    pub fn lockKick(l: *Lease) void {
+        while (!l.kick_lock.tryLock()) std.atomic.spinLoopHint();
+    }
+
+    /// The process is done with it: its own vCPU goes, and no executor
+    /// keeps it as its vCPU's owner.
+    pub fn release(l: *Lease) void {
+        if (l.owned) {
+            l.lockKick();
+            l.owned = false;
+            l.kick_lock.unlock();
+            l.vcpu.destroy();
+        }
+        if (comptime enabled) if (l.home) |h| {
+            const e: *Exec = @ptrCast(@alignCast(h));
+            _ = e.owner.cmpxchgStrong(l, null, .acq_rel, .acquire);
+        };
+        l.home = null;
+    }
+
+    pub fn setAddressSpace(l: *Lease, as: engine.AddressSpace) engine.Error!void {
+        l.as = as;
+        l.as_dirty = true;
+    }
+
+    pub fn setUreg(l: *Lease, u: *const engine.Ureg) void {
+        l.ureg = u.*;
+    }
+
+    pub fn getUreg(l: *Lease, u: *engine.Ureg) void {
+        u.* = l.ureg;
+    }
+
+    /// The FP/SIMD registers and thread pointer, as of the last exit.
+    pub fn getExtra(l: *Lease, x: *engine.Extra) engine.Error!void {
+        if (l.owned) {
+            if (!l.extra_dirty) try l.vcpu.getExtra(&l.extra);
+        } else if (current()) |e| {
+            if (e.owner.load(.acquire) == l and l.home == @as(?*anyopaque, e) and !l.extra_dirty)
+                try e.vcpu.getExtra(&l.extra);
+        }
+        x.* = l.extra;
+    }
+
+    pub fn setExtra(l: *Lease, x: *const engine.Extra) void {
+        l.extra = x.*;
+        l.extra_dirty = true;
+    }
+
+    /// Runs the guest until its next exit.
+    pub fn run(l: *Lease) engine.Error!engine.Exit {
+        if (comptime !enabled) return runOwn(null, l);
+        return leaseRun(l);
+    }
+
+    /// Makes the current or next run return `.interrupted` soon. Safe from
+    /// any thread.
+    pub fn kick(l: *Lease) void {
+        l.lockKick();
+        defer l.kick_lock.unlock();
+        if (l.owned) {
+            l.vcpu.kick();
+        } else if (l.running_on) |v| {
+            v.kick();
+        } else l.kicked = true;
+    }
+};
 
 /// Runs the lease's guest code to its next exit, on the executor the
 /// calling task is on.
-pub fn leaseRun(l: *cpupool.Lease) engine.Error!engine.Exit {
+fn leaseRun(l: *Lease) engine.Error!engine.Exit {
     var e = current() orelse return error.HypervisorFailed;
     if (e.shouldYield()) {
         c.h9_sched_yield();
@@ -706,10 +792,10 @@ pub fn leaseRun(l: *cpupool.Lease) engine.Error!engine.Exit {
 }
 
 /// leaseRun where the process keeps a vCPU of its own, made on its first
-/// run: only the host thread is the executor's.
-fn runOwn(e: *Exec, l: *cpupool.Lease) engine.Error!engine.Exit {
+/// run: only the host thread is the executor's, if there's one (`e`).
+fn runOwn(e: ?*Exec, l: *Lease) engine.Error!engine.Exit {
     if (!l.owned) {
-        const v = e.s.eng.createVcpu() catch |err| return switch (err) {
+        const v = l.eng.createVcpu() catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfGuestMemory,
             else => |x| x,
         };
@@ -729,34 +815,7 @@ fn runOwn(e: *Exec, l: *cpupool.Lease) engine.Error!engine.Exit {
         l.extra_dirty = false;
     }
     l.vcpu.setUreg(&l.ureg);
-    const exit = try e.runGuest(&l.vcpu);
+    const exit = try if (comptime enabled) e.?.runGuest(&l.vcpu) else l.vcpu.run();
     l.vcpu.getUreg(&l.ureg);
     return exit;
-}
-
-/// The FP/SIMD registers and thread pointer, as of the last exit.
-pub fn leaseGetExtra(l: *cpupool.Lease, x: *engine.Extra) engine.Error!void {
-    if (l.owned) {
-        if (!l.extra_dirty) try l.vcpu.getExtra(&l.extra);
-    } else if (current()) |e| {
-        if (e.owner.load(.acquire) == l and l.home == @as(?*anyopaque, e) and !l.extra_dirty)
-            try e.vcpu.getExtra(&l.extra);
-    }
-    x.* = l.extra;
-}
-
-/// The process is done with its lease: no executor keeps it as its
-/// vCPU's owner.
-pub fn leaseRelease(l: *cpupool.Lease) void {
-    if (l.owned) {
-        l.lockKick();
-        l.owned = false;
-        l.kick_lock.unlock();
-        l.vcpu.destroy();
-    }
-    if (l.home) |h| {
-        const e: *Exec = @ptrCast(@alignCast(h));
-        _ = e.owner.cmpxchgStrong(l, null, .acq_rel, .acquire);
-    }
-    l.home = null;
 }
