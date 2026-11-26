@@ -23,6 +23,8 @@
 //!
 //! - `glue.zig`: glue.c, booting the kernel, and the Zig side's small
 //!   calls into it.
+//! - `proc.zig`: proc.c, the process record, notes, rfork, and wait
+//!   records, with drawterm's procinit.c.
 //!
 //! This file is the root the kernel builds compile (build.zig's addKern,
 //! and src/nskernel.zig), and holds what the ported files share: the C
@@ -44,6 +46,7 @@ pub const devmnt = @import("devmnt.zig");
 pub const devpipe = @import("dev/pipe.zig");
 pub const devroot = @import("dev/root.zig");
 pub const glue = @import("glue.zig");
+pub const process = @import("proc.zig");
 
 comptime {
     qio.exportC();
@@ -57,6 +60,7 @@ comptime {
     devpipe.exportC();
     devroot.exportC();
     glue.exportC();
+    process.exportC();
 }
 
 test {
@@ -74,6 +78,7 @@ test {
     _ = devpipe;
     _ = devroot;
     _ = glue;
+    _ = process;
 }
 
 /// A kernel error. The Plan 9 error string is on the process, in
