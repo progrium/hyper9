@@ -1,7 +1,8 @@
 ---
+issue: 316
 slug: file-watch
 title: Watching files for changes, on the host and in the guest
-status: draft
+status: proposed
 created: 2026-11-24
 authors: [progrium]
 depends: []
