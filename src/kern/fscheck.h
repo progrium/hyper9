@@ -134,32 +134,21 @@ DWORD	h9_fs_getattr(wchar_t *path);
 /*
  * devfs's side (third_party/drawterm/kern/devfs-*.c). h9_fs_anchor makes
  * a contained attach's tree the place its namec walk ended; chan.c calls
- * it. h9_fs_readlink puts the target of the link a devfs chan was walked
- * through as its last name in buf, NUL-terminated, and returns its
- * length, or -1 if that name isn't a link.
+ * it.
+ *
+ * devfs's optional operations (design/file-interface.md,
+ * src/kern/devx.h): h9_fs_readlink puts the target of the link a devfs
+ * chan was walked through as its last name in buf, NUL-terminated, and
+ * returns its length, or -1 if that name isn't a link. h9_fs_symlink
+ * makes name in the devfs directory c a link to target. h9_fs_rename
+ * moves the devfs file c to name in the devfs directory dir with the
+ * host's rename, checked as a rename of c and a create of name; 1 if
+ * the host can't (Windows, for now). Other devices reach them through
+ * the device switch.
  */
 void	h9_fs_anchor(Chan *c);
 int	h9_fs_readlink(Chan *c, char *buf, int nbuf);
-/* The same by a path in the caller's namespace, through an overlay (fscheck.c). */
-int	h9_fs_readlinkpath(char *path, char *buf, int nbuf);
-/*
- * h9_fs_symlink makes name in the devfs directory c a link to target.
- * h9_fs_symlinkpath does it by a path in the caller's namespace, in an
- * overlay, a devfs tree, or a 9P2000.L mount (fscheck.c); 0, or -1 with
- * the error in errstr. h9_fs_mntsymlink makes one in a 9P2000.L mount's
- * directory dir, by Tsymlink, and is Eperm on any other.
- */
 void	h9_fs_symlink(Chan *c, char *name, char *target);
-int	h9_fs_symlinkpath(char *path, char *target);
-void	h9_fs_mntsymlink(Chan *dir, char *name, char *target);
-/*
- * h9_fs_rename moves the devfs file c to name in the devfs directory dir
- * with the host's rename, checked as a rename of c and a create of name;
- * 1 if the host can't (Windows, for now). h9_fs_renamepath does it by
- * paths in the caller's namespace, for renameat across directories,
- * also moving within one overlay (h9_overlay_move): 0, 1 if it can't
- * (the caller's EXDEV), or -1 with the error in errstr.
- */
 int	h9_fs_rename(Chan *c, Chan *dir, char *name);
 /*
  * h9_fs_syncfs syncs the host file system behind the open devfs chan c,
@@ -168,7 +157,6 @@ int	h9_fs_rename(Chan *c, Chan *dir, char *name);
  */
 void	h9_fs_syncfs(Chan *c);
 void	h9_fs_sync(void);
-int	h9_fs_renamepath(char *old, char *new);
 /*
  * FIFOs for the Linux ABI (design/epoch-0/linux-fifo.md). A Dir marks one
  * with H9_DMFIFO, 9P2000.u's DMNAMEDPIPE, since Plan 9 has no file types.
@@ -192,13 +180,12 @@ int	h9_fs_chanisfifo(Chan *c);
  * process's walks stop at links: whether its root is the Linux view.
  * h9_fs_nofollow sets whether its next lookup acts on a link in its
  * last name rather than following it (lstat, readlink, O_NOFOLLOW) and
- * returns what it was. h9_fs_chanreadlink puts the target of the link
- * c is on in buf, through overlays and unions, and returns its length,
- * or -1 if c isn't on one.
+ * returns what it was; a call made in the kernel's Zig passes nofollow
+ * to namecx instead (src/kern/syswide.zig). A link's target is read by
+ * its device's readlink (src/kern/devx.h).
  */
 #define	H9_QTSYMLINK	0x02
 #define	H9_DMSYMLINK	0x02000000
 int	h9_fs_linkwalk(void);
 int	h9_fs_nofollow(int on);
 int	h9_fs_nofollowing(void);
-int	h9_fs_chanreadlink(Chan *c, char *buf, int nbuf);

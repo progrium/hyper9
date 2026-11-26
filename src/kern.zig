@@ -232,18 +232,28 @@ const c_stub = struct {
     fn h9_overlay_newpath(_: ?[*:0]const u8) c_int {
         return -1;
     }
-    fn h9_fs_readlinkpath(_: [*:0]const u8, _: [*]u8, _: c_int) c_int {
+    fn h9_readlink(_: [*:0]const u8, _: [*]u8, _: c_int) c_int {
         return -1;
     }
-    fn h9_fs_symlinkpath(_: [*:0]const u8, _: [*:0]const u8) c_int {
+    fn h9_symlink(_: [*:0]const u8, _: [*:0]const u8) c_int {
+        return -1;
+    }
+    fn h9_link(_: [*:0]const u8, _: [*:0]const u8, _: c_int) c_int {
+        return -1;
+    }
+    fn h9_rename(_: [*:0]const u8, _: [*:0]const u8) c_int {
+        return -1;
+    }
+    fn h9_getattr(_: [*:0]const u8, _: c_int, _: u64, _: *Attr, _: [*]u8, _: c_int) c_int {
+        return -1;
+    }
+    fn h9_fgetattr(_: c_int, _: u64, _: *Attr, _: [*]u8, _: c_int) c_int {
         return -1;
     }
     fn h9_fs_mkfifopath(_: [*:0]const u8, _: c_uint) c_int {
         return -1;
     }
-    fn h9_fs_renamepath(_: [*:0]const u8, _: [*:0]const u8) c_int {
-        return 1;
-    }
+
     fn h9_overlay_drop(_: c_int) void {}
     fn h9_overlay_union(_: [*:0]const u8, _: [*:0]const u8, _: [*:0]const u8, _: c_int) c_int {
         return -1;
@@ -383,10 +393,14 @@ const c_real = struct {
     extern fn syswstat(name: [*:0]const u8, buf: [*]u8, n: c_int) c_int;
     extern fn sysfwstat(fd: c_int, buf: [*]u8, n: c_int) c_int;
     extern fn h9_overlay_newpath(path: ?[*:0]const u8) c_int;
-    extern fn h9_fs_readlinkpath(path: [*:0]const u8, buf: [*]u8, nbuf: c_int) c_int;
-    extern fn h9_fs_symlinkpath(path: [*:0]const u8, target: [*:0]const u8) c_int;
+    extern fn h9_readlink(path: [*:0]const u8, buf: [*]u8, nbuf: c_int) c_int;
+    extern fn h9_symlink(path: [*:0]const u8, target: [*:0]const u8) c_int;
+    extern fn h9_link(old: [*:0]const u8, new: [*:0]const u8, follow: c_int) c_int;
+    extern fn h9_rename(old: [*:0]const u8, new: [*:0]const u8) c_int;
+    extern fn h9_getattr(path: [*:0]const u8, nofollow: c_int, mask: u64, a: *Attr, dir: [*]u8, ndir: c_int) c_int;
+    extern fn h9_fgetattr(fd: c_int, mask: u64, a: *Attr, dir: [*]u8, ndir: c_int) c_int;
     extern fn h9_fs_mkfifopath(path: [*:0]const u8, perm: c_uint) c_int;
-    extern fn h9_fs_renamepath(old: [*:0]const u8, new: [*:0]const u8) c_int;
+
     extern fn h9_overlay_drop(id: c_int) void;
     extern fn h9_overlay_union(name: [*:0]const u8, path: [*:0]const u8, at: [*:0]const u8, flags: c_int) c_int;
     extern fn h9_overlay_cowname(name: [*:0]const u8) c_int;
@@ -994,22 +1008,85 @@ pub fn overlayNew(lower: ?[*:0]const u8) Error!u32 {
     return try check(c.h9_overlay_newpath(lower));
 }
 
-/// The target of the host link that `path`'s last name is, through `#U`
-/// and an overlay over it, as the link has it written
-/// (design/epoch-0/symlinks-in-root.md). Fails with "not a symbolic link"
-/// for anything else. For the Linux ABI's readlinkat; Plan 9
-/// programs never see links.
+/// The target of the link that `path`'s last name is, as the link has it
+/// written, by its device's readlink (design/file-interface.md): an
+/// overlay's, a host tree's, or a 9P2000.L server's. Fails with "not a
+/// symbolic link" for anything else. For the Linux ABI's readlinkat;
+/// Plan 9 programs never see links.
 pub fn readlink(path: [*:0]const u8, buf: []u8) Error![]u8 {
-    const n = try check(c.h9_fs_readlinkpath(path, buf.ptr, @intCast(@min(buf.len, std.math.maxInt(c_int)))));
+    const n = try check(c.h9_readlink(path, buf.ptr, clampLen(buf.len)));
     return buf[0..@intCast(n)];
 }
 
-/// Makes `path` a symbolic link to `target`: in memory in an overlay, or
-/// on the host in a devfs tree, where the new name is checked like a
-/// create. For the Linux ABI's symlinkat; Plan 9 programs never
-/// see links.
+/// Makes `path` a symbolic link to `target`, by its directory's device
+/// (design/file-interface.md): in memory in an overlay, on the host in a
+/// host tree, where the new name is checked like a create, or by
+/// Tsymlink on a 9P2000.L server; "permission denied" elsewhere. For the
+/// Linux ABI's symlinkat; Plan 9 programs never see links.
 pub fn symlink(path: [*:0]const u8, target: [*:0]const u8) Error!void {
-    _ = try check(c.h9_fs_symlinkpath(path, target));
+    _ = try check(c.h9_symlink(path, target));
+}
+
+/// Makes `new` another name for `old`'s file, following a link `old` is
+/// if `follow`: a link where the device has them (a host tree, or a
+/// 9P2000.L server), and a copy elsewhere (design/file-interface.md).
+pub fn link(old: [*:0]const u8, new: [*:0]const u8, follow: bool) Error!void {
+    _ = try check(c.h9_link(old, new, @intFromBool(follow)));
+}
+
+/// Moves `old` (the link, if it's one) to `new`, replacing what's there:
+/// at once where the device can, and by wstat within a directory
+/// elsewhere; "cross-device link" across directories where it can't
+/// (design/file-interface.md).
+pub fn rename(old: [*:0]const u8, new: [*:0]const u8) Error!void {
+    _ = try check(c.h9_rename(old, new));
+}
+
+/// A file's attributes as Linux has them (src/kern/devx.h's Attr), which
+/// a device that keeps more than a Dir says gives: links, ids, device
+/// numbers, and nanosecond times (design/file-interface.md).
+pub const Attr = extern struct {
+    valid: u64 = 0,
+    qid_path: u64 = 0,
+    qid_vers: u32 = 0,
+    qid_type: u8 = 0,
+    mode: u32 = 0,
+    uid: u32 = 0,
+    gid: u32 = 0,
+    nlink: u64 = 0,
+    rdev: u64 = 0,
+    size: u64 = 0,
+    blocks: u64 = 0,
+    atime: i64 = 0,
+    atimens: i64 = 0,
+    mtime: i64 = 0,
+    mtimens: i64 = 0,
+    ctime: i64 = 0,
+    ctimens: i64 = 0,
+
+    pub const mode_bit = 0x1;
+    pub const nlink_bit = 0x2;
+    pub const uid_bit = 0x4;
+    pub const gid_bit = 0x8;
+    pub const rdev_bit = 0x10;
+    pub const atime_bit = 0x20;
+    pub const mtime_bit = 0x40;
+    pub const ctime_bit = 0x80;
+    pub const ino_bit = 0x100;
+    pub const size_bit = 0x200;
+    pub const blocks_bit = 0x400;
+    pub const basic = 0x7ff;
+};
+
+/// `path`'s attributes, acting on a link in its last name if `nofollow`,
+/// and its Dir, as stat gives it, into `dir`, whose length is returned.
+pub fn getattr(path: [*:0]const u8, nofollow: bool, a: *Attr, dir: []u8) Error!usize {
+    return try check(c.h9_getattr(path, @intFromBool(nofollow), Attr.basic, a, dir.ptr, clampLen(dir.len)));
+}
+
+/// fd's, as getattr.
+pub fn fgetattr(fd: u31, a: *Attr, dir: []u8) Error!usize {
+    return try check(c.h9_fgetattr(fd, Attr.basic, a, dir.ptr, clampLen(dir.len)));
 }
 
 /// Makes `path` a FIFO with permissions `perm`: a node in memory in an
@@ -1020,12 +1097,6 @@ pub fn mkfifo(path: [*:0]const u8, perm: u32) Error!void {
     _ = try check(c.h9_fs_mkfifopath(path, perm));
 }
 
-/// Moves `old` to `new` in another directory with the host's rename,
-/// when both are in host (devfs) trees; false if either isn't. For the
-/// Linux ABI's renameat.
-pub fn renameAcross(old: [*:0]const u8, new: [*:0]const u8) Error!bool {
-    return try check(c.h9_fs_renamepath(old, new)) == 0;
-}
 
 /// Where a union member goes (design/epoch-0/mounts.md, "Union instances").
 pub const UnionFlags = packed struct(c_int) {

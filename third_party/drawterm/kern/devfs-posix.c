@@ -16,6 +16,7 @@
 #include	"fns.h"
 #include	"error.h"
 #include	"fscheck.h"	/* h9: sandbox hooks */
+#include	"devx.h"	/* h9: optional operations */
 
 typedef	struct Ufsinfo	Ufsinfo;
 struct Ufsinfo
@@ -565,15 +566,12 @@ openfile(Chan *c)
 	return (c->flag & COPEN) != 0 && (c->qid.type & QTDIR) == 0 && ((Ufsinfo*)c->aux)->fd >= 0;
 }
 
-static int
-fsstat(Chan *c, uchar *buf, int n)
+/* h9: the host's stat for c, as fsstat and fsgetattr give it. */
+static void
+fshoststat(Chan *c, struct stat *st)
 {
-	Dir d;
 	struct stat stbuf;
 	Ufsinfo *uif;
-
-	if(n < BIT16SZ)
-		error(Eshortstat);
 
 	uif = c->aux;
 	/*
@@ -602,7 +600,21 @@ fsstat(Chan *c, uchar *buf, int n)
 		if(h9_fs_check(uif->path, H9_FSWALK) == 0 && stat(uif->path, &t) == 0)
 			stbuf = t;
 	}
+	*st = stbuf;
+}
 
+static int
+fsstat(Chan *c, uchar *buf, int n)
+{
+	Dir d;
+	struct stat stbuf;
+	Ufsinfo *uif;
+
+	if(n < BIT16SZ)
+		error(Eshortstat);
+
+	uif = c->aux;
+	fshoststat(c, &stbuf);
 	d.name = lastelem(ownpath(uif));
 	d.uid = eve;
 	d.gid = eve;
@@ -1510,6 +1522,88 @@ h9_fs_rename(Chan *c, Chan *dir, char *name)
 }
 
 /*
+ * h9: makes name in the directory dir another name for c's file
+ * (design/file-interface.md), relative to fds for both parent
+ * directories, as h9_fs_rename is. The new name is checked like a
+ * create, and the old like a write, since the new name writes it.
+ */
+static int
+fslink(Chan *c, Chan *dir, char *name)
+{
+	Ufsinfo *uif, *duif;
+	char base[NAME_MAX+1];
+	int sdfd, ddfd;
+
+	if(devtab[dir->type]->dc != 'U')
+		error(Eperm);
+	uif = c->aux;
+	duif = dir->aux;
+	if(strlen(name) > NAME_MAX)
+		error(strerror(ENAMETOOLONG));
+	sdfd = h9_parentfd(uif, ownpath(uif), base);
+	if(waserror()){
+		close(sdfd);
+		nexterror();
+	}
+	if((ddfd = fsopenpath(duif, duif->path, O_RDONLY|O_DIRECTORY, 0)) < 0)
+		error(strerror(errno));
+	if(waserror()){
+		close(ddfd);
+		nexterror();
+	}
+	h9_fs_notefd(ddfd, duif->path);
+	h9_fs_allowfd(ddfd, H9_FSWALK);
+	h9_fs_allowat(ddfd, name, H9_FSCREATE);
+	h9_fs_allowat(sdfd, base, H9_FSWRITE);
+	if(linkat(sdfd, base, ddfd, name, 0) < 0)
+		error(strerror(errno));
+	poperror();
+	close(ddfd);
+	poperror();
+	close(sdfd);
+	return 0;
+}
+
+#if defined(__APPLE__)
+#define	STATNS(st, x)	((st)->st_##x##timespec.tv_nsec)
+#else
+#define	STATNS(st, x)	((st)->st_##x##tim.tv_nsec)
+#endif
+
+/* h9: c's attributes, from the host's stat (design/file-interface.md). */
+static void
+fsgetattr(Chan *c, uvlong mask, Attr *a)
+{
+	struct stat st;
+
+	USED(mask);
+	fshoststat(c, &st);
+	a->valid = Abasic;
+	a->qid = c->qid;
+	a->mode = (c->qid.type<<24)|STMODE(&st);
+	if(S_ISFIFO(st.st_mode))
+		a->mode |= H9_DMFIFO;
+	a->uid = st.st_uid;
+	a->gid = st.st_gid;
+	a->nlink = st.st_nlink;
+	a->rdev = st.st_rdev;
+	a->size = st.st_size;
+	a->blocks = st.st_blocks;
+	a->atime = st.st_atime;
+	a->atimens = STATNS(&st, a);
+	a->mtime = st.st_mtime;
+	a->mtimens = STATNS(&st, m);
+	a->ctime = st.st_ctime;
+	a->ctimens = STATNS(&st, c);
+}
+
+static int
+fsrename(Chan *c, Chan *dir, char *name)
+{
+	return h9_fs_rename(c, dir, name);
+}
+
+/*
  * h9: the host fd of an open file or directory, or -1. uif->fd is 0
  * until a file is opened, and a directory's is never set: its DIR is.
  */
@@ -1620,4 +1714,15 @@ Dev fsdevtab = {
 	devbwrite,
 	fsremove,
 	fswstat,
+};
+
+/* h9: the optional operations (design/file-interface.md, src/kern/devx.h). */
+Devx fsdevx = {
+	'U',
+	h9_fs_readlink,
+	h9_fs_symlink,
+	fslink,
+	fsgetattr,
+	nil,
+	fsrename,
 };
