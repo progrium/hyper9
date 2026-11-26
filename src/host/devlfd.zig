@@ -4,7 +4,7 @@
 //! that it reads and writes as it is: the host's stdio for the console,
 //! a unix-socket root's connection (src/kern/rootdial.zig), and a
 //! process's pipes from drawterm's oscmd. drawterm names it `#L`, which
-//! h9's Linux device has, so it's φ here (design/mounts.md).
+//! h9's Linux device has, so it's φ here (design/epoch-0/mounts.md).
 
 const std = @import("std");
 const builtin = @import("builtin");
