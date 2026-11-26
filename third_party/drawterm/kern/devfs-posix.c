@@ -57,12 +57,10 @@ ownpath(Ufsinfo *uif)
 /*
  * h9: Linux symlinks (design/linux-symlinks.md). A Linux process's walk
  * looks each name up with lstat and stops at a link, and its opens
- * refuse links: lxopen opens a path that holds none (canon) without
+ * refuse links: a path that holds none (canon) is opened without
  * following any, so a link swapped in since the walk fails the open
- * (ELOOP) instead of being followed by the host. On Linux that's an
- * openat2 with RESOLVE_NO_SYMLINKS, elsewhere (and on Linux kernels
- * without openat2) a chain of openats with O_NOFOLLOW from /. The web
- * host has no / to start from, so its last name alone isn't followed.
+ * (ELOOP) instead of being followed by the host. The web host has no /
+ * to start from, so its last name alone isn't followed.
  */
 static int
 lxmode(Ufsinfo *uif)
@@ -70,108 +68,22 @@ lxmode(Ufsinfo *uif)
 	return uif->canon && h9_fs_linkwalk();
 }
 
-#if defined(__linux__)
-#include	<sys/syscall.h>
-#ifndef SYS_openat2
-#define	SYS_openat2	437
-#endif
-struct lxhow {
-	uvlong	flags;
-	uvlong	mode;
-	uvlong	resolve;
-};
-enum { LxResolveNoSymlinks = 0x04 };
-#endif
-
-static int
-lxopen(char *path, int flags, int mode)
-{
-#if defined(__wasi__)
-	return open(path, flags|O_NOFOLLOW, mode);
-#else
-	char name[NAME_MAX+1];
-	char *p, *e;
-	int fd, nfd, last, n;
-
-#if defined(__linux__)
-	{
-		struct lxhow how;
-
-		memset(&how, 0, sizeof how);
-		how.flags = flags|O_CLOEXEC;
-		how.mode = (flags & O_CREAT) ? mode : 0;
-		how.resolve = LxResolveNoSymlinks;
-		fd = syscall(SYS_openat2, AT_FDCWD, path, &how, sizeof how);
-		if(fd >= 0 || (errno != ENOSYS && errno != EPERM))
-			return fd;
-	}
-#endif
-	if(path[0] != '/'){
-		errno = EINVAL;
-		return -1;
-	}
-	if((fd = open("/", O_RDONLY|O_DIRECTORY|O_CLOEXEC)) < 0)
-		return -1;
-	p = path;
-	for(;;){
-		while(*p == '/')
-			p++;
-		if(*p == 0){
-			/* path is "/" or ends in a slash: fd is the directory. */
-			if((flags & O_ACCMODE) != O_RDONLY){
-				close(fd);
-				errno = EISDIR;
-				return -1;
-			}
-			return fd;
-		}
-		e = strchr(p, '/');
-		n = e != nil ? e - p : strlen(p);
-		if(n > NAME_MAX){
-			close(fd);
-			errno = ENAMETOOLONG;
-			return -1;
-		}
-		memmove(name, p, n);
-		name[n] = 0;
-		p += n;
-		last = 1;
-		for(e = p; *e; e++)
-			if(*e != '/'){
-				last = 0;
-				break;
-			}
-		if(last)
-			nfd = openat(fd, name, flags|O_NOFOLLOW|O_CLOEXEC, mode);
-		else
-#ifdef O_SEARCH
-			nfd = openat(fd, name, O_SEARCH|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
-#else
-			nfd = openat(fd, name, O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
-#endif
-		n = errno;
-		close(fd);
-		if(nfd < 0){
-			/* A link that isn't the last name is ENOTDIR from O_DIRECTORY. */
-			errno = n;
-			return -1;
-		}
-		fd = nfd;
-		if(last)
-			return fd;
-	}
-#endif
-}
-
-/* h9: open(2), or lxopen for a Linux process's walk. */
+/*
+ * h9: open(2), beneath the machine's directory handle that holds path
+ * (h9_host_open, src/host/dirs.c, design/host-handles.md), with no link
+ * followed for a Linux process's walk.
+ */
 static int
 fsopenpath(Ufsinfo *uif, char *path, int flags, int mode)
 {
+#if defined(__wasi__)
 	if(lxmode(uif))
-		return lxopen(path, flags, mode);
+		return open(path, flags|O_NOFOLLOW, mode);
 	return open(path, flags, mode);
+#else
+	return h9_host_open(path, flags, mode, lxmode(uif));
+#endif
 }
-
 
 #if defined(__wasi__)
 /*
@@ -448,7 +360,7 @@ fswalklx(Chan *c, char *name)
 		free(uif->path);
 		uif->path = strdup(buf);
 #else
-		/* The web host's opens refuse only a last name that's a link (lxopen). */
+		/* The web host's opens refuse only a last name that's a link (fsopenpath). */
 		USED(buf);
 #endif
 		free(uif->lpath);

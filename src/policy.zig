@@ -13,6 +13,7 @@ pub const mount = @import("mount.zig");
 const newns = @import("newns.zig");
 const web = @import("web.zig").enabled;
 const resolver = @import("resolver.zig");
+const handles = @import("host/host.zig");
 
 pub const Profile = enum { default, tight };
 
@@ -276,6 +277,10 @@ pub const Plan = struct {
     /// run; without one it's refused.
     resolves: bool = false,
     dns: ?*resolver.Resolver = null,
+    /// The host the machine reaches outside through (design/host-handles.md),
+    /// built from this plan: what devfs and devip, which find the plan by
+    /// their thread, find their handles by. The machine sets it.
+    host: ?*const handles.Host = null,
     /// Device letters masked after the namespace is built.
     devmask: []const u8,
     binds: []const Bind,
