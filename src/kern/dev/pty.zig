@@ -139,6 +139,8 @@ const Pty = struct {
 
     line: [Linemax]u8 = @splat(0), // the canonical line being edited
     nline: c_int = 0,
+
+    watch: dev.rd.Watchers = .{}, // both queues' (design/file-interface.md)
 };
 
 /// The pair state h9_pty_get and h9_pty_set copy; src/abi/linux/kc.zig's PtyState.
@@ -208,6 +210,8 @@ fn newpty() Error!*Pty {
     }
     p.in = in.?;
     p.out = out.?;
+    qio.qsetwatch(p.in, &p.watch);
+    qio.qsetwatch(p.out, &p.watch);
     p.termios = defterm;
     const m = upmach();
     p.mach = m;
@@ -738,7 +742,23 @@ pub const Device = dev.Native(Tau, "pty", .{
     .remove = dev.devremove,
     .wstat = dev.devwstat,
     .gens = &.{&ptygen},
+    .ready = ptyready,
+    .watch = ptywatch,
 });
+
+/// Readiness (design/file-interface.md): an open side's queues.
+fn ptyready(ch: *Chan, ev: c_int) c_int {
+    if (ch.qid.type & c.QTDIR != 0) return dev.readydefault(ev);
+    const rq = h9_ptyq(ch, 0) orelse return dev.readydefault(ev);
+    return qio.qready(rq, h9_ptyq(ch, 1).?, ev);
+}
+
+fn ptywatch(ch: *Chan, ev: c_int, w: *dev.rd.Watch, wk: *dev.rd.Waker) void {
+    _ = ev;
+    if (ch.qid.type & c.QTDIR != 0 or h9_ptyq(ch, 0) == null) return;
+    const p: *Pty = @ptrCast(@alignCast(dev.aux(ch).*.?));
+    dev.rd.add(&p.watch, w, wk);
+}
 
 /// The queue a read of ch takes from (wr == 0) or a write to ch adds
 /// to, for Linux poll (src/kern/linuxnet.zig); nil if ch isn't an open side.

@@ -5,14 +5,14 @@
 //! (src/abi/linux/sys.zig). A close translation, with error unions for the
 //! C's error labels. A native device (dev.zig's `Native`).
 //!
-//! A read or write that can't go on waits in linuxnet.zig's pollwait,
-//! for the next readiness wake.
+//! Its readiness is the device's `ready` and `watch`
+//! (design/file-interface.md): an eventfd has watchers, which every
+//! change notifies, and a read or write that can't go on waits on them.
 
 const std = @import("std");
 const port = @import("../port.zig");
 const dev = @import("../dev.zig");
 const sysfile = @import("../sysfile.zig");
-const linuxnet = @import("../linuxnet.zig");
 const c = port.c;
 const Error = port.Error;
 
@@ -33,6 +33,7 @@ const Evfd = struct {
     count: u64 = 0,
     sem: bool = false,
     epoll: bool = false,
+    watch: dev.rd.Watchers = .{},
 };
 
 var evdir = [_]Dirtab{
@@ -56,11 +57,43 @@ pub fn evready(ch: *Chan, ev: c_int) c_int {
     var r: c_int = 0;
     c.lock(&e.lk);
     if (e.count > 0)
-        r |= linuxnet.LPOLLIN;
+        r |= dev.rd.In;
     if (e.count < ~@as(u64, 0) - 1)
-        r |= linuxnet.LPOLLOUT;
+        r |= dev.rd.Out;
     c.unlock(&e.lk);
     return r & ev;
+}
+
+fn evwatch(ch: *Chan, ev: c_int, w: *dev.rd.Watch, wk: *dev.rd.Waker) void {
+    _ = ev;
+    const e = evof(ch) orelse return;
+    if (e.epoll) return;
+    dev.rd.add(&e.watch, w, wk);
+}
+
+/// Waits for e to change, after asking again: true from ok means stop
+/// waiting.
+fn evwait(e: *Evfd, ok: *const fn (*Evfd) bool) Error!void {
+    var s: dev.rd.Sleeper = .{};
+    var w: dev.rd.Watch = .{};
+    dev.rd.add(&e.watch, &w, &s.waker);
+    defer dev.rd.unwatch(&w);
+    while (true) {
+        s.arm();
+        c.lock(&e.lk);
+        const go = ok(e);
+        c.unlock(&e.lk);
+        if (go) return;
+        _ = try s.wait(0);
+    }
+}
+
+fn hascount(e: *Evfd) bool {
+    return e.count > 0;
+}
+
+fn hasroom(e: *Evfd) bool {
+    return e.count < ~@as(u64, 0) - 1;
 }
 
 fn evattach(spec: [*:0]const u8) Error!*Chan {
@@ -113,7 +146,6 @@ fn evread(ch: *Chan, va: ?*anyopaque, n: c_int, off: i64) Error!c_int {
         return port.kerror(&port.Ebadarg);
     var v: u64 = undefined;
     while (true) {
-        const g = linuxnet.h9_pollgen();
         c.lock(&e.lk);
         if (e.count > 0) {
             if (e.sem) {
@@ -127,9 +159,9 @@ fn evread(ch: *Chan, va: ?*anyopaque, n: c_int, off: i64) Error!c_int {
             break;
         }
         c.unlock(&e.lk);
-        _ = try linuxnet.pollwait(g, 0);
+        try evwait(e, hascount);
     }
-    linuxnet.h9_pollwake(); // a writer waiting for room
+    dev.rd.notify(&e.watch); // a writer waiting for room
     const p: *[8]u8 = @ptrCast(va.?);
     std.mem.writeInt(u64, p, v, .little);
     return 8;
@@ -146,7 +178,6 @@ fn evwrite(ch: *Chan, va: ?*const anyopaque, n: c_int, off: i64) Error!c_int {
     if (v == ~@as(u64, 0))
         return port.kerror(&port.Ebadarg);
     while (true) {
-        const g = linuxnet.h9_pollgen();
         c.lock(&e.lk);
         const sum = e.count +% v;
         if (sum >= e.count and sum < ~@as(u64, 0)) {
@@ -155,9 +186,9 @@ fn evwrite(ch: *Chan, va: ?*const anyopaque, n: c_int, off: i64) Error!c_int {
             break;
         }
         c.unlock(&e.lk);
-        _ = try linuxnet.pollwait(g, 0);
+        try evwait(e, hasroom);
     }
-    linuxnet.h9_pollwake();
+    dev.rd.notify(&e.watch);
     return 8;
 }
 
@@ -172,6 +203,8 @@ pub const Device = dev.Native(Epsilon, "eventfd", .{
     .write = evwrite,
     .remove = dev.devremove,
     .wstat = dev.devwstat,
+    .ready = evready,
+    .watch = evwatch,
 });
 
 pub fn exportC() void {
@@ -212,12 +245,12 @@ test "an eventfd sums its writes and a read takes them all [kernel-port]" {
     _ = try port.testing.begin();
     const ch = try instance(Qeventfd);
     defer drop(ch);
-    try testing.expectEqual(@as(c_int, linuxnet.LPOLLOUT), evready(ch, linuxnet.LPOLLIN | linuxnet.LPOLLOUT));
+    try testing.expectEqual(@as(c_int, dev.rd.Out), evready(ch, dev.rd.In | dev.rd.Out));
     try put(ch, 2);
     try put(ch, 3);
-    try testing.expectEqual(@as(c_int, linuxnet.LPOLLIN), evready(ch, linuxnet.LPOLLIN));
+    try testing.expectEqual(@as(c_int, dev.rd.In), evready(ch, dev.rd.In));
     try testing.expectEqual(@as(u64, 5), try take(ch));
-    try testing.expectEqual(@as(c_int, 0), evready(ch, linuxnet.LPOLLIN));
+    try testing.expectEqual(@as(c_int, 0), evready(ch, dev.rd.In));
     try testing.expectEqual(Qinst, ch.qid.path & 0xf);
 }
 
@@ -228,7 +261,7 @@ test "an eventsem's read takes one at a time [kernel-port]" {
     try put(ch, 2);
     try testing.expectEqual(@as(u64, 1), try take(ch));
     try testing.expectEqual(@as(u64, 1), try take(ch));
-    try testing.expectEqual(@as(c_int, 0), evready(ch, linuxnet.LPOLLIN));
+    try testing.expectEqual(@as(c_int, 0), evready(ch, dev.rd.In));
 }
 
 test "an eventfd refuses short buffers and the all-ones value [kernel-port]" {
@@ -248,7 +281,7 @@ test "an epoll instance can't be read or written [kernel-port]" {
     var b: [8]u8 = @splat(0);
     try testing.expectError(error.Kernel, evread(ch, &b, 8, 0));
     try testing.expectError(error.Kernel, evwrite(ch, &b, 8, 0));
-    try testing.expectEqual(@as(c_int, 0), evready(ch, linuxnet.LPOLLIN | linuxnet.LPOLLOUT));
+    try testing.expectEqual(@as(c_int, 0), evready(ch, dev.rd.In | dev.rd.Out));
 }
 
 test "a bad open mode makes no instance [kernel-port]" {

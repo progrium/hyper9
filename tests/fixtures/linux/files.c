@@ -106,6 +106,81 @@ static void ofd_flock(void) {
 	printf("ok ofd_flock\n");
 }
 
+static double now_us(void) {
+	struct timespec t;
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	return t.tv_sec * 1e6 + t.tv_nsec / 1e3;
+}
+
+static int cmpd(const void *a, const void *b) {
+	double x = *(const double *)a, y = *(const double *)b;
+	return x < y ? -1 : x > y;
+}
+
+/* One round of lock_wake: how long from the parent's letting a child go
+ * to the child's running, where the child waits in an F_SETLKW (kind 0),
+ * a flock (1), or a read of a pipe (2), a wake that never polled. */
+static double wake_round(int fd, int kind) {
+	int p[2], q[2];
+	if (pipe(p) != 0 || pipe(q) != 0)
+		return -1;
+	if (kind == 0 && setlk(fd, F_SETLK, F_WRLCK, 0, 1) != 0) return -1;
+	if (kind == 1 && flock(fd, LOCK_EX) != 0) return -1;
+	pid_t c = fork();
+	if (c == 0) {
+		char b;
+		int f = open(path, O_RDWR);
+		if (f < 0) _exit(1);
+		if (kind == 0 && setlk(f, F_SETLKW, F_WRLCK, 0, 1) != 0) _exit(2);
+		if (kind == 1 && flock(f, LOCK_EX) != 0) _exit(2);
+		if (kind == 2 && read(q[0], &b, 1) != 1) _exit(2);
+		double t = now_us();
+		if (write(p[1], &t, sizeof t) != sizeof t) _exit(3);
+		_exit(0);
+	}
+	close(p[1]);
+	close(q[0]);
+	usleep(20000);
+	double t0 = now_us(), t1 = -1;
+	int ok = kind == 0 ? setlk(fd, F_SETLK, F_UNLCK, 0, 1) == 0 : kind == 1 ? flock(fd, LOCK_UN) == 0 : write(q[1], "x", 1) == 1;
+	if (!ok || read(p[0], &t1, sizeof t1) != sizeof t1)
+		t1 = -1;
+	close(p[0]);
+	close(q[1]);
+	if (child_status(c) != 0 || t1 < 0)
+		return -1;
+	return t1 - t0;
+}
+
+/* A blocked F_SETLKW or flock wakes when the lock goes (design/
+ * file-interface.md, Part 3), not at a poll's next look: the median from
+ * the unlock to the waiter's running is within a little of a pipe
+ * reader's, where a 2 ms poll added most of a millisecond or more. A
+ * loaded host can slow one set of rounds, so it gets three tries. */
+static void lock_wake(void) {
+	enum { N = 31 };
+	double lat[3][N];
+	int fd = fresh("lockwake");
+	CHECK("lock_wake", fd >= 0);
+	for (int attempt = 0; attempt < 3; attempt++) {
+		for (int i = 0; i < N; i++)
+			for (int k = 0; k < 3; k++) {
+				lat[k][i] = wake_round(fd, k);
+				CHECK("lock_wake", lat[k][i] >= 0);
+			}
+		for (int k = 0; k < 3; k++)
+			qsort(lat[k], N, sizeof lat[k][0], cmpd);
+		if (lat[0][N / 2] <= lat[2][N / 2] + 400 && lat[1][N / 2] <= lat[2][N / 2] + 400) {
+			close(fd);
+			printf("ok lock_wake\n");
+			return;
+		}
+	}
+	close(fd);
+	printf("FAIL lock_wake: median wake %.0f us (fcntl), %.0f us (flock), %.0f us (pipe)\n", lat[0][N / 2], lat[1][N / 2], lat[2][N / 2]);
+	failed = 1;
+}
+
 /* A flock goes with the last fd of its open file, even when that's a
  * child's close-on-exec copy that exec closes after the parent closed its
  * own (Zig's cache locks, held while it spawns clang). */
@@ -273,6 +348,36 @@ static void gs_base(void) {
 	CHECK("gs_base", child_status(c) == 0);
 #endif
 	printf("ok gs_base\n");
+}
+
+/* An fsync and an fdatasync of a file in $DIR, which the [file-interface]
+ * case puts on a .L mount whose server counts its Tfsyncs. */
+static void fsync_file(void) {
+	int fd = fresh("fsyncf");
+	CHECK("fsync_file", fd >= 0 && write(fd, "x", 1) == 1 && fsync(fd) == 0 && fdatasync(fd) == 0);
+	close(fd);
+	printf("ok fsync_file\n");
+}
+
+/* chmod, truncate, and utimensat on a file in $DIR, which the
+ * [file-interface] case puts on a .L mount: each is the device's setattr,
+ * so the server keeps a time's nanoseconds, which a wstat can't carry. */
+static void setattr_ns(void) {
+	int fd = fresh("setattrf");
+	CHECK("setattr_ns", fd >= 0 && write(fd, "hello", 5) == 5);
+	struct timespec ts[2] = {{.tv_nsec = UTIME_OMIT}, {.tv_sec = 1234567890, .tv_nsec = 123456789}};
+	CHECK("setattr_ns", utimensat(AT_FDCWD, path, ts, 0) == 0);
+	CHECK("setattr_ns", chmod(path, 0600) == 0 && truncate(path, 3) == 0);
+	struct stat st;
+	CHECK("setattr_ns", stat(path, &st) == 0);
+	CHECK("setattr_ns", (st.st_mode & 0777) == 0600 && st.st_size == 3);
+	CHECK("setattr_ns", st.st_mtim.tv_sec == 1234567890 && st.st_mtim.tv_nsec == 123456789);
+	ts[1].tv_nsec = 5;
+	CHECK("setattr_ns", futimens(fd, ts) == 0 && ftruncate(fd, 1) == 0 && fchmod(fd, 0640) == 0);
+	CHECK("setattr_ns", fstat(fd, &st) == 0);
+	CHECK("setattr_ns", (st.st_mode & 0777) == 0640 && st.st_size == 1 && st.st_mtim.tv_nsec == 5);
+	close(fd);
+	printf("ok setattr_ns\n");
 }
 
 static void fsync_rusage(void) {
@@ -1033,12 +1138,15 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "posix_locks")) posix_locks();
 		if (all || !strcmp(n, "ofd_flock")) ofd_flock();
 		if (all || !strcmp(n, "flock_exec")) flock_exec();
+		if (!strcmp(n, "lock_wake")) lock_wake();
 		if (all || !strcmp(n, "shared_map")) shared_map();
 		if (all || !strcmp(n, "fixed_shared")) fixed_shared();
 		if (all || !strcmp(n, "private_sees")) private_sees();
 		if (all || !strcmp(n, "gs_base")) gs_base();
 		if (all || !strcmp(n, "prctl_name")) prctl_name();
 		if (all || !strcmp(n, "fsync_rusage")) fsync_rusage();
+		if (!strcmp(n, "fsync_file")) fsync_file();
+		if (!strcmp(n, "setattr_ns")) setattr_ns();
 		if (all || !strcmp(n, "dir_sync")) dir_sync();
 		if (all || !strcmp(n, "sync_open")) sync_open();
 		if (all || !strcmp(n, "read_cache")) read_cache();

@@ -252,6 +252,15 @@ const c_stub = struct {
     fn h9_fgetattr(_: c_int, _: u64, _: *Attr, _: [*]u8, _: c_int) c_int {
         return -1;
     }
+    fn h9_fsync(_: c_int, _: c_int) c_int {
+        return -1;
+    }
+    fn h9_setattr(_: [*:0]const u8, _: c_int, _: u64, _: *const Attr) c_int {
+        return -1;
+    }
+    fn h9_fsetattr(_: c_int, _: u64, _: *const Attr) c_int {
+        return -1;
+    }
     fn h9_fs_mkfifopath(_: [*:0]const u8, _: c_uint) c_int {
         return -1;
     }
@@ -402,6 +411,9 @@ const c_real = struct {
     extern fn h9_rename(old: [*:0]const u8, new: [*:0]const u8) c_int;
     extern fn h9_getattr(path: [*:0]const u8, nofollow: c_int, mask: u64, a: *Attr, dir: [*]u8, ndir: c_int) c_int;
     extern fn h9_fgetattr(fd: c_int, mask: u64, a: *Attr, dir: [*]u8, ndir: c_int) c_int;
+    extern fn h9_fsync(fd: c_int, datasync: c_int) c_int;
+    extern fn h9_setattr(path: [*:0]const u8, nofollow: c_int, mask: u64, a: *const Attr) c_int;
+    extern fn h9_fsetattr(fd: c_int, mask: u64, a: *const Attr) c_int;
     extern fn h9_fs_mkfifopath(path: [*:0]const u8, perm: c_uint) c_int;
 
     extern fn h9_overlay_drop(id: c_int) void;
@@ -1103,6 +1115,23 @@ pub fn fgetattr(fd: u31, a: *Attr, dir: []u8) Error!usize {
     return try check(c.h9_fgetattr(fd, Attr.basic, a, dir.ptr, clampLen(dir.len)));
 }
 
+/// Sets what `mask` names from `a` on `path` (following a link in its
+/// last name): the device's setattr, a Tsetattr on a .L mount, and by
+/// default a wstat, in whole seconds. `a.mode` is Plan 9's, with DMDIR
+/// and the rest as a stat gave them; a time's nanoseconds `now_ns` mean
+/// the time now.
+pub fn setattr(path: [*:0]const u8, mask: u64, a: *const Attr) Error!void {
+    _ = try check(c.h9_setattr(path, 0, mask, a));
+}
+
+/// fd's, as setattr.
+pub fn fsetattr(fd: u31, mask: u64, a: *const Attr) Error!void {
+    _ = try check(c.h9_fsetattr(fd, mask, a));
+}
+
+/// In a setattr's atimens or mtimens: the time now (devx.h's Anow).
+pub const now_ns: i64 = (1 << 30) - 1;
+
 /// Makes `path` a FIFO with permissions `perm`: a node in memory in an
 /// overlay, or a host FIFO in a devfs tree, where the new name is checked
 /// like a create (design/epoch-0/linux-fifo.md). For the Linux ABI's
@@ -1407,6 +1436,12 @@ pub fn fstat(fd: u31, buf: []u8) Error!usize {
 
 pub fn wstat(name: [*:0]const u8, buf: []u8) Error!usize {
     return try check(c.syswstat(name, buf.ptr, clampLen(buf.len)));
+}
+
+/// Makes what was written to fd's file durable, only its data if
+/// datasync: the device's fsync, by default the null wstat.
+pub fn fsync(fd: u31, datasync: bool) Error!void {
+    _ = try check(c.h9_fsync(fd, @intFromBool(datasync)));
 }
 
 pub fn fwstat(fd: u31, buf: []u8) Error!usize {

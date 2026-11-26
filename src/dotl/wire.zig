@@ -386,11 +386,12 @@ pub const p9 = struct {
 
 /// What devmnt sends a `#ℓ` conversation that translates to 9P2000.L:
 /// 9P2000, and 9P2000.L's requests for the device's optional operations
+/// (links, attributes, and fsync)
 /// (design/file-interface.md), with devmnt's fids. Their replies are
 /// 9P2000.L's, and an error is 9P2000's Rerror.
 pub const wide = struct {
-    pub const T = Union(&.{ p9.Tversion, p9.Tauth, p9.Tattach, p9.Tflush, p9.Twalk, p9.Topen, p9.Tcreate, p9.Tread, p9.Twrite, p9.Tclunk, p9.Tremove, p9.Tstat, p9.Twstat, l.Tsymlink, l.Trename, l.Treadlink, l.Tgetattr, l.Tsetattr, l.Tlink });
-    pub const R = Union(&.{ p9.Rversion, p9.Rauth, p9.Rattach, p9.Rerror, p9.Rflush, p9.Rwalk, p9.Ropen, p9.Rcreate, p9.Rread, p9.Rwrite, p9.Rclunk, p9.Rremove, p9.Rstat, p9.Rwstat, l.Rsymlink, l.Rrename, l.Rreadlink, l.Rgetattr, l.Rsetattr, l.Rlink });
+    pub const T = Union(&.{ p9.Tversion, p9.Tauth, p9.Tattach, p9.Tflush, p9.Twalk, p9.Topen, p9.Tcreate, p9.Tread, p9.Twrite, p9.Tclunk, p9.Tremove, p9.Tstat, p9.Twstat, l.Tsymlink, l.Trename, l.Treadlink, l.Tgetattr, l.Tsetattr, l.Tlink, l.Tfsync });
+    pub const R = Union(&.{ p9.Rversion, p9.Rauth, p9.Rattach, p9.Rerror, p9.Rflush, p9.Rwalk, p9.Ropen, p9.Rcreate, p9.Rread, p9.Rwrite, p9.Rclunk, p9.Rremove, p9.Rstat, p9.Rwstat, l.Rsymlink, l.Rrename, l.Rreadlink, l.Rgetattr, l.Rsetattr, l.Rlink, l.Rfsync });
 };
 
 /// 9P2000.L, and ZeroFS's `9P2000.L.Z` messages besides.
