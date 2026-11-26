@@ -758,13 +758,15 @@ const asyncify_skip = "interp.*,jit.*,engine.hcpu.h86.*,engine.hcpu.ha64.*,engin
 /// C kernel's setjmp uses, since a task never parks in a handler. No
 /// import starts an unwind but Asyncify's own, which cont.zig calls.
 ///
-/// The emulator's CPUs and JIT (`asyncify_skip`) are left as they are:
-/// a task parks or yields only between runs of guest code, never under
-/// them, and instrumented they're half the module and slow for the JS
-/// engine to compile. The build needs `wasm-opt` on PATH.
-fn asyncifyWasm(b: *std.Build, exe: *std.Build.Step.Compile, optimize: std.lang.Optimize) std.Build.LazyPath {
+/// With `cpus`, h9.wasm's, the emulator's CPUs and JIT (`asyncify_skip`)
+/// are left as they are: a task parks or yields only between runs of
+/// guest code, never under them, and instrumented they're half the module
+/// and slow for the JS engine to compile. h9ns.wasm has none, and
+/// wasm-opt warns of patterns that match nothing. The build needs
+/// `wasm-opt` on PATH.
+fn asyncifyWasm(b: *std.Build, exe: *std.Build.Step.Compile, optimize: std.lang.Optimize, cpus: bool) std.Build.LazyPath {
     const run = b.addSystemCommand(&.{ "wasm-opt", "--enable-exception-handling", "--asyncify", "--pass-arg=asyncify-imports@asyncify.none", "-g" });
-    run.addArg("--pass-arg=asyncify-removelist@" ++ asyncify_skip);
+    if (cpus) run.addArg("--pass-arg=asyncify-removelist@" ++ asyncify_skip);
     run.addArg(switch (optimize) { .debug => "-O1", .small => "-Oz", else => "-O2" });
     run.addArtifactArg(exe);
     run.addArg("-o");
@@ -816,7 +818,7 @@ fn addWeb(b: *std.Build, optimize: std.lang.Optimize, parts: ModuleParts, gfx: G
     exe.use_lld = true;
     const dir: std.Build.InstallDir = .{ .custom = "web" };
     const all = b.step("web-install", "");
-    all.dependOn(&b.addInstallFileWithDir(asyncifyWasm(b, exe, optimize), dir, "h9.wasm").step);
+    all.dependOn(&b.addInstallFileWithDir(asyncifyWasm(b, exe, optimize, true), dir, "h9.wasm").step);
     for ([_][]const u8{ "h9-web.js", "h9-node", "worker.js", "wasi-mem.js", "statictree.js", "index.html", "package.json" }) |f|
         all.dependOn(&b.addInstallFileWithDir(b.path(b.pathJoin(&.{ "src/web", f })), dir, f).step);
     return .{ .exe = exe, .install = all };
@@ -1349,7 +1351,7 @@ pub fn build(b: *std.Build) void {
     const ns_step = b.step("nskernel", "Build the namespace kernel into zig-out/nskernel (design/epoch-0/namespace-kernel.md)");
     const ns_dir: std.Build.InstallDir = .{ .custom = "nskernel" };
     const ns_web = addNsKernel(b, webTarget(b, false), optimize, true, false).artifact;
-    ns_step.dependOn(&b.addInstallFileWithDir(asyncifyWasm(b, ns_web, optimize), ns_dir, "h9ns.wasm").step);
+    ns_step.dependOn(&b.addInstallFileWithDir(asyncifyWasm(b, ns_web, optimize, false), ns_dir, "h9ns.wasm").step);
     for ([_][]const u8{ "h9ns.js", "h9ns-worker.js" }) |f|
         ns_step.dependOn(&b.addInstallFileWithDir(b.path(b.pathJoin(&.{ "src/web", f })), ns_dir, f).step);
     for ([_][]const u8{ "h9-web.js", "wasi-mem.js", "statictree.js" }) |f|
