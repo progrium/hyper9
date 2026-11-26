@@ -45,7 +45,7 @@ Pointers, argv, the words of the note frame, and the Tos's pointers follow the a
 
 h9 implements only the current calls, plus `_NSEC` (53), which Go's `syscall.Gettimeofday` uses ([go-compat](../design/epoch-0/go-compat.md)): as 9front's `sys_nsec`, it returns the wall time in nanoseconds in the return register on 64-bit machines, and on 386 stores it through its argument and returns 0. The others post "sys: bad sys call", as the real kernel does for unknown calls.
 
-`mount`, `unmount`, and `fauth` are served by drawterm's `sysmount` and `sysunmount` and a `fauth` wrapper over devmnt's `mntauth` (`h9_fauth` in `src/kern/glue.c`), so a guest mounts any 9P server it has an fd for: a posted channel, a pipe it serves itself, or a network connection the policy allowed. `mount` blocks until the server answers `Tversion` and `Tattach`, and a note interrupts it as it does any devmnt RPC.
+`mount`, `unmount`, and `fauth` are served by drawterm's `sysmount` and `sysunmount` and a `fauth` wrapper over devmnt's `mntauth` (`h9_fauth` in `src/kern/glue.zig`), so a guest mounts any 9P server it has an fd for: a posted channel, a pipe it serves itself, or a network connection the policy allowed. `mount` blocks until the server answers `Tversion` and `Tattach`, and a note interrupts it as it does any devmnt RPC.
 
 Time otherwise comes from `/dev/bintime`, which h9's devcons hooks serve in nanoseconds with all four of 9front's words (see Kernel, "Added by us").
 

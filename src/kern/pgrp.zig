@@ -2,6 +2,10 @@
 //! table, Pgrp), rendezvous groups (Rgrp), file descriptor groups
 //! (Fgrp), and mounts. A close translation: the same functions in the
 //! same order, with error unions in place of error().
+//!
+//! With h9's ns.c, 9front's pgrpcpy (port/pgrp.c at the pinned release),
+//! which drawterm lacks: namespace copying for rfork (proc.zig) and the
+//! namespace kernel (devns.c).
 
 const std = @import("std");
 const port = @import("port.zig");
@@ -192,6 +196,48 @@ pub fn mountfree(m_: ?*Mount) void {
     }
 }
 
+/// 9front's pgrpcpy: copies the mount table of from into to when flag
+/// has RFNAMEG, and always the device mask.
+pub fn pgrpcpy(to: *Pgrp, from: *Pgrp, flag: c_int) Error!void {
+    sync.wlock(&to.ns);
+    defer sync.wunlock(&to.ns);
+    sync.wlock(&from.ns); // must wlock to protect from.mntorder.norder
+    defer sync.wunlock(&from.ns);
+
+    to.devmask = from.devmask;
+
+    if ((flag & c.RFNAMEG) == 0)
+        return;
+
+    for (&to.mnthash, &from.mnthash) |*th, fh| {
+        var l: *[*c]Mhead = th;
+        var f_: ?*Mhead = fh;
+        while (f_) |f| : (f_ = f.hash) {
+            sync.rlock(&f.lock);
+            defer sync.runlock(&f.lock);
+            const mh = try chan.newmhead(f.from);
+            l.* = mh;
+            l = &mh.hash;
+            var link: *[*c]Mount = &mh.mount;
+            var m_: ?*Mount = f.mount;
+            while (m_) |m| : (m_ = m.next) {
+                const n = try newmount(m.to, m.mflag, @ptrCast(m.spec()));
+                n.umh = mh;
+                link.* = n;
+                link = &n.next;
+                m.norder = n; // for the mntorder loop below
+            }
+        }
+    }
+    // add mounts in original mntorder
+    var m_: ?*Mount = from.mntorder;
+    while (m_) |m| : (m_ = m.order) {
+        const n: *Mount = m.norder;
+        m.norder = null;
+        pgrpinsert(to, n);
+    }
+}
+
 // The C kernel's names, with its semantics: a function that fails raises
 // its error.
 
@@ -234,6 +280,9 @@ fn c_newmount(to: *Chan, flag: c_int, spec: ?[*:0]const u8) callconv(.c) *Mount 
 fn c_mountfree(m: ?*Mount) callconv(.c) void {
     mountfree(m);
 }
+fn c_pgrpcpy(to: *Pgrp, from: *Pgrp, flag: c_int) callconv(.c) void {
+    pgrpcpy(to, from, flag) catch |e| port.raise(e);
+}
 
 pub fn exportC() void {
     @export(&c_newpgrp, .{ .name = "newpgrp" });
@@ -249,4 +298,40 @@ pub fn exportC() void {
     @export(&c_closefgrp, .{ .name = "closefgrp" });
     @export(&c_newmount, .{ .name = "newmount" });
     @export(&c_mountfree, .{ .name = "mountfree" });
+    @export(&c_pgrpcpy, .{ .name = "pgrpcpy" });
+}
+
+const testing = std.testing;
+const kt = port.testing;
+
+test "pgrpcpy copies the mounts in their order with RFNAMEG, and only the device mask without [kernel-port]" {
+    const p = try kt.namespace();
+    const sysfile = @import("sysfile.zig");
+    _ = try sysfile.bind("#|", "/mnt", c.MAFTER);
+    _ = try sysfile.bind("#|", "/mnt", c.MBEFORE);
+
+    const to = try newpgrp();
+    defer closepgrp(to);
+    devmask(p.pgrp, false, "|");
+    try pgrpcpy(to, p.pgrp, c.RFNAMEG);
+    try testing.expect(devmasked(to, dev.devno('|')));
+    var a: ?*Mount = p.pgrp.*.mntorder;
+    var b: ?*Mount = to.mntorder;
+    var n: usize = 0;
+    while (a) |m| : (a = m.order) {
+        const copy = b orelse return error.TestUnexpectedResult;
+        try testing.expectEqual(m.to, copy.to);
+        try testing.expectEqual(m.mflag, copy.mflag);
+        try testing.expect(m.norder == null);
+        b = copy.order;
+        n += 1;
+    }
+    try testing.expect(b == null);
+    try testing.expect(n >= 2);
+
+    const bare = try newpgrp();
+    defer closepgrp(bare);
+    try pgrpcpy(bare, p.pgrp, 0);
+    try testing.expect(devmasked(bare, dev.devno('|')));
+    try testing.expect(bare.mntorder == null);
 }

@@ -60,7 +60,7 @@ A chunk that one lazily filled private file mapping covers whole, where the file
 
 A `pread64` of 16 KiB or less reads 128 KiB ahead into a cache per fd, trusted until any Linux write or truncate, any lock change, or a second.
 
-`wait4`, `waitid` and `getrusage` report CPU time from the host thread a guest thread runs on (`src/abi/linux/cputime.zig`); a group's leader puts it, with its reaped children's, in its wait record's user and system times (a hook in `src/kern/proc.c`).
+`wait4`, `waitid` and `getrusage` report CPU time from the host thread a guest thread runs on (`src/abi/linux/cputime.zig`); a group's leader puts it, with its reaped children's, in its wait record's user and system times (a hook in `src/kern/proc.zig`).
 ### Syscalls
 
 `src/abi/linux/sys.zig` and `src/abi/linux/nr.zig` have one table, decoded per architecture (amd64's older forms such as `open` and `stat` map onto the `*at` calls), translated onto the drawterm kernel. Errors map from 9front error strings to errno.
@@ -73,7 +73,7 @@ A Linux process starts as uid and gid 0 and keeps real, effective and saved ids 
 
 `symlink` makes a link in memory in an overlay (an `Nlink` node in `src/kern/devoverlay.c`), a host symlink in a `#U` tree, the new name checked like a create, or a server's link by `Tsymlink` on a 9P2000.L mount, plain or under a mount index (each the device's `symlink`); elsewhere, such as a 9P2000 mount, it's `EPERM`, as it is on Windows hosts. A Linux process's links are followed by the kernel's walk from its root, the Linux view ([linux-symlinks](../design/epoch-0/linux-symlinks.md), and [Linux symlinks](sandbox.md#linux-symlinks) in the sandbox's spec): an absolute target names the guest's path, whatever tree the link is in, so a link into another `#L` layer, mount, or bind resolves, and a host path the guest doesn't see is `ENOENT`. `lstat`, `fstatat` and `statx` with `AT_SYMLINK_NOFOLLOW`, `readlink`, `rename`, and `unlink` act on the link, and `O_NOFOLLOW` (without `O_PATH`) is `ELOOP` on one; a loop of links is `ELOOP`. A link's `Dir` has `H9_DMSYMLINK`, so `stat` and `getdents` give `S_IFLNK` and `DT_LNK`, and a dangling link lists and removes. `/proc/self/exe`, `/proc/self/cwd`, and `/proc/self/fd/N` are the Linux layer's (`procLink`): `readlink` and `lstat` give their targets, and an open of `/proc/self/fd/N` is a dup of the fd (`#d/N`), as `/dev/fd/N`'s is, so a deleted file's or a pipe's still opens.
 
-A Linux parent gets `SIGCHLD` when a child leaves a wait record (a hook in `src/kern/proc.c`), unless it ignores it. Interrupted calls restart or return `EINTR` per `SA_RESTART`, and the waits (`pause`, `poll`, `nanosleep` and the like) always return `EINTR`.
+A Linux parent gets `SIGCHLD` when a child leaves a wait record (a hook in `src/kern/proc.zig`), unless it ignores it. Interrupted calls restart or return `EINTR` per `SA_RESTART`, and the waits (`pause`, `poll`, `nanosleep` and the like) always return `EINTR`.
 ### Signals
 
 Notes are signals (`src/abi/linux/signal.zig`). `interrupt`, `hangup` and `alarm` map to `SIGINT`, `SIGHUP` and `SIGALRM`; faults to `SIGSEGV`, `SIGBUS`, `SIGILL` or `SIGFPE` with `si_addr`, an x86 CPU exception other than a page fault by its vector as Linux's `traps.c` does (`x86Exception`: `#UD` is `SIGILL`, `#DE` `SIGFPE`, `#AC` `SIGBUS`, and the rest `SIGSEGV`), and an arm64 one by its exception class (`a64Exception`: an undefined, SVE, or SME instruction is `SIGILL`, and a misaligned PC or SP `SIGBUS`); a closed pipe to `SIGPIPE`; and Linux `kill` posts `linux: signal N`, so a 9front process sees a note it can print.
@@ -130,7 +130,7 @@ Readiness is kernel code (`src/kern/linuxnet.c`): `h9_poll` asks each fd's chann
 
 A thread ([linux-threads](../design/epoch-0/linux-threads.md)) is its own kernel process, with its own `Proc`, vCPU lease and note queue, forked with `RFNOWAIT` (and `RFFDG` unless `CLONE_FILES`), sharing the creator's `Mm` and a thread group (`lsys.Group`), which holds the tgid, the members, the signal actions, fd flags, directory buffers, sockets and epoll sets.
 
-`getpid` is the tgid, `gettid` the process's own pid. A thread's forks are the leader's children (`RFLXTHREAD` in `src/kern/proc.c`), so any thread can wait for them, several at once, and `waitid` takes `WNOWAIT`.
+`getpid` is the tgid, `gettid` the process's own pid. A thread's forks are the leader's children (`RFLXTHREAD` in `src/kern/proc.zig`), so any thread can wait for them, several at once, and `waitid` takes `WNOWAIT`.
 
 `clone` takes the flag sets glibc, musl and Go use (`CLONE_SETTLS`, `PARENT_SETTID`, `CHILD_CLEARTID`); others are `EINVAL`.
 
