@@ -12,13 +12,13 @@ Every proposal at the top of [design/](README.md), in the order they were writte
 | [child-machines](child-machines.md) | [#109](../../../issues/109) | proposed |  | Child machines |
 | [wine-draw](wine-draw.md) | [#158](../../../issues/158) | proposed | in progress on wine-draw | Wine windows through draw |
 | [namespace-kernel](namespace-kernel.md) |  | implemented |  | A namespace-only kernel build |
-| [baseline-1](baseline-1.md) |  | draft | needs renames | Baseline 1 (h9 at the end of epoch 0) |
+| [baseline-1](baseline-1.md) |  | draft |  | Baseline 1 (h9 at the end of epoch 0) |
 | [file-interface](file-interface.md) |  | draft | needs kernel-port | A wider file interface inside the kernel, with 9P2000 as a view |
 | [host-handles](host-handles.md) |  | draft | needs kernel-port | Host access through handles |
 | [kernel-port](kernel-port.md) |  | draft | needs baseline-1 | Port the kernel core to Zig, as an instance |
 | [memory-model](memory-model.md) |  | draft | needs baseline-1 | One memory model under both ABIs |
 | [plan-format](plan-format.md) |  | draft | needs baseline-1, child-machines | The plan as a file, and the one way in |
-| [renames](renames.md) |  | draft |  | Rename the parts, to ABI, engine, sud, and hcpu |
+| [renames](renames.md) |  | implemented |  | Rename the parts, to ABI, engine, sud, and hcpu |
 | [scheduler](scheduler.md) |  | draft | needs kernel-port | A scheduler, with processes on per-core executors |
 | [upper-layers](upper-layers.md) |  | implemented |  | Writable layers on the host |
 | [headless-screen](headless-screen.md) |  | implemented |  | Headless screen (--gfx=headless) |
@@ -44,7 +44,7 @@ flowchart LR
   p_kernel_port["kernel-port<br/>draft"]:::draft
   p_memory_model["memory-model<br/>draft"]:::draft
   p_plan_format["plan-format<br/>draft"]:::draft
-  p_renames["renames<br/>draft"]:::draft
+  p_renames["renames<br/>implemented"]:::implemented
   p_scheduler["scheduler<br/>draft"]:::draft
   p_upper_layers["upper-layers<br/>implemented"]:::implemented
   p_headless_screen["headless-screen<br/>implemented"]:::implemented
