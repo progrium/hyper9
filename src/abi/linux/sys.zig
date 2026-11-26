@@ -1039,7 +1039,8 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const engine.Ureg) Err!Outcome {
         .ftruncate => return ret(try truncateFd(p, c.int(0), c.a[1])),
         .fallocate => return ret(try fallocate(p, c.int(0), c.uint(1), c.a[2], c.a[3])),
         .truncate => return ret(try truncatePath(p, c.a[0], c.a[1])),
-        .fsync, .fdatasync => return ret(fsync(c.int(0))),
+        .fsync => return ret(fsync(c.int(0), false)),
+        .fdatasync => return ret(fsync(c.int(0), true)),
         // A hint to start writing back: fsync does the writing here.
         .sync_file_range => return ret(if (kc.fdInfo(c.int(0))) |_| 0 else |_| -E.BADF),
         .syncfs => return ret(syncfs(c.int(0))),
@@ -2617,16 +2618,19 @@ fn recordLock(p: *Process, fd: i32, arg: u64, ofd: bool, get: bool, wait: bool, 
     if (t == .read and info.mode == kern.OWRITE) return -E.BADF;
     if (t == .write and info.mode != kern.OWRITE and info.mode != kern.ORDWR) return -E.BADF;
     while (true) {
+        // Read before trying, so a change after the try ends the wait.
+        const g = kc.lockGen();
         locks.set(key, owner, t, start, end) catch |e| switch (e) {
             error.OutOfMemory => return -E.NOLCK,
             error.WouldBlock => {
                 if (!wait) return -E.AGAIN;
-                // No wait queue: poll, and let a signal end the wait.
+                // Wait for the table to change, or a signal.
                 if (p.sig.deliverable()) return -E.INTR;
-                kern.sleep(2) catch return -E.INTR;
+                kc.lockWait(g) catch return -E.INTR;
                 continue;
             },
         };
+        kc.lockWake();
         return 0;
     }
 }
@@ -2642,15 +2646,17 @@ fn flockCall(p: *Process, fd: i32, op: u32) Err!i64 {
         else => return -E.INVAL,
     };
     while (true) {
+        const g = kc.lockGen();
         locks.flock(lockKey(info), ch.id, t) catch |e| switch (e) {
             error.OutOfMemory => return -E.NOLCK,
             error.WouldBlock => {
                 if (op & 4 != 0) return -E.AGAIN;
                 if (p.sig.deliverable()) return -E.INTR;
-                kern.sleep(2) catch return -E.INTR;
+                kc.lockWait(g) catch return -E.INTR;
                 continue;
             },
         };
+        kc.lockWake();
         return 0;
     }
 }
@@ -2665,6 +2671,7 @@ fn releaseLocks(p: *Process, fd: i32) void {
     const key = lockKey(info);
     locks.closedPosix(key, posixOwner(p).id);
     if (kc.fdChan(fd)) |ch| if (ch.refs <= 1) locks.closedOfd(key, ch.id);
+    kc.lockWake();
 }
 
 /// At the group's end, before the kernel closes its fds: what closing
@@ -2673,6 +2680,7 @@ pub fn releaseAllLocks(p: *Process) void {
     var buf: [1024]c_int = undefined;
     for (buf[0..@min(buf.len, kc.fds(&buf))]) |fd| releaseLocks(p, fd);
     locks.endedPosix(posixOwner(p).id);
+    kc.lockWake();
     itimer.cancel(@intFromPtr(p.g));
     for (buf[0..@min(buf.len, kc.fds(&buf))]) |fd| {
         unixClosed(p, fd);
@@ -2958,16 +2966,17 @@ fn isLdir(dirfd: i32, path: [:0]const u8) bool {
     return d.mode & DMDIR != 0;
 }
 
-/// fsync and fdatasync: a wstat that changes nothing, which a host file
-/// system serves with the host's fsync of the file or directory
-/// (third_party/drawterm/kern/devfs-*.c). Databases fsync a directory
-/// to make a rename or a create in it durable. Devices that don't keep
-/// data, and 9P servers that refuse it, have nothing to sync.
-fn fsync(fd: i32) i64 {
+/// fsync and fdatasync: the device's fsync (design/file-interface.md,
+/// Part 3), a Tfsync on a .L mount, and elsewhere a wstat that changes
+/// nothing, which a host file system serves with the host's fsync of
+/// the file or directory (third_party/drawterm/kern/devfs-*.c).
+/// Databases fsync a directory to make a rename or a create in it
+/// durable. Devices that don't keep data, and 9P servers that refuse
+/// it, have nothing to sync.
+fn fsync(fd: i32, datasync: bool) i64 {
     if (fd < 0) return -E.BADF;
     const info = kc.fdInfo(fd) catch return -E.BADF;
-    var b: [64]u8 = undefined;
-    _ = kern.fwstat(@intCast(fd), (Wstat{}).encode(&b)) catch {
+    kern.fsync(@intCast(fd), datasync) catch {
         // devfs raises the host's error; anything else means no sync.
         return if (info.dc == 'U') -E.IO else 0;
     };
@@ -2986,7 +2995,7 @@ var sync_opened: std.atomic.Value(bool) = .init(false);
 fn synced(p: *Process, fd: i32, n: i64) i64 {
     if (n <= 0 or !sync_opened.load(.monotonic)) return n;
     if (!flagsOf(p, fd).dsync) return n;
-    const r = fsync(fd);
+    const r = fsync(fd, !flagsOf(p, fd).sync);
     return if (r < 0) r else n;
 }
 

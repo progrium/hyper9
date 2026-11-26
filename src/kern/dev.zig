@@ -504,6 +504,12 @@ pub const Ops = struct {
     /// Hangs w, with waker wk, on what ch's readiness comes from, for a
     /// call when it may have changed; ready.unwatch takes it off.
     watch: ?*const fn (*Chan, c_int, *rd.Watch, *rd.Waker) void = null,
+
+    // Part 3.
+
+    /// Makes what was written to ch's file durable, only its data (and
+    /// the size) if datasync.
+    fsync: ?*const fn (*Chan, bool) Error!void = null,
 };
 
 /// A Devgen in Zig that can fail, as a C Devgen can raise.
@@ -941,6 +947,21 @@ pub fn rename(ch: *Chan, dir: *Chan, name: [*:0]const u8) Error!bool {
     var r: c_int = 1;
     try caught(h9_dev_rename(x, ch, dir, name, &r));
     return r == 0;
+}
+
+/// Makes what was written to ch's file durable. By default the null
+/// wstat, which a host tree serves with the host's fsync.
+pub fn fsync(ch: *Chan, datasync: bool) Error!void {
+    if (nativeOps(of(ch))) |o| if (o.fsync) |f| return f(ch, datasync);
+    return fsyncdefault(ch);
+}
+
+pub fn fsyncdefault(ch: *Chan) Error!void {
+    var dir: Dir = undefined;
+    nulldir(&dir);
+    var buf: [c.STATFIXLEN + 16]u8 = undefined;
+    const n = c.convD2M(&dir, &buf, buf.len);
+    _ = try wstat(of(ch), ch, &buf, @intCast(n));
 }
 
 /// The events of ev ready on ch now, of ready.zig's, with an error or

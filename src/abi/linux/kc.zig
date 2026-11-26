@@ -31,6 +31,9 @@ const real = struct {
     extern fn h9_fdready(fd: c_int, events: c_int) c_int;
     extern fn h9_pollgen() c_uint;
     extern fn h9_pollkick() void;
+    extern fn h9_lockgen() c_uint;
+    extern fn h9_lockwake() void;
+    extern fn h9_lockwait(seen: c_uint) c_int;
     extern fn h9_futex_wait(key: *const anyopaque, addr: u64, word: *u32, val: u32, bitset: u32, ms: c_int) c_int;
     extern fn h9_futex_wake(key: *const anyopaque, addr: u64, n: c_int, bitset: u32, addr2: u64, nreq: c_int, word: ?*u32, val: u32) c_int;
     extern fn h9_linux_sockrecv(fd: c_int, buf: [*]u8, n: c_int, peek: c_int, dontwait: c_int, raddr: ?*[16]u8, rport: ?*u16) c_int;
@@ -137,6 +140,13 @@ const stub = struct {
         return 0;
     }
     fn h9_pollkick() void {}
+    fn h9_lockgen() c_uint {
+        return 0;
+    }
+    fn h9_lockwake() void {}
+    fn h9_lockwait(_: c_uint) c_int {
+        return 0;
+    }
     fn h9_futex_wait(_: *const anyopaque, _: u64, _: *u32, _: u32, _: u32, _: c_int) c_int {
         return 1;
     }
@@ -320,6 +330,22 @@ pub fn futexWake(key: *const anyopaque, addr: u64, n: u32, bitset: u32, addr2: u
 /// Wakes every poll, select and epoll_wait, to look again.
 pub fn pollWake() void {
     c.h9_pollkick();
+}
+
+/// The file lock table's changes (locks.zig), for lockWait.
+pub fn lockGen() u32 {
+    return c.h9_lockgen();
+}
+
+/// The file lock table changed: wakes the locks waiting in lockWait.
+pub fn lockWake() void {
+    c.h9_lockwake();
+}
+
+/// Waits until the lock table has changed since lockGen said seen, or a
+/// signal interrupts it.
+pub fn lockWait(seen: u32) Error!void {
+    _ = try check(c.h9_lockwait(seen));
 }
 
 pub fn pollGen() u64 {

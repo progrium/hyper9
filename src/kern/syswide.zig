@@ -200,6 +200,14 @@ pub fn fsetattr(fd: c_int, mask: u64, a: *const Attr) Error!void {
     try dev.setattr(ch, mask, a);
 }
 
+/// Makes what was written to fd's file durable, only its data if
+/// datasync (the device switch's fsync, Part 3).
+pub fn fsync(fd: c_int, datasync: bool) Error!void {
+    const ch = try sysfile.fdtochan(fd, -1, false, true);
+    defer chan.cclose(ch);
+    try dev.fsync(ch, datasync);
+}
+
 // The C names, with sysfile.zig's contract.
 
 fn call(comptime f: anytype, args: anytype, fail: anytype) @TypeOf(fail) {
@@ -267,6 +275,15 @@ fn c_fsetattr(fd: c_int, mask: u64, a: *const Attr) callconv(.c) c_int {
     }.f, .{ fd, mask, a }, @as(c_int, -1));
 }
 
+fn c_fsync(fd: c_int, datasync: c_int) callconv(.c) c_int {
+    return call(struct {
+        fn f(d: c_int, ds: bool) Error!c_int {
+            try fsync(d, ds);
+            return 0;
+        }
+    }.f, .{ fd, datasync != 0 }, @as(c_int, -1));
+}
+
 /// The switch's optional operations for C, which raise: the overlay's
 /// up layers and copy-ups make links in whatever device a layer is.
 fn c_devreadlink(ch: *Chan, buf: [*]u8, n: c_int) callconv(.c) c_int {
@@ -297,6 +314,7 @@ pub fn exportC() void {
     @export(&c_fgetattr, .{ .name = "h9_fgetattr" });
     @export(&c_setattr, .{ .name = "h9_setattr" });
     @export(&c_fsetattr, .{ .name = "h9_fsetattr" });
+    @export(&c_fsync, .{ .name = "h9_fsync" });
     @export(&c_devreadlink, .{ .name = "devreadlink" });
     @export(&c_devsymlink, .{ .name = "devsymlink" });
     @export(&c_devlink, .{ .name = "devlink" });

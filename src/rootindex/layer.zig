@@ -600,7 +600,7 @@ pub const Layer = struct {
 
     fn isWide(t: u8) bool {
         return switch (t) {
-            wire.l.Tsymlink.id, wire.l.Trename.id, wire.l.Treadlink.id, wire.l.Tgetattr.id, wire.l.Tsetattr.id, wire.l.Tlink.id => true,
+            wire.l.Tsymlink.id, wire.l.Trename.id, wire.l.Treadlink.id, wire.l.Tgetattr.id, wire.l.Tsetattr.id, wire.l.Tlink.id, wire.l.Tfsync.id => true,
             else => false,
         };
     }
@@ -620,11 +620,12 @@ pub const Layer = struct {
             .Tgetattr => |m| .{ m.fid, null },
             .Tsetattr => |m| .{ m.fid, null },
             .Tlink => |m| .{ m.fid, m.dfid },
+            .Tfsync => |m| .{ m.fid, null },
             else => unreachable,
         };
         const f = l.fids.get(fid) orelse return l.plain(tag, frame);
         const f2 = if (fid2) |x| l.fids.get(x) orelse return l.plain(tag, frame) else null;
-        var p: Pending = .{ .kind = .wide, .fid = fid, .node = f.node, .mutates = d.msg != .Treadlink and d.msg != .Tgetattr };
+        var p: Pending = .{ .kind = .wide, .fid = fid, .node = f.node, .mutates = d.msg != .Treadlink and d.msg != .Tgetattr and d.msg != .Tfsync };
         if (f2) |g| {
             p.fid2 = fid2;
             p.node2 = g.node;

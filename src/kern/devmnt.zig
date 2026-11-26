@@ -18,7 +18,7 @@
 //!
 //! h9: the device's optional operations (design/file-interface.md) are
 //! the wide requests, 9P2000.L's Tsymlink, Treadlink, Tgetattr,
-//! Tsetattr, Tlink, and Trename, with devmnt's fids, which it sends only
+//! Tsetattr, Tlink, Trename, and Tfsync, with devmnt's fids, which it sends only
 //! to a server that takes them: a `#ℓ` conversation that translates to
 //! 9P2000.L, directly or under a `#ι` index (`wideof`). The translator
 //! (src/dotl/client.zig) sends each on with the server's fids, so a
@@ -1046,11 +1046,12 @@ const Treadlink = 22;
 const Tgetattr = 24;
 const Tsetattr = 26;
 const Tlink = 70;
+const Tfsync = 50;
 
 /// Whether t is a wide request's reply.
 fn widereply(t: u8) bool {
     return switch (t) {
-        Tsymlink + 1, Trename + 1, Treadlink + 1, Tgetattr + 1, Tsetattr + 1, Tlink + 1, Tready + 1 => true,
+        Tsymlink + 1, Trename + 1, Treadlink + 1, Tgetattr + 1, Tsetattr + 1, Tlink + 1, Tfsync + 1, Tready + 1 => true,
         else => false,
     };
 }
@@ -1243,6 +1244,17 @@ fn mntsetattr(ch: *Chan, mask: u64, a: *const Attr) Error!void {
     w.put64(@bitCast(if (a.mtimens == c.Anow) 0 else a.mtimens));
     var out: [64]u8 = undefined;
     _ = try widerpc(m, ch, Tsetattr, &w, &out);
+}
+
+/// Tfsync (Part 3), to a server that takes the wide requests; the null
+/// wstat to any other.
+fn mntfsync(ch: *Chan, datasync: bool) Error!void {
+    const m = wideof(ch) orelse return dev.fsyncdefault(ch);
+    var w: Wbody = .{};
+    w.put32(@bitCast(ch.fid));
+    w.put32(@intFromBool(datasync));
+    var out: [64]u8 = undefined;
+    _ = try widerpc(m, ch, Tfsync, &w, &out);
 }
 
 // h9: readiness (design/file-interface.md, Part 1), for a server that
@@ -1710,6 +1722,7 @@ pub const Device = dev.Native('M', "mnt", .{
     .setattr = mntsetattr,
     .rename = mntrename,
     .hasattr = mnthasattr,
+    .fsync = mntfsync,
     .ready = mntready,
     .watch = mntwatch,
 });
@@ -1868,8 +1881,27 @@ pub const Server = struct {
         return true;
     }
 
+    /// Each fid's path (0 the root, 1 hello, -1 none), by fid: devmnt's
+    /// fids are its channels' numbers, however many cases made before.
+    const Fids = struct {
+        id: [32]u32 = undefined,
+        path: [32]i64 = @splat(-1),
+
+        fn at(t: *Fids, fid: u32) *i64 {
+            var free: ?usize = null;
+            for (t.path, 0..) |p, i| {
+                if (p >= 0 and t.id[i] == fid) return &t.path[i];
+                if (p < 0 and free == null) free = i;
+            }
+            const i = free orelse 0;
+            t.id[i] = fid;
+            t.path[i] = -1;
+            return &t.path[i];
+        }
+    };
+
     pub fn run(ch: *Chan) void {
-        var fids: [32]i64 = @splat(-1);
+        var fids: Fids = .{};
         var in: [8192 + 24]u8 = undefined;
         var out: [8192 + 24]u8 = undefined;
         var data: [512]u8 = undefined;
@@ -1888,11 +1920,11 @@ pub const Server = struct {
                     r.version = @constCast("9P2000");
                 },
                 c.Tattach => {
-                    fids[f.fid] = 0;
+                    fids.at(f.fid).* = 0;
                     r.qid = .{ .path = 0, .vers = 0, .type = c.QTDIR };
                 },
                 c.Twalk => {
-                    var path = fids[f.fid];
+                    var path = fids.at(f.fid).*;
                     var i: usize = 0;
                     while (i < f.nwname) : (i += 1) {
                         if (path != 0 or !std.mem.eql(u8, std.mem.span(f.wname[i]), "hello")) break;
@@ -1904,16 +1936,16 @@ pub const Server = struct {
                         r.ename = @constCast("file does not exist on the test server");
                     } else {
                         r.nwqid = @intCast(i);
-                        if (i == f.nwname) fids[f.newfid] = path;
+                        if (i == f.nwname) fids.at(f.newfid).* = path;
                     }
                 },
                 c.Topen => {
-                    const path: u64 = @intCast(fids[f.fid]);
+                    const path: u64 = @intCast(fids.at(f.fid).*);
                     r.qid = .{ .path = path, .vers = 0, .type = if (path == 0) c.QTDIR else 0 };
                 },
                 c.Tread => {
                     var n: usize = 0;
-                    if (fids[f.fid] == 0) {
+                    if (fids.at(f.fid).* == 0) {
                         if (f.offset == 0) n = dir(1, &data);
                     } else if (f.offset < hello.len) {
                         n = @min(hello.len - @as(usize, @intCast(f.offset)), f.count);
@@ -1923,10 +1955,10 @@ pub const Server = struct {
                     r.data = &data;
                 },
                 c.Tstat => {
-                    r.nstat = @intCast(dir(@intCast(fids[f.fid]), &data));
+                    r.nstat = @intCast(dir(@intCast(fids.at(f.fid).*), &data));
                     r.stat = &data;
                 },
-                c.Tclunk => fids[f.fid] = -1,
+                c.Tclunk => fids.at(f.fid).* = -1,
                 else => {
                     r.type = c.Rerror;
                     r.ename = @constCast("not on the test server");

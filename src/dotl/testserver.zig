@@ -88,6 +88,8 @@ pub const Server = struct {
     log: std.ArrayList(u8) = .empty,
     /// Every name a Twalk asked for, one per line, across connections.
     walked: std.ArrayList(u8) = .empty,
+    /// Tfsyncs, by datasync (0 or 1), across connections.
+    fsyncs: [2]u32 = .{ 0, 0 },
     /// The uname and n_uname of the last attach.
     attached_as: ?struct { []const u8, u32 } = null,
     /// `9P2000.L.Z` was negotiated on this connection.
@@ -571,6 +573,7 @@ pub const Server = struct {
             },
             .Tfsync => |fs| {
                 _ = s.fids.get(fs.fid) orelse return s.lerr(tag, E.BADF);
+                s.fsyncs[@intFromBool(fs.datasync != 0)] += 1;
                 try s.send(tag, l.Rfsync{});
             },
             .Tclunk => |cl| {

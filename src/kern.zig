@@ -250,6 +250,9 @@ const c_stub = struct {
     fn h9_fgetattr(_: c_int, _: u64, _: *Attr, _: [*]u8, _: c_int) c_int {
         return -1;
     }
+    fn h9_fsync(_: c_int, _: c_int) c_int {
+        return -1;
+    }
     fn h9_fs_mkfifopath(_: [*:0]const u8, _: c_uint) c_int {
         return -1;
     }
@@ -399,6 +402,7 @@ const c_real = struct {
     extern fn h9_rename(old: [*:0]const u8, new: [*:0]const u8) c_int;
     extern fn h9_getattr(path: [*:0]const u8, nofollow: c_int, mask: u64, a: *Attr, dir: [*]u8, ndir: c_int) c_int;
     extern fn h9_fgetattr(fd: c_int, mask: u64, a: *Attr, dir: [*]u8, ndir: c_int) c_int;
+    extern fn h9_fsync(fd: c_int, datasync: c_int) c_int;
     extern fn h9_fs_mkfifopath(path: [*:0]const u8, perm: c_uint) c_int;
 
     extern fn h9_overlay_drop(id: c_int) void;
@@ -1393,6 +1397,12 @@ pub fn fstat(fd: u31, buf: []u8) Error!usize {
 
 pub fn wstat(name: [*:0]const u8, buf: []u8) Error!usize {
     return try check(c.syswstat(name, buf.ptr, clampLen(buf.len)));
+}
+
+/// Makes what was written to fd's file durable, only its data if
+/// datasync: the device's fsync, by default the null wstat.
+pub fn fsync(fd: u31, datasync: bool) Error!void {
+    _ = try check(c.h9_fsync(fd, @intFromBool(datasync)));
 }
 
 pub fn fwstat(fd: u31, buf: []u8) Error!usize {

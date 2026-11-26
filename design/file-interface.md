@@ -102,8 +102,8 @@ Part 2:
 
 Part 3:
 
-- [ ] `test "a blocked fcntl lock wakes without polling [file-interface]"` passes, and the 2 ms poll is deleted.
-- [ ] `test "fsync reaches a .L server as Tfsync [file-interface]"` passes.
+- [x] `test "a blocked fcntl lock wakes without polling [file-interface]"` passes, and the 2 ms poll is deleted.
+- [x] `test "fsync reaches a .L server as Tfsync [file-interface]"` passes.
 
 All parts:
 
@@ -143,3 +143,8 @@ All parts:
 - **A 9front server's `/net` is always ready**, so a non-blocking read of a conversation mounted from one blocks, where the read-ahead answered `EAGAIN`. So does one mounted through a `#ℓ` conversation, which answers devmnt `9P2000` itself.
 - **A remote `SO_ERROR` is a guess**: `ECONNREFUSED` when the server says `Err`, since the conversation's error isn't carried.
 - `MSG_PEEK` and `FIONREAD` on a remote conversation read into a buffer per conversation that later reads take first, the one place something is still read ahead.
+
+**2026-11-26, Part 3 on the file-interface-2 branch.** `fsync(chan, datasync)` is built, with the null wstat as its default, and devmnt sends `Tfsync`, with `datasync`, to a .L mount; the Linux ABI's `fsync` and `fdatasync` call it. A blocked `F_SETLKW` or `flock` waits on Part 1's wakers, which each change to the lock table fires, and the 2 ms poll is deleted. Some things it found:
+
+- **`lock` and `unlock` aren't device operations yet.** The Linux ABI's one table (`src/abi/linux/locks.zig`) still serves every device, so a lock is seen by the programs of every machine in the h9 process and by none outside it, as before; a host tree's `fcntl` locks and a .L server's `Tlock` would be the devices' own, and a lock wait would hang on the device's waker rather than the table's.
+- The lock case compares a lock's wake with a pipe reader's in the same run, since a loaded host slows both: a 2 ms poll added most of a millisecond or more to the median.

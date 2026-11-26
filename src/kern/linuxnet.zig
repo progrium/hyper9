@@ -122,6 +122,51 @@ pub fn h9_pollkick() callconv(.c) void {
     c.unlock(&plk);
 }
 
+// Linux file locks (design/file-interface.md, Part 3): the table is the
+// ABI's (src/abi/linux/locks.zig), and a blocked lock waits here for a
+// change to it, on Part 1's wakers.
+
+var lockwatch: rd.Watchers = .{};
+var lockgen = std.atomic.Value(c_uint).init(0);
+/// Locks waiting, so a change with none waiting moves no poller's
+/// generation (every close comes to h9_lockwake).
+var lockwaiters = std.atomic.Value(c_uint).init(0);
+
+/// The lock table's changes, for h9_lockwait.
+fn h9_lockgen() callconv(.c) c_uint {
+    return lockgen.load(.seq_cst);
+}
+
+/// The lock table changed: wakes each blocked lock to try again.
+fn h9_lockwake() callconv(.c) void {
+    _ = lockgen.fetchAdd(1, .seq_cst);
+    // A waiter counts itself before it looks at lockgen.
+    if (lockwaiters.load(.seq_cst) != 0)
+        rd.notify(&lockwatch);
+}
+
+/// Waits until the table has changed since h9_lockgen said seen, or a
+/// note (-1, interrupted).
+fn h9_lockwait(seen: c_uint) callconv(.c) c_int {
+    lockwait(seen) catch return syserr();
+    return 0;
+}
+
+fn lockwait(seen: c_uint) Error!void {
+    var s: rd.Sleeper = .{};
+    var w: rd.Watch = .{};
+    rd.add(&lockwatch, &w, &s.waker);
+    defer rd.unwatch(&w);
+    _ = lockwaiters.fetchAdd(1, .seq_cst);
+    defer _ = lockwaiters.fetchSub(1, .seq_cst);
+    while (lockgen.load(.seq_cst) == seen) {
+        s.arm();
+        if (lockgen.load(.seq_cst) != seen)
+            break;
+        _ = try s.wait(0);
+    }
+}
+
 /// A recv or send on a host socket that finds it not ready (EAGAIN). An
 /// edge-triggered epoll entry that was reported ready and is still ready
 /// is watched with Pedge, which doesn't watch the host socket itself (it
@@ -707,6 +752,9 @@ pub fn exportC() void {
     @export(&h9_pollgen, .{ .name = "h9_pollgen" });
     @export(&h9_pollwake, .{ .name = "h9_pollwake" });
     @export(&h9_pollkick, .{ .name = "h9_pollkick" });
+    @export(&h9_lockgen, .{ .name = "h9_lockgen" });
+    @export(&h9_lockwake, .{ .name = "h9_lockwake" });
+    @export(&h9_lockwait, .{ .name = "h9_lockwait" });
     @export(&h9_poll, .{ .name = "h9_poll" });
     @export(&h9_fdready, .{ .name = "h9_fdready" });
     @export(&h9_ip_ready, .{ .name = "h9_ip_ready" });

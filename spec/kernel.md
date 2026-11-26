@@ -189,6 +189,10 @@ A device can have two more optional operations, `ready` and `watch` (`src/kern/r
 
 devmnt's `ready` sends a `Tready` that asks for an answer now, unless one waiting for these events is already out (and `Now` isn't asked). Its `watch` sends a `Tready` for the events its watches want that the server hasn't said hold, as an asynchronous request: a reply calls back from `mountmux`, and while only asynchronous requests are outstanding a reader kproc per mount reads the replies. A clunk flushes the channel's waiting `Tready`s. A server that fails a `Tready` is always ready.
 
+#### Locks and fsync ([file-interface](../design/file-interface.md), Part 3)
+
+`fsync(c, datasync)` makes what was written to `c`'s file durable, only its data if `datasync`; the default is the null wstat, which `#U` serves with the host's `fsync`, and devmnt's is a `Tfsync` on a mount that takes the wide requests (the default elsewhere). `src/kern/syswide.zig` exports it on an fd as `h9_fsync`. Locks have no device operation yet: the Linux ABI's table (`src/abi/linux/locks.zig`) serves every device, and a blocked lock waits in `h9_lockwait` (`src/kern/linuxnet.zig`), on a `Watchers` that each change to the table notifies (`h9_lockwake`) while a lock waits, with a count of changes (`h9_lockgen`) read before the try, so a change between the try and the wait isn't missed.
+
 #### `tsleep` (`src/kern/tsleep.zig`)
 
 drawterm's `sleep` has no timeout. `tsleep` has 9front's contract and uses only the kernel's public `sleep` and `wakeup`: it puts a timer on its own stack into a list sorted by host monotonic time, and the timer kproc wakes it at the deadline.
