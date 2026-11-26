@@ -90,6 +90,7 @@ extern long	h9_dotl_takeserver(void *t, void *buf, long n);
 extern long	h9_dotl_takemount(void *t, void *buf, long n);
 extern int	h9_dotl_mountready(void *t);
 extern int	h9_dotl_status(void *t, char *buf, int n);
+extern int	h9_dotl_translating(void *t);
 
 enum {
 	Dotldc		= 0x2113,	/* ℓ */
@@ -1093,6 +1094,31 @@ dotlwrite(Chan *c, void *va, long n, vlong off)
 	}
 	error(Eperm);
 	return -1;
+}
+
+/*
+ * Whether c, a server connection devmnt mounted, is a conversation's
+ * data whose client side translates to 9P2000.L, so devmnt may send it
+ * the wide requests (design/file-interface.md, src/kern/devmnt.zig).
+ */
+int
+h9_dotl_wide(Chan *c)
+{
+	Conv *cv;
+	int n, r;
+
+	if(devtab[c->type]->dc != Dotldc || TYPE(c->qid) != Qdata)
+		return 0;
+	n = CONV(c->qid);
+	if(n < 0 || n >= Maxconv)
+		return 0;
+	cv = &convs[n];
+	r = 0;
+	qlock(&cv->tl);
+	if(cv->inuse && !cv->serving && cv->tr != nil)
+		r = h9_dotl_translating(cv->tr);
+	qunlock(&cv->tl);
+	return r;
 }
 
 Dev dotldevtab = {

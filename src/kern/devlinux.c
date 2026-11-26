@@ -214,7 +214,7 @@ mkentry(Chan *c, int q, ulong pid, int fd, Dir *dp)
 static int
 pidok(ulong pid)
 {
-	Hproc *h;
+	Proc *h;
 
 	h = h9_pidlookup(upmach(), pid);
 	if(h == nil)
@@ -227,7 +227,7 @@ pidok(ulong pid)
 static int
 pidfds(ulong pid, int *fds, int n)
 {
-	Hproc *h;
+	Proc *h;
 	Fgrp *f;
 	int i, count;
 
@@ -236,7 +236,7 @@ pidfds(ulong pid, int *fds, int n)
 		return 0;
 	count = 0;
 	qlock(&h->debug);
-	if(h->p != nil && (f = h->p->fgrp) != nil){
+	if(!h->exited && (f = h->fgrp) != nil){
 		lock(&f->ref.lk);
 		for(i = 0; i <= f->maxfd; i++)
 			if(f->fd[i] != nil && count < n)
@@ -253,7 +253,7 @@ static ulong
 tgidof(ulong pid)
 {
 	ulong tgid, nthr;
-	Hproc *h;
+	Proc *h;
 
 	tgid = pid;
 	h = h9_pidlookup(upmach(), pid);
@@ -438,7 +438,7 @@ struct Text
 static int
 cmdline(ulong pid, char *buf, int n, int comm)
 {
-	Hproc *h;
+	Proc *h;
 	int len, i;
 
 	h = h9_pidlookup(upmach(), pid);
@@ -466,7 +466,7 @@ cmdline(ulong pid, char *buf, int n, int comm)
 static int
 pstat(ulong pid, char *buf, int n, int status)	/* status: 0 stat, 1 status, 2 statm */
 {
-	Hproc *h;
+	Proc *h;
 	ulong ppid, mem, tgid, nthr;
 	char state[64];
 	char *st;
@@ -511,7 +511,7 @@ linuxopen(Chan *c, int omode)
 	int q, n;
 	ulong pid;
 	Text *t;
-	Hproc *h;
+	Proc *h;
 	void *aux;
 
 	q = QFILE(c->qid.path);

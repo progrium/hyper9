@@ -690,7 +690,6 @@ extern fn h9_shim_fs_anchor(*Chan) c_int;
 // h9: Linux symlinks (design/epoch-0/linux-symlinks.md, src/kern/fscheck.h)
 extern fn h9_fs_linkwalk() c_int;
 extern fn h9_fs_nofollowing() c_int;
-extern fn h9_shim_fs_chanreadlink(*Chan, [*]u8, c_int, *c_int) c_int;
 extern fn h9_fs_atroot(*Chan) c_int; // h9: src/kern/linux.c
 const Qtsymlink = 0x02; // H9_QTSYMLINK
 const Maxlinks = 40; // H9_MAXLINKS
@@ -815,14 +814,15 @@ fn followlink(ch: *Chan, path: *Path, names: [*]const [*:0]const u8, k: c_int, r
     const lc = lc_.?;
     c.free(wq);
     const buf: [*]u8 = @ptrCast(c.smalloc(Linkbuf));
-    var n: c_int = 0;
-    if (h9_shim_fs_chanreadlink(lc, buf, Linkbuf, &n) < 0) {
+    // The link's device reads it (design/file-interface.md).
+    const got = dev.readlink(lc, buf[0..Linkbuf]) catch {
         cclose(lc);
         c.free(buf);
         return null;
-    }
+    };
     cclose(lc);
-    if (n <= 0) {
+    const n: c_int = @intCast(got orelse 0);
+    if (n == 0) {
         c.free(buf);
         kstrcpy(up().errstr, &port.Enonexist, port.ERRMAX);
         return null;
@@ -1239,6 +1239,14 @@ pub fn namelenerror(aname: [*:0]const u8, len_: c_int, err: [*:0]const u8) error
 /// correct name. Sysstat and sys_stat need the correct name so they can
 /// rewrite the stat info.
 pub fn namec(aname_: [*:0]const u8, amode: c_int, omode: c_int, perm: c_uint) Error!*Chan {
+    return namecx(aname_, amode, omode, perm, false);
+}
+
+/// h9: namec, for a Linux process's lookup that acts on a link in its
+/// last name instead of following it when nofollow is set (lstat,
+/// readlink, rename; design/file-interface.md), as the process's own
+/// flag (h9_fs_nofollow) also says for the calls that set it.
+pub fn namecx(aname_: [*:0]const u8, amode: c_int, omode: c_int, perm: c_uint, nofollow: bool) Error!*Chan {
     if (aname_[0] == 0)
         return port.kerror("empty file name");
     const aname: [*:0]u8 = (try validnamedupAt(aname_, true, @returnAddress())).?;
@@ -1294,7 +1302,7 @@ pub fn namec(aname_: [*:0]const u8, amode: c_int, omode: c_int, perm: c_uint) Er
 
     var e: Elemlist = .{ .aname = aname, .prefix = @intCast(@intFromPtr(name) - @intFromPtr(aname)) };
     var nlinks: c_int = 0;
-    namec1(&ch, &e, name, nomount, &nlinks, amode, omode, perm) catch |err| {
+    namec1(&ch, &e, name, nomount, &nlinks, amode, omode, perm, nofollow) catch |err| {
         cclose(ch);
         c.free(e.name);
         c.free(@ptrCast(e.elems));
@@ -1327,7 +1335,7 @@ pub fn namec(aname_: [*:0]const u8, amode: c_int, omode: c_int, perm: c_uint) Er
 
 /// namec's work from its starting chan, *cp, which it replaces with the
 /// result, and which is namec's to close on an error.
-fn namec1(cp: **Chan, e: *Elemlist, name: [*:0]const u8, nomount: bool, nlinks: *c_int, amode: c_int, omode_: c_int, perm: c_uint) Error!void {
+fn namec1(cp: **Chan, e: *Elemlist, name: [*:0]const u8, nomount: bool, nlinks: *c_int, amode: c_int, omode_: c_int, perm: c_uint, want_nofollow: bool) Error!void {
     var omode = omode_;
 
     // Build a list of elements in the name.
@@ -1348,9 +1356,10 @@ fn namec1(cp: **Chan, e: *Elemlist, name: [*:0]const u8, nomount: bool, nlinks: 
     }
 
     // h9: a Linux process's lookup follows a link in its last name
-    // unless it's a remove, or the call says not to (h9_fs_nofollow). A
-    // create's walk here stops before its last name.
-    const nofollow = amode == c.Aremove or (amode != c.Acreate and h9_fs_linkwalk() != 0 and h9_fs_nofollowing() != 0);
+    // unless it's a remove, or the call says not to (namecx's nofollow,
+    // or h9_fs_nofollow). A create's walk here stops before its last
+    // name.
+    const nofollow = amode == c.Aremove or (amode != c.Acreate and h9_fs_linkwalk() != 0 and (want_nofollow or h9_fs_nofollowing() != 0));
     const elems: [*]const [*:0]const u8 = if (e.elems) |el| @ptrCast(el) else &.{};
     if (try walkl(cp, elems, e.nelems, nomount, &e.nerror, !nofollow, nlinks) < 0) {
         if (e.nerror < 0 or e.nerror > e.nelems) {

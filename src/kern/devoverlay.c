@@ -63,6 +63,7 @@
 #include "fns.h"
 #include "error.h"
 #include "fscheck.h"
+#include "devx.h"
 
 /* Implemented in Zig (src/kern.zig). They never raise kernel errors. */
 extern void *h9_overlay_pool(void);
@@ -70,8 +71,12 @@ extern void *h9_overlay_alloc(void *pool, ulong n);
 extern void h9_overlay_free(void *pool, void *p, ulong n);
 extern void h9_overlay_changed(void *track, char *path);
 /* src/kern/fscheck.c */
-extern void h9_fs_symlink(Chan*, char*, char*);
 extern void *h9_plan_get(void);
+/* The device switch's optional operations, which raise (src/kern/syswide.zig). */
+extern int devreadlink(Chan*, char*, int);
+extern void devsymlink(Chan*, char*, char*);
+extern int devrename(Chan*, Chan*, char*);
+extern void devgetattr(Chan*, uvlong, Attr*);
 extern int h9_fs_linkwalk(void);
 extern vlong h9_clock_mono(void);
 
@@ -1377,7 +1382,7 @@ h9_overlay_newpath(char *path)
 }
 
 /*
- * The lower chan for c's name, for h9_fs_readlinkpath (src/kern/fscheck.c),
+ * The lower chan for c's name, for ovreadlink and ovgetattr,
  * or nil if c isn't an overlay chan or its name is in memory: a link
  * copied up is a file now.
  */
@@ -3142,23 +3147,14 @@ upwalk(Inst *in, char *path, int make)
 	return c;
 }
 
-/* Makes name in the directory dir, on any device that has them, a symbolic link. */
+/*
+ * Makes name in the directory dir, on any device that has them, a
+ * symbolic link, by its symlink operation (design/file-interface.md).
+ */
 static void
 mklink(Chan *dir, char *name, char *target)
 {
-	switch(devtab[dir->type]->dc){
-	case 'U':
-		h9_fs_symlink(dir, name, target);
-		break;
-	case 'O':
-		h9_overlay_symlink(cclone(dir), name, target);
-		break;
-	case 'M':
-		h9_fs_mntsymlink(dir, name, target);
-		break;
-	default:
-		error(Eperm);
-	}
+	devsymlink(dir, name, target);
 }
 
 /* As mklink, a FIFO. */
@@ -3405,7 +3401,7 @@ upcopy(Chan *c, int trunc)
 			error(Eisdir);
 		if((d.qid.type & H9_QTSYMLINK) || (d.mode & H9_DMSYMLINK)){
 			char tgt[2048];
-			n = h9_fs_chanreadlink(lc, tgt, sizeof tgt);
+			n = devreadlink(lc, tgt, sizeof tgt);
 			if(n < 0)
 				error(Eperm);
 			mklink(pd, name, tgt);
@@ -3875,11 +3871,8 @@ unmove(Chan *c, Chan *dc, char *name)
 	if(oc == nil || pd == nil)
 		error(Enonexist);
 	waswh = rmwh(pd, name);
-	r = 1;
-	if(devtab[oc->type]->dc == 'U' && devtab[pd->type]->dc == 'U')
-		r = h9_fs_rename(oc, pd, name);
-	else if(devtab[oc->type]->dc == 'O' && devtab[pd->type]->dc == 'O')
-		r = h9_overlay_move(oc, pd, name);
+	/* The layer's own rename, where its device has one (design/file-interface.md). */
+	r = devrename(oc, pd, name);
 	if(r != 0 && strcmp(odir, ud->path) == 0){
 		/* In one directory, any device renames with a wstat. */
 		ovnulldir(&nd);
@@ -5739,9 +5732,9 @@ ovrename(Chan *c, Node *n, char *name)
 }
 
 /*
- * Moves c's name into the directory dc as name, for the Linux
- * ABI's renameat across directories (h9_fs_renamepath in
- * src/kern/fscheck.c), as ovrename does within one. Both are overlay
+ * Moves c's name into the directory dc as name, the overlay's rename
+ * (design/file-interface.md), for the Linux ABI's renameat, as
+ * ovrename does within one directory for a wstat. Both are overlay
  * chans; returns 1 if they're in different instances, or c is a
  * directory still in the lower tree (Linux's overlayfs refuses that
  * with EXDEV too, and mv copies), and 0 once moved. A file or link
@@ -5968,6 +5961,97 @@ ovwstat(Chan *c, uchar *db, int n)
 	return n;
 }
 
+/*
+ * The target of the link c is: an overlay's own, or the lower tree's,
+ * through its device, for a name that's below (design/file-interface.md).
+ */
+static int
+ovreadlink(Chan *c, char *buf, int nbuf)
+{
+	Chan *volatile l;
+	int n;
+
+	if((n = h9_overlay_readlink(c, buf, nbuf)) >= 0)
+		return n;
+	l = h9_overlay_lower(c);
+	if(l == nil)
+		return -1;
+	if(waserror()){
+		cclose(l);
+		nexterror();
+	}
+	n = devreadlink(l, buf, nbuf);
+	poperror();
+	cclose(l);
+	return n;
+}
+
+static void
+ovsymlink(Chan *c, char *name, char *target)
+{
+	h9_overlay_symlink(cclone(c), name, target);
+}
+
+/*
+ * c's attributes: its stat's, with the lower tree's links, ids, device,
+ * and nanoseconds for a name that's below, or a union's member's
+ * (design/file-interface.md).
+ */
+static void
+ovgetattr(Chan *c, uvlong mask, Attr *a)
+{
+	Chan *volatile l;
+	uchar buf[Attrstatlen];
+	char strs[sizeof buf];
+	Attr la;
+	Dir d;
+	int n;
+
+	n = ovstat(c, buf, sizeof buf);
+	if(convM2D(buf, n, &d, strs) == 0)
+		error(Ebadstat);
+	memset(a, 0, sizeof *a);
+	a->valid = Amode|Aatime|Amtime|Aino|Asize;
+	a->qid = d.qid;
+	a->mode = d.mode;
+	a->size = d.length;
+	a->atime = d.atime;
+	a->mtime = d.mtime;
+	l = h9_overlay_lower(c);
+	if(l == nil)
+		return;
+	if(waserror()){
+		cclose(l);
+		nexterror();
+	}
+	devgetattr(l, mask, &la);
+	poperror();
+	cclose(l);
+	a->nlink = la.nlink;
+	a->valid |= la.valid & (Anlink|Auid|Agid|Ardev|Ablocks);
+	a->uid = la.uid;
+	a->gid = la.gid;
+	a->rdev = la.rdev;
+	a->blocks = la.blocks;
+	if((la.valid & Aatime) && la.atime == a->atime)
+		a->atimens = la.atimens;
+	if((la.valid & Amtime) && la.mtime == a->mtime)
+		a->mtimens = la.mtimens;
+	if(la.valid & Actime){
+		a->valid |= Actime;
+		a->ctime = la.ctime;
+		a->ctimens = la.ctimens;
+	}
+}
+
+static int
+ovrename1(Chan *c, Chan *dc, char *name)
+{
+	if(isctl(c) || isctl(dc))
+		error(Eperm);
+	return h9_overlay_move(c, dc, name);
+}
+
 Dev overlaydevtab = {
 	'O',
 	"overlay",
@@ -5987,4 +6071,19 @@ Dev overlaydevtab = {
 	devbwrite,
 	ovremove,
 	ovwstat,
+};
+
+/*
+ * The optional operations (design/file-interface.md, src/kern/devx.h).
+ * A link is the switch's default, a copy: the tree in memory has one
+ * name per node.
+ */
+Devx overlaydevx = {
+	'O',
+	ovreadlink,
+	ovsymlink,
+	nil,
+	ovgetattr,
+	nil,
+	ovrename1,
 };

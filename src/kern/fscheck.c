@@ -1,7 +1,7 @@
 /*
  * The host's half of fscheck.h: the policy checks on host paths. The
- * kernel's half, the Linux ABI's links, renames, and FIFOs by paths in
- * the caller's namespace, is src/kern/fscheck.zig.
+ * kernel's half, the Linux ABI's FIFOs by paths in the caller's
+ * namespace, is src/kern/fscheck.zig.
  *
  * The devfs side of the sandbox policy (SPEC.md, "Vendor hooks" and
  * "Path resolution"). devfs-posix calls these before touching a host path.
@@ -1113,3 +1113,4 @@ h9_fs_allow(char *path, int op)
 	}
 }
 #endif
+

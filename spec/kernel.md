@@ -48,13 +48,13 @@ The boot also starts one kernel thread of its own, the timer kproc (`src/kern/ts
 
 ### Several machines per host process
 
-An embedder, or the test suite, can run several machines in one host process. They share the one drawterm kernel, but each machine's first Proc starts with a fresh Pgrp, Fgrp, and Egrp, so each has its own namespace, device mask, console, and environment. The CLI always runs one.
+An embedder, or the test suite, can run several machines in one host process. Each run of a `Machine` has a kernel of its own, `kern.Kernel` (`src/kern.zig`, [kernel-port](../design/kernel-port.md)), made with `Kernel.init(gpa, host)` from the machine's `Host` and spawned into with `Kernel.spawn`: its process list, pids, note groups, `#s` board, and `/proc` are its processes' alone, and so are the settings #ℓ, #ι, and host streams look up for it (they were tables keyed by machine, of 64 entries). Its C half, `Hmach` (`src/kern/hproc.h`), is counted, so processes and host streams can outlive the `Kernel`, and find no settings once it's gone. Each machine's first Proc starts with a fresh Pgrp, Fgrp, and Egrp, so each has its own namespace, device mask, console, and environment. The host threads, the boot Proc, the device table, and the timer kproc are still the host process's, as are some C devices' tables, which every machine's entries share (`#ℓ`'s, `#ι`'s, and `#ℓ` streams' conversations, `#y`'s consoles, the ptys, and the Linux futex waits). The CLI always runs one.
 
 ### Notes on blocked and running processes
 
 A note to a process blocked in a host syscall wakes it through drawterm's sleep/wakeup, and the syscall fails with "interrupted" (`rendezvous` returns `~0` instead, as on 9front). A note to a process running guest code kicks its vCPU, and the note is delivered at the exit.
 
-Pending notes are queued on h9's process record, not in drawterm's Proc: drawterm's `postnote` keeps only `notepending`, which `enderror` clears after every failed syscall, so it serves only as the "interrupt this call" flag.
+Pending notes are queued on the process record by `pushnote`: drawterm's `postnote` keeps only `notepending`, which `enderror` clears after every failed syscall, so it serves only as the "interrupt this call" flag.
 
 Because calls clear that flag as they return, a note posted while one call is finishing would be lost to the next call if the guest made one straight away; the exit loop re-arms the flag when it starts a call with a note flagged, and `pushnote` kicks before it interrupts, so a call started before the kick's flag is set still sees the interrupt.
 
@@ -94,7 +94,7 @@ Each piece below is new in h9, with the reason it's needed.
 
 #### Process model (Proc fields, segments, rfork/exec/await, notes)
 
-drawterm only ever ran its own kprocs.
+drawterm only ever ran its own kprocs. A process is one record, `Proc`, defined by h9 in `src/kern/h9proc.h`, which drawterm's `dat.h` includes in place of its own: drawterm's fields, then what 9front's Proc has and drawterm's lacks (the Egrp, the machine and its list, the machine-local pid, the note queue, the parent and wait records, and debugging state), and a pointer to the ABI's state (`src/machine.zig`'s Proc, with the address space). It's counted: the thread holds a reference until `pexit`, a child holds its parent's, and a lookup by pid takes one. drawterm's `procinit.c` (`newproc`, `kproc`, and `pexit`) is in `src/kern/proc.c`, and isn't built from drawterm. A kproc has no machine, and its pid is 0.
 
 #### `src/kern/devtab.c`
 
@@ -106,13 +106,13 @@ drawterm's `#c/cons` reads and writes the host's fds 0 and 1 directly. `#y<id>` 
 
 #### devenv `#e`, from 9front (`src/kern/devenv.c`)
 
-drawterm's has one machine-wide environment and imports the host process's environment on first attach, which breaks `env.scrub`. 9front's keeps one environment per Egrp, which `RFENVG` needs anyway. drawterm's Proc has no `egrp` and stays as it is, so each process's group is kept on its h9 process record (`src/kern/proc.c`). `#ec` isn't supported.
+drawterm's has one machine-wide environment and imports the host process's environment on first attach, which breaks `env.scrub`. 9front's keeps one environment per Egrp, which `RFENVG` needs anyway. drawterm's Proc has no `egrp`, so h9's (`src/kern/h9proc.h`) has one. `#ec` isn't supported.
 
 #### devproc `#p`, from 9front (`src/kern/devproc.c`)
 
 rc, kill, and ps need `/proc/n/{note,notepg,noteid,ctl,status,ns,fd,args,ppid,wait}`, and `segment` is served too; acid also needs `mem`, `regs`, `fpregs`, and `text` ([self-host](../design/epoch-0/self-host.md)).
 
-It serves h9's process records (`src/kern/proc.c`, shared through `src/kern/hproc.h`) instead of 9front's Proc table: a qid holds the machine-local pid, and every walk, open, read, and write looks it up in the caller's machine, so a machine can't see, signal, or kill another's processes.
+It serves h9's process records (`Proc`, in `src/kern/h9proc.h`, with `src/kern/proc.c`'s functions declared in `src/kern/hproc.h`), from each machine's list of processes rather than 9front's Proc table: a qid holds the machine-local pid, and every walk, open, read, and write looks it up in the caller's machine, so a machine can't see, signal, or kill another's processes.
 
 `status` has the 12 fields `ps` reads: the user is the machine's user (the guest's `$user`), the state is the syscall being served (as 9front's `psstate`, so `Await`, `Sleep`, `Pread`) or `Running`, memory is the bytes of the process's pages that are allocated (shared pages count in each process that maps them), and the user and system times read 0 until there's per-thread CPU accounting.
 
@@ -144,15 +144,37 @@ drawterm's `qio.c` and `allocb.c` are `src/kern/qio.zig`, and its `qlock.c`, `rw
 
 drawterm's `dev.c` is `src/kern/dev.zig`: the helpers devices are built from (`devattach`, `devwalk`, `devstat`, `devdirread`, `devopen`, and the rest), and the device switch, through which the Zig calls a device. Devices are still C `Dev`s in the device table (`src/kern/devtab.c`, or `nstab.c` in the namespace kernel), so the switch calls a C device's functions, and a C `Devgen`, through `src/kern/devshim.c`, whose functions run the call under `waserror` and return -1 with the error string on the process, which the switch turns into an error union (`error.Interrupted` when the string is `Eintr`). A device ported to Zig is native: `dev.Native` makes its C `Dev` from its Zig functions, wrapped to raise for the C that calls the table, and the switch calls the Zig functions directly.
 
-drawterm's `pgrp.c` is `src/kern/pgrp.zig` (mount tables, and file descriptor and rendezvous groups), its `chan.c` is `src/kern/chan.zig` (channels, paths, mounts, walks, and `namec`), and its `sysfile.c` is `src/kern/sysfile.zig`, the file system calls. There is no `sys*` wrapper layer in the Zig: `sysfile.zig`'s `open`, `bind`, `pread`, and the rest return error unions, and the C names (`sysopen`, `sysbind`, `syspread`, and the rest) are small exported adapters for the C callers, which return -1 with the error in `syserrstr` as drawterm's did. Inside a call `nerrlab` is 0, so `werrstr` and `%r` in C that the Zig calls see `syserrstr`. `werrstr` stays C (`src/kern/werrstr.c`), since it's variadic. The h9 hooks that `namec` and `walk` call and that can raise (the devfs policy's anchor check, and `chanreadlink`) go through `devshim.c` the same way the device switch does. The Zig allocates with `port.malloc`, drawterm's `malloc`, which clears what it returns.
+drawterm's `pgrp.c` is `src/kern/pgrp.zig` (mount tables, and file descriptor and rendezvous groups), its `chan.c` is `src/kern/chan.zig` (channels, paths, mounts, walks, and `namec`), and its `sysfile.c` is `src/kern/sysfile.zig`, the file system calls. There is no `sys*` wrapper layer in the Zig: `sysfile.zig`'s `open`, `bind`, `pread`, and the rest return error unions, and the C names (`sysopen`, `sysbind`, `syspread`, and the rest) are small exported adapters for the C callers, which return -1 with the error in `syserrstr` as drawterm's did. Inside a call `nerrlab` is 0, so `werrstr` and `%r` in C that the Zig calls see `syserrstr`. `werrstr` stays C (`src/kern/werrstr.c`), since it's variadic. The h9 hooks that `namec` and `walk` call and that can raise (the devfs policy's anchor check) go through `devshim.c` the same way the device switch does. The Zig allocates with `port.malloc`, drawterm's `malloc`, which clears what it returns.
 
 drawterm's `devmnt.c` is `src/kern/devmnt.zig`, the 9P client and the first native device: the switch calls its walk, open, read, and the rest directly, and `mntdevtab`, which the device tables name, holds the C wrappers. `mntversion`, `mntauth`, `mntattach`, and `muxclose` are exported for the C that calls them (`glue.c` and `devoverlay.c`). A process waiting for its reply sleeps in `sync.zig`, and a note that interrupts it sends `Tflush` as before. The reply parser (`mntrpcread`) and the check of a directory read from a server (`mntdirsfix`) are fuzzed in `zig build kern-test`.
 
 drawterm's `devpipe.c` and `devroot.c` are `src/kern/dev/pipe.zig` and `src/kern/dev/root.zig`, native devices too. The pipe keeps h9's Linux FIFOs (one queue that every open reads and writes, `h9_fifopipe` and `h9_fiforefs` for `src/kern/fifo.c`) and `h9_pipeq` for Linux poll, and a write on a pipe whose reader closed still posts the note through `h9_postnote`, unless the pipe carries a mount's 9P. A native device's own `Devgen` is Zig that doesn't raise, so the switch calls it directly. Of drawterm's `kern/`, the build now compiles no file the proposal ports.
 
-h9's own C is ported the same way, a file at a time. `src/kern/devpty.c` is `src/kern/dev/pty.zig`, a native device, with `h9_ptyq` and the `h9_pty_*` calls the Linux ABI makes exported for their callers. `src/kern/netcheck.c` is `src/kern/netcheck.zig`, and the kernel's half of `src/kern/fscheck.c` (links, renames, and FIFOs by path, through overlays and 9P2000.L mounts) is `src/kern/fscheck.zig`; the host's half, the policy checks on host paths, stays C, since it never sets an error label. The C they call that raises (devip's socket calls, and devoverlay's and devfs's links, moves, and FIFOs) goes through `devshim.c`. `src/kern/devns.c` is `src/kern/dev/ns.zig`, the namespace kernel's `#N`, native there only, with `pgrpcpy` and `h9_srvpost` called through `devshim.c`. `src/kern/linuxnet.c` is three files: `src/kern/linuxnet.zig`, readiness (`h9_poll` and its wake generation) and the Linux socket calls; `src/kern/dev/eventfd.zig`, `#ε`; and `src/kern/rconv.zig`, the read-ahead for remote conversations, kept apart since file-interface replaces it. Files only one kernel has export their C names only there (`kern_options`, from the build).
+h9's own C is ported the same way, a file at a time. `src/kern/devpty.c` is `src/kern/dev/pty.zig`, a native device, with `h9_ptyq` and the `h9_pty_*` calls the Linux ABI makes exported for their callers. `src/kern/netcheck.c` is `src/kern/netcheck.zig`, and the kernel's half of `src/kern/fscheck.c` (FIFOs by path, through overlays and 9P2000.L mounts) is `src/kern/fscheck.zig`; the host's half, the policy checks on host paths, stays C, since it never sets an error label. The C they call that raises (devip's socket calls, and devoverlay's and devfs's FIFOs) goes through `devshim.c`. `src/kern/devns.c` is `src/kern/dev/ns.zig`, the namespace kernel's `#N`, native there only, with `pgrpcpy` and `h9_srvpost` called through `devshim.c`. `src/kern/linuxnet.c` is three files: `src/kern/linuxnet.zig`, readiness (`h9_poll` and its wake generation) and the Linux socket calls; `src/kern/dev/eventfd.zig`, `#ε`; and `src/kern/rconv.zig`, the read-ahead for remote conversations, kept apart since file-interface replaces it. Files only one kernel has export their C names only there (`kern_options`, from the build).
 
 The rest of the kernel is C, so each ported file exports drawterm's functions under their C names (`qread`, `qlock`, `ksleep`, which `lib.h` renames `sleep` to, and the rest) with their C semantics: an exported function that gets an error from the Zig raises it with `nexterror()`, from its own frame, which has nothing to undo. A queue's kick and bypass functions are called from the Zig, so they must not raise; nothing in h9 sets them. Every place a process waits in the Zig is `park` in `sync.zig` (posix.c's `procsleep`), and every place one is let go is `unpark`. `zig build kern-test` runs their cases, on the native namespace kernel.
+
+#### Links and attributes ([file-interface](../design/file-interface.md), Part 2)
+
+Besides the nine operations, a device can have six optional ones for links and attributes: `readlink`, `symlink`, `link`, `getattr`, `setattr`, and `rename`. A Zig device has them as optional fields of its `dev.Ops`; a C device has them as function pointers in a `Devx` (`src/kern/devx.h`), found by the device's character in `devxtab` (`devtab.c`, or `nstab.c`), and called through `devshim.c` like the rest. `dev.zig`'s switch calls a device's operation, or the default where it has none:
+
+| Operation | Does | Default |
+|---|---|---|
+| `readlink(c, buf)` | the target of the link `c` is on | not a link |
+| `symlink(dir, name, target)` | makes a link in `dir` | "permission denied" |
+| `link(c, dir, name)` | a second name for `c`'s file | a copy, by an exclusive create |
+| `getattr(c, mask, Attr)` | the attributes `stat` can't say | from `stat`: mode, size, qid, and times in seconds |
+| `setattr(c, mask, Attr)` | sets them | a `wstat`; ids are "permission denied" |
+| `rename(c, dir, name)` | moves `c`'s file, replacing what's at `name` | a `wstat` of the name within one directory, after removing the file there; "cross-device link" (Linux's `EXDEV`) across directories |
+
+An `Attr` has a mask of what it holds (`Amode`, `Anlink`, `Auid`, `Agid`, `Ardev`, `Aatime`, `Amtime`, `Actime`, `Aino`, `Asize`, and `Ablocks`, as 9P2000.L's `Tgetattr` numbers them), the qid, the Plan 9 mode, numeric ids, the link count, rdev, size, blocks, and times in seconds and nanoseconds. `link` and `rename` act only within one device instance (the same type and `dev`), and are the default otherwise; `symlink`'s target isn't walked. `namecx` is `namec` with `nofollow`, which stops a Linux process's walk at a link in the last name, so a link's own name is opened, removed, or renamed; a link followed elsewhere is still a fresh walk from the process's root, with the policy checked where it lands. The calls on paths and fds are `src/kern/syswide.zig`'s, exported with `sysfile.zig`'s contract as `h9_readlink`, `h9_symlink`, `h9_link`, `h9_rename`, `h9_getattr`, `h9_fgetattr`, `h9_setattr`, and `h9_fsetattr`, and to devices that call another device's as `devreadlink`, `devsymlink`, `devlink`, `devrename`, and `devgetattr`.
+
+| Device | Has |
+|---|---|
+| `#U`, POSIX (`devfs-posix.c`) | `readlink`, `symlink`, `link` (`linkat`, the new name checked like a create), `getattr` (the host's `stat`, with nanoseconds and the real link count), and `rename` (`rename(2)`) |
+| `#U`, Windows (`devfs-win32.c`) | `readlink`, `rename`, and `symlink`, which is "permission denied" there; `link` is the default copy |
+| `#O` (`devoverlay.c`) | `readlink` and `symlink` (its own `Nlink` nodes, or the tree a name is in), `getattr` (its `Dir`, with what the lower tree's `getattr` adds), and `rename` (`h9_overlay_move`); `link` is the default copy |
+| devmnt | all six, as 9P2000.L requests, on a mount whose server is a `#ℓ` conversation translating to 9P2000.L (see [spec/ninep.md](ninep.md)); the defaults elsewhere |
 
 #### `tsleep` (`src/kern/tsleep.c`)
 

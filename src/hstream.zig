@@ -765,32 +765,21 @@ pub fn identity(id: u32, buf: *[ws.max_user]u8) ?Identity {
 // (design/epoch-0/credential-helpers.md): the root's options for its URL, and
 // the mounts' for the rest.
 
-const HostEntry = struct { owner: usize, root_url: ?[]const u8, root: HostOptions, mounts: HostOptions };
+/// A kernel's options for host-made streams, kept on the kernel.
+pub const HostSet = struct { root_url: ?[]const u8, root: HostOptions, mounts: HostOptions };
 
-var hosts_lock: std.atomic.Mutex = .unlocked;
-var hosts: [64]?HostEntry = @splat(null);
-
-fn lockHosts() void {
-    while (!hosts_lock.tryLock()) std.atomic.spinLoopHint();
+/// Sets kernel `k`'s options. What they point to must outlive it.
+pub fn registerHost(k: *kern.Kernel, root_url: ?[]const u8, root: HostOptions, mounts: HostOptions) void {
+    k.lockSettings();
+    defer k.lock.unlock();
+    k.streams = .{ .root_url = root_url, .root = root, .mounts = mounts };
 }
 
-/// Registers machine `owner`'s options until `unregisterHost`. What they
-/// point to must outlive the registration.
-pub fn registerHost(owner: usize, root_url: ?[]const u8, root: HostOptions, mounts: HostOptions) void {
-    lockHosts();
-    defer hosts_lock.unlock();
-    for (&hosts) |*e| if (e.* == null or e.*.?.owner == owner) {
-        e.* = .{ .owner = owner, .root_url = root_url, .root = root, .mounts = mounts };
-        return;
-    };
-}
-
-pub fn unregisterHost(owner: usize) void {
-    lockHosts();
-    defer hosts_lock.unlock();
-    for (&hosts) |*e| if (e.* != null and e.*.?.owner == owner) {
-        e.* = null;
-    };
+/// Drops kernel `k`'s options, so its machine no longer redials.
+pub fn unregisterHost(k: *kern.Kernel) void {
+    k.lockSettings();
+    defer k.lock.unlock();
+    k.streams = null;
 }
 
 /// Waits up to `ms` for machine `owner`'s host-made streams to finish
@@ -822,12 +811,12 @@ fn h9_hstream_redial(mach: ?*anyopaque, url: [*]const u8, n: c_long, err: [*]u8)
     const u = url[0..@intCast(n)];
     const owner = @intFromPtr(mach);
     const o: HostOptions = blk: {
-        lockHosts();
-        defer hosts_lock.unlock();
-        for (hosts) |e| if (e != null and e.?.owner == owner) {
-            const h = e.?;
-            break :blk if (h.root_url != null and std.mem.eql(u8, h.root_url.?, u)) h.root else h.mounts;
-        };
+        if (kern.Kernel.ofMach(mach)) |k| {
+            k.lockSettings();
+            defer k.lock.unlock();
+            if (k.streams) |h|
+                break :blk if (h.root_url != null and std.mem.eql(u8, h.root_url.?, u)) h.root else h.mounts;
+        }
         putErr(err, "redial: no options for this machine");
         return -1;
     };
@@ -2124,7 +2113,7 @@ fn h9_hstream_read(id: c_ulong, kind: c_int, buf: [*]u8, n: c_long, err: [*]u8) 
         return -1;
     }
     const dest = buf[0..@intCast(n)];
-    if (kind == @intFromEnum(Kind.text)) {
+    if (kind == @backingInt(Kind.text)) {
         if (s.text.len > 0) {
             const len = s.text.peekLen();
             if (len > dest.len) {
@@ -2154,7 +2143,7 @@ fn h9_hstream_ready(id: c_ulong, kind: c_int) callconv(.c) c_int {
     const st = s.state.load(.acquire);
     if (st == .idle) return 1;
     if (st == .connecting) return 0;
-    return @intFromBool(if (kind == @intFromEnum(Kind.text)) s.text.len > 0 else s.data.len > 0);
+    return @intFromBool(if (kind == @backingInt(Kind.text)) s.text.len > 0 else s.data.len > 0);
 }
 
 /// Sends one binary (`data`) or text message. Returns `n` or -1.
@@ -2165,7 +2154,7 @@ fn h9_hstream_write(id: c_ulong, kind: c_int, buf: [*]const u8, n: c_long, err: 
     };
     defer unref(s);
     const bytes = buf[0..@intCast(n)];
-    const text = kind == @intFromEnum(Kind.text);
+    const text = kind == @backingInt(Kind.text);
     if (text and !ws.validUtf8(bytes)) {
         putErr(err, "invalid utf-8");
         return -1;
@@ -2455,7 +2444,7 @@ test "the guest's /net/ws: connect, data, text, status, and the last close hangs
         }
     };
     var t: T = .{ .port = echo.port };
-    try kern.spawn("test", T, T.run, &t);
+    try kern.spawnAlone("test", T, T.run, &t);
     while (!t.done.load(.acquire)) std.Thread.yield() catch {};
     if (t.err) |e| {
         std.debug.print("at {s}: {s}\n", .{ t.what, t.why[0..t.why_len] });
@@ -2522,7 +2511,7 @@ test "a host-made stream: connect, wait, an fd, and a server close ends it" {
         }
     };
     var t: T = .{ .port = echo.port, .bye_port = bye.port };
-    try kern.spawn("test", T, T.run, &t);
+    try kern.spawnAlone("test", T, T.run, &t);
     while (!t.done.load(.acquire)) std.Thread.yield() catch {};
     if (t.err) |e| {
         std.debug.print("{s}\n", .{t.msg[0..t.msg_len]});
@@ -2559,7 +2548,7 @@ test "the keepalive pings an idle stream" {
         }
     };
     var t: T = .{ .port = echo.port };
-    try kern.spawn("test", T, T.run, &t);
+    try kern.spawnAlone("test", T, T.run, &t);
     while (!t.done.load(.acquire)) std.Thread.yield() catch {};
     if (t.err) |e| return e;
     try testing.expect(echo.pings.load(.acquire) >= 2);

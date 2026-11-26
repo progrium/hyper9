@@ -27,39 +27,20 @@ pub const Config = struct {
     io: ?std.Io = null,
 };
 
-const Entry = struct { owner: usize, cfg: Config };
-
-var mutex: std.atomic.Mutex = .unlocked;
-var configs: [64]?Entry = @splat(null);
-
-fn lock() void {
-    while (!mutex.tryLock()) std.atomic.spinLoopHint();
+/// Sets kernel `k`'s configuration, kept on the kernel. The strings must
+/// outlive it.
+pub fn register(k: *kern.Kernel, cfg: Config) void {
+    k.lockSettings();
+    defer k.lock.unlock();
+    k.dotl = cfg;
 }
 
-/// Registers machine `owner`'s configuration until `unregister`. The
-/// strings must outlive the registration.
-pub fn register(owner: usize, cfg: Config) void {
-    lock();
-    defer mutex.unlock();
-    for (&configs) |*e| if (e.* == null or e.*.?.owner == owner) {
-        e.* = .{ .owner = owner, .cfg = cfg };
-        return;
-    };
-}
-
-pub fn unregister(owner: usize) void {
-    lock();
-    defer mutex.unlock();
-    for (&configs) |*e| if (e.* != null and e.*.?.owner == owner) {
-        e.* = null;
-    };
-}
-
-fn configFor(owner: usize) ?Config {
-    lock();
-    defer mutex.unlock();
-    for (configs) |e| if (e != null and e.?.owner == owner) return e.?.cfg;
-    return null;
+/// The configuration of the kernel whose machine is `mach`, if any.
+fn configFor(mach: ?*anyopaque) ?Config {
+    const k = kern.Kernel.ofMach(mach) orelse return null;
+    k.lockSettings();
+    defer k.lock.unlock();
+    return k.dotl;
 }
 
 /// The host uid sent for the machine's user, by UserMap.hostUid's rule.
@@ -107,7 +88,7 @@ fn secondsNow() u32 {
 /// and 9P-User (design/epoch-0/credential-helpers.md), or -1 and null: without a
 /// `--user-map`, the map then takes them as the machine's user.
 fn h9_dotl_new(mach: ?*anyopaque, mode: c_int, uid: c_long, user: ?[*:0]const u8, err: [*]u8) callconv(.c) ?*Tr {
-    const cfg = configFor(@intFromPtr(mach)) orelse Config{ .user = "none" };
+    const cfg = configFor(mach) orelse Config{ .user = "none" };
     const t = gpa.create(Tr) catch {
         putErr(err, "out of memory");
         return null;
@@ -230,6 +211,15 @@ fn h9_dotl_status(t: *Tr, buf: [*]u8, n: c_int) callconv(.c) c_int {
     return @intCast(s.len);
 }
 
+/// Whether the client side translates to 9P2000.L, so it takes devmnt's
+/// wide requests (design/file-interface.md, src/kern/devmnt.zig).
+fn h9_dotl_translating(t: *Tr) callconv(.c) c_int {
+    return switch (t.side) {
+        .client => |*c| @intFromBool(c.wide()),
+        .server => 0,
+    };
+}
+
 /// Whether a dropped connection can be resumed (9P2000.L.Z).
 fn h9_dotl_canreconnect(t: *Tr) callconv(.c) c_int {
     return switch (t.side) {
@@ -272,6 +262,7 @@ comptime {
         @export(&h9_dotl_mountready, .{ .name = "h9_dotl_mountready" });
         @export(&h9_dotl_status, .{ .name = "h9_dotl_status" });
         @export(&h9_dotl_canreconnect, .{ .name = "h9_dotl_canreconnect" });
+        @export(&h9_dotl_translating, .{ .name = "h9_dotl_translating" });
         @export(&h9_dotl_wantreconnect, .{ .name = "h9_dotl_wantreconnect" });
         @export(&h9_dotl_reconnect, .{ .name = "h9_dotl_reconnect" });
     }

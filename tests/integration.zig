@@ -7705,6 +7705,82 @@ test "/proc/self/fd/N of a deleted file still opens [linux-symlinks]" {
     try symlinkFixture(&le, "deleted", false);
 }
 
+// Links and attributes (design/file-interface.md): the symlink fixture's
+// cases where a device has the operation itself, so a link is a second
+// name and a rename a move, not a copy: the host tree device, in a
+// --writable directory, and devdotl, by a .L mount of the in-memory
+// server that a Linux program sees under /9.
+
+/// Runs the symlink fixture's case `name` in a `--writable` host
+/// directory, with `extra` flags first.
+fn hostFixture(le: *const LinuxEnv, extra: []const []const u8, dir: ?[]const u8, name: []const u8) !void {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var want_buf: [64]u8 = undefined;
+    const want = try std.fmt.bufPrint(&want_buf, "ok {s}\n", .{name});
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.createDirPath(std.testing.io, "b");
+    var dir_buf: [std.Io.Dir.max_path_bytes + 16]u8 = undefined;
+    const d = if (dir) |x| try std.fmt.bufPrint(&dir_buf, "DIR={s}", .{x}) else try std.fmt.bufPrint(&dir_buf, "DIR=/mnt/term{s}/b", .{s.path});
+    var bind_buf: [std.Io.Dir.max_path_bytes + 16]u8 = undefined;
+    const bind = try std.fmt.bufPrint(&bind_buf, "/mnt/term{s}/b:#L/srv:c", .{s.path});
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try argv.appendSlice(gpa, &.{ "--writable", s.path, "--bind", bind });
+    try argv.appendSlice(gpa, extra);
+    try argv.appendSlice(gpa, &.{ "env", d, "/mnt/term/cwd/symlink", name });
+    try netCase(le, argv.items, want);
+}
+
+/// Runs the symlink fixture's case `name` in a .L mount of the in-memory
+/// server, on one engine: the server's tree carries over between runs.
+fn dotlFixture(le: *const LinuxEnv, name: []const u8) !void {
+    var d: DotlServer = undefined;
+    try d.start(std.testing.io, dotlTree);
+    defer d.finish(std.testing.io);
+    var allow_buf: [64]u8 = undefined;
+    const allow = try std.fmt.bufPrint(&allow_buf, "tcp!127.0.0.1!{d}", .{d.port()});
+    var cmd_buf: [512]u8 = undefined;
+    const cmd = try std.fmt.bufPrint(&cmd_buf, "mkdir -p /n/l; dotlfs {s} /n/l || exit mount; '#L/bin/busybox' env 'DIR=/9/n/l/usr' /mnt/term/cwd/symlink {s}", .{ d.dial(), name });
+    var one = le.*;
+    var it = std.mem.tokenizeScalar(u8, le.engines, ',');
+    one.engines = it.next() orelse "auto";
+    var want_buf: [64]u8 = undefined;
+    const r = try runLinux(&one, true, &.{ "--net-allow", allow, "--rc", cmd });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&want_buf, "ok {s}\n", .{name}), r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "symlink through a bind, an overlay, and a .L mount [file-interface]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    if (le.nine == null) return error.SkipZigTest;
+    // A host directory bound over the Alpine root's /srv.
+    try hostFixture(&le, &.{}, "/srv", "nofollow");
+    // The root's overlay.
+    try netCase(&le, &.{ "env", "DIR=/usr/lib", "/mnt/term/cwd/symlink", "nofollow" }, "ok nofollow\n");
+    try dotlFixture(&le, "nofollow");
+}
+
+test "link makes a second name, not a copy [file-interface]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    if (le.nine == null) return error.SkipZigTest;
+    try hostFixture(&le, &.{}, null, "hardlink");
+    try dotlFixture(&le, "hardlink");
+}
+
+test "rename across directories is atomic [file-interface]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    if (le.nine == null) return error.SkipZigTest;
+    try hostFixture(&le, &.{}, null, "renamedir");
+    try dotlFixture(&le, "renamedir");
+}
+
 // chroot (design/epoch-0/linux-chroot.md), with tests/fixtures/linux/chroot.c,
 // which runs each case in a child that chroots and prints "ok NAME".
 
@@ -11610,6 +11686,33 @@ test "a symlink in the in-memory .L server is followed and can't leave the mount
     // A link that resolves to nothing, dangling or a loop, isn't listed.
     try std.testing.expectEqualStrings("root:x:0:0\nroot:x:0:0\none\ntwo\n/n/l/usr/abs\n/n/l/usr/escape\n/n/l/usr/glenda\n", r.out[0..@min(r.out.len, 200)]);
     try std.testing.expect(std.mem.indexOf(u8, r.err, "too many symbolic links") != null);
+}
+
+test "a 9front ls sees the same Dir as before [file-interface]" {
+    const e = try env(@src());
+    var d: DotlServer = undefined;
+    try d.start(std.testing.io, dotlTree);
+    defer d.finish(std.testing.io);
+    // Over 9P2000, through the translator: a link is its target's Dir,
+    // and a dangling one isn't listed. This is what dev's h9 printed
+    // before devmnt sent the wide requests, qids and all.
+    const r = try dotlRun(e, &d, "ls -lq /n/l /n/l/etc /n/l/usr /n/l/lib/notes; ls -ld /n/l/lib");
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings(
+        \\(0000000000000002 0 80) d-rwxr-xr-x M 2 1000 1000 0 Jan  1  1970 /n/l/etc
+        \\(0000000000000006 0 80) d-rwxr-xr-x M 2 1000 1000 0 Jan  1  1970 /n/l/lib
+        \\(0000000000000005 0 80) d-rwxr-xr-x M 2 1000 1000 0 Jan  1  1970 /n/l/usr
+        \\(0000000000000003 0 00) --rw-r--r-- M 2 1000 1000 14 Jan  1  1970 /n/l/etc/motd
+        \\(0000000000000004 0 00) --rw-r--r-- M 2 1000 1000 11 Jan  1  1970 /n/l/etc/passwd
+        \\(0000000000000004 0 00) --rw-r--r-- M 2 1000 1000 11 Jan  1  1970 /n/l/usr/abs
+        \\(0000000000000004 0 00) --rw-r--r-- M 2 1000 1000 11 Jan  1  1970 /n/l/usr/escape
+        \\(0000000000000006 0 80) d-rwxr-xr-x M 2 1000 1000  0 Jan  1  1970 /n/l/usr/glenda
+        \\(0000000000000007 0 00) --rw-r--r-- M 2 1000 1000  8 Jan  1  1970 /n/l/lib/notes
+        \\d-rwxr-xr-x M 2 1000 1000 0 Jan  1  1970 /n/l/lib
+        \\
+    , r.out);
 }
 
 test "Rlerror errnos from the in-memory .L server become 9front error strings [dotl]" {

@@ -1,29 +1,30 @@
 /*
- * h9's per-process records: what 9front keeps in its Proc and drawterm's
- * lacks (parent, children, wait queue, Egrp, the machine-local pid and a
- * pointer to the Zig process). drawterm's Proc stays as it is, so a record is
- * found from its Proc through a table here. See SPEC.md, "Process model".
+ * h9's process record, Proc (h9proc.h): drawterm's Proc with what 9front
+ * keeps in its Proc and drawterm's lacks (parent, children, wait queue,
+ * Egrp, the machine-local pid, the note queue and a pointer to the ABI's
+ * state), in one record. See SPEC.md, "Process model". drawterm's
+ * procinit.c is here too, since making and ending a Proc is this file's.
  *
  * Also here, ported from 9front at the pinned release: the group handling
  * of sysrfork (port/sysproc.c), pexit's and
  * pwait's wait records, and the note queue (mknote, pushnote, postnote,
  * postnotepg and popnote, port/proc.c).
  *
- * Notes are queued on the record, not in drawterm's Proc: drawterm's
- * postnote only sets notepending, which its sysfile.c clears after every
- * successful call, so notepending stays the "interrupt this call" flag.
- * The pipe device (src/kern/dev/pipe.zig) posts its notes here.
- * Each record belongs to a machine (Hmach): note groups and postnotepg
- * never reach another machine's processes.
+ * Notes are queued on the record by pushnote: drawterm's postnote only
+ * set notepending, which sysfile clears after every successful call, so
+ * notepending stays the "interrupt this call" flag. The pipe device
+ * (src/kern/dev/pipe.zig) posts its notes here. Each guest process
+ * belongs to a machine (Hmach) and is on its list: note groups and
+ * postnotepg never reach another machine's processes.
  *
  * devproc.c (#p) reads and changes records through the h9_* functions
  * declared in hproc.h; a lookup by pid only finds processes in the
  * caller's machine.
  *
- * Records are reference counted: the table holds one for the process's
- * life, and each child holds one on its parent's record, so a child that
- * outlives its parent never touches freed memory. A parent that exits
- * marks its record dead, and children's exits then leave no wait record.
+ * Records are reference counted: the thread holds one until pexit, and
+ * each child holds one on its parent's, so a child that outlives its
+ * parent never touches freed memory. A parent that exits marks its record
+ * dead, and children's exits then leave no wait record.
  */
 
 #include "u.h"
@@ -34,52 +35,36 @@
 
 #include "hproc.h"
 
-static Lock tablk;
-static Hproc *table[PROCHASH];
-
-static uint
-prochash(Proc *p)
+/*
+ * A guest process is on its machine's list (Hmach.procs) from its making
+ * until h9_kern_exit; pid lookups, /proc and group notes walk it.
+ */
+static void
+enter(Proc *p)
 {
-	return ((uintptr)p >> 4) % PROCHASH;
-}
+	Hmach *m;
 
-static Hproc*
-lookup(Proc *p)
-{
-	Hproc *h;
-
-	lock(&tablk);
-	for(h = table[prochash(p)]; h != nil; h = h->hash)
-		if(h->p == p)
-			break;
-	unlock(&tablk);
-	return h;
+	m = p->mach;
+	lock(&m->lk);
+	p->mnext = m->procs;
+	m->procs = p;
+	unlock(&m->lk);
 }
 
 static void
-enter(Hproc *h)
+leave(Proc *p)
 {
-	uint i;
+	Proc **l;
+	Hmach *m;
 
-	i = prochash(h->p);
-	lock(&tablk);
-	h->hash = table[i];
-	table[i] = h;
-	unlock(&tablk);
-}
-
-static void
-leave(Hproc *h)
-{
-	Hproc **l;
-
-	lock(&tablk);
-	for(l = &table[prochash(h->p)]; *l != nil; l = &(*l)->hash)
-		if(*l == h){
-			*l = h->hash;
+	m = p->mach;
+	lock(&m->lk);
+	for(l = &m->procs; *l != nil; l = &(*l)->mnext)
+		if(*l == p){
+			*l = p->mnext;
 			break;
 		}
-	unlock(&tablk);
+	unlock(&m->lk);
 }
 
 static void
@@ -90,13 +75,13 @@ freenote(Hnote *n)
 	free(n);
 }
 
-/* Called with h->nlk held. */
+/* Called with p->nlk held. */
 static void
-freenotes(Hproc *h)
+freenotes(Proc *p)
 {
-	while(h->nnote > 0){
-		freenote(h->note[--h->nnote]);
-		h->note[h->nnote] = nil;
+	while(p->nnote > 0){
+		freenote(p->note[--p->nnote]);
+		p->note[p->nnote] = nil;
 	}
 }
 
@@ -109,21 +94,25 @@ putmach(Hmach *m)
 	}
 }
 
+/*
+ * Drops a reference to p. The last frees what's left once its thread has
+ * gone (pexit closed its groups): wait records, notes and the machine.
+ */
 static void
-putproc(Hproc *h)
+putproc(Proc *p)
 {
 	Hwait *w;
 
-	if(h == nil || decref(&h->ref))
+	if(p == nil || decref(&p->ref))
 		return;
-	while((w = h->waitq) != nil){
-		h->waitq = w->next;
+	while((w = p->waitq) != nil){
+		p->waitq = w->next;
 		free(w);
 	}
-	freenotes(h);
-	freenote(h->lastnote);
-	putmach(h->mach);
-	free(h);
+	freenotes(p);
+	freenote(p->lastnote);
+	putmach(p->mach);
+	free(p);
 }
 
 /*
@@ -131,39 +120,128 @@ putproc(Hproc *h)
  * a change to its wait records, children or deadness. Called with h->exl.
  */
 void
-wakewaits(Hproc *h)
+wakewaits(Proc *h)
 {
-	Hproc *s;
+	Proc *s;
 
 	h->wgen++;
 	for(s = h->wsleep; s != nil; s = s->wnext)
 		wakeup(&s->lwaitr);
 }
 
-static Hproc*
-newhproc(Proc *p, char *text)
+/* The calling process, if it's a guest process (it has a machine), or nil. */
+static Proc*
+self(void)
 {
-	Hproc *h;
-
-	h = mallocz(sizeof *h, 1);
-	if(h == nil)
+	if(up == nil || up->mach == nil)
 		return nil;
-	h->ref.ref = 1;
-	h->p = p;
-	h->start = ticks();
-	strecpy(h->text, h->text+sizeof h->text, text);
-	return h;
+	return up;
 }
 
-static Hproc*
+static Proc*
 uphproc(void)
 {
-	Hproc *h;
-
-	h = lookup(up);
-	if(h == nil)
+	if(self() == nil)
 		error("not an h9 process");
-	return h;
+	return up;
+}
+
+/*
+ * drawterm's procinit.c, which h9 doesn't build: the boot Proc, and
+ * making and ending kprocs. A Proc is counted (h9proc.h), and pexit
+ * drops the thread's reference rather than freeing it.
+ */
+void
+procinit0(void)
+{
+	Proc *p;
+
+	p = newproc();
+	p->fgrp = dupfgrp(nil);
+	p->rgrp = newrgrp();
+	p->pgrp = newpgrp();
+	_setproc(p);
+
+	up->slash = namec("#/", Atodir, 0, 0);
+	pathclose(up->slash->path);
+	up->slash->path = newpath("/");
+	up->dot = cclone(up->slash);
+}
+
+Proc*
+newproc(void)
+{
+	Proc *p;
+
+	p = mallocz(sizeof(Proc), 1);
+	if(p == nil)
+		return nil;
+	p->ref.ref = 1;
+	strcpy(p->user, eve);
+	p->syserrstr = p->errbuf0;
+	p->errstr = p->errbuf1;
+	strcpy(p->text, "drawterm");
+	p->start = ticks();
+	osnewproc(p);
+	return p;
+}
+
+void*
+kproc(char *name, void (*fn)(void*), void *arg)
+{
+	Proc *p;
+
+	p = newproc();
+	if(p == nil)
+		panic("kproc: no memory");
+	p->fn = fn;
+	p->arg = arg;
+	p->slash = cclone(up->slash);
+	p->dot = cclone(up->dot);
+	p->rgrp = up->rgrp;
+	if(p->rgrp != nil)
+		incref(&p->rgrp->ref);
+	p->pgrp = up->pgrp;
+	if(up->pgrp != nil)
+		incref(&up->pgrp->ref);
+	p->fgrp = up->fgrp;
+	if(p->fgrp != nil)
+		incref(&p->fgrp->ref);
+	strecpy(p->text, p->text+sizeof p->text, name);
+
+	osproc(p);
+	return (void*)p;
+}
+
+/* Ends the calling Proc's thread, after closing its groups (drawterm's closefgrp, as procinit.c's). */
+void
+pexit(char *msg, int freemem)
+{
+	Proc *p = up;
+
+	USED(msg);
+	USED(freemem);
+
+	if(p->pgrp != nil){
+		closepgrp(p->pgrp);
+		p->pgrp = nil;
+	}
+	if(p->rgrp != nil){
+		closergrp(p->rgrp);
+		p->rgrp = nil;
+	}
+	if(p->fgrp != nil){
+		closefgrp(p->fgrp);
+		p->fgrp = nil;
+	}
+
+	cclose(p->dot);
+	p->dot = nil;
+	cclose(p->slash);
+	p->slash = nil;
+
+	putproc(p);
+	osexit();
 }
 
 static ulong
@@ -204,10 +282,10 @@ mknote(char *msg, int flag)
  * can't handle it will kill it, so the notes before it are dropped.
  */
 static int
-pushnote(Hproc *h, Hnote *n)
+pushnote(Proc *h, Hnote *n)
 {
 	lock(&h->nlk);
-	if(h->p == nil){
+	if(h->exited){
 		unlock(&h->nlk);
 		freenote(n);
 		return 0;
@@ -227,7 +305,7 @@ pushnote(Hproc *h, Hnote *n)
 	 */
 	if(h->aux != nil && h9_notekick != nil)
 		h9_notekick(h->aux);
-	procinterrupt(h->p);
+	procinterrupt(h);
 	unlock(&h->nlk);
 	return 1;
 }
@@ -240,29 +318,18 @@ pushnote(Hproc *h, Hnote *n)
 int
 h9_postnote(Proc *p, int dolock, char *msg, int flag)
 {
-	Hproc *h;
 	Hnote *n;
-	int r;
 
 	USED(dolock);
 	if(p == nil)
 		return 0;
-	lock(&tablk);
-	for(h = table[prochash(p)]; h != nil; h = h->hash)
-		if(h->p == p)
-			break;
-	if(h != nil)
-		incref(&h->ref);
-	unlock(&tablk);
-	if(h == nil){
+	if(p->mach == nil){
 		procinterrupt(p);
 		return 0;
 	}
-	r = 0;
-	if((n = mknote(msg, flag)) != nil)
-		r = pushnote(h, n);
-	putproc(h);
-	return r;
+	if((n = mknote(msg, flag)) == nil)
+		return 0;
+	return pushnote(p, n);
 }
 
 /* 9front's postnotepg, within machine m. */
@@ -270,20 +337,18 @@ static void
 postnotepg(Hmach *m, ulong noteid, char *msg, int flag)
 {
 	Hnote *n;
-	Hproc *h;
-	int i;
+	Proc *h;
 
 	if((n = mknote(msg, flag)) == nil)
 		return;
-	lock(&tablk);
-	for(i = 0; i < PROCHASH; i++)
-		for(h = table[i]; h != nil; h = h->hash){
-			if(h->mach != m || h->p == up || h->noteid != noteid)
-				continue;
-			incref(&n->ref);
-			pushnote(h, n);
-		}
-	unlock(&tablk);
+	lock(&m->lk);
+	for(h = m->procs; h != nil; h = h->mnext){
+		if(h == up || h->noteid != noteid)
+			continue;
+		incref(&n->ref);
+		pushnote(h, n);
+	}
+	unlock(&m->lk);
 	freenote(n);
 }
 
@@ -295,20 +360,11 @@ postnotepg(Hmach *m, ulong noteid, char *msg, int flag)
 int
 h9_kern_postnote(ulong pid, char *msg, int flag)
 {
-	Hproc *self, *h;
+	Proc *h;
 	Hnote *n;
-	int i, r;
+	int r;
 
-	self = lookup(up);
-	h = nil;
-	lock(&tablk);
-	for(i = 0; h == nil && i < PROCHASH; i++)
-		for(h = table[i]; h != nil; h = h->hash)
-			if(self != nil && h->mach == self->mach && h->pid == pid)
-				break;
-	if(h != nil)
-		incref(&h->ref);
-	unlock(&tablk);
+	h = self() != nil ? h9_pidlookup(up->mach, pid) : nil;
 	if(h == nil){
 		kstrcpy(up->syserrstr, "process exited", ERRMAX);
 		return -1;
@@ -328,9 +384,9 @@ h9_kern_postnote(ulong pid, char *msg, int flag)
 void*
 h9_kern_selfref(void)
 {
-	Hproc *h;
+	Proc *h;
 
-	h = lookup(up);
+	h = self();
 	if(h != nil)
 		incref(&h->ref);
 	return h;
@@ -360,9 +416,9 @@ h9_kern_unref(void *v)
 void*
 h9_kern_mach(void)
 {
-	Hproc *h;
+	Proc *h;
 
-	h = lookup(up);
+	h = self();
 	if(h == nil)
 		return nil;
 	incref(&h->mach->ref);
@@ -388,33 +444,30 @@ h9_kern_postmach(void *v, int all, char *msg, int flag)
 {
 	Hmach *m;
 	Hnote *n;
-	Hproc *h;
+	Proc *h;
 	ulong noteid;
-	int i, found, count;
+	int found, count;
 
 	m = v;
 	if((n = mknote(msg, flag)) == nil)
 		return 0;
 	count = 0;
-	lock(&tablk);
+	lock(&m->lk);
 	noteid = 0;
 	found = all;
-	for(i = 0; !found && i < PROCHASH; i++)
-		for(h = table[i]; h != nil; h = h->hash)
-			if(h->mach == m && h->pid == 1){
-				noteid = h->noteid;
-				found = 1;
-				break;
-			}
+	for(h = m->procs; !found && h != nil; h = h->mnext)
+		if(h->pid == 1){
+			noteid = h->noteid;
+			found = 1;
+		}
 	if(found)
-		for(i = 0; i < PROCHASH; i++)
-			for(h = table[i]; h != nil; h = h->hash){
-				if(h->mach != m || (!all && h->noteid != noteid))
-					continue;
-				incref(&n->ref);
-				count += pushnote(h, n);
-			}
-	unlock(&tablk);
+		for(h = m->procs; h != nil; h = h->mnext){
+			if(!all && h->noteid != noteid)
+				continue;
+			incref(&n->ref);
+			count += pushnote(h, n);
+		}
+	unlock(&m->lk);
 	freenote(n);
 	return count;
 }
@@ -434,7 +487,7 @@ int	(*h9_procsegment)(void*, char*, int);
 void	(*h9_stopkick)(void*);
 long	(*h9_procdebug)(void*, int, int, uvlong, void*, long);
 
-Hproc*
+Proc*
 h9_uphproc(void)
 {
 	return uphproc();
@@ -448,10 +501,10 @@ h9_uphproc(void)
 int
 h9_fs_nofollow(int on)
 {
-	Hproc *h;
+	Proc *h;
 	int old;
 
-	if(up == nil || (h = lookup(up)) == nil)
+	if(up == nil || (h = self()) == nil)
 		return 0;
 	old = h->nofollow;
 	h->nofollow = on;
@@ -461,34 +514,31 @@ h9_fs_nofollow(int on)
 int
 h9_fs_nofollowing(void)
 {
-	Hproc *h;
+	Proc *h;
 
-	if(up == nil || (h = lookup(up)) == nil)
+	if(up == nil || (h = self()) == nil)
 		return 0;
 	return h->nofollow;
 }
 
 /* The process with machine-local pid in machine m, with a reference, or nil. */
-Hproc*
+Proc*
 h9_pidlookup(Hmach *m, ulong pid)
 {
-	Hproc *h;
-	int i;
+	Proc *h;
 
-	h = nil;
-	lock(&tablk);
-	for(i = 0; h == nil && i < PROCHASH; i++)
-		for(h = table[i]; h != nil; h = h->hash)
-			if(h->mach == m && h->pid == pid)
-				break;
+	lock(&m->lk);
+	for(h = m->procs; h != nil; h = h->mnext)
+		if(h->pid == pid)
+			break;
 	if(h != nil)
 		incref(&h->ref);
-	unlock(&tablk);
+	unlock(&m->lk);
 	return h;
 }
 
 void
-h9_putproc(Hproc *h)
+h9_putproc(Proc *h)
 {
 	putproc(h);
 }
@@ -500,19 +550,18 @@ h9_putproc(Hproc *h)
 int
 h9_pids(Hmach *m, ulong *pids, int n)
 {
-	Hproc *h;
+	Proc *h;
 	int i, count;
 
 	count = 0;
-	lock(&tablk);
-	for(i = 0; i < PROCHASH; i++)
-		for(h = table[i]; h != nil; h = h->hash)
-			if(h->mach == m && h->pid != 0){
-				if(count < n)
-					pids[count] = h->pid;
-				count++;
-			}
-	unlock(&tablk);
+	lock(&m->lk);
+	for(h = m->procs; h != nil; h = h->mnext)
+		if(h->pid != 0){
+			if(count < n)
+				pids[count] = h->pid;
+			count++;
+		}
+	unlock(&m->lk);
 	if(count > n)
 		count = n;
 	for(i = 1; i < count; i++){
@@ -540,7 +589,7 @@ h9_freenote(Hnote *n)
 }
 
 int
-h9_pushnote(Hproc *h, Hnote *n)
+h9_pushnote(Proc *h, Hnote *n)
 {
 	return pushnote(h, n);
 }
@@ -557,22 +606,19 @@ h9_postnotepg(Hmach *m, ulong noteid, char *msg, int flag)
  * Returns 0, or -1 if there's no such group.
  */
 int
-h9_setnoteid(Hproc *h, ulong noteid)
+h9_setnoteid(Proc *h, ulong noteid)
 {
-	Hproc *q;
-	int i, found;
+	Proc *q;
+	int found;
 
 	found = 0;
-	lock(&tablk);
-	for(i = 0; !found && i < PROCHASH; i++)
-		for(q = table[i]; q != nil; q = q->hash)
-			if(q->mach == h->mach && q->noteid == noteid){
-				found = 1;
-				break;
-			}
+	lock(&h->mach->lk);
+	for(q = h->mach->procs; !found && q != nil; q = q->mnext)
+		if(q->noteid == noteid)
+			found = 1;
 	if(found)
 		h->noteid = noteid;
-	unlock(&tablk);
+	unlock(&h->mach->lk);
 	return found ? 0 : -1;
 }
 
@@ -581,15 +627,15 @@ h9_setnoteid(Hproc *h, ulong noteid)
  * next note delivery, whether or not it has a handler.
  */
 void
-h9_killproc(Hproc *h)
+h9_killproc(Proc *h)
 {
 	lock(&h->nlk);
-	if(h->p != nil){
+	if(!h->exited){
 		h->killed = 1;
 		/* The kick first, as in pushnote. */
 		if(h->aux != nil && h9_notekick != nil)
 			h9_notekick(h->aux);
-		procinterrupt(h->p);
+		procinterrupt(h);
 	}
 	unlock(&h->nlk);
 }
@@ -601,9 +647,9 @@ h9_killproc(Hproc *h)
 void
 h9_kern_setargs(char *args, int n)
 {
-	Hproc *h;
+	Proc *h;
 
-	h = lookup(up);
+	h = self();
 	if(h == nil || n < 0 || n > ARGSLEN)
 		return;
 	lock(&h->alk);
@@ -617,9 +663,9 @@ h9_kern_setargs(char *args, int n)
 void
 h9_kern_postnotepg(ulong noteid, char *msg, int flag)
 {
-	Hproc *h;
+	Proc *h;
 
-	h = lookup(up);
+	h = self();
 	if(h != nil)
 		postnotepg(h->mach, noteid, msg, flag);
 }
@@ -628,9 +674,9 @@ h9_kern_postnotepg(ulong noteid, char *msg, int flag)
 ulong
 h9_kern_noteid(void)
 {
-	Hproc *h;
+	Proc *h;
 
-	h = lookup(up);
+	h = self();
 	return h != nil ? h->noteid : 0;
 }
 
@@ -638,9 +684,9 @@ h9_kern_noteid(void)
 void
 h9_kern_setnotify(int on)
 {
-	Hproc *h;
+	Proc *h;
 
-	h = lookup(up);
+	h = self();
 	if(h == nil)
 		return;
 	lock(&h->nlk);
@@ -652,9 +698,9 @@ h9_kern_setnotify(int on)
 int
 h9_kern_notepending(void)
 {
-	Hproc *h;
+	Proc *h;
 
-	h = lookup(up);
+	h = self();
 	return h != nil && (h->nnote > 0 || h->killed);
 }
 
@@ -669,11 +715,11 @@ h9_kern_notepending(void)
 int
 h9_kern_popnote(char *msg, uvlong pc)
 {
-	Hproc *h;
+	Proc *h;
 	Hnote *n;
 	int l, r;
 
-	h = lookup(up);
+	h = self();
 	if(h == nil)
 		return Nnone;
 	up->notepending = 0;
@@ -717,10 +763,10 @@ h9_kern_popnote(char *msg, uvlong pc)
 int
 h9_kern_noted(int arg, char *msg)
 {
-	Hproc *h;
+	Proc *h;
 	int r;
 
-	h = lookup(up);
+	h = self();
 	if(h == nil)
 		return -1;
 	lock(&h->nlk);
@@ -758,9 +804,9 @@ h9_kern_noted(int arg, char *msg)
 void
 h9_kern_execnotes(void)
 {
-	Hproc *h;
+	Proc *h;
 
-	h = lookup(up);
+	h = self();
 	if(h == nil)
 		return;
 	lock(&h->nlk);
@@ -790,10 +836,10 @@ h9_kern_execnotes(void)
 int
 h9_kern_wantstop(void)
 {
-	Hproc *h;
+	Proc *h;
 	int r;
 
-	h = lookup(up);
+	h = self();
 	if(h == nil)
 		return 0;
 	r = 0;
@@ -815,7 +861,7 @@ h9_kern_wantstop(void)
 static int
 notstopped(void *a)
 {
-	return !((Hproc*)a)->stopped;
+	return !((Proc*)a)->stopped;
 }
 
 /*
@@ -828,9 +874,9 @@ notstopped(void *a)
 int
 h9_kern_stopwait(void)
 {
-	Hproc *h;
+	Proc *h;
 
-	h = lookup(up);
+	h = self();
 	if(h == nil)
 		return 0;
 	lock(&h->nlk);
@@ -848,9 +894,9 @@ h9_kern_stopwait(void)
 void
 h9_kern_unstop(void)
 {
-	Hproc *h;
+	Proc *h;
 
-	h = lookup(up);
+	h = self();
 	if(h == nil)
 		return;
 	lock(&h->nlk);
@@ -862,9 +908,9 @@ h9_kern_unstop(void)
 int
 h9_kern_killed(void)
 {
-	Hproc *h;
+	Proc *h;
 
-	h = lookup(up);
+	h = self();
 	return h != nil && h->killed;
 }
 
@@ -875,10 +921,10 @@ h9_kern_killed(void)
 int
 h9_kern_exechang(void)
 {
-	Hproc *h;
+	Proc *h;
 	int r;
 
-	h = lookup(up);
+	h = self();
 	if(h == nil)
 		return 0;
 	lock(&h->nlk);
@@ -897,10 +943,10 @@ h9_kern_exechang(void)
 void
 h9_kern_settextpath(char *path)
 {
-	Hproc *h;
+	Proc *h;
 	Chan *c, *old;
 
-	h = lookup(up);
+	h = self();
 	if(h == nil)
 		return;
 	c = nil;
@@ -922,9 +968,9 @@ h9_kern_settextpath(char *path)
 void*
 h9_upegrp(void)
 {
-	Hproc *h;
+	Proc *h;
 
-	h = lookup(up);
+	h = self();
 	if(h == nil || h->egrp == nil)
 		error("no environment");
 	return h->egrp;
@@ -1051,7 +1097,7 @@ static void
 spawntramp(void *v)
 {
 	Spawn s;
-	Hproc *h;
+	Proc *h;
 
 	s = *(Spawn*)v;
 	free(v);
@@ -1071,19 +1117,65 @@ spawntramp(void *v)
 }
 
 /*
- * Runs fn(arg) on a new kernel process with its own thread, a fresh
- * namespace (just #/, as the boot Proc has), no fds, an empty environment
- * and its own rendezvous group; it has no parent. Unlike drawterm's kproc
- * it can be called from a thread that isn't a Proc: it only allocates
- * here, and the new thread sets up its groups once up is set. Returns 0,
- * or -1 if allocation fails.
+ * A machine's C half, for the Zig Kernel (src/kern.zig) that owns it:
+ * kernel is that Kernel, which h9_kern_machkernel returns until
+ * h9_kern_machdetach. Returns nil if allocation fails.
+ */
+void*
+h9_kern_newmach(void *kernel)
+{
+	Hmach *m;
+
+	m = mallocz(sizeof *m, 1);
+	if(m == nil)
+		return nil;
+	m->ref.ref = 1;
+	m->kernel = kernel;
+	return m;
+}
+
+/* The Kernel that owns machine m, or nil once it has let go of it. */
+void*
+h9_kern_machkernel(void *v)
+{
+	Hmach *m;
+	void *k;
+
+	m = v;
+	if(m == nil)
+		return nil;
+	lock(&m->lk);
+	k = m->kernel;
+	unlock(&m->lk);
+	return k;
+}
+
+/* The Kernel's end: drops its reference to m, which its processes may outlive. */
+void
+h9_kern_machdetach(void *v)
+{
+	Hmach *m;
+
+	m = v;
+	lock(&m->lk);
+	m->kernel = nil;
+	unlock(&m->lk);
+	putmach(m);
+}
+
+/*
+ * Runs fn(arg) on a new kernel process in machine mach, with its own
+ * thread, a fresh namespace (just #/, as the boot Proc has), no fds, an
+ * empty environment and its own rendezvous group; it has no parent.
+ * Unlike drawterm's kproc it can be called from a thread that isn't a
+ * Proc: it only allocates here, and the new thread sets up its groups
+ * once up is set. Returns 0, or -1 if allocation fails.
  */
 int
-h9_kern_spawn(char *name, void (*fn)(void*), void *arg)
+h9_kern_spawn(void *mach, char *name, void (*fn)(void*), void *arg)
 {
 	Proc *p;
 	Spawn *s;
-	Hproc *h;
 
 	s = malloc(sizeof *s);
 	if(s == nil)
@@ -1091,22 +1183,20 @@ h9_kern_spawn(char *name, void (*fn)(void*), void *arg)
 	s->fn = fn;
 	s->arg = arg;
 	p = newproc();
-	h = newhproc(p, name);
-	if(h != nil)
-		h->mach = mallocz(sizeof *h->mach, 1);
-	if(h == nil || h->mach == nil){
-		free(h);
+	if(p == nil){
 		free(s);
-		free(p);
 		return -1;
 	}
-	h->mach->ref.ref = 1;
-	h->mach->nlive = 1;
-	h->noteid = newnoteid(h->mach);
+	p->mach = mach;
+	incref(&p->mach->ref);
+	lock(&p->mach->lk);
+	p->mach->nlive++;
+	unlock(&p->mach->lk);
+	p->noteid = newnoteid(p->mach);
 	p->fn = spawntramp;
 	p->arg = s;
 	strecpy(p->text, p->text+sizeof p->text, name);
-	enter(h);
+	enter(p);
 	osproc(p);
 	return 0;
 }
@@ -1245,12 +1335,10 @@ forktramp(void *v)
 int
 h9_kern_fork(int flag, ulong pid, void (*fn)(void*), void *arg)
 {
-	Proc *p;
-	Hproc *h, *ph, *wp;
+	Proc *p, *h, *ph, *wp;
 	Spawn *s;
 
 	p = nil;
-	h = nil;
 	s = nil;
 	if(waserror()){
 		if(p != nil){
@@ -1264,15 +1352,12 @@ h9_kern_fork(int flag, ulong pid, void (*fn)(void*), void *arg)
 				cclose(p->dot);
 			if(p->slash != nil)
 				cclose(p->slash);
+			if(p->textc != nil)
+				cclose(p->textc);
+			if(p->egrp != nil)
+				h9_egrpclose(p->egrp);
+			putmach(p->mach);
 			free(p);
-		}
-		if(h != nil){
-			if(h->textc != nil)
-				cclose(h->textc);
-			if(h->egrp != nil)
-				h9_egrpclose(h->egrp);
-			putmach(h->mach);
-			free(h);
 		}
 		free(s);
 		return syserr();
@@ -1290,9 +1375,9 @@ h9_kern_fork(int flag, ulong pid, void (*fn)(void*), void *arg)
 	s->fn = fn;
 	s->arg = arg;
 	p = newproc();
-	h = newhproc(p, ph->text);
-	if(h == nil)
+	if(p == nil)
 		error(Enomem);
+	h = p;
 	h->pid = pid;
 	h->ppid = wp->pid;
 	h->mach = ph->mach;
@@ -1385,7 +1470,7 @@ h9_kern_fork(int flag, ulong pid, void (*fn)(void*), void *arg)
 
 /* Swap the caller's groups under h->debug, for devproc's readers. */
 static void
-swapfgrp(Hproc *h, Fgrp *f)
+swapfgrp(Proc *h, Fgrp *f)
 {
 	qlock(&h->debug);
 	up->fgrp = f;
@@ -1393,7 +1478,7 @@ swapfgrp(Hproc *h, Fgrp *f)
 }
 
 static void
-swappgrp(Hproc *h, Pgrp *pg)
+swappgrp(Proc *h, Pgrp *pg)
 {
 	qlock(&h->debug);
 	up->pgrp = pg;
@@ -1404,14 +1489,14 @@ swappgrp(Hproc *h, Pgrp *pg)
 int
 h9_kern_chdir(char *name)
 {
-	Hproc *h;
+	Proc *h;
 	Chan *c, *old;
 
 	if(waserror())
 		return syserr();
 	c = namec(name, Atodir, 0, 0);
 	poperror();
-	h = lookup(up);
+	h = self();
 	if(h != nil)
 		qlock(&h->debug);
 	old = up->dot;
@@ -1433,7 +1518,7 @@ h9_kern_rfork(int flag)
 	Pgrp *opg;
 	Rgrp *org;
 	void *oeg;
-	Hproc *h;
+	Proc *h;
 
 	if(waserror())
 		return syserr();
@@ -1511,9 +1596,9 @@ h9_kern_rfork(int flag)
 		ulong id;
 
 		id = newnoteid(h->mach);
-		lock(&tablk);	/* postnotepg reads noteid under tablk */
+		lock(&h->mach->lk);	/* postnotepg reads noteid under the machine's lock */
 		h->noteid = id;
-		unlock(&tablk);
+		unlock(&h->mach->lk);
 	}
 	return 0;
 }
@@ -1531,7 +1616,7 @@ void
 h9_kern_release(void)
 {
 	Chan *c;
-	Hproc *h;
+	Proc *h;
 	Hmach *m;
 	int last;
 
@@ -1550,7 +1635,7 @@ h9_kern_release(void)
 	up->slash = cclone(bootproc->slash);
 	cclose(c);
 
-	h = lookup(up);
+	h = self();
 	/* The image's channel (/proc/n/text) can hold an overlay too, and so can a chroot's root. */
 	if(h != nil){
 		lock(&h->nlk);
@@ -1585,13 +1670,13 @@ h9_kern_release(void)
 void
 h9_kern_exit(void)
 {
-	Hproc *h, *ph;
+	Proc *h, *ph;
 	Hwait *w;
 	Chan *c;
 	int want;
 	Hnote *n;
 
-	h = lookup(up);
+	h = self();
 	if(h == nil){
 		pexit("", 1);
 		return;
@@ -1604,10 +1689,13 @@ h9_kern_exit(void)
 	if(c != nil)
 		cclose(c);
 	leave(h);
-	/* Notes posted from now on are dropped; the Proc goes with pexit. */
+	/*
+	 * Notes posted from now on are dropped, and devproc no longer looks
+	 * at its groups, which pexit closes.
+	 */
 	qlock(&h->debug);
 	lock(&h->nlk);
-	h->p = nil;
+	h->exited = 1;
 	h->aux = nil;
 	h->killed = 0;
 	h->stopped = 0;
@@ -1702,14 +1790,14 @@ h9_kern_exit(void)
 		h9_egrpclose(h->egrp);
 		h->egrp = nil;
 	}
-	putproc(h);
+	/* pexit drops the thread's reference to the record. */
 	pexit("", 1);
 }
 
 static int
 haswaitq(void *x)
 {
-	return ((Hproc*)x)->waitq != nil;
+	return ((Proc*)x)->waitq != nil;
 }
 
 /*
@@ -1721,7 +1809,7 @@ haswaitq(void *x)
 int
 h9_kern_await(char *buf, int n)
 {
-	Hproc *h;
+	Proc *h;
 	Hwait *w;
 	int len;
 
@@ -1761,9 +1849,9 @@ h9_kern_await(char *buf, int n)
 void
 h9_kern_setexits(char *msg)
 {
-	Hproc *h;
+	Proc *h;
 
-	h = lookup(up);
+	h = self();
 	if(h != nil)
 		strecpy(h->exitstr, h->exitstr+sizeof h->exitstr, msg);
 }
@@ -1772,9 +1860,9 @@ h9_kern_setexits(char *msg)
 ulong
 h9_kern_gpid(void)
 {
-	Hproc *h;
+	Proc *h;
 
-	h = lookup(up);
+	h = self();
 	return h != nil ? h->pid : 0;
 }
 
@@ -1782,18 +1870,18 @@ h9_kern_gpid(void)
 ulong
 h9_kern_gppid(void)
 {
-	Hproc *h;
+	Proc *h;
 
-	h = lookup(up);
+	h = self();
 	return h != nil ? h->ppid : 0;
 }
 
 void
 h9_kern_setgpid(ulong pid)
 {
-	Hproc *h;
+	Proc *h;
 
-	h = lookup(up);
+	h = self();
 	if(h != nil)
 		h->pid = pid;
 }
@@ -1802,11 +1890,6 @@ h9_kern_setgpid(ulong pid)
 void
 h9_kern_settext(char *text)
 {
-	Hproc *h;
-
-	h = lookup(up);
-	if(h != nil)
-		strecpy(h->text, h->text+sizeof h->text, text);
 	strecpy(up->text, up->text+sizeof up->text, text);
 }
 
@@ -1814,18 +1897,18 @@ h9_kern_settext(char *text)
 void*
 h9_kern_aux(void)
 {
-	Hproc *h;
+	Proc *h;
 
-	h = lookup(up);
+	h = self();
 	return h != nil ? h->aux : nil;
 }
 
 void
 h9_kern_setaux(void *aux)
 {
-	Hproc *h;
+	Proc *h;
 
-	h = lookup(up);
+	h = self();
 	if(h == nil)
 		return;
 	/* h9_notekick reads aux under nlk. */
@@ -1871,9 +1954,9 @@ h9_kern_closeexec(void)
 void*
 h9_kprocsrc(void)
 {
-	Hproc *h;
+	Proc *h;
 
-	if(up == nil || (h = lookup(up)) == nil)
+	if(up == nil || (h = self()) == nil)
 		return nil;
 	incref(&h->ref);
 	return h;
@@ -1888,14 +1971,13 @@ h9_kprocput(void *v)
 int
 h9_kprocshare(void *v, char *text)
 {
-	Hproc *src, *h;
+	Proc *src, *h;
 
 	src = v;
-	if(src == nil || lookup(up) != nil)
+	if(src == nil || self() != nil)
 		return -1;
-	h = newhproc(up, text);
-	if(h == nil)
-		return -1;
+	h = up;
+	strecpy(h->text, h->text+sizeof h->text, text);
 	h->mach = src->mach;
 	incref(&h->mach->ref);
 	h->ppid = src->pid;
@@ -1913,19 +1995,23 @@ h9_kprocshare(void *v, char *text)
 void
 h9_kprocunshare(void)
 {
-	Hproc *h;
+	Proc *h;
 	void *e;
 
-	if(up == nil || (h = lookup(up)) == nil)
+	if(up == nil || (h = self()) == nil)
 		return;
 	leave(h);
 	lock(&h->nlk);
-	h->p = nil;
 	freenotes(h);
+	freenote(h->lastnote);
+	h->lastnote = nil;
 	unlock(&h->nlk);
 	e = h->egrp;
 	h->egrp = nil;
 	if(e != nil)
 		h9_egrpclose(e);
-	putproc(h);
+	/* A kproc again: no machine. */
+	putmach(h->mach);
+	h->mach = nil;
+	h->pid = h->ppid = h->noteid = 0;
 }

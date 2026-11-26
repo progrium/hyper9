@@ -390,6 +390,8 @@ fn theIo() std.Io {
 
 const Boot = struct {};
 var boot_arg: Boot = .{};
+var ns_kernel: ?*kern.Kernel = null;
+const no_host: @import("host/host.zig").Host = .{};
 
 /// The namespace kernel's first process: makes namespace 0 and the
 /// server, then serves each connection posted to it until the host
@@ -397,7 +399,7 @@ var boot_arg: Boot = .{};
 fn serverMain(_: *Boot) void {
     kern.setText("h9ns");
     if (h9_ns_init() < 0) return failBoot(kern.errstr());
-    dotl.register(owner(), .{ .user = kern.user(), .io = theIo() });
+    if (kern.Kernel.ofMach(@ptrFromInt(owner()))) |k| dotl.register(k, .{ .user = kern.user(), .io = theIo() });
     server = kern.Kserve.newNamed(&h9_ns_lookup, null, null) catch return failBoot(kern.errstr());
     booted.store(1, .release);
     if (comptime web.enabled) {
@@ -499,10 +501,17 @@ fn bootOnce() c_int {
         threaded = .init(std.heap.page_allocator, .{});
     }
     hstream.setIo(theIo());
-    kern.spawn("h9ns", Boot, serverMain, &boot_arg) catch {
+    // The namespace kernel's one Kernel, for the host process's life.
+    const k = kern.Kernel.init(std.heap.page_allocator, &no_host) catch {
         failBoot("can't start the kernel");
         return -1;
     };
+    k.spawn("h9ns", Boot, serverMain, &boot_arg) catch {
+        k.deinit();
+        failBoot("can't start the kernel");
+        return -1;
+    };
+    ns_kernel = k;
     while (booted.load(.acquire) == 0) web.yield();
     return if (booted.load(.acquire) == 1) 0 else -1;
 }

@@ -27,11 +27,9 @@ pub const Config = struct {
     io: ?std.Io = null,
 };
 
-const Entry = struct { owner: usize, cfg: Config };
 const Given = struct { owner: usize, id: u32, compiled: []u8, label: []u8, cached: bool };
 
 var mutex: std.atomic.Mutex = .unlocked;
-var configs: [64]?Entry = @splat(null);
 var given: std.ArrayList(Given) = .empty;
 var next_id: u32 = 1;
 
@@ -39,25 +37,18 @@ fn lock() void {
     while (!mutex.tryLock()) std.atomic.spinLoopHint();
 }
 
-/// Registers machine `owner`'s configuration until `unregister`. The
-/// strings must outlive the registration.
-pub fn register(owner: usize, cfg: Config) void {
-    lock();
-    defer mutex.unlock();
-    for (&configs) |*e| if (e.* == null or e.*.?.owner == owner) {
-        e.* = .{ .owner = owner, .cfg = cfg };
-        return;
-    };
+/// Sets kernel `k`'s configuration, kept on the kernel. The strings
+/// must outlive it.
+pub fn register(k: *kern.Kernel, cfg: Config) void {
+    k.lockSettings();
+    defer k.lock.unlock();
+    k.hidx = cfg;
 }
 
-/// Drops machine `owner`'s configuration and any index it gave and no
-/// conversation took.
+/// Drops any index machine `owner` gave and no conversation took.
 pub fn unregister(owner: usize) void {
     lock();
     defer mutex.unlock();
-    for (&configs) |*e| if (e.* != null and e.*.?.owner == owner) {
-        e.* = null;
-    };
     var i: usize = 0;
     while (i < given.items.len) {
         if (given.items[i].owner == owner) {
@@ -69,10 +60,10 @@ pub fn unregister(owner: usize) void {
 }
 
 fn configFor(owner: usize) Config {
-    lock();
-    defer mutex.unlock();
-    for (configs) |e| if (e != null and e.?.owner == owner) return e.?.cfg;
-    return .{};
+    const k = kern.Kernel.ofMach(@ptrFromInt(owner)) orelse return .{};
+    k.lockSettings();
+    defer k.lock.unlock();
+    return k.hidx orelse .{};
 }
 
 /// Hands a compiled index (allocated with web.gpa, which `#ι` then owns)

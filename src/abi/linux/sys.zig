@@ -2804,12 +2804,43 @@ fn putStat(p: *Process, buf: u64, st_in: *const attr.Stat, fmt: StatFmt) Err!voi
     }
 }
 
+/// What a device's getattr adds to a Stat built from a Dir: the link
+/// count, the change time, and nanoseconds (design/file-interface.md).
+fn withAttr(st: *attr.Stat, a: *const kern.Attr) void {
+    const A = kern.Attr;
+    if (a.valid & A.nlink_bit != 0) st.nlink = @truncate(a.nlink);
+    if (a.valid & A.atime_bit != 0 and a.atime == st.atime) st.atime_ns = nanos(a.atimens);
+    if (a.valid & A.mtime_bit != 0 and a.mtime == st.mtime) st.mtime_ns = nanos(a.mtimens);
+    if (a.valid & A.ctime_bit != 0) {
+        st.ctime = @intCast(std.math.clamp(a.ctime, 0, std.math.maxInt(u32)));
+        st.ctime_ns = nanos(a.ctimens);
+    }
+}
+
+fn nanos(ns: i64) u32 {
+    return @intCast(std.math.clamp(ns, 0, std.time.ns_per_s - 1));
+}
+
+/// path's Dir into b, and its attributes into a, acting on a link in its
+/// last name if nofollow, as lstat does.
+fn getattrAt(dirfd: i32, path: [:0]const u8, nofollow: bool, a: *kern.Attr, b: []u8) kern.Error!usize {
+    return at(dirfd, path, usize, kern.getattr, .{ path, nofollow, a, b });
+}
+
+/// path's Dir, acting on a link in its last name.
+fn lstatAt(dirfd: i32, path: [:0]const u8, b: []u8) kern.Error!usize {
+    var a: kern.Attr = .{};
+    return getattrAt(dirfd, path, true, &a, b);
+}
+
 fn statFd(p: *Process, fd: i32, buf: u64, fmt: StatFmt) Err!i64 {
     if (fd < 0) return -E.BADF;
     var b: [1024]u8 = undefined;
-    const n = kern.fstat(@intCast(fd), &b) catch return kerr();
+    var a: kern.Attr = .{};
+    const n = kern.fgetattr(@intCast(fd), &a, &b) catch return kerr();
     const d, _ = attr.Dir.parse(b[0..n]) orelse return -E.IO;
     var st = attr.Stat.fromDir(&d, kindOfDir(&d), 0, 0);
+    withAttr(&st, &a);
     if (d.type == pty_dc and d.qid_type & 0x80 == 0) st.rdev = ptyRdev(d.qid_path);
     // A pipe end's Dir is its directory's in some kernels; trust the fd.
     if (kc.fdInfo(fd)) |info| {
@@ -2829,6 +2860,7 @@ fn statAt(p: *Process, dirfd: i32, path_va: u64, buf: u64, flags: u32, fmt: Stat
     // design/epoch-0/linux-symlinks.md), which kindOfDir makes S_IFLNK. /proc's
     // links are the Linux layer's (procLink), so they're made here.
     var b: [1024]u8 = undefined;
+    var a: kern.Attr = .{};
     if (flags & AT_SYMLINK_NOFOLLOW != 0 and path[0] == '/') if (procLink(p, path)) |target| {
         const n = at(dirfd, path, usize, kern.stat, .{ path, &b }) catch return kerr();
         const d, _ = attr.Dir.parse(b[0..n]) orelse return -E.IO;
@@ -2840,11 +2872,12 @@ fn statAt(p: *Process, dirfd: i32, path_va: u64, buf: u64, flags: u32, fmt: Stat
     var exe_buf: [256 + 1]u8 = undefined;
     const fpath = if (flags & AT_SYMLINK_NOFOLLOW == 0 and path[0] == '/') procExe(p, path, &exe_buf) orelse path else path;
     const n = (if (flags & AT_SYMLINK_NOFOLLOW != 0)
-        atNoFollow(dirfd, path, usize, kern.stat, .{ path, &b })
+        getattrAt(dirfd, path, true, &a, &b)
     else
-        at(dirfd, fpath, usize, kern.stat, .{ fpath, &b })) catch return kerr();
+        getattrAt(dirfd, fpath, false, &a, &b)) catch return kerr();
     const d, _ = attr.Dir.parse(b[0..n]) orelse return -E.IO;
     var st = attr.Stat.fromDir(&d, kindOfDir(&d), 0, 0);
+    withAttr(&st, &a);
     if (d.type == pty_dc and d.qid_type & 0x80 == 0) st.rdev = ptyRdev(d.qid_path);
     try putStat(p, buf, &st, fmt);
     return 0;
@@ -2893,7 +2926,7 @@ fn unlink(p: *Process, dirfd: i32, path_va: u64, flags: u32) Err!i64 {
     // A link is removed itself, whatever it points at: one walk that
     // stops at a link says what's there, or that nothing is.
     var b: [512]u8 = undefined;
-    const n = atNoFollow(dirfd, path, usize, kern.stat, .{ path, &b }) catch
+    const n = lstatAt(dirfd, path, &b) catch
         return if (flags & AT_REMOVEDIR != 0) -E.NOENT else kerr();
     const d, _ = attr.Dir.parse(b[0..n]) orelse return -E.IO;
     const is_link = d.mode & DMSYMLINK != 0 and d.mode & DMDIR == 0;
@@ -2913,14 +2946,14 @@ fn statExists(dirfd: i32, path: [:0]const u8) bool {
 /// Whether anything is at path, a link (even a dangling one) included.
 fn lexists(dirfd: i32, path: [:0]const u8) bool {
     var b: [512]u8 = undefined;
-    _ = atNoFollow(dirfd, path, usize, kern.stat, .{ path, &b }) catch return false;
+    _ = lstatAt(dirfd, path, &b) catch return false;
     return true;
 }
 
 /// Whether path is a directory itself, not a link to one.
 fn isLdir(dirfd: i32, path: [:0]const u8) bool {
     var b: [512]u8 = undefined;
-    const n = atNoFollow(dirfd, path, usize, kern.stat, .{ path, &b }) catch return false;
+    const n = lstatAt(dirfd, path, &b) catch return false;
     const d, _ = attr.Dir.parse(b[0..n]) orelse return false;
     return d.mode & DMDIR != 0;
 }
@@ -2996,105 +3029,74 @@ fn rename(p: *Process, olddir: i32, old_va: u64, newdir: i32, new_va: u64, flags
     const old = try pathArg(p, old_va, &p.name_buf);
     const new = try pathArg(p, new_va, &p.name2_buf);
     if (old.len == 0 or new.len == 0) return -E.NOENT;
-    // Plan 9 renames within a directory only (wstat of the name). A move
-    // between directories is the host's rename when both are in host
-    // trees, which replaces the target atomically, as Redis's AOF and
-    // other databases need, and a move in memory when both are in one
-    // overlay, as Zig's cache needs (its entries are made in tmp/ and
-    // renamed into place). Anywhere else, and for a directory still in an
-    // overlay's lower tree, it's EXDEV, and mv copies instead.
-    const od = dirname(old);
-    const nd = dirname(new);
-    if (!std.mem.eql(u8, od, nd) or olddir != newdir) {
-        const old_abs = old[0] == '/';
-        var new_abs = new[0] == '/';
-        // Both names must resolve from one place: a relative new name in
-        // another directory (Zig's cache renames from its tmp/ fd into
-        // o/'s) is joined to that directory's path.
-        var newbuf: [4096]u8 = undefined;
-        var new_full = new;
-        if (!new_abs and newdir != olddir) {
-            var db: [4096]u8 = undefined;
-            const d = if (newdir == AT_FDCWD) kc.getcwd(&db) catch return kerr() else blk: {
-                kern.fd2path(@intCast(@max(newdir, 0)), &db) catch return -E.BADF;
-                break :blk std.mem.sliceTo(&db, 0);
-            };
-            new_full = std.fmt.bufPrintSentinel(&newbuf, "{s}/{s}", .{ d, new }, 0) catch return -E.NAMETOOLONG;
-            new_abs = true;
-        }
-        const base: i32 = if (old_abs and new_abs) AT_FDCWD else if (!old_abs and new_abs) olddir else if (olddir == newdir) olddir else return -E.XDEV;
-        if (!lexists(olddir, old)) return -E.NOENT;
-        if (flags & RENAME_NOREPLACE != 0 and lexists(newdir, new_full)) return -E.EXIST;
-        if (lexists(newdir, new_full)) {
-            const new_dir = isLdir(newdir, new_full);
-            const old_dir = isLdir(olddir, old);
-            if (new_dir and !old_dir) return -E.ISDIR;
-            if (!new_dir and old_dir) return -E.NOTDIR;
-        }
-        const moved = at(base, old, bool, kern.renameAcross, .{ old, new_full }) catch return kerr();
-        return if (moved) 0 else -E.XDEV;
+    // The kernel's rename (design/file-interface.md): the device's own,
+    // which replaces the target at once, as Linux's does (a host tree's
+    // rename(2), a .L server's Trenameat, or an overlay's move in
+    // memory), and otherwise a wstat of the name within one directory,
+    // or EXDEV across directories, where mv copies instead. Redis's AOF
+    // and other databases need the replace to be atomic, and Zig's cache
+    // makes its entries in tmp/ and renames them into place.
+    const old_abs = old[0] == '/';
+    var new_abs = new[0] == '/';
+    // Both names must resolve from one place: a relative new name in
+    // another directory (Zig's cache renames from its tmp/ fd into o/'s)
+    // is joined to that directory's path.
+    var newbuf: [4096]u8 = undefined;
+    var new_full = new;
+    if (!new_abs and newdir != olddir) {
+        var db: [4096]u8 = undefined;
+        const d = if (newdir == AT_FDCWD) kc.getcwd(&db) catch return kerr() else blk: {
+            kern.fd2path(@intCast(@max(newdir, 0)), &db) catch return -E.BADF;
+            break :blk std.mem.sliceTo(&db, 0);
+        };
+        new_full = std.fmt.bufPrintSentinel(&newbuf, "{s}/{s}", .{ d, new }, 0) catch return -E.NAMETOOLONG;
+        new_abs = true;
     }
+    const base: i32 = if (old_abs and new_abs) AT_FDCWD else if (!old_abs and new_abs) olddir else if (olddir == newdir) olddir else return -E.XDEV;
     if (!lexists(olddir, old)) return -E.NOENT;
-    if (std.mem.eql(u8, old, new)) return 0;
-    if (lexists(newdir, new)) {
+    if (olddir == newdir and std.mem.eql(u8, old, new)) return 0;
+    if (lexists(newdir, new_full)) {
         if (flags & RENAME_NOREPLACE != 0) return -E.EXIST;
-        const new_dir = isLdir(newdir, new);
+        const new_dir = isLdir(newdir, new_full);
         const old_dir = isLdir(olddir, old);
         if (new_dir and !old_dir) return -E.ISDIR;
         if (!new_dir and old_dir) return -E.NOTDIR;
-        // In a host tree or an overlay, the host's or the overlay's own
-        // rename replaces the target at once, as Linux's does. Removing it
-        // and renaming over the gap raced: two renames onto one name (two
-        // Zig compiles writing one cache file) failed with EEXIST or
-        // ENOENT, or ENOTEMPTY on macOS.
-        if (at(olddir, old, bool, kern.renameAcross, .{ old, new }) catch false) return 0;
-        at(newdir, new, void, kern.remove, .{new}) catch return kerr();
     }
-    var b: [600]u8 = undefined;
-    const base = basename(new);
-    if (base.len > 512) return -E.NAMETOOLONG;
-    const msg = (Wstat{ .name = base }).encode(&b);
-    _ = atNoFollow(olddir, old, usize, kern.wstat, .{ old, msg }) catch return kerr();
+    if (basename(new_full).len > 512) return -E.NAMETOOLONG;
+    at(base, old, void, kern.rename, .{ old, new_full }) catch return kerr();
     return 0;
 }
 
-/// 9P has no hard links, so a link to a regular file is a copy, made
-/// with an exclusive create: the "create if absent" that programs use
-/// `link` for (object_store's put-if-not-exists, lock files) holds, but
-/// the two names don't share later writes.
+/// The kernel's link (design/file-interface.md): a second name for the
+/// file where its device has links (a host tree, or a .L server), and
+/// otherwise a copy made with an exclusive create, so the "create if
+/// absent" that programs use `link` for (object_store's
+/// put-if-not-exists, lock files) holds, though the two names don't
+/// share later writes.
 fn link(p: *Process, olddir: i32, old_va: u64, newdir: i32, new_va: u64, flags: u32) Err!i64 {
     const AT_SYMLINK_FOLLOW = 0x400;
     if (flags & ~@as(u32, AT_SYMLINK_FOLLOW) != 0) return -E.INVAL;
     const old = try pathArg(p, old_va, &p.name_buf);
     const new = try pathArg(p, new_va, &p.name2_buf);
     if (old.len == 0 or new.len == 0) return -E.NOENT;
-    var sb: [512]u8 = undefined;
-    const sn = at(olddir, old, usize, kern.stat, .{ old, &sb }) catch return kerr();
-    const d, _ = attr.Dir.parse(sb[0..sn]) orelse return -E.IO;
-    if (d.mode & DMDIR != 0) return -E.PERM;
-    if (statExists(newdir, new)) return -E.EXIST;
-    const in = at(olddir, old, u31, kern.open, .{ old, kern.OREAD }) catch return kerr();
-    defer kern.close(in) catch {};
-    const OEXCL = 0x1000;
-    const out = at(newdir, new, u31, kern.create, .{ new, kern.OWRITE | OEXCL, d.mode & 0o777 }) catch {
-        return if (statExists(newdir, new)) -E.EXIST else kerr();
-    };
-    var buf: [16 << 10]u8 = undefined;
-    var off: i64 = 0;
-    const ok = while (true) {
-        const n = kern.pread(in, &buf, off) catch break false;
-        if (n == 0) break true;
-        var w: usize = 0;
-        while (w < n) w += kern.pwrite(out, buf[w..n], off + @as(i64, @intCast(w))) catch break;
-        if (w < n) break false;
-        off += @intCast(n);
-    };
-    kern.close(out) catch {};
-    if (!ok) {
-        const e = kerr();
-        at(newdir, new, void, kern.remove, .{new}) catch {};
-        return e;
+    if (!lexists(olddir, old)) return -E.NOENT;
+    if (isLdir(olddir, old)) return -E.PERM;
+    if (lexists(newdir, new)) return -E.EXIST;
+    // Both names from one place, as rename's.
+    var newbuf: [4096]u8 = undefined;
+    var new_full = new;
+    if (new[0] != '/' and newdir != olddir) {
+        var db: [4096]u8 = undefined;
+        const d = if (newdir == AT_FDCWD) kc.getcwd(&db) catch return kerr() else blk: {
+            kern.fd2path(@intCast(@max(newdir, 0)), &db) catch return -E.BADF;
+            break :blk std.mem.sliceTo(&db, 0);
+        };
+        new_full = std.fmt.bufPrintSentinel(&newbuf, "{s}/{s}", .{ d, new }, 0) catch return -E.NAMETOOLONG;
     }
+    const base: i32 = if (old[0] == '/' and new_full[0] == '/') AT_FDCWD else if (new_full[0] == '/' or olddir == newdir) olddir else return -E.XDEV;
+    at(base, old, void, kern.link, .{ old, new_full, flags & AT_SYMLINK_FOLLOW != 0 }) catch {
+        return if (lexists(newdir, new)) -E.EXIST else kerr();
+    };
     return 0;
 }
 
@@ -3124,8 +3126,10 @@ fn mknod(p: *Process, dirfd: i32, path_va: u64, mode: u32) Err!i64 {
     return 0;
 }
 
-/// A link in an overlay is kept in memory; in a host tree it's a host
-/// symlink, the new name checked like a create (design/epoch-0/linux-personality.md).
+/// The kernel's symlink, by the new name's directory's device
+/// (design/file-interface.md): in memory in an overlay, a host symlink
+/// in a host tree, the new name checked like a create, and a Tsymlink on
+/// a 9P2000.L server.
 fn symlink(p: *Process, target_va: u64, newdir: i32, new_va: u64) Err!i64 {
     const target = try pathArg(p, target_va, &p.name2_buf);
     if (target.len == 0) return -E.NOENT;
@@ -3137,12 +3141,6 @@ fn symlink(p: *Process, target_va: u64, newdir: i32, new_va: u64) Err!i64 {
     if (at(newdir, new, []u8, kern.readlink, .{ new, &lb })) |_| return -E.EXIST else |_| {}
     at(newdir, new, void, kern.symlink, .{ new, target }) catch return kerr();
     return 0;
-}
-
-fn dirname(path: []const u8) []const u8 {
-    const t = std.mem.trimEnd(u8, path, "/");
-    const i = std.mem.lastIndexOfScalar(u8, t, '/') orelse return ".";
-    return if (i == 0) "/" else t[0..i];
 }
 
 fn basename(path: []const u8) []const u8 {

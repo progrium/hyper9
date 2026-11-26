@@ -1,12 +1,13 @@
 //! The kernel's half of src/kern/fscheck.c in Zig (design/kernel-port.md):
-//! the Linux ABI's links, renames, and FIFOs by paths in the caller's
-//! namespace, through #U, overlays, and 9P2000.L mounts (fscheck.h). A
-//! close translation of the same functions, in the same order, with error
-//! unions for the C's error labels. fscheck.c keeps the host's half, the
-//! policy checks on host paths, which never sets an error label.
+//! the Linux ABI's FIFOs by paths in the caller's namespace, through #U,
+//! overlays, and 9P2000.L mounts (fscheck.h). A close translation of the
+//! same functions, in the same order, with error unions for the C's error
+//! labels. fscheck.c keeps the host's half, the policy checks on host
+//! paths, which never sets an error label. Links and renames are device
+//! operations (design/file-interface.md, src/kern/syswide.zig).
 //!
-//! The *path calls return -1 with the error in errstr, as the sys*
-//! wrappers do; the rest raise for the C that calls them, as they did.
+//! h9_fs_mkfifopath returns -1 with the error in errstr, as the sys*
+//! wrappers do; h9_fs_chanisfifo raises for the C that calls it.
 //! devoverlay's and devfs's calls that raise go through
 //! src/kern/devshim.c.
 
@@ -20,27 +21,17 @@ const Error = port.Error;
 
 const Chan = c.Chan;
 
-const H9_QTSYMLINK = 0x02;
-const H9_DMSYMLINK: c_uint = 0x02000000;
 const H9_DMFIFO: c_uint = 0x00200000;
 
-// proc.c: whether the next lookup acts on a link in its last name.
-extern fn h9_fs_nofollow(on: c_int) c_int;
 // devoverlay.c's and devfs's, which don't raise.
-extern fn h9_overlay_readlink(ch: *Chan, buf: [*]u8, nbuf: c_int) c_int;
 extern fn h9_overlay_isfifo(ch: *Chan) c_int;
-extern fn h9_fs_readlink(ch: *Chan, buf: [*]u8, nbuf: c_int) c_int;
 extern fn h9_fs_isfifo(ch: *Chan) c_int;
 // devhidx.c
 extern fn h9_hidx_dotl(ch: *Chan) c_int;
 // src/kern/devshim.c: those that raise.
-extern fn h9_shim_overlay_lower(ch: *Chan, r: *?*Chan) c_int;
-extern fn h9_shim_overlay_symlink(ch: *Chan, name: [*:0]const u8, target: [*:0]const u8) c_int;
-extern fn h9_shim_overlay_move(ch: *Chan, dc: *Chan, name: [*:0]const u8, r: *c_int) c_int;
 extern fn h9_shim_overlay_mkfifo(ch: *Chan, name: [*:0]const u8, perm: c_uint) c_int;
-extern fn h9_shim_fs_symlink(ch: *Chan, name: [*:0]const u8, target: [*:0]const u8) c_int;
-extern fn h9_shim_fs_rename(ch: *Chan, dir: *Chan, name: [*:0]const u8, r: *c_int) c_int;
 extern fn h9_shim_fs_mkfifo(ch: *Chan, name: [*:0]const u8, perm: c_uint) c_int;
+
 
 /// A call that failed: its error string becomes the process's
 /// syserrstr, as errstr(2) reads it, and -1.
@@ -52,79 +43,9 @@ fn syserr() c_int {
     return -1;
 }
 
-/// The chan path names with nofollow set, so a Linux process's walk
-/// stops on a link in its last name (design/epoch-0/linux-symlinks.md).
-fn namecnofollow(path: [*:0]const u8) Error!*Chan {
-    const nf = h9_fs_nofollow(1);
-    defer _ = h9_fs_nofollow(nf);
-    return chan.namec(path, c.Aaccess, 0, 0);
-}
-
-/// The target of the link that path's last name is, through #U and an
-/// overlay over it, for the Linux ABI's readlinkat and lstat
-/// (design/epoch-0/symlinks-in-root.md). Plan 9 programs never see links,
-/// so it's a leaf, not a 9P message.
-fn readlinkpath(path: [*:0]const u8, buf: [*]u8, nbuf: c_int) Error!c_int {
-    const ch = try namecnofollow(path);
-    defer chan.cclose(ch);
-    const n = try chanreadlink(ch, buf, nbuf);
-    if (n < 0)
-        return port.kerror("not a symbolic link");
-    return n;
-}
-
-/// Returns the target's length, with it in buf, or -1 with the error in
-/// errstr, as the sys* wrappers do.
-fn h9_fs_readlinkpath(path: [*:0]const u8, buf: [*]u8, nbuf: c_int) callconv(.c) c_int {
-    return readlinkpath(path, buf, nbuf) catch syserr();
-}
-
-/// A link on a 9P mount reads as its target: the 9P2000.L client opens a
-/// link a Linux process's walk stopped at without the server, and its
-/// reads are the server's Treadlink (src/dotl/client.zig).
-fn mntreadlink(ch: *Chan, buf: [*]u8, nbuf: c_int) Error!c_int {
-    if (dev.of(ch).dc != 'M' or (ch.qid.type & H9_QTSYMLINK) == 0 or nbuf <= 0)
-        return -1;
-    var r = try chan.cclone(ch);
-    defer chan.cclose(r);
-    r = try dev.open(dev.of(r), r, c.OREAD);
-    const n = try dev.read(dev.of(r), r, buf, nbuf - 1, 0);
-    buf[@intCast(n)] = 0;
-    return n;
-}
-
-/// The target of the link ch is on: an overlay's own, or one in the tree
-/// that holds the name, down through overlays and unions
-/// (design/epoch-0/mounts.md). Its length, with it in buf, or -1 if ch
-/// isn't on a link.
-pub fn chanreadlink(ch: *Chan, buf: [*]u8, nbuf: c_int) Error!c_int {
-    _ = chan.incref(&ch.ref);
-    var l = ch;
-    defer chan.cclose(l);
-    while (true) {
-        const n = h9_overlay_readlink(l, buf, nbuf);
-        if (n >= 0)
-            return n;
-        var nl: ?*Chan = null;
-        try dev.caught(h9_shim_overlay_lower(l, &nl));
-        if (nl == null) {
-            const m = h9_fs_readlink(l, buf, nbuf);
-            if (m >= 0)
-                return m;
-            return mntreadlink(l, buf, nbuf);
-        }
-        chan.cclose(l);
-        l = nl.?;
-    }
-}
-
-fn h9_fs_chanreadlink(ch: *Chan, buf: [*]u8, nbuf: c_int) callconv(.c) c_int {
-    return chanreadlink(ch, buf, nbuf) catch |e| port.raise(e);
-}
-
 /// The directory a new name in path goes in, open for Aaccess, and the
 /// name, which is path's last element, in dir, a copy of path the caller
-/// frees: what renamepath, symlinkpath, and mkfifopath share.
+/// frees.
 fn newname(path: [*:0]const u8, dir: *?[*:0]u8) Error!struct { ch: *Chan, name: [*:0]u8 } {
     const d_: ?[*:0]u8 = @ptrCast(c.strdup(path));
     const d = d_ orelse return port.kerror(&port.Enomem);
@@ -148,62 +69,6 @@ fn newname(path: [*:0]const u8, dir: *?[*:0]u8) Error!struct { ch: *Chan, name: 
     return .{ .ch = ch, .name = name };
 }
 
-/// Moves old to new in another directory, for the Linux ABI's renameat: a
-/// host rename when both are in devfs trees (fscheck.h), and a move in
-/// memory when both are in one overlay (devoverlay.c).
-fn renamepath(old: [*:0]const u8, new: [*:0]const u8) Error!c_int {
-    // The link old names is moved, not its target.
-    const oc = try namecnofollow(old);
-    defer chan.cclose(oc);
-    var dir: ?[*:0]u8 = null;
-    defer c.free(dir);
-    const nn = try newname(new, &dir);
-    defer chan.cclose(nn.ch);
-    var r: c_int = 1;
-    if (dev.of(oc).dc == 'U' and dev.of(nn.ch).dc == 'U')
-        try dev.caught(h9_shim_fs_rename(oc, nn.ch, nn.name, &r))
-    else if (dev.of(oc).dc == 'O' and dev.of(nn.ch).dc == 'O')
-        try dev.caught(h9_shim_overlay_move(oc, nn.ch, nn.name, &r));
-    return r;
-}
-
-/// 0, 1 if it can't (the caller's EXDEV), or -1 with the error in errstr.
-fn h9_fs_renamepath(old: [*:0]const u8, new: [*:0]const u8) callconv(.c) c_int {
-    return renamepath(old, new) catch syserr();
-}
-
-/// Makes path a symbolic link to target, for the Linux ABI's symlinkat:
-/// in memory in an overlay, on the host in a devfs tree, where the new
-/// name is checked like a create, or on a 9P2000.L mount by Tsymlink.
-/// Anywhere else it's "permission denied".
-fn symlinkpath(path: [*:0]const u8, target: [*:0]const u8) Error!void {
-    var dir: ?[*:0]u8 = null;
-    defer c.free(dir);
-    const nn = try newname(path, &dir);
-    switch (dev.of(nn.ch).dc) {
-        // The overlay takes the chan, whatever happens.
-        'O' => return dev.caught(h9_shim_overlay_symlink(nn.ch, nn.name, target)),
-        'U' => {
-            defer chan.cclose(nn.ch);
-            try dev.caught(h9_shim_fs_symlink(nn.ch, nn.name, target));
-        },
-        'M' => {
-            defer chan.cclose(nn.ch);
-            try mntsymlink(nn.ch, nn.name, target);
-        },
-        else => {
-            chan.cclose(nn.ch);
-            return port.kerror(&port.Eperm);
-        },
-    }
-}
-
-/// 0, or -1 with the error in errstr.
-fn h9_fs_symlinkpath(path: [*:0]const u8, target: [*:0]const u8) callconv(.c) c_int {
-    symlinkpath(path, target) catch return syserr();
-    return 0;
-}
-
 /// Whether the mount chan ch is a 9P2000.L server's, through devdotl
 /// (#ℓ), directly or under a mount index (#ι, devhidx.c).
 fn dotlmount(ch: *Chan) bool {
@@ -212,27 +77,6 @@ fn dotlmount(ch: *Chan) bool {
         return true;
     // The namespace kernel has no mount index.
     return !port.options.nskernel and h9_hidx_dotl(m) != 0;
-}
-
-/// Makes name in the 9P2000.L mount directory dir a link to target: a
-/// create with H9_DMSYMLINK, then a write of the target, which the
-/// translator makes a Tsymlink (src/dotl/client.zig). Anywhere else, such
-/// as a plain 9P mount, it's Eperm.
-fn mntsymlink(dir: *Chan, name: [*:0]const u8, target: [*:0]const u8) Error!void {
-    if (dev.of(dir).dc != 'M' or !dotlmount(dir))
-        return port.kerror(&port.Eperm);
-    const n: c_int = @intCast(std.mem.len(target));
-    if (n == 0)
-        return port.kerror(&port.Enonexist);
-    var nc = try chan.cclone(dir);
-    defer chan.cclose(nc);
-    nc = try dev.create(dev.of(nc), nc, name, c.OWRITE, 0o777 | H9_DMSYMLINK);
-    if (try dev.write(dev.of(nc), nc, @ptrCast(target), n, 0) != n)
-        return port.kerror("short write");
-}
-
-fn h9_fs_mntsymlink(dir: *Chan, name: [*:0]const u8, target: [*:0]const u8) callconv(.c) void {
-    mntsymlink(dir, name, target) catch |e| port.raise(e);
 }
 
 /// Makes path a FIFO, for the Linux ABI's mknodat
@@ -299,11 +143,6 @@ fn h9_fs_chanisfifo(ch: *Chan) callconv(.c) c_int {
 }
 
 pub fn exportC() void {
-    @export(&h9_fs_readlinkpath, .{ .name = "h9_fs_readlinkpath" });
-    @export(&h9_fs_chanreadlink, .{ .name = "h9_fs_chanreadlink" });
-    @export(&h9_fs_renamepath, .{ .name = "h9_fs_renamepath" });
-    @export(&h9_fs_symlinkpath, .{ .name = "h9_fs_symlinkpath" });
-    @export(&h9_fs_mntsymlink, .{ .name = "h9_fs_mntsymlink" });
     @export(&h9_fs_mkfifopath, .{ .name = "h9_fs_mkfifopath" });
     @export(&h9_fs_chanisfifo, .{ .name = "h9_fs_chanisfifo" });
 }
@@ -341,32 +180,18 @@ test "mkfifopath makes a FIFO in an overlay, and chanisfifo sees it [kernel-port
     try testing.expect(!try chanisfifo(d));
 }
 
-test "the path calls refuse a bad last name, a file as the directory, and devices with no links [kernel-port]" {
+test "mkfifopath refuses a bad last name, a file as the directory, and devices with no FIFOs [kernel-port]" {
     const id = try overlayTmp();
     defer h9_overlay_drop(id);
     try testing.expectError(error.Kernel, mkfifopath("/root/..", 0o644));
     try testing.expectEqualStrings(std.mem.span(@as([*:0]const u8, &port.Eexist)), kt.errstr());
     try mkfifopath("/root/f", 0o644);
-    try testing.expectError(error.Kernel, symlinkpath("/root/f/x", "y"));
+    try testing.expectError(error.Kernel, mkfifopath("/root/f/x", 0o644));
     try testing.expectEqualStrings(std.mem.span(@as([*:0]const u8, &port.Enotdir)), kt.errstr());
-    // The root device has no links, and no FIFOs.
-    try testing.expectError(error.Kernel, symlinkpath("/x", "y"));
-    try testing.expectEqualStrings(std.mem.span(@as([*:0]const u8, &port.Eperm)), kt.errstr());
+    // The root device has no FIFOs.
     try testing.expectError(error.Kernel, mkfifopath("/x", 0o644));
     try testing.expectEqualStrings("operation not permitted", kt.errstr());
     // The C calls give -1, with the error in syserrstr.
     try testing.expectEqual(-1, h9_fs_mkfifopath("/x", 0o644));
     try testing.expectEqualStrings("operation not permitted", std.mem.sliceTo(up().syserrstr, 0));
-}
-
-test "renamepath moves a name within an overlay [kernel-port]" {
-    const id = try overlayTmp();
-    defer h9_overlay_drop(id);
-    _ = try sysfile.close(try sysfile.create("/root/a", c.OWRITE, 0o644));
-    _ = try sysfile.close(try sysfile.create("/root/d", c.OREAD, c.DMDIR | 0o755));
-    try testing.expectEqual(0, try renamepath("/root/a", "/root/d/b"));
-    _ = try sysfile.close(try sysfile.open("/root/d/b", c.OREAD));
-    try testing.expectError(error.Kernel, sysfile.open("/root/a", c.OREAD));
-    // Across devices it's the caller's EXDEV.
-    try testing.expectEqual(1, try renamepath("/root/d/b", "/c"));
 }
