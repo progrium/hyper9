@@ -10185,10 +10185,48 @@ test "links and FIFOs are made in the layer [upper-layers]" {
         try std.testing.expectEqualStrings("ok\n", r.out);
         var lb: [64]u8 = undefined;
         const n = try s.tmp.dir.readLink(std.testing.io, "up/root/lnk", &lb);
+        // On Windows the link keeps its target with '\\' for each '/', as
+        // WSL and tar make them, and the FIFO is an empty file with WSL's
+        // reparse tag for one.
+        if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, lb[0..n], '\\', '/');
         try std.testing.expectEqualStrings("/etc/alpine-release", lb[0..n]);
-        const st = try s.tmp.dir.statFile(std.testing.io, "up/root/ff", .{ .follow_symlinks = false });
-        try std.testing.expectEqual(std.Io.File.Kind.named_pipe, st.kind);
+        if (builtin.os.tag == .windows) {
+            var pb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            try std.testing.expectEqual(@as(u32, 0x80000024), try reparseTag(try std.fmt.bufPrint(&pb, "{s}\\up\\root\\ff", .{s.path})));
+        } else {
+            const st = try s.tmp.dir.statFile(std.testing.io, "up/root/ff", .{ .follow_symlinks = false });
+            try std.testing.expectEqual(std.Io.File.Kind.named_pipe, st.kind);
+        }
     }
+}
+
+/// The reparse tag of path's own entry on Windows (FindFirstFileW's
+/// dwReserved0), or 0 if it has none.
+fn reparseTag(path: []const u8) !u32 {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const W = struct {
+        const FindData = extern struct {
+            attrs: u32,
+            times: [6]u32,
+            size_high: u32,
+            size_low: u32,
+            reserved0: u32,
+            reserved1: u32,
+            name: [260]u16,
+            alt: [14]u16,
+            rest: [3]u32,
+        };
+        extern "kernel32" fn FindFirstFileW(p: [*:0]const u16, d: *FindData) callconv(.winapi) ?*anyopaque;
+        extern "kernel32" fn FindClose(h: ?*anyopaque) callconv(.winapi) i32;
+    };
+    var wp: [std.Io.Dir.max_path_bytes:0]u16 = undefined;
+    const n = try std.unicode.utf8ToUtf16Le(&wp, path);
+    wp[n] = 0;
+    var d: W.FindData = undefined;
+    const h = W.FindFirstFileW(&wp, &d);
+    if (h == null or @intFromPtr(h) == std.math.maxInt(usize)) return error.FileNotFound;
+    _ = W.FindClose(h);
+    return if (d.attrs & 0x400 != 0) d.reserved0 else 0;
 }
 
 test "a rename across directories copies up and renames in the layer [upper-layers]" {
