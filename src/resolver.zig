@@ -370,8 +370,13 @@ pub const HostNet = struct {
         const len = toSockaddr(&srv.addr, srv.port, &sa);
         const fam: c_uint = if (len == @sizeOf(c.sockaddr.in)) c.AF.INET else c.AF.INET6;
         const st: c_uint = if (kind == .udp) c.SOCK.DGRAM else c.SOCK.STREAM;
-        const fd = c.socket(fam, st | c.SOCK.NONBLOCK | c.SOCK.CLOEXEC, 0);
+        // Not SOCK.NONBLOCK and SOCK.CLOEXEC in the type: Darwin's socket()
+        // has neither (std.c's are std.posix.socket's shim bits, which
+        // fail the call), so the flags are set after, on every host.
+        const fd = c.socket(fam, st, 0);
         if (fd < 0) return null;
+        _ = c.fcntl(fd, c.F.SETFD, @as(c_int, c.FD_CLOEXEC));
+        _ = c.fcntl(fd, c.F.SETFL, c.fcntl(fd, c.F.GETFL) | @as(c_int, @bitCast(c.O{ .NONBLOCK = true })));
         if (c.connect(fd, &sa.any, len) == 0) return fd;
         if (std.posix.errno(-1) != .INPROGRESS or !wait(fd, c.POLL.OUT, until - monoMs())) {
             close(fd);
