@@ -662,6 +662,9 @@ fn nativeOps(d: *Dev) ?*const Ops {
 /// lookup, not a search of the list.
 const NativeSlot = struct { dev: *Dev, ops: *const Ops };
 const native_slots = blk: {
+    @setEvalBranchQuota(100_000);
+    for (natives, 0..) |N, i| for (natives, 0..) |M, j| if (j < i and M.char == N.char)
+        @compileError("two native devices are #" ++ std.unicode.utf8EncodeComptime(@intCast(N.char)));
     var size: u32 = natives.len;
     while (true) : (size += 1) {
         var t: [size]?NativeSlot = @splat(null);

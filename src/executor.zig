@@ -228,10 +228,21 @@ pub const Exec = struct {
     /// The lease whose state the vCPU holds, if it's still there.
     owner: std.atomic.Value(?*cpupool.Lease) = .init(null),
     state: std.atomic.Value(State) = .init(.idle),
-    /// When `state` last changed, in the machine's monotonic ns.
-    since: std.atomic.Value(i64) = .init(0),
-    /// When the running task went on it.
-    slice_start: i64 = 0,
+    /// Counts changes of `state`, and of the task on it (`task_gen`), so
+    /// the monitor times them by its own clock: an executor reads no
+    /// clock as it enters and leaves guest code, which every system call
+    /// does twice.
+    gen: std.atomic.Value(u32) = .init(0),
+    task_gen: std.atomic.Value(u32) = .init(0),
+    /// Set by the monitor when the task on it has had its slice and
+    /// another waits; it yields at its next run (`shouldYield`).
+    yield_due: std.atomic.Value(bool) = .init(false),
+    /// The monitor's: the `gen` and `task_gen` it last saw, and when it
+    /// first saw them.
+    seen_gen: u32 = 0,
+    seen_at: i64 = 0,
+    seen_task_gen: u32 = 0,
+    seen_task_at: i64 = 0,
     /// Replaced by the monitor: it ends once its task leaves it.
     retiring: std.atomic.Value(bool) = .init(false),
     /// 1 once its vCPU is made, 2 if it couldn't be.
@@ -266,13 +277,13 @@ pub const Exec = struct {
     }
 
     fn setState(e: *Exec, st: State) void {
-        e.since.store(now(), .release);
         e.state.store(st, .release);
+        e.gen.store(e.gen.raw +% 1, .release);
     }
 
     /// Whether the running task's slice is up and another waits.
     fn shouldYield(e: *Exec) bool {
-        return now() - e.slice_start >= slice_ns and e.s.hasWork(e);
+        return e.yield_due.load(.acquire) and e.s.hasWork(e);
     }
 
     fn main(e: *Exec) void {
@@ -310,7 +321,8 @@ pub const Exec = struct {
         const s = e.s;
         e.cur = t;
         t.last = e;
-        e.slice_start = now();
+        e.yield_due.store(false, .release);
+        e.task_gen.store(e.task_gen.raw +% 1, .release);
         e.setState(.kernel);
         t.mark = cputime.hostThread();
         c.h9_kern_locals(0, &t.locals);
@@ -531,17 +543,33 @@ pub const Sched = struct {
             var replace: u32 = 0;
             var work: ?bool = null;
             for (s.execs.items) |e| {
-                const since = e.since.load(.acquire);
-                switch (e.state.load(.acquire)) {
+                // How long the state and the task have been as they are,
+                // from when this first saw them so: at most a tick less
+                // than they have, never more.
+                const st = e.state.load(.acquire);
+                const g = e.gen.load(.acquire);
+                if (g != e.seen_gen) {
+                    e.seen_gen = g;
+                    e.seen_at = t;
+                }
+                const tg = e.task_gen.load(.acquire);
+                if (tg != e.seen_task_gen) {
+                    e.seen_task_gen = tg;
+                    e.seen_task_at = t;
+                } else if (st != .idle and t - e.seen_task_at >= slice_ns and !e.yield_due.load(.acquire)) {
+                    if (work == null) work = s.anyQueuedLocked();
+                    if (work.?) e.yield_due.store(true, .release);
+                }
+                switch (st) {
                     .idle => {},
-                    .guest => if (t - since >= slice_ns) {
+                    .guest => if (t - e.seen_at >= slice_ns) {
                         if (work == null) work = s.anyQueuedLocked();
                         if (work.?) {
-                            e.since.store(t, .release);
+                            e.seen_at = t;
                             e.kick();
                         }
                     },
-                    .kernel => if (t - since >= block_ns and !e.retiring.load(.acquire)) {
+                    .kernel => if (t - e.seen_at >= block_ns and !e.retiring.load(.acquire)) {
                         // In a host call that blocks: another runs in its
                         // place, and it ends when it's back.
                         e.retiring.store(true, .release);
