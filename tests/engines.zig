@@ -2354,7 +2354,10 @@ fn rcWithHost(kind: engine.Choice, root: []const u8, hst: ?h9.Host, script: []co
 
 test "a kernel with an empty Host can reach nothing outside [host-handles]" {
     var rb: [std.fs.max_path_bytes]u8 = undefined;
-    const root = nineRoot(&rb) orelse return error.SkipZigTest;
+    const host_root = nineRoot(&rb) orelse return error.SkipZigTest;
+    // In the form a mount takes (/C:/... on Windows).
+    var kb: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const root = kernPath(&kb, host_root);
     var ran: usize = 0;
     for ([_]engine.Choice{ .hvf, .kvm, .whp, .sud, .hcpu }) |kind| {
         var sb: [512]u8 = undefined;
@@ -2405,7 +2408,8 @@ test "an embedder's in-memory dirs handle serves a root [host-handles]" {
     // The tree's path names it in the plan and the mount; nothing is there
     // on the host.
     var mb: [std.fs.max_path_bytes + 8]u8 = undefined;
-    const mem = try std.fmt.bufPrint(&mb, "{s}-mem", .{root});
+    var kb: [std.fs.max_path_bytes + 9]u8 = undefined;
+    const mem = kernPath(&kb, try std.fmt.bufPrint(&mb, "{s}-mem", .{root}));
     const Allow = struct {
         fn check(_: *anyopaque, _: []const u8, _: h9.policy.Op) h9.policy.Verdict {
             return .allow;
