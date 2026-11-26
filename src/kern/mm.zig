@@ -92,6 +92,10 @@ pub const Vma = struct {
     pad: bool = false,
     /// For /proc/n/maps: the file's path, or empty.
     name: Name = .{},
+    /// The ABI's name for the mapping, or 0: for a 9front process, the
+    /// segment it's part of (src/segment.zig's `Label`). Mappings with
+    /// different labels are never joined.
+    label: u8 = 0,
     /// The file offset of `start`, for /proc/n/maps.
     offset: u64 = 0,
     /// A private file mapping filled on first touch: each chunk's pages in
@@ -240,7 +244,18 @@ pub const Mm = struct {
     /// The process's architecture, for an ABI's layout (the Linux ABI's
     /// `Layout.of`).
     arch: engine.Arch,
+    /// The address space its pages are mapped into: the one it made
+    /// (`create`), or for a 9front process the first of `spaces`.
     as: engine.AddressSpace,
+    /// Every address space the Mm's pages are mapped into, `as` first.
+    /// A Linux process's Mm has one, its own, which threads and a vfork
+    /// child share. A 9front process's has its own and those of the RFMEM
+    /// siblings it shares text, data, bss, and segattach's segments with,
+    /// each of which has its own stack at the same address, in an Mm of
+    /// its own (src/segment.zig). Guarded by `lock`.
+    spaces: std.ArrayList(engine.AddressSpace) = .empty,
+    /// Whether `as` is the Mm's to destroy, made by `create`.
+    owns_as: bool = true,
     refs: std.atomic.Value(u32) = .init(1),
     /// Sorted by start, not overlapping.
     vmas: std.ArrayList(Vma) = .empty,
@@ -288,8 +303,81 @@ pub const Mm = struct {
     pub fn create(gpa: std.mem.Allocator, eng: engine.Engine, arch: engine.Arch) (Error || engine.CreateError)!*Mm {
         const m = try gpa.create(Mm);
         errdefer gpa.destroy(m);
-        m.* = .{ .gpa = gpa, .engine = eng, .arch = arch, .as = try eng.newAddressSpace() };
+        const as = try eng.newAddressSpace();
+        errdefer as.destroy();
+        m.* = .{ .gpa = gpa, .engine = eng, .arch = arch, .as = as };
+        try m.spaces.append(gpa, as);
         return m;
+    }
+
+    /// An Mm mapped into `as`, which stays the caller's: a 9front
+    /// process's, whose stack is in an Mm of its own in the same space.
+    pub fn createIn(gpa: std.mem.Allocator, eng: engine.Engine, arch: engine.Arch, as: engine.AddressSpace) Error!*Mm {
+        const m = try gpa.create(Mm);
+        errdefer gpa.destroy(m);
+        m.* = .{ .gpa = gpa, .engine = eng, .arch = arch, .as = as, .owns_as = false };
+        try m.spaces.append(gpa, as);
+        return m;
+    }
+
+    /// Maps the Mm's pages into `as` too, for an RFMEM child, which runs
+    /// in a space of its own (`spaces`). The caller holds a reference for
+    /// it, and gives it up with `detach` and `put`.
+    pub fn attach(m: *Mm, as: engine.AddressSpace) Error!void {
+        m.lockSpin();
+        defer m.lock.unlock();
+        try m.spaces.ensureUnusedCapacity(m.gpa, 1);
+        var it = m.chunks.iterator();
+        while (it.next()) |e| {
+            const c = e.value_ptr.*;
+            for (c.runs[0..c.nruns], 0..) |r, i| {
+                const b = c.backing(r.va % chunk_size);
+                as.map(r.va, @alignCast(b.mem[0..@intCast(r.len)]), r.perms) catch {
+                    for (c.runs[0..i]) |q| as.unmap(q.va);
+                    var undo = m.chunks.iterator();
+                    while (undo.next()) |u| {
+                        if (u.value_ptr.* == c) break;
+                        for (u.value_ptr.*.runs[0..u.value_ptr.*.nruns]) |q| as.unmap(q.va);
+                    }
+                    return error.OutOfMemory;
+                };
+            }
+        }
+        m.spaces.appendAssumeCapacity(as);
+    }
+
+    /// Unmaps the Mm's pages from `as`, which `attach` or `createIn` put
+    /// it in, before the space is destroyed or given another Mm (exit or
+    /// exec). The caller then drops its reference.
+    pub fn detach(m: *Mm, as: engine.AddressSpace) void {
+        m.lockSpin();
+        defer m.lock.unlock();
+        const i = for (m.spaces.items, 0..) |a, k| {
+            if (std.meta.eql(a, as)) break k;
+        } else return;
+        var it = m.chunks.iterator();
+        while (it.next()) |e| for (e.value_ptr.*.runs[0..e.value_ptr.*.nruns]) |r| as.unmap(r.va);
+        _ = m.spaces.orderedRemove(i);
+        if (i == 0 and m.spaces.items.len > 0) m.as = m.spaces.items[0];
+    }
+
+    fn mapAll(m: *Mm, va: u64, mem: []align(page) u8, perms: engine.Perms) engine.CreateError!void {
+        for (m.spaces.items, 0..) |as, i| as.map(va, mem, perms) catch |e| {
+            for (m.spaces.items[0..i]) |a| a.unmap(va);
+            return e;
+        };
+    }
+
+    fn unmapAll(m: *Mm, va: u64) void {
+        for (m.spaces.items) |as| as.unmap(va);
+    }
+
+    fn shootdownAll(m: *Mm) void {
+        for (m.spaces.items) |as| as.shootdown();
+    }
+
+    fn hostWroteAll(m: *Mm, mem: []const u8) void {
+        for (m.spaces.items) |as| as.hostWrote(mem);
     }
 
     pub fn get(m: *Mm) *Mm {
@@ -303,7 +391,7 @@ pub const Mm = struct {
         var it = m.chunks.iterator();
         while (it.next()) |e| {
             const c = e.value_ptr.*;
-            for (c.runs[0..c.nruns]) |r| m.as.unmap(r.va);
+            for (c.runs[0..c.nruns]) |r| m.unmapAll(r.va);
             m.dropChunk(c);
         }
         m.chunks.deinit(m.gpa);
@@ -318,7 +406,8 @@ pub const Mm = struct {
         m.dead_srcs.deinit(m.gpa);
         for (m.cow_old.items) |p| m.dropCowOld(p);
         m.cow_old.deinit(m.gpa);
-        m.as.destroy();
+        if (m.owns_as) m.as.destroy();
+        m.spaces.deinit(m.gpa);
         m.gpa.destroy(m);
     }
 
@@ -333,7 +422,7 @@ pub const Mm = struct {
         // Another Mm may hold them, and take them for its own once this
         // reference goes: not before this Mm's vCPUs can't read them.
         m.cow_old.append(m.gpa, p) catch {
-            m.as.shootdown();
+            m.shootdownAll();
             m.dropCowOld(p);
         };
     }
@@ -348,7 +437,7 @@ pub const Mm = struct {
             _ = p.pending.fetchAdd(1, .acq_rel);
             _ = p.refs.fetchSub(1, .acq_rel);
             m.unmapped_files.append(m.gpa, p) catch {
-                m.as.shootdown();
+                m.shootdownAll();
                 f(p);
             };
             return;
@@ -356,7 +445,7 @@ pub const Mm = struct {
         if (p.refs.fetchSub(1, .acq_rel) != 1) return;
         // Another thread's vCPU may still reach them until `settle`.
         m.doomed.append(m.gpa, p) catch {
-            m.as.shootdown();
+            m.shootdownAll();
             m.freeP(p);
         };
     }
@@ -397,7 +486,7 @@ pub const Mm = struct {
         var old = m.cow_old;
         m.cow_old = .empty;
         m.lock.unlock();
-        if ((narrowed or list.items.len > 0 or files.items.len > 0 or old.items.len > 0) and m.refs.load(.acquire) > 1) m.as.shootdown();
+        if ((narrowed or list.items.len > 0 or files.items.len > 0 or old.items.len > 0) and m.refs.load(.acquire) > 1) m.shootdownAll();
         for (old.items) |p| m.dropCowOld(p);
         old.deinit(m.gpa);
         for (list.items) |p| m.freeP(p);
@@ -502,7 +591,7 @@ pub const Mm = struct {
         };
         _ = m.allocated.fetchAdd(c.mem.len, .acq_rel);
         m.remap(ci, c) catch |e| {
-            for (c.runs[0..c.nruns]) |r| m.as.unmap(r.va);
+            for (c.runs[0..c.nruns]) |r| m.unmapAll(r.va);
             _ = m.chunks.remove(ci);
             _ = m.allocated.fetchSub(c.mem.len, .acq_rel);
             _ = p.refs.fetchSub(1, .acq_rel);
@@ -630,7 +719,7 @@ pub const Mm = struct {
                     const off = v.offset + (cs + lo - v.start);
                     const n = s.fill(s, b.mem[0..@intCast(e - lo)], off);
                     if (n < e - lo) v.eof = @min(v.eof, off + n);
-                    m.as.hostWrote(b.mem[0..@intCast(e - lo)]);
+                    m.hostWroteAll(b.mem[0..@intCast(e - lo)]);
                 }
                 lo = e;
             }
@@ -942,7 +1031,7 @@ pub const Mm = struct {
         var kept: u16 = 0;
         for (c.runs[0..c.nruns]) |r| {
             if (r.va < cs + hi and r.va + r.len > cs + lo) {
-                m.as.unmap(r.va);
+                m.unmapAll(r.va);
                 continue;
             }
             c.runs[kept] = r;
@@ -985,6 +1074,48 @@ pub const Mm = struct {
             var i: usize = 0;
             while (i < c.overlays.items.len and c.overlays.items[i].lo < at - cs) i += 1;
             c.overlays.insertAssumeCapacity(i, .{ .lo = at - cs, .hi = hi - cs, .pages = pg, .poff = fo % chunk_size });
+            m.dropRuns(ci, c, at - cs, hi - cs);
+            try m.remap(ci, c);
+            at = hi;
+        }
+    }
+
+    /// Adds a shared anonymous VMA (`v.shared`) at any page, for a 9front
+    /// shared segment, which segattach places beside private ones in the
+    /// same chunk: each piece of it within a chunk is an overlay of pages
+    /// of its own, allocated now and zero, so fork shares them however
+    /// the rest of the chunk goes, and they're freed with the last Mm
+    /// that maps them. `v` must not have a Src.
+    pub fn insertOverlaid(m: *Mm, v: Vma) Error!void {
+        std.debug.assert(v.shared and v.src == null and v.start % page == 0 and v.end % page == 0 and v.start < v.end);
+        defer m.settle(false);
+        m.lockSpin();
+        defer m.lock.unlock();
+        if (!m.isFree(v.start, v.end)) return error.BadAddress;
+        try m.vmas.insert(m.gpa, m.indexAfter(v.start), v);
+        errdefer {
+            const i = m.indexAfter(v.start) - 1;
+            _ = m.vmas.orderedRemove(i);
+            m.trimOverlays(v.start, v.end) catch {};
+            m.refreshRange(v.start - v.start % chunk_size, std.mem.alignForward(u64, v.end, chunk_size)) catch {};
+        }
+        var at = v.start;
+        while (at < v.end) {
+            const ci = at / chunk_size;
+            const cs = ci * chunk_size;
+            const hi = @min(v.end, cs + chunk_size);
+            const c = try m.populate(at);
+            try m.own(ci, c);
+            try c.overlays.ensureUnusedCapacity(m.gpa, 1);
+            const mem = m.engine.allocPages(@intCast((hi - at) / page)) catch return error.NoSpace;
+            const pg = m.gpa.create(Pages) catch {
+                m.engine.freePages(mem);
+                return error.OutOfMemory;
+            };
+            pg.* = .{ .mem = mem };
+            var i: usize = 0;
+            while (i < c.overlays.items.len and c.overlays.items[i].lo < at - cs) i += 1;
+            c.overlays.insertAssumeCapacity(i, .{ .lo = at - cs, .hi = hi - cs, .pages = pg, .poff = 0 });
             m.dropRuns(ci, c, at - cs, hi - cs);
             try m.remap(ci, c);
             at = hi;
@@ -1054,7 +1185,7 @@ pub const Mm = struct {
             }
             var cj = lo / chunk_size;
             while (cj * chunk_size < hi) : (cj += 1) if (m.chunks.fetchRemove(cj)) |e| {
-                for (e.value.runs[0..e.value.nruns]) |r| m.as.unmap(r.va);
+                for (e.value.runs[0..e.value.nruns]) |r| m.unmapAll(r.va);
                 m.dropChunk(e.value);
             };
         }
@@ -1091,6 +1222,63 @@ pub const Mm = struct {
         m.lockSpin();
         defer m.lock.unlock();
         return m.find(va) != null;
+    }
+
+    /// Whether VMAs that allow the access cover all of [va, va+len), for
+    /// another thread than the one that changes the VMAs: before the host
+    /// writes where the guest says, as 9front's okaddr checks a note
+    /// handler's frame.
+    pub fn permits(m: *Mm, va: u64, len: u64, write: bool) bool {
+        const end = std.math.add(u64, va, len) catch return false;
+        m.lockSpin();
+        defer m.lock.unlock();
+        var at = va;
+        while (at < end) {
+            const v = m.find(at) orelse return false;
+            if (write and !v.prot.write) return false;
+            if (!write and v.prot.perms() == null) return false;
+            at = v.end;
+        }
+        return true;
+    }
+
+    /// The VMAs with a label (`Vma.label`), in order, as many as `buf`
+    /// holds: for an ABI's view of its mappings (a 9front process's
+    /// segments), from any thread.
+    pub fn labelled(m: *Mm, buf: []Vma) []Vma {
+        return m.snapshot(buf, true);
+    }
+
+    /// The VMAs, or with `only_labelled` those with a label, in order, as
+    /// many as `buf` holds.
+    pub fn snapshot(m: *Mm, buf: []Vma, only_labelled: bool) []Vma {
+        m.lockSpin();
+        defer m.lock.unlock();
+        var n: usize = 0;
+        for (m.vmas.items) |v| {
+            if (only_labelled and v.label == 0) continue;
+            if (n == buf.len) break;
+            buf[n] = v;
+            n += 1;
+        }
+        return buf[0..n];
+    }
+
+    /// How many references the pages under `va` have (each Mm mapping
+    /// them holds one), or 0 if none are allocated there.
+    pub fn pageRefs(m: *Mm, va: u64) u32 {
+        m.lockSpin();
+        defer m.lock.unlock();
+        const c = m.chunks.get(va / chunk_size) orelse return 0;
+        if (overlayAt(c, va % chunk_size)) |o| return o.pages.refs.load(.acquire);
+        return c.pages.refs.load(.acquire);
+    }
+
+    /// How many address spaces the Mm is mapped into (`spaces`).
+    pub fn nspaces(m: *Mm) usize {
+        m.lockSpin();
+        defer m.lock.unlock();
+        return m.spaces.items.len;
     }
 
     /// Whether `va`'s chunk is allocated, so a fault there isn't its
@@ -1137,7 +1325,7 @@ pub const Mm = struct {
     /// Whether anonymous VMAs `a` and `b` touch and are alike, so they
     /// can be one.
     fn mergeable(a: Vma, b: Vma) bool {
-        return a.end == b.start and a.prot.eql(b.prot) and a.kind == b.kind and a.kind != .file and a.kind != .shm and a.shared == b.shared and a.pad == b.pad;
+        return a.end == b.start and a.prot.eql(b.prot) and a.kind == b.kind and a.kind != .file and a.kind != .shm and a.shared == b.shared and a.pad == b.pad and a.label == b.label;
     }
 
     /// Zeroes the allocated pages in [start, end), which the caller has
@@ -1158,7 +1346,7 @@ pub const Mm = struct {
                     // What was decoded or compiled from these pages goes: a
                     // mapping made here later reuses them. After the
                     // write, so a decode during it goes too.
-                    m.as.hostWrote(b.mem[0..@intCast(e - lo)]);
+                    m.hostWroteAll(b.mem[0..@intCast(e - lo)]);
                 }
                 lo = e;
             }
@@ -1179,7 +1367,7 @@ pub const Mm = struct {
     fn remap(m: *Mm, ci: u64, c: *Chunk) Error!void {
         m.remaps +%= 1;
         if (m.refs.load(.acquire) > 1) return m.remapShared(ci, c);
-        for (c.runs[0..c.nruns]) |r| m.as.unmap(r.va);
+        for (c.runs[0..c.nruns]) |r| m.unmapAll(r.va);
         c.nruns = 0;
         const cs = ci * chunk_size;
         var any = false;
@@ -1219,7 +1407,7 @@ pub const Mm = struct {
                 // Copy-on-write pages fault on a write (`fault`): file
                 // pages under a private mapping, or a fork's.
                 if ((b.overlay and v.cow) or c.cow) perms.write = false;
-                m.as.map(va, @alignCast(b.mem[0..@intCast(n * page)]), perms) catch return error.OutOfMemory;
+                m.mapAll(va, @alignCast(b.mem[0..@intCast(n * page)]), perms) catch return error.OutOfMemory;
                 c.runs[c.nruns] = .{ .va = va, .len = n * page, .perms = perms };
                 c.nruns += 1;
             }
@@ -1251,7 +1439,7 @@ pub const Mm = struct {
             if (w.* != null and (c.cow or (v.?.cow and overlayAt(c, p * page) != null))) w.*.?.write = false;
         }
         if (!any) {
-            for (c.runs[0..c.nruns]) |r| m.as.unmap(r.va);
+            for (c.runs[0..c.nruns]) |r| m.unmapAll(r.va);
             c.nruns = 0;
             _ = m.chunks.remove(ci);
             m.dropChunk(c);
@@ -1266,7 +1454,7 @@ pub const Mm = struct {
                 if (w == null or !std.meta.eql(w.?, r.perms)) break false;
             } else true;
             if (!same) {
-                m.as.unmap(r.va);
+                m.unmapAll(r.va);
                 continue;
             }
             @memset(in_run[first..][0..n], true);
@@ -1289,7 +1477,7 @@ pub const Mm = struct {
             const limit: usize = @intCast(b.end / page);
             var q = p + 1;
             while (q < limit and !in_run[q] and want[q] != null and std.meta.eql(want[q].?, perms)) q += 1;
-            m.as.map(cs + off, @alignCast(b.mem[0..@intCast((q - p) * page)]), perms) catch return error.OutOfMemory;
+            m.mapAll(cs + off, @alignCast(b.mem[0..@intCast((q - p) * page)]), perms) catch return error.OutOfMemory;
             c.runs[c.nruns] = .{ .va = cs + off, .len = (q - p) * page, .perms = perms };
             c.nruns += 1;
             p = q;
@@ -1336,7 +1524,7 @@ pub const Mm = struct {
             const c = m.chunks.get(ci) orelse continue;
             if (!c.cow) continue;
             if (drop_whole and ci * chunk_size >= start and (ci + 1) * chunk_size <= end) {
-                for (c.runs[0..c.nruns]) |r| m.as.unmap(r.va);
+                for (c.runs[0..c.nruns]) |r| m.unmapAll(r.va);
                 c.nruns = 0;
                 _ = m.chunks.remove(ci);
                 // A fault on it from another thread meanwhile is retried.
@@ -1493,7 +1681,7 @@ pub const Mm = struct {
             const h = buf[@intCast(at - va)..@intCast(hi - va)];
             if (to_guest) {
                 @memcpy(g, h);
-                m.as.hostWrote(g);
+                m.hostWroteAll(g);
             } else @memcpy(h, g);
             at = hi;
         }
@@ -1521,7 +1709,7 @@ pub const Mm = struct {
             const b = c.backing(at - cs);
             const hi = @min(end, cs + b.end);
             f(ctx, b.mem[0..@intCast(hi - at)], at - va);
-            m.as.hostWrote(b.mem[0..@intCast(hi - at)]);
+            m.hostWroteAll(b.mem[0..@intCast(hi - at)]);
             at = hi;
         }
     }
@@ -1561,7 +1749,16 @@ pub const Mm = struct {
     /// child. Chunks with overlays, and those a pin holds for I/O into
     /// them, are copied now.
     pub fn fork(m: *Mm) (Error || engine.CreateError)!*Mm {
-        const n = try create(m.gpa, m.engine, m.arch);
+        return m.forkTo(try create(m.gpa, m.engine, m.arch));
+    }
+
+    /// `fork` into `as`, which stays the caller's (`createIn`): a 9front
+    /// rfork child's.
+    pub fn forkInto(m: *Mm, as: engine.AddressSpace) Error!*Mm {
+        return m.forkTo(try createIn(m.gpa, m.engine, m.arch, as));
+    }
+
+    fn forkTo(m: *Mm, n: *Mm) Error!*Mm {
         errdefer n.put();
         defer m.settle(true);
         m.lockSpin();
@@ -1578,7 +1775,7 @@ pub const Mm = struct {
             if (!v.shared or v.pad) continue;
             var ci = v.start / chunk_size;
             while (ci * chunk_size < v.end) : (ci += 1) {
-                if (m.chunks.contains(ci)) continue;
+                if (m.chunks.contains(ci) or !m.allShared(ci)) continue;
                 const p = try m.newPages();
                 _ = m.addChunk(ci, p, false) catch |err| {
                     m.freeP(p);
@@ -1591,7 +1788,7 @@ pub const Mm = struct {
             const ci = e.key_ptr.*;
             const c = e.value_ptr.*;
             // A chunk with overlays has private pages around them.
-            const shared = c.overlays.items.len == 0 and if (m.find(ci * chunk_size)) |v| v.shared else false;
+            const shared = c.overlays.items.len == 0 and m.allShared(ci);
             if (shared) {
                 _ = try n.addChunk(ci, c.pages, false);
                 continue;
@@ -1627,6 +1824,23 @@ pub const Mm = struct {
             try n.remap(ci, nc);
         }
         return n;
+    }
+
+    /// Whether every VMA with pages in chunk `ci` is shared, so fork shares
+    /// it whole. A Linux shared mapping has its chunks to itself
+    /// (`insertShared`); a 9front shared segment, placed at any page, may
+    /// share one with a private segment, and then the child gets a copy,
+    /// so no private page is ever shared.
+    fn allShared(m: *Mm, ci: u64) bool {
+        const cs = ci * chunk_size;
+        var i = m.indexAfter(cs);
+        if (i > 0 and m.vmas.items[i - 1].end > cs) i -= 1;
+        var any = false;
+        while (i < m.vmas.items.len and m.vmas.items[i].start < cs + chunk_size) : (i += 1) {
+            if (!m.vmas.items[i].shared) return false;
+            any = true;
+        }
+        return any;
     }
 
     /// MADV_DONTNEED: private pages in [start, end) read as zero again,
@@ -1684,7 +1898,7 @@ pub const Mm = struct {
                 if (v.shared or (v.src == null and v.kind == .file and !v.cow)) break false;
             } else true;
             if (!ok) continue;
-            for (c.runs[0..c.nruns]) |r| m.as.unmap(r.va);
+            for (c.runs[0..c.nruns]) |r| m.unmapAll(r.va);
             c.nruns = 0;
             _ = m.chunks.remove(ci);
             // A fault on it from another thread meanwhile is retried.
@@ -1718,7 +1932,7 @@ pub const Mm = struct {
             try m.own((dst + off) / chunk_size, dc);
             const do = (dst + off) % chunk_size;
             @memcpy(dc.backing(do).mem[0..page], from);
-            m.as.hostWrote(dc.backing(do).mem[0..page]);
+            m.hostWroteAll(dc.backing(do).mem[0..page]);
         }
     }
 
@@ -1777,7 +1991,7 @@ pub const Mm = struct {
     /// same file at the next offset, with the same permissions and kind.
     fn joins(a: Vma, b: Vma) bool {
         return a.kind == .file and b.kind == .file and a.end == b.start and !a.pad and !b.pad and
-            a.shared == b.shared and std.meta.eql(a.prot, b.prot) and
+            a.shared == b.shared and a.label == b.label and std.meta.eql(a.prot, b.prot) and
             b.offset == a.offset + (a.end - a.start) and std.mem.eql(u8, a.name.slice(), b.name.slice());
     }
 };
