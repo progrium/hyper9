@@ -166,7 +166,7 @@ The web host runs h86 and ha64, each with T1 in `src/engine/hcpu/jit/wasm_t1.zig
 
 h9.wasm imports `jit_compile` and `jit_drop`, and exports `jit_eval`, `jit_slow_load`, `jit_slow_store`, `jit_slow_cas`, `jit_interp`, `jit_helper`, `jit_ext`, and `jit_table_base`, which generated modules import or the host calls.
 
-**Preemption** is a budget: a vCPU runs 64K instructions at a time and returns `.interrupted` once 2 ms have passed since it last let the other coroutines run. `poll` and T0 spend `ctx.budget`; natively it's never spent.
+**Preemption** is a budget: a vCPU runs 64K instructions at a time and returns `.interrupted` once 2 ms have passed since it last let the other tasks run. `poll` and T0 spend `ctx.budget`; natively it's never spent.
 
 ## Build and selection
 

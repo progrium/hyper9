@@ -593,8 +593,9 @@ fn builtinArches(target: std.Target, emu: Emu) []const []const u8 {
 /// drawterm's kern and the libraries it uses, as a static library for
 /// `target`. `web` builds it for the web host
 /// (design/epoch-0/browser-host.md): wasm32-wasi, with src/kern/os-wasm.c in
-/// place of posix.c, the coroutines it runs on (src/web/coro.c), and
-/// setjmp/longjmp on wasm exception handling.
+/// place of posix.c, the executor its processes run on
+/// (src/kern/sched/web.zig), and setjmp/longjmp on wasm exception
+/// handling.
 fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, web: bool, gfx: Gfx, exported: bool) *std.Build.Step.Compile {
     const os = target.result.os.tag;
     const flags: []const []const u8 = if (web) &kern_flags_web else if (os == .windows) &kern_flags_win32 else &kern_flags;
@@ -658,8 +659,6 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.O
         // No __builtin_return_address on wasm: os-wasm.c has getcallerpc.
         kern.root_module.addCSourceFiles(.{ .root = b.path(drawterm ++ "/posix-port"), .files = &.{"tas.c"}, .flags = flags });
         kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"os-wasm.c"}, .flags = flags });
-        kern.root_module.addCSourceFiles(.{ .root = b.path("src/web"), .files = &.{"coro.c"}, .flags = flags });
-        kern.root_module.addAssemblyFile(b.path("src/web/stack.S"));
         kern.root_module.addAssemblyFile(b.path("src/web/sjlj_tag.S"));
         // wasi-libc's setjmp/longjmp runtime for wasm exception handling,
         // which Zig's wasi-libc doesn't build.
@@ -748,6 +747,32 @@ fn webTarget(b: *std.Build, eh: bool) std.Build.ResolvedTarget {
     });
 }
 
+/// What Asyncify leaves alone (asyncifyWasm): the emulator's CPUs, from
+/// the engine's run (which yields before it calls them) down, and its
+/// JIT's compilers. Patterns match functions' names.
+const asyncify_skip = "interp.*,jit.*,engine.hcpu.h86.*,engine.hcpu.ha64.*,engine.hcpu.hx64.*";
+
+/// A web build's module after Binaryen's Asyncify pass, which the web
+/// host's executor switches its tasks with (src/kern/sched/cont.zig,
+/// design/scheduler.md). Asyncify takes the wasm exception handling the
+/// C kernel's setjmp uses, since a task never parks in a handler. No
+/// import starts an unwind but Asyncify's own, which cont.zig calls.
+///
+/// With `cpus`, h9.wasm's, the emulator's CPUs and JIT (`asyncify_skip`)
+/// are left as they are: a task parks or yields only between runs of
+/// guest code, never under them, and instrumented they're half the module
+/// and slow for the JS engine to compile. h9ns.wasm has none, and
+/// wasm-opt warns of patterns that match nothing. The build needs
+/// `wasm-opt` on PATH.
+fn asyncifyWasm(b: *std.Build, exe: *std.Build.Step.Compile, optimize: std.lang.Optimize, cpus: bool) std.Build.LazyPath {
+    const run = b.addSystemCommand(&.{ "wasm-opt", "--enable-exception-handling", "--asyncify", "--pass-arg=asyncify-imports@asyncify.none", "-g" });
+    if (cpus) run.addArg("--pass-arg=asyncify-removelist@" ++ asyncify_skip);
+    run.addArg(switch (optimize) { .debug => "-O1", .small => "-Oz", else => "-O2" });
+    run.addArtifactArg(exe);
+    run.addArg("-o");
+    return run.addOutputFileArg(b.fmt("{s}.wasm", .{exe.name}));
+}
+
 const Web = struct {
     exe: *std.Build.Step.Compile,
     /// Installs everything into zig-out/web.
@@ -786,13 +811,14 @@ fn addWeb(b: *std.Build, optimize: std.lang.Optimize, parts: ModuleParts, gfx: G
     // The function table too, so h9-web.js can grow it: the JIT installs
     // its regions there (src/engine/hcpu/jit/emit/wasm.zig).
     exe.import_table = true;
-    // The main coroutine's stack; kernel processes get their own.
+    // The executor's loop's stack, and the JS host's calls in; every task
+    // has its own (src/kern/sched/web.zig).
     exe.stack_size = 1 << 20;
     exe.rdynamic = true;
     exe.use_lld = true;
     const dir: std.Build.InstallDir = .{ .custom = "web" };
     const all = b.step("web-install", "");
-    all.dependOn(&b.addInstallArtifact(exe, .{ .dest_dir = .{ .override = dir } }).step);
+    all.dependOn(&b.addInstallFileWithDir(asyncifyWasm(b, exe, optimize, true), dir, "h9.wasm").step);
     for ([_][]const u8{ "h9-web.js", "h9-node", "worker.js", "wasi-mem.js", "statictree.js", "index.html", "package.json" }) |f|
         all.dependOn(&b.addInstallFileWithDir(b.path(b.pathJoin(&.{ "src/web", f })), dir, f).step);
     return .{ .exe = exe, .install = all };
@@ -867,8 +893,6 @@ fn addNsKernel(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.la
     if (web) {
         m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/posix-port"), .files = &.{"tas.c"}, .flags = flags });
         m.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"os-wasm.c"}, .flags = flags });
-        m.addCSourceFiles(.{ .root = b.path("src/web"), .files = &.{"coro.c"}, .flags = flags });
-        m.addAssemblyFile(b.path("src/web/stack.S"));
         m.addAssemblyFile(b.path("src/web/sjlj_tag.S"));
         m.addCSourceFile(.{
             .file = b.graph.path(.zig_lib, "libc/wasi/libc-top-half/musl/src/setjmp/wasm32/rt.c"),
@@ -1327,7 +1351,7 @@ pub fn build(b: *std.Build) void {
     const ns_step = b.step("nskernel", "Build the namespace kernel into zig-out/nskernel (design/epoch-0/namespace-kernel.md)");
     const ns_dir: std.Build.InstallDir = .{ .custom = "nskernel" };
     const ns_web = addNsKernel(b, webTarget(b, false), optimize, true, false).artifact;
-    ns_step.dependOn(&b.addInstallArtifact(ns_web, .{ .dest_dir = .{ .override = ns_dir } }).step);
+    ns_step.dependOn(&b.addInstallFileWithDir(asyncifyWasm(b, ns_web, optimize, false), ns_dir, "h9ns.wasm").step);
     for ([_][]const u8{ "h9ns.js", "h9ns-worker.js" }) |f|
         ns_step.dependOn(&b.addInstallFileWithDir(b.path(b.pathJoin(&.{ "src/web", f })), ns_dir, f).step);
     for ([_][]const u8{ "h9-web.js", "wasi-mem.js", "statictree.js" }) |f|

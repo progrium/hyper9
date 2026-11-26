@@ -1,9 +1,10 @@
 /*
  * drawterm's OS layer for the web host (design/epoch-0/browser-host.md),
- * built instead of kern/posix.c. Kernel processes are coroutines
- * (src/web/coro.c): blocking parks one and hands the event loop back to
- * the JS host. Everything runs on one thread, so a contended spin lock is
- * a bug, and lock() in libc/lock.c still works since nothing preempts it.
+ * built instead of kern/posix.c. Kernel processes are tasks on the web
+ * host's one executor (src/kern/sched/web.zig): blocking parks one, and
+ * the executor runs another. Everything runs on one thread, so a
+ * contended spin lock is a bug, and lock() in libc/lock.c still works
+ * since nothing preempts it.
  */
 
 #include "u.h"
@@ -15,7 +16,17 @@
 #include <errno.h>
 #include <string.h>
 
-#include "../web/coro.h"
+typedef struct Htask Htask;
+/* src/kern/sched/web.zig */
+Htask*	h9_task_self(void);
+Htask*	h9_task_spawn(char *name, void (*fn)(void*), void *arg);
+int	h9_task_park(long ms);	/* 1 if unparked, 0 if the time ran out; ms < 0 waits */
+void	h9_task_unpark(Htask*);
+void	h9_task_yield(void);
+void	h9_task_sleep(long ms);
+void	h9_task_exit(void);
+void*	h9_task_getproc(void);
+void	h9_task_setproc(void*);
 
 #define IMPORT(n) __attribute__((import_module("h9"), import_name(#n)))
 
@@ -23,36 +34,26 @@ IMPORT(now_ms) double js_now_ms(void);
 IMPORT(mono_ms) double js_mono_ms(void);
 IMPORT(random) void js_random(void *p, int n);
 
-/*
- * The kernel process stack: the integration suite's deepest use at a park
- * (149 KiB, in a guest process's syscall path, Debug build), doubled and
- * rounded up (SPEC.md).
- */
-enum { KSTACK = 320*1024 };
-
 typedef struct Oproc Oproc;
 struct Oproc
 {
 	int nsleep;
 	int nwakeup;
-	H9coro *coro;
+	Htask *task;
 };
 
 Proc*
 _getproc(void)
 {
-	return h9_coro_self()->proc;
+	return h9_task_getproc();
 }
 
 void
 _setproc(Proc *p)
 {
-	H9coro *c;
-
-	c = h9_coro_self();
-	c->proc = p;
+	h9_task_setproc(p);
 	if(p != nil)
-		((Oproc*)p->oproc)->coro = c;
+		((Oproc*)p->oproc)->task = h9_task_self();
 }
 
 void
@@ -68,19 +69,19 @@ osnewproc(Proc *p)
 	op = (Oproc*)p->oproc;
 	op->nsleep = 0;
 	op->nwakeup = 0;
-	op->coro = nil;
+	op->task = nil;
 }
 
 void
 osmsleep(int ms)
 {
-	h9_coro_sleep(ms);
+	h9_task_sleep(ms);
 }
 
 void
 osyield(void)
 {
-	h9_coro_yield();
+	h9_task_yield();
 }
 
 void
@@ -115,15 +116,15 @@ tramp(void *vp)
 void
 osproc(Proc *p)
 {
-	if(h9_coro_spawn(p->text, tramp, p, KSTACK) == nil)
+	if(h9_task_spawn(p->text, tramp, p) == nil)
 		panic("osproc: no memory for a stack");
 }
 
 void
 osexit(void)
 {
-	h9_coro_self()->proc = nil;
-	h9_coro_exit();
+	h9_task_setproc(nil);
+	h9_task_exit();
 }
 
 void
@@ -134,7 +135,7 @@ procsleep(void)
 	op = (Oproc*)up->oproc;
 	op->nsleep++;
 	while(op->nsleep > op->nwakeup)
-		h9_coro_park(-1);
+		h9_task_park(-1);
 }
 
 void
@@ -144,8 +145,8 @@ procwakeup(Proc *p)
 
 	op = (Oproc*)p->oproc;
 	op->nwakeup++;
-	if(op->nwakeup == op->nsleep && op->coro != nil)
-		h9_coro_unpark(op->coro);
+	if(op->nwakeup == op->nsleep && op->task != nil)
+		h9_task_unpark(op->task);
 }
 
 void
@@ -214,7 +215,7 @@ h9_hostuser(void)
  * The host side of tsleep's timer kproc (tsleep.c), as glue.c has it for
  * POSIX: one waiter at a time, the timer kproc.
  */
-static H9coro *twaiter;
+static Htask *twaiter;
 static int tsignalled;
 
 void
@@ -243,7 +244,7 @@ h9_tsignal(void)
 {
 	tsignalled = 1;
 	if(twaiter != nil)
-		h9_coro_unpark(twaiter);
+		h9_task_unpark(twaiter);
 }
 
 void
@@ -255,13 +256,13 @@ h9_twait(uvlong when)
 		tsignalled = 0;
 		return;
 	}
-	twaiter = h9_coro_self();
+	twaiter = h9_task_self();
 	if(when == 0)
-		h9_coro_park(-1);
+		h9_task_park(-1);
 	else{
 		now = h9_tnow();
 		if(when > now)
-			h9_coro_park((long)((when - now + 999999) / 1000000));
+			h9_task_park((long)((when - now + 999999) / 1000000));
 	}
 	twaiter = nil;
 	tsignalled = 0;

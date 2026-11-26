@@ -19,7 +19,7 @@
 //!
 //! On the web host (design/epoch-0/websocket-9p.md, "On the web host")
 //! the JS host's WebSocket connects, does TLS and frames, through the
-//! `h9_ws_*` imports below; each stream's reader is a coroutine parked
+//! `h9_ws_*` imports below; each stream's reader is a task parked
 //! in `ws_recv`. ws.zig, TLS, proxies and the keepalive aren't used there.
 //!
 //! Ports (design/epoch-0/port-streams.md) are the web host's third kind: a
@@ -83,8 +83,8 @@ fn theIo() Io {
 pub const Kind = enum(c_int) { data = 0, text = 1 };
 
 /// The JS host's WebSockets (src/web/h9-web.js), on the web host only.
-/// `ws_opened` and `ws_recv` are Suspending, so they're called through
-/// `web.coro.blocking`.
+/// `ws_opened` and `ws_recv` are ops, which return an id the task waits
+/// on, so they're called through `web.task.blocking`.
 const js = struct {
     /// Starts a WebSocket to `url` offering the comma-separated
     /// `protocols`, with `headers` (`Name: value` lines) in its handshake;
@@ -100,7 +100,7 @@ const js = struct {
     /// `--cred` helper's command, one word per line, or empty. Writes
     /// `Name: value` lines to `out`, the first of which may instead be
     /// `url URL`, a URL to connect to, and returns their length; -1 for no
-    /// credential; -2 with the error in `out`. Suspending.
+    /// credential; -2 with the error in `out`. An op.
     extern "h9" fn ws_cred(url: [*]const u8, url_n: u32, failed: [*]const u8, failed_n: u32, argv: [*]const u8, argv_n: u32, out: [*]u8, out_n: u32) i32;
     /// Waits for the open: the selected subprotocol's length (in `sel`),
     /// or -1 if it failed or closed first.
@@ -122,7 +122,7 @@ const js = struct {
     /// opened and closed.
     extern "h9" fn port_open(name: [*]const u8, n: u32) i32;
     /// Waits for the next port the page serves the machine on, opened:
-    /// its id, or -1 once `port_stop` was called. Suspending.
+    /// its id, or -1 once `port_stop` was called. An op.
     extern "h9" fn port_accept() i32;
     extern "h9" fn port_stop() void;
     /// What the embedder serves on ports: bit 0 set to serve the machine
@@ -966,7 +966,7 @@ fn acceptUpgrade(s: *Stream, pol: ws.ServerPolicy) error{Refused}!void {
 /// once `stopPorts` was called. Web host only.
 pub fn acceptPort() ?i32 {
     if (!web.enabled) return null;
-    const id = web.coro.blocking(js.port_accept, .{});
+    const id = web.task.blocking(js.port_accept, .{});
     return if (id < 0) null else id;
 }
 
@@ -1419,7 +1419,7 @@ fn webCred(s: *Stream, failed: []const u8, out: *[8192]u8) ConnectError!i32 {
         }
         cred.warnPlain(h, s.url);
     }
-    const n = web.coro.blocking(js.ws_cred, .{ s.url.ptr, @as(u32, @intCast(s.url.len)), failed.ptr, @as(u32, @intCast(failed.len)), argv.items.ptr, @as(u32, @intCast(argv.items.len)), out, @as(u32, out.len) });
+    const n = web.task.blocking(js.ws_cred, .{ s.url.ptr, @as(u32, @intCast(s.url.len)), failed.ptr, @as(u32, @intCast(failed.len)), argv.items.ptr, @as(u32, @intCast(argv.items.len)), out, @as(u32, out.len) });
     if (n == -2) {
         const msg = std.mem.sliceTo(out, 0);
         return webFail(s, "{s}", .{msg[0..@min(msg.len, 120)]});
@@ -1447,7 +1447,7 @@ fn webOpen(s: *Stream, url: []const u8, protos: []const u8, headers: []const u8,
     }
     // From here `finish` frees the socket.
     var sel: [32]u8 = undefined;
-    const n = web.coro.blocking(js.ws_opened, .{ id, &sel, @as(u32, sel.len) });
+    const n = web.task.blocking(js.ws_opened, .{ id, &sel, @as(u32, sel.len) });
     if (n < 0) {
         var len: u32 = 0;
         _ = js.ws_status(id, why, why.len, &len);
@@ -1495,7 +1495,7 @@ fn webReadLoop(s: *Stream) void {
     var buf: [4096]u8 = undefined;
     while (true) {
         var info: u32 = 0;
-        const n = web.coro.blocking(js.ws_recv, .{ s.sock, &buf, @as(u32, buf.len), &info });
+        const n = web.task.blocking(js.ws_recv, .{ s.sock, &buf, @as(u32, buf.len), &info });
         if (n < 0) {
             var reason: [123]u8 = undefined;
             var len: u32 = 0;

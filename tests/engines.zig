@@ -630,12 +630,12 @@ test "a timeout interrupts sleep arm64" {
     try runPolicy(.arm64, img, .{ .timeout_ns = 100 * std.time.ns_per_ms }, "h9: timeout");
 }
 
-/// Runs `bytes` on every engine that can, with an owned and a pooled
-/// vCPU, and checks the status (prefix) and output.
+/// Runs `bytes` on every engine that can, with the default executors and
+/// with one, and checks the status (prefix) and output.
 fn expectNotes(arch: aout.Arch, bytes: []const u8, want_status: []const u8, want_out: []const u8) !void {
     const gpa = std.testing.allocator;
     var ran: usize = 0;
-    for ([_]engine.Choice{ .hvf, .kvm, .whp, .sud, .hcpu }) |kind| for ([_]?u32{ null, 0 }) |own| {
+    for ([_]engine.Choice{ .hvf, .kvm, .whp, .sud, .hcpu }) |kind| for ([_]?u32{ null, 1 }) |cpus| {
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
         var err: std.Io.Writer.Allocating = .init(gpa);
@@ -643,8 +643,7 @@ fn expectNotes(arch: aout.Arch, bytes: []const u8, want_status: []const u8, want
         var m = h9.Machine.init(gpa, std.testing.io, .{
             .engine = kind,
             .arch = arch,
-            .policy = .{ .timeout_ns = 10 * std.time.ns_per_s },
-            .owned_vcpus = own,
+            .policy = .{ .timeout_ns = 10 * std.time.ns_per_s, .cpus = cpus },
             .stdio = .{ .out = &out.writer, .err = &err.writer },
         }) catch |e| switch (e) {
             error.HypervisorUnavailable, error.EngineNotBuilt, error.WrongArch => continue,
@@ -652,7 +651,7 @@ fn expectNotes(arch: aout.Arch, bytes: []const u8, want_status: []const u8, want
         };
         defer m.deinit();
         const status = try m.run(.{ .bytes = bytes }, &.{"t"});
-        errdefer std.debug.print("engine {t}, {t} binary, owned_vcpus {?d}\n", .{ kind, arch, own });
+        errdefer std.debug.print("engine {t}, {t} binary, cpus {?d}\n", .{ kind, arch, cpus });
         var sb: [300]u8 = undefined;
         const got = switch (status) {
             .exited => |t| try std.fmt.bufPrint(&sb, "exited {s}", .{t}),
@@ -1262,9 +1261,8 @@ test "a syscall zeroes X1 to X17 and keeps X18 to X25 arm64" {
 
 test "pooled vCPUs carry FP state, the thread pointer and fork across processes arm64" {
     // Forks four times (16 processes), then each sets d8 and TPIDR_EL0 from
-    // its Tos pid and makes 2000 syscalls, each one a fresh trip through
-    // the shared pool when no vCPUs can be owned, so processes keep landing
-    // on vCPUs others last used. Each checks both registers at the end, and
+    // its Tos pid and makes 2000 syscalls, on one or two executors, so
+    // processes keep landing on vCPUs others last used. Each checks both registers at the end, and
     // faults if either is wrong.
     const code = words(&.{
         0xaa0003f7, // mov  x23, x0            Tos
@@ -1415,20 +1413,21 @@ test "pooled vCPUs carry FP state and fork across processes 386 [i386]" {
     try expectPooled(.i386, &code);
 }
 
-/// Runs `code` with the pool forced on (no owned vCPUs) and off, on every
-/// engine that can, and expects a clean exit.
+/// Runs `code` on one executor and on two, so processes keep landing on
+/// vCPUs others last used, on every engine that can, and expects a clean
+/// exit.
 fn expectPooled(arch: aout.Arch, code: []const u8) !void {
     const gpa = std.testing.allocator;
     const bytes = try image(gpa, arch, code);
     defer gpa.free(bytes);
     var ran: usize = 0;
-    for ([_]engine.Choice{ .hvf, .kvm, .whp, .sud, .hcpu }) |kind| for ([_]u32{ 0, 1 }) |own| {
+    for ([_]engine.Choice{ .hvf, .kvm, .whp, .sud, .hcpu }) |kind| for ([_]u32{ 1, 2 }) |cpus| {
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
         var m = h9.Machine.init(gpa, std.testing.io, .{
             .engine = kind,
             .arch = arch,
-            .owned_vcpus = own,
+            .policy = .{ .cpus = cpus },
             .stdio = .{ .out = &out.writer, .err = &out.writer },
         }) catch |e| switch (e) {
             error.HypervisorUnavailable, error.EngineNotBuilt, error.WrongArch => continue,
@@ -1436,7 +1435,7 @@ fn expectPooled(arch: aout.Arch, code: []const u8) !void {
         };
         defer m.deinit();
         const status = try m.run(.{ .bytes = bytes }, &.{"t"});
-        errdefer std.debug.print("engine {t}, {t}, owned_vcpus {d}\n", .{ kind, arch, own });
+        errdefer std.debug.print("engine {t}, {t}, cpus {d}\n", .{ kind, arch, cpus });
         var sb: [300]u8 = undefined;
         try std.testing.expectEqualStrings("exited ", switch (status) {
             .exited => |t| try std.fmt.bufPrint(&sb, "exited {s}", .{t}),

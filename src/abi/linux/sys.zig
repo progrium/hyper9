@@ -1335,8 +1335,8 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const engine.Ureg) Err!Outcome {
         },
         .sched_setaffinity, .setpriority, .sched_setscheduler, .sched_setparam => return ret(0),
         // The kernel's sleep(0), as 9front's: the host's sched_yield, or
-        // on the web host, where every vCPU is a coroutine on one thread,
-        // a coroutine switch. Without one, a thread spinning on
+        // on the web host, where every vCPU is a task on one thread,
+        // a task switch. Without one, a thread spinning on
         // sched_yield there never lets another run.
         .sched_yield => {
             kern.sleep(0) catch {};

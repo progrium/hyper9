@@ -284,7 +284,7 @@ export function wasiImports({ memory, root, args, env, write, tty = false }) {
       return E.SUCCESS;
     },
     path_readlink: (fd, p, n) => { const [e] = at(fd, p, n); return e || E.INVAL; },
-    // Nothing can block here; h9 waits in its own coroutines.
+    // Nothing can block here; h9 waits in its own tasks.
     poll_oneoff: (inp, outp, nsubs, nout) => {
       const v = dv();
       for (let k = 0; k < nsubs; k++) {

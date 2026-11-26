@@ -24,8 +24,7 @@ const abi = @import("whp_abi.zig");
 const ram_gpa: u64 = 0x8000_0000;
 
 /// The partition's processor count, fixed before WHvSetupPartition, and so
-/// the vCPU limit: HVF's measured limit, which the vCPU pool is shaped
-/// around. WHP's own limit is an open issue in the proposal.
+/// the vCPU limit: HVF's measured limit. WHP's own limit is an open issue in the proposal.
 pub const processor_count: u32 = 64;
 
 fn check(hr: abi.HRESULT) engine.Error!void {

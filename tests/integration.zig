@@ -9341,7 +9341,7 @@ test "Go GC with a goroutine in a call-free loop, at 1 ms slices [linux-threads]
 }
 
 // The web host's cases (design/epoch-0/browser-host.md). They run on
-// every engine; what they guard is the web host's: coroutines that park
+// every engine; what they guard is the web host's: tasks that park
 // for the event loop, a JIT over recycled pages, and stacks without
 // guard pages.
 

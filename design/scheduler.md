@@ -86,7 +86,7 @@ None for the guest's reach. The scheduler is new code in the trusted base, and a
 - [ ] `test "processes keep their own registers across executor switches [scheduler]"` passes on every engine.
 - [ ] `zig build integration`, `zig build integration -Dweb`, and `zig build web-test` pass, with the web host on one executor and no coroutine layer.
 - [ ] `zig build bench` shows a system call round trip no slower than before, and a `fork` and `exit` loop faster.
-- [ ] `src/cpupool.zig`, `src/web/coro.zig`, `src/web/coro.c`, and `src/kern/os-wasm.c`'s thread emulation are deleted.
+- [x] `src/cpupool.zig`, `src/web/coro.zig`, `src/web/coro.c`, and `src/kern/os-wasm.c`'s thread emulation are deleted.
 - [x] [spec/kernel.md](../spec/kernel.md)'s process model describes executors, parking, and slices.
 
 ## Implementation
@@ -127,3 +127,19 @@ None for the guest's reach. The scheduler is new code in the trusted base, and a
 Steps 6 and 7 are left. The web build needs Binaryen's `wasm-opt` for Asyncify, and the pool, the per-process threads, and the coroutines go only once the web host runs on an executor.
 
 **2026-11-26, no clock reads per run.** On the `syscall-perf` branch, an executor no longer reads the monotonic clock in `leaseRun` and as it enters and leaves guest code, which made a `pwrite` round trip on hcpu about 20% slower on this Linux host. It counts its state changes and task switches, and the monitor times them from when it first sees each, so it may see a run or a call up to a tick short, never long; when a task has had its slice and another waits, it sets `yield_due`, which `leaseRun` checks. `nsec` round trips are still about 15% over main's here, from the rest of the executor's work per run.
+
+**2026-11-26, the web host on one executor.** `src/kern/sched/web.zig` is the web host's executor: every kernel process and every one of h9's own threads is a task on it, a continuation switched with Asyncify, and `src/web/coro.c`, `coro.zig`, and `stack.S` are gone. Some things building it found:
+
+- **Asyncify and wasm exception handling work together.** `wasm-opt --enable-exception-handling --asyncify` accepts h9.wasm, and a C test of a park inside a `setjmp`'s body, a `longjmp` after the resume, and a park after the `longjmp` lands gives the right answers at `-O0` and `-O2`. Asyncify can't unwind through a `catch` handler, but no task parks inside one: LLVM's lowering uses the handler only to note which `setjmp` was jumped to and branch out, so the code after a `setjmp` returns 1 runs outside it. So the C kernel keeps wasm EH for `setjmp` and `longjmp`.
+- **One JSPI stack.** Only `_start` is `promising`, and the one `Suspending` import is `idle(ms)`, which the executor calls when nothing is runnable, and every 10 ms otherwise so the page's events are seen. The other imports that wait on JavaScript (console input, the signal wait, `gfx_wait`, and the WebSocket and port waits) are ops: they return an id at once, the task parks in `h9_task_await`, and `idle` hands back the finished ops' results.
+- **Asyncify leaves the CPUs and the JIT alone.** A task parks or yields only between runs of guest code, so `asyncify-removelist` skips the interpreters, h86, ha64, hx64, and the JIT's compilers. Instrumented, they were half the module, and V8's optimizing compiler took a minute on them before `ls` ran. Debug builds also run `wasm-opt -O1` after the pass, which takes the module from 83 MB to 35 MB; `ls /bin` is now 0.7 s under Node, against 1.0 s before the executor.
+- **Per-task state.** A switch saves and restores `errno`, the kernel's Zig threadlocals, and drawterm's `up`, as coro.c did around its parks. `H9_TEST_KSTACK` sets task stacks' size, rounded to 16 bytes rather than wasm's 64 KiB pages.
+
+`zig build web-test` needs Chromium and Playwright, which this step's checks didn't have.
+
+**2026-11-26, the pool and the coroutines removed.** `src/cpupool.zig` is gone: its `Lease`, a process's registers, FP state, and address space between runs, is `executor.Lease`, and the pool threads, the owned-vCPU limit, and the `--cpus` run slots went with it, since executors already did all three. Where a process keeps a vCPU of its own (sud, and the web host), the lease makes it on the first run. Machine.Options' `owned_vcpus` went too, and the pooled-vCPU engine cases run on one executor and on two instead. Some things stay:
+
+- **Three processes keep host threads.** h9's 9P server, pty server, and each pty's control process (`RFHOSTTHREAD`) wait in host calls for the machine's whole life (an accept, the host's pty queue), so on an executor they'd hold its thread anyway, after the monitor had started another in its place.
+- **KVM's vCPU recycling.** An executor that's taken for blocked in the host is replaced, and KVM can't destroy a vCPU, so the engine's free list of parked vCPUs is what keeps the count bounded.
+- **A child machine's CPUs.** A child machine (design/child-machines.md) has executors of its own, `--cpus` of them, so its runs aren't under its parent's `--cpus` as that proposal says; running a child's processes on its parent's executors is left.
+

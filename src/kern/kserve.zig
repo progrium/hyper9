@@ -18,7 +18,7 @@
 //! unions and mount points read as through read(2).
 //!
 //! Each connection has a reader kproc, which parses messages and hands
-//! them to workers: up to Nworker kprocs (coroutines on the web host),
+//! them to workers: up to Nworker kprocs (tasks on the web host),
 //! started as requests need them and kept until the connection ends, so
 //! a request that blocks holds up only its worker. Past that, requests
 //! wait in a queue of up to Maxqueue, and past that the reader stops

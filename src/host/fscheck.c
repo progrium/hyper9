@@ -417,7 +417,7 @@ h9_fs_resolvein(char *top, char *dir, char *rel, char *buf, int nbuf)
 /*
  * The web host's fd paths, as devfs noted them at the open. Every open that
  * devfs checks by its fd is noted, so a reused fd number gets its new path
- * before it's checked again. The web host runs one coroutine at a time and
+ * before it's checked again. The web host runs one task at a time and
  * no host call parks between an open and its check, so the path can't
  * change under it either.
  */

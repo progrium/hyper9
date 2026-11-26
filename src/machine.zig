@@ -18,7 +18,6 @@ const syscall = @import("abi/plan9/syscall.zig");
 const policy = @import("policy.zig");
 const segment = @import("segment.zig");
 const newns = @import("newns.zig");
-const cpupool = @import("cpupool.zig");
 const executor = @import("executor.zig");
 const gm = @import("guestmem.zig");
 const consin = @import("consin.zig");
@@ -279,10 +278,6 @@ pub const Machine = struct {
         /// up (design/epoch-0/mounts.md, "Namespace files"). They're text: the
         /// CLI reads `--ns @FILE` on the host.
         ns: []const []const u8 = &.{},
-        /// How many processes may own a vCPU before the rest share the
-        /// pool (src/cpupool.zig); null means the engine's limit less the
-        /// pool. For tests of the pool.
-        owned_vcpus: ?u32 = null,
         /// Host events to deliver while a run is in progress (Ctrl-C,
         /// hangup); see `Signals`.
         signals: ?*Signals = null,
@@ -1111,13 +1106,7 @@ pub const Machine = struct {
         if (m.plan.host) |h| @constCast(h).console = m.host.console;
         const sc = m.host.console.?;
         const job = try m.gpa.create(Job);
-        // A child machine's runs are under its parent's pool
-        // (design/child-machines.md).
-        const pool = if (m.parent) |pa| cpupool.Pool.initChild(&pa.job.pool, m.plan.cpus) else cpupool.Pool.init(m.gpa, m.io, m.engine, m.plan.cpus, m.opts.owned_vcpus) catch |e| {
-            m.gpa.destroy(job);
-            return e;
-        };
-        job.* = .{ .m = undefined, .mc = m.*, .prog = prog, .argv = argv, .con = .{ .in = null, .out = sc.out, .err = sc.err, .raw = sc.raw }, .pool = pool, .srv = srv, .parent_job = if (m.parent) |pa| pa.job else null };
+        job.* = .{ .m = undefined, .mc = m.*, .prog = prog, .argv = argv, .con = .{ .in = null, .out = sc.out, .err = sc.err, .raw = sc.raw }, .srv = srv, .parent_job = if (m.parent) |pa| pa.job else null };
         // Host ptys can be asked for from here; the pty server takes them
         // once the namespace is built. Every process has exited (or is
         // stuck) by the time `end` fails the rest.
@@ -1125,7 +1114,6 @@ pub const Machine = struct {
         if (ptys) |ps| ps.begin();
         defer if (ptys) |ps| ps.end();
         if (srv) |s| s.cfg.trace_lock = &job.trace_lock;
-        job.pool.gpa = m.gpa;
         job.ncpu = m.cpuCount();
         kern.setNoteKick(Proc.noteKick);
         kern.setProcStatus(Proc.status);
@@ -1152,7 +1140,6 @@ pub const Machine = struct {
         // groups, #s board and /proc are this run's alone.
         const kernel = kern.Kernel.init(m.gpa, &m.host) catch |e| {
             kern.removeConsole(job.con_id);
-            job.pool.deinit();
             m.gpa.destroy(job);
             return e;
         };
@@ -1160,7 +1147,6 @@ pub const Machine = struct {
         const first = job.newProc(.program) catch |e| {
             kernel.deinit();
             kern.removeConsole(job.con_id);
-            job.pool.deinit();
             m.gpa.destroy(job);
             return switch (e) {
                 error.OutOfMemory => error.OutOfMemory,
@@ -1177,7 +1163,6 @@ pub const Machine = struct {
                 kernel.deinit();
                 kern.removeConsole(job.con_id);
                 job.procs.deinit(m.gpa);
-                job.pool.deinit();
                 m.gpa.destroy(job);
                 return switch (e) {
                     error.OutOfMemory => error.OutOfMemory,
@@ -1192,7 +1177,6 @@ pub const Machine = struct {
             kernel.deinit();
             kern.removeConsole(job.con_id);
             job.procs.deinit(m.gpa);
-            job.pool.deinit();
             m.gpa.destroy(job);
             return e;
         };
@@ -1247,7 +1231,6 @@ pub const Machine = struct {
         if (!freed) m.stuck = true;
         defer if (freed) {
             job.procs.deinit(m.gpa);
-            job.pool.deinit();
             m.gpa.destroy(job);
         };
         if (timed_out) return .{ .killed = timeout_note };
@@ -1310,7 +1293,7 @@ pub const Machine = struct {
         /// Set to end every process; exit loops check it after every exit.
         stopping: std.atomic.Value(bool) = .init(false),
         /// The executors its processes run on (design/scheduler.md), or
-        /// null where each has a host thread and a vCPU (`pool`).
+        /// null on the web host, whose processes are tasks on its one.
         sched: ?*executor.Sched = null,
         /// Guards `procs`, `next_pid` and each Proc's `kproc` and `lease`.
         lock: std.atomic.Mutex = .unlocked,
@@ -1324,8 +1307,6 @@ pub const Machine = struct {
         /// The listeners, with `--serve` (design/epoch-0/serve.md).
         srv: ?*serve.Server = null,
         trace_lock: std.atomic.Mutex = .unlocked,
-        /// vCPUs for the processes.
-        pool: cpupool.Pool,
         /// A child machine's parent's run (design/child-machines.md),
         /// whose `--pids` its processes count against too.
         parent_job: ?*Job = null,
@@ -1602,8 +1583,8 @@ pub const Machine = struct {
         /// Set on the process's own thread; guarded by `job.lock`.
         kproc: ?*kern.Proc = null,
         /// How it runs guest code, while it does.
-        lease: ?*cpupool.Lease = null,
-        lease_store: cpupool.Lease = undefined,
+        lease: ?*executor.Lease = null,
+        lease_store: executor.Lease = undefined,
         as: ?engine.AddressSpace = null,
         /// A 9front process's memory: its segments, as mappings in the
         /// kernel's Mms (src/segment.zig), mapped into `as`. Swapped by
@@ -1872,7 +1853,7 @@ pub const Machine = struct {
             return n;
         }
 
-        fn setLease(p: *Proc, l: ?*cpupool.Lease) void {
+        fn setLease(p: *Proc, l: ?*executor.Lease) void {
             p.job.lockSpin();
             defer p.job.lock.unlock();
             p.lease = l;
@@ -2450,7 +2431,7 @@ pub const Machine = struct {
 
     fn runLoop(m: *Machine, p: *Proc) RunError!Status {
         const j = p.job;
-        if (executor.enabled and j.sched != null) p.lease_store.initScheduled(&j.pool) else try j.pool.acquire(&p.lease_store);
+        p.lease_store = .{ .eng = j.m.engine };
         p.setLease(&p.lease_store);
         const vcpu = &p.lease_store;
         try vcpu.setAddressSpace(p.as.?);
@@ -2706,7 +2687,7 @@ pub const Machine = struct {
     /// before it runs on. Returns the status it ends with if the machine
     /// is torn down meanwhile. A note doesn't end the stop; ctl kill does,
     /// and the note delivery after it kills the process.
-    fn stopPoint(p: *Proc, vcpu: *cpupool.Lease, u: *engine.Ureg) RunError!?Status {
+    fn stopPoint(p: *Proc, vcpu: *executor.Lease, u: *engine.Ureg) RunError!?Status {
         // A stop request flags the process, and Ptraceme waits for a note,
         // which flags it too; the kernel decides.
         if (!p.stop_flag.swap(false, .acq_rel) and !p.note_flag.load(.acquire)) return null;
@@ -2750,7 +2731,7 @@ pub const Machine = struct {
     /// and enters the handler; without one, or for a note that arrives in
     /// the handler, or if the frame doesn't fit, returns the note the
     /// process dies with. `u` holds the current registers.
-    fn deliver(p: *Proc, vcpu: *cpupool.Lease, u: *engine.Ureg) engine.Error!?[]const u8 {
+    fn deliver(p: *Proc, vcpu: *executor.Lease, u: *engine.Ureg) engine.Error!?[]const u8 {
         var msg: [kern.ERRMAX]u8 = undefined;
         switch (kern.popNote(&msg, u.pc())) {
             .none => return null,
@@ -2788,7 +2769,7 @@ pub const Machine = struct {
     /// the note for NDFLT. Outside a handler, anything but NRSTR fails
     /// with "bad arg in system call". Returns the note the process dies
     /// with, if it does.
-    fn noted(p: *Proc, vcpu: *cpupool.Lease, u: *engine.Ureg, arg: i32) engine.Error!?[]const u8 {
+    fn noted(p: *Proc, vcpu: *executor.Lease, u: *engine.Ureg, arg: i32) engine.Error!?[]const u8 {
         var msg: [kern.ERRMAX]u8 = undefined;
         const how: kern.Noted = @fromBackingInt(@intCast(arg));
         switch (kern.noted(how, &msg) catch {
@@ -2911,7 +2892,7 @@ pub const Machine = struct {
     /// space and makes it the process's, as exec does for an a.out: the
     /// process is unchanged until the image is built. With `vcpu` null
     /// (the first process) the exit loop sets the address space.
-    fn execLinux(m: *Machine, p: *Proc, vcpu: ?*cpupool.Lease, arena: std.mem.Allocator, path: []const u8, bytes: []const u8, argv: []const []const u8, envp: []const []const u8) error{Failed}!void {
+    fn execLinux(m: *Machine, p: *Proc, vcpu: ?*executor.Lease, arena: std.mem.Allocator, path: []const u8, bytes: []const u8, argv: []const []const u8, envp: []const []const u8) error{Failed}!void {
         const exe = elf.check(bytes, m.arch) catch return failWith(ebadexec);
         var interp: ?elf.Image = null;
         if (exe.interp) |ip| {
@@ -3119,11 +3100,11 @@ pub const Machine = struct {
     /// execve from a Linux process: follows #! lines as Linux does (the
     /// interpreter, its one optional argument, the script's path, then
     /// the caller's arguments after argv[0]) and loads the ELF binary.
-    fn linuxExec(m: *Machine, p: *Proc, vcpu: ?*cpupool.Lease, e: lsys.Exec) error{Failed}!void {
+    fn linuxExec(m: *Machine, p: *Proc, vcpu: ?*executor.Lease, e: lsys.Exec) error{Failed}!void {
         return m.linuxExecPath(p, vcpu, e.path, @ptrCast(e.argv), @ptrCast(e.envp));
     }
 
-    fn linuxExecPath(m: *Machine, p: *Proc, vcpu: ?*cpupool.Lease, path0: []const u8, argv0: []const []const u8, envp: []const []const u8) error{Failed}!void {
+    fn linuxExecPath(m: *Machine, p: *Proc, vcpu: ?*executor.Lease, path0: []const u8, argv0: []const []const u8, envp: []const []const u8) error{Failed}!void {
         var arena_state: std.heap.ArenaAllocator = .init(m.gpa);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
@@ -3217,7 +3198,7 @@ pub const Machine = struct {
 
     /// Serves a Linux process's syscall exit. Returns the status when the
     /// process exits.
-    fn linuxSyscall(m: *Machine, p: *Proc, l: *lsys.Process, vcpu: *cpupool.Lease, u: *engine.Ureg) RunError!?Status {
+    fn linuxSyscall(m: *Machine, p: *Proc, l: *lsys.Process, vcpu: *executor.Lease, u: *engine.Ureg) RunError!?Status {
         // See the 9front branch of `loop`.
         if (p.note_flag.load(.acquire)) kern.interrupt(kern.self());
         if (u.* == .i386) {
@@ -3402,7 +3383,7 @@ pub const Machine = struct {
     /// hands the exec to the leader and ends (`.handed_off`). A path that
     /// doesn't name a file fails before any thread is killed, so execvp's
     /// search along PATH leaves them be.
-    fn groupExec(m: *Machine, p: *Proc, l: *lsys.Process, vcpu: *cpupool.Lease, e: lsys.Exec) enum { alone, handed_off, failed } {
+    fn groupExec(m: *Machine, p: *Proc, l: *lsys.Process, vcpu: *executor.Lease, e: lsys.Exec) enum { alone, handed_off, failed } {
         _ = vcpu;
         {
             const swap = !kc.inView();
@@ -3440,7 +3421,7 @@ pub const Machine = struct {
     /// The leader's side of a thread's execve: once only it and the
     /// thread are left, runs the exec, and tells the thread how it went.
     /// Returns whether there was one.
-    fn leaderExec(m: *Machine, p: *Proc, vcpu: *cpupool.Lease, u: *engine.Ureg) bool {
+    fn leaderExec(m: *Machine, p: *Proc, vcpu: *executor.Lease, u: *engine.Ureg) bool {
         const l = p.lx.?;
         const g = l.g;
         const req: *ExecReq = @ptrCast(@alignCast(g.exec_req orelse return false));
@@ -3537,7 +3518,7 @@ pub const Machine = struct {
     /// the stack. A call that returned EINTR is restarted when no handler
     /// ran, or when the handler has SA_RESTART. Returns the note the
     /// process dies with, if it does.
-    fn deliverLinux(m: *Machine, p: *Proc, vcpu: *cpupool.Lease, u: *engine.Ureg, flagged: bool) engine.Error!?[]const u8 {
+    fn deliverLinux(m: *Machine, p: *Proc, vcpu: *executor.Lease, u: *engine.Ureg, flagged: bool) engine.Error!?[]const u8 {
         const l = p.lx.?;
         if (flagged) {
             var msg: [kern.ERRMAX]u8 = undefined;
@@ -3857,7 +3838,7 @@ pub const Machine = struct {
     /// replaces the process's memory, closes its close-on-exec fds and
     /// resets its registers. On error the process is unchanged and the
     /// error string is set.
-    fn exec(m: *Machine, p: *Proc, vcpu: *cpupool.Lease, e: syscall.Exec) error{Failed}!void {
+    fn exec(m: *Machine, p: *Proc, vcpu: *executor.Lease, e: syscall.Exec) error{Failed}!void {
         var arena_state: std.heap.ArenaAllocator = .init(m.gpa);
         defer arena_state.deinit();
         const arena = arena_state.allocator();

@@ -224,7 +224,6 @@ pub const Options = struct {
     serve_token: ?[]const u8 = null,    // required on WebSocket listeners when set
     serve_origins: []const []const u8 = &.{}, // Origins WebSocket listeners accept; "*" for any
     serve_net: bool = false,            // export /net too
-    owned_vcpus: ?u32 = null,           // for tests of the vCPU pool
     signals: ?*Signals = null,          // Ctrl-C and hangup from the embedder
     gfx: ?Gfx = null,                   // a host window or the headless screen (.screen, .size); one machine in the process at a time
     plan: ?[]const u8 = null,           // a plan's text, in place of the fields a plan covers (design/plan-format.md); host paths absolute

@@ -1,7 +1,8 @@
 //! The CLI's host side on the web host (design/epoch-0/browser-host.md): its
 //! stdin, Ctrl-C and raw mode come from the JS host (h9-web.js), which
 //! has them from Node's process or from the page's terminal. Each blocking
-//! call is a Suspending import, so it parks only the coroutine making it.
+//! call is an op the JS host finishes (src/kern/sched/web.zig), so it parks
+//! only the task making it.
 
 const std = @import("std");
 const h9 = @import("h9");
@@ -46,7 +47,7 @@ pub const Stdin = struct {
 
     fn stream(_: *std.Io.Reader, wr: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
         const dest = limit.slice(try wr.writableSliceGreedy(1));
-        const n = web.coro.blocking(js.read_stdin, .{ dest.ptr, @as(u32, @intCast(@min(dest.len, std.math.maxInt(u32)))) });
+        const n = web.task.blocking(js.read_stdin, .{ dest.ptr, @as(u32, @intCast(@min(dest.len, std.math.maxInt(u32)))) });
         if (n == 0) return error.EndOfStream;
         if (n < 0) return error.ReadFailed;
         wr.advance(@intCast(n));
@@ -54,7 +55,7 @@ pub const Stdin = struct {
     }
 };
 
-/// hostsig.Host's counterpart: a coroutine waits for the JS host's
+/// hostsig.Host's counterpart: a task waits for the JS host's
 /// signals and passes them to `Machine.Signals`.
 pub const Host = struct {
     io: std.Io,
@@ -100,7 +101,7 @@ pub const Host = struct {
     }
 
     fn watch(h: *Host) void {
-        while (true) switch (web.coro.blocking(js.wait_signal, .{})) {
+        while (true) switch (web.task.blocking(js.wait_signal, .{})) {
             1 => {
                 // A second interrupt within a second tears the machine down,
                 // as a second Ctrl-C does natively.

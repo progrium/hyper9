@@ -19,7 +19,7 @@
 //!   uses.
 //! - **wasm32**: wasm has no guard pages. A stack is a block of linear
 //!   memory with a canary word at its low end, which the continuation
-//!   checks at every switch (as src/web/coro.c does today), so an overflow
+//!   checks at every switch, so an overflow
 //!   is a panic at the next park rather than silent corruption. Below the
 //!   canary is the continuation's Asyncify buffer (cont.zig), which
 //!   Asyncify bounds itself.
@@ -35,7 +35,7 @@ const page_size = std.heap.page_size_min;
 /// whole exit loop runs on it, so natively it's a host thread's 8 MiB: a
 /// Debug build's Linux clone alone takes 170 KiB, and the debug allocator
 /// unwinds the stack on each allocation. Only what's touched is resident.
-/// On wasm it's the size of today's coroutine stacks (src/web/coro.zig).
+/// On wasm it's the web executor's task stacks' (sched/web.zig).
 pub const default_size: usize = if (is_wasm) 320 * 1024 else 8 * 1024 * 1024;
 
 /// The inaccessible region below a native stack.
@@ -86,7 +86,8 @@ pub const Stack = struct {
 
     /// Maps a stack of `size` usable bytes, with its guard page.
     pub fn map(size: usize) Error!Stack {
-        const len = std.mem.alignForward(usize, size, page_size) + guard_size + async_size;
+        // wasm's pages are 64 KiB, too coarse for a stack's size.
+        const len = std.mem.alignForward(usize, size, if (is_wasm) 16 else page_size) + guard_size + async_size;
         if (is_wasm) {
             const mem = std.heap.wasm_allocator.alignedAlloc(u8, .fromByteUnits(page_size), len) catch return error.OutOfMemory;
             const s: Stack = .{ .mem = mem };

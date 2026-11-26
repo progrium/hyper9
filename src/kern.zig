@@ -464,7 +464,7 @@ pub fn boot() Error!void {
     while (true) switch (boot_state.load(.acquire)) {
         .up => return,
         .failed => return error.Kern,
-        // On the web host the boot runs on a coroutine, which needs a turn.
+        // On the web host the boot runs on a task, which needs a turn.
         .booting => if (web.enabled) web.yield() else std.atomic.spinLoopHint(),
         .idle => if (boot_state.cmpxchgStrong(.idle, .booting, .acq_rel, .acquire) == null) {
             // The monotonic clock starts at the wall time of the boot.
@@ -1747,8 +1747,8 @@ fn h9_clock_mono() callconv(.c) i64 {
 /// with the plan. Kernel threads without a machine see one.
 threadlocal var cons_ncpu: u32 = 1;
 
-// On the web host, where threadlocals are plain globals, a coroutine's
-// park saves and restores them (src/web/coro.c).
+// On the web host, where threadlocals are plain globals, a task's
+// switch saves and restores them (src/kern/sched/web.zig).
 comptime {
     if (web.enabled) @export(&h9_web_locals, .{ .name = "h9_web_locals" });
 }
