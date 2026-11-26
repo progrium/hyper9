@@ -10,7 +10,7 @@
 
 ## Project conventions
 
-- This is a Zig project targeting native 9front executables on host hypervisors. Use the Zig version and setup described in DEVELOPING.md.
+- This is a Zig project: h9, a namespace kernel for 9front and Linux executables, on host hypervisors, the sud engine, and h9's own CPUs (see SPEC.md). Use the Zig version and setup described in DEVELOPING.md.
 - Keep the public machine/library API independent of CLI-global state; keep the CLI a thin wrapper.
 - Keep hypervisor-specific behavior behind the `src/engine.zig` interface and its engine implementations.
 - Treat `third_party/drawterm` as vendored upstream code. Prefer changes in project-owned code; modify the vendor tree only when necessary, and keep such changes minimal. It is a squashed git subtree: update it only with `scripts/vendor-drawterm.sh`, never by copying files over it.
