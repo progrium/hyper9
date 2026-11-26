@@ -1,7 +1,8 @@
 ---
+issue: 314
 slug: audio
 title: Audio (--audio)
-status: draft
+status: proposed
 created: 2026-11-07
 authors: [progrium]
 depends: [browser-host]
