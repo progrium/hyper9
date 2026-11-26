@@ -48,13 +48,13 @@ The boot also starts one kernel thread of its own, the timer kproc (`src/kern/ts
 
 ### Several machines per host process
 
-An embedder, or the test suite, can run several machines in one host process. They share the one drawterm kernel, but each machine's first Proc starts with a fresh Pgrp, Fgrp, and Egrp, so each has its own namespace, device mask, console, and environment. The CLI always runs one.
+An embedder, or the test suite, can run several machines in one host process. Each run of a `Machine` has a kernel of its own, `kern.Kernel` (`src/kern.zig`, [kernel-port](../design/kernel-port.md)), made with `Kernel.init(gpa, host)` from the machine's `Host` and spawned into with `Kernel.spawn`: its process list, pids, note groups, `#s` board, and `/proc` are its processes' alone, and so are the settings #ℓ, #ι, and host streams look up for it (they were tables keyed by machine, of 64 entries). Its C half, `Hmach` (`src/kern/hproc.h`), is counted, so processes and host streams can outlive the `Kernel`, and find no settings once it's gone. Each machine's first Proc starts with a fresh Pgrp, Fgrp, and Egrp, so each has its own namespace, device mask, console, and environment. The host threads, the boot Proc, the device table, and the timer kproc are still the host process's, as are some C devices' tables, which every machine's entries share (`#ℓ`'s, `#ι`'s, and `#ℓ` streams' conversations, `#y`'s consoles, the ptys, and the Linux futex waits). The CLI always runs one.
 
 ### Notes on blocked and running processes
 
 A note to a process blocked in a host syscall wakes it through drawterm's sleep/wakeup, and the syscall fails with "interrupted" (`rendezvous` returns `~0` instead, as on 9front). A note to a process running guest code kicks its vCPU, and the note is delivered at the exit.
 
-Pending notes are queued on h9's process record, not in drawterm's Proc: drawterm's `postnote` keeps only `notepending`, which `enderror` clears after every failed syscall, so it serves only as the "interrupt this call" flag.
+Pending notes are queued on the process record by `pushnote`: drawterm's `postnote` keeps only `notepending`, which `enderror` clears after every failed syscall, so it serves only as the "interrupt this call" flag.
 
 Because calls clear that flag as they return, a note posted while one call is finishing would be lost to the next call if the guest made one straight away; the exit loop re-arms the flag when it starts a call with a note flagged, and `pushnote` kicks before it interrupts, so a call started before the kick's flag is set still sees the interrupt.
 

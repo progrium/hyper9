@@ -64,7 +64,7 @@ pub fn set(owner: usize, v: Value) error{OutOfMemory}!Value {
     }
     mutex.unlock();
     if (dropped) |r| kern.unref(r);
-    if (start) kern.spawn("itimer", u8, run, &dummy) catch {
+    if (start) kern.spawnAlone("itimer", u8, run, &dummy) catch {
         lock();
         running = false;
         mutex.unlock();

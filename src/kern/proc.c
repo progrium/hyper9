@@ -1117,15 +1117,62 @@ spawntramp(void *v)
 }
 
 /*
- * Runs fn(arg) on a new kernel process with its own thread, a fresh
- * namespace (just #/, as the boot Proc has), no fds, an empty environment
- * and its own rendezvous group; it has no parent. Unlike drawterm's kproc
- * it can be called from a thread that isn't a Proc: it only allocates
- * here, and the new thread sets up its groups once up is set. Returns 0,
- * or -1 if allocation fails.
+ * A machine's C half, for the Zig Kernel (src/kern.zig) that owns it:
+ * kernel is that Kernel, which h9_kern_machkernel returns until
+ * h9_kern_machdetach. Returns nil if allocation fails.
+ */
+void*
+h9_kern_newmach(void *kernel)
+{
+	Hmach *m;
+
+	m = mallocz(sizeof *m, 1);
+	if(m == nil)
+		return nil;
+	m->ref.ref = 1;
+	m->kernel = kernel;
+	return m;
+}
+
+/* The Kernel that owns machine m, or nil once it has let go of it. */
+void*
+h9_kern_machkernel(void *v)
+{
+	Hmach *m;
+	void *k;
+
+	m = v;
+	if(m == nil)
+		return nil;
+	lock(&m->lk);
+	k = m->kernel;
+	unlock(&m->lk);
+	return k;
+}
+
+/* The Kernel's end: drops its reference to m, which its processes may outlive. */
+void
+h9_kern_machdetach(void *v)
+{
+	Hmach *m;
+
+	m = v;
+	lock(&m->lk);
+	m->kernel = nil;
+	unlock(&m->lk);
+	putmach(m);
+}
+
+/*
+ * Runs fn(arg) on a new kernel process in machine mach, with its own
+ * thread, a fresh namespace (just #/, as the boot Proc has), no fds, an
+ * empty environment and its own rendezvous group; it has no parent.
+ * Unlike drawterm's kproc it can be called from a thread that isn't a
+ * Proc: it only allocates here, and the new thread sets up its groups
+ * once up is set. Returns 0, or -1 if allocation fails.
  */
 int
-h9_kern_spawn(char *name, void (*fn)(void*), void *arg)
+h9_kern_spawn(void *mach, char *name, void (*fn)(void*), void *arg)
 {
 	Proc *p;
 	Spawn *s;
@@ -1136,15 +1183,15 @@ h9_kern_spawn(char *name, void (*fn)(void*), void *arg)
 	s->fn = fn;
 	s->arg = arg;
 	p = newproc();
-	if(p != nil)
-		p->mach = mallocz(sizeof *p->mach, 1);
-	if(p == nil || p->mach == nil){
+	if(p == nil){
 		free(s);
-		free(p);
 		return -1;
 	}
-	p->mach->ref.ref = 1;
-	p->mach->nlive = 1;
+	p->mach = mach;
+	incref(&p->mach->ref);
+	lock(&p->mach->lk);
+	p->mach->nlive++;
+	unlock(&p->mach->lk);
 	p->noteid = newnoteid(p->mach);
 	p->fn = spawntramp;
 	p->arg = s;

@@ -44,10 +44,15 @@ extern void	*h9_egrpcopy(void*);
 extern void	h9_egrpincref(void*);
 extern void	h9_egrpclose(void*);
 
-/* A machine: the processes descended from one h9_kern_spawn. */
+/*
+ * A machine: the C half of a Kernel (src/kern.zig), which makes it with
+ * h9_kern_newmach, and the processes spawned into it and their
+ * descendants.
+ */
 struct Hmach
 {
-	Ref	ref;		/* one per record */
+	Ref	ref;		/* the Kernel's, and one per process */
+	void	*kernel;	/* the Kernel, until h9_kern_machdetach; under lk */
 	Lock	lk;
 	ulong	nextnoteid;
 	int	nlive;		/* processes not yet released (h9_kern_release); under lk */

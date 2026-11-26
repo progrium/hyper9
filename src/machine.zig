@@ -3,10 +3,10 @@
 //! and I/O".
 //!
 //! Each guest process runs on its own kernel thread with its own vCPU. The
-//! first is made with kern.spawn: it builds the machine's namespace, loads
-//! the program and runs the exit loop. rfork makes the others with
-//! kern.fork, and they run the same loop. Machine.run waits for the first
-//! to exit, then stops the rest.
+//! first is spawned into the run's kern.Kernel: it builds the machine's
+//! namespace, loads the program and runs the exit loop. rfork makes the
+//! others with kern.fork, and they run the same loop. Machine.run waits
+//! for the first to exit, then stops the rest.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -644,7 +644,6 @@ pub const Machine = struct {
         return false;
     }
 
-
     /// On PolicyConflict, `conflict` (if given) explains it.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, opts: Options) InitError!Machine {
         return initExplained(gpa, io, opts, null);
@@ -867,7 +866,17 @@ pub const Machine = struct {
             job.con_in = .{ .io = m.io, .src = src, .cancel = m.opts.stdio.in_cancel, .id = job.con_id, .wake = kern.wakeConsole };
             job.con.in = &job.con_in.?;
         }
+        // The run's kernel (design/kernel-port.md): its processes, note
+        // groups, #s board and /proc are this run's alone.
+        const kernel = kern.Kernel.init(m.gpa, &m.host) catch |e| {
+            kern.removeConsole(job.con_id);
+            job.pool.deinit();
+            m.gpa.destroy(job);
+            return e;
+        };
+        job.kernel = kernel;
         const first = job.newProc(.program) catch |e| {
+            kernel.deinit();
             kern.removeConsole(job.con_id);
             job.pool.deinit();
             m.gpa.destroy(job);
@@ -876,8 +885,9 @@ pub const Machine = struct {
                 error.TooManyProcs => unreachable, // the cap is at least 1
             };
         };
-        kern.spawn("h9", Proc, firstMain, first) catch |e| {
+        kernel.spawn("h9", Proc, firstMain, first) catch |e| {
             job.dropProc(first);
+            kernel.deinit();
             kern.removeConsole(job.con_id);
             job.procs.deinit(m.gpa);
             job.pool.deinit();
@@ -889,7 +899,7 @@ pub const Machine = struct {
         // A machine that's ending doesn't redial: a 9P2000.L.Z mount whose
         // host stream drops as the processes stop would run its credential
         // helper and dial again for nothing, maybe still at it as h9 exits.
-        if (job.mach.load(.acquire)) |mc| hstream.unregisterHost(@intFromPtr(mc));
+        hstream.unregisterHost(kernel);
         // The machine ends with its first process: any others are stopped,
         // as at a timeout.
         job.stopAll();
@@ -906,12 +916,11 @@ pub const Machine = struct {
         m.root_changes = job.rootChanges();
         m.out_of_memory = job.out_of_memory.load(.acquire);
         if (job.mach.load(.acquire)) |mc| {
-            dotl.unregister(@intFromPtr(mc));
             hidx.unregister(@intFromPtr(mc));
-            hstream.unregisterHost(@intFromPtr(mc));
             _ = hstream.waitConnects(@intFromPtr(mc), grace_ms);
             mc.put();
         }
+        kernel.deinit();
         // The static trees the run's mounts served, now nothing dials them.
         if (comptime !no_threads) for (job.mc.static_servers.items) |sv| sv.stop();
         job.mc.static_servers.deinit(m.gpa);
@@ -967,6 +976,9 @@ pub const Machine = struct {
         /// The first process's outcome, set before `first_done`.
         result: RunError!Status = error.Kern,
         first_done: std.Io.Event = .unset,
+        /// The run's kernel; `run` deinits it once every process has
+        /// ended (and leaks it with the rest when one is stuck).
+        kernel: ?*kern.Kernel = null,
         /// The kernel's machine, set by the first process once it's a
         /// kernel process, for posting host-side notes. `run` releases it.
         mach: std.atomic.Value(?*kern.Mach) = .init(null),
@@ -1297,7 +1309,7 @@ pub const Machine = struct {
             const out = buf[0..@intCast(n)];
             const nr = p.in_sys.load(.acquire);
             var name: []const u8 = "Running";
-            if (nr != 0) name = std.enums.tagName(syscall.Nr, @enumFromInt(nr - 1)) orelse "Syscall";
+            if (nr != 0) name = std.enums.tagName(syscall.Nr, @fromBackingInt(@intCast(nr - 1))) orelse "Syscall";
             const len = @min(name.len, out.len - 1);
             @memcpy(out[0..len], name[0..len]);
             if (nr != 0 and len > 0) out[0] = std.ascii.toUpper(out[0]);
@@ -1366,7 +1378,7 @@ pub const Machine = struct {
             const data = b[0..@intCast(@max(n, 0))];
             p.dbgLock();
             defer p.dbg_lock.unlock();
-            const r: kern.DebugError!usize = switch (@as(kern.DebugFile, @enumFromInt(file))) {
+            const r: kern.DebugError!usize = switch (@as(kern.DebugFile, @fromBackingInt(@intCast(file)))) {
                 .mem => p.memIo(off, data, write != 0),
                 .regs => p.regsIo(off, data, write != 0),
                 .fpregs => p.fpregsIo(off, data, write != 0),
@@ -1547,13 +1559,15 @@ pub const Machine = struct {
         p.setKproc();
         const mc = kern.mach();
         j.mach.store(mc, .release);
-        // What #ℓ's translators send as the machine's user.
-        if (mc) |x| {
-            dotl.register(@intFromPtr(x), .{ .user = kern.user(), .user_map = m.opts.user_map, .io = m.io });
+        // The kernel keeps what its devices look up for the machine:
+        // what #ℓ's translators send as the machine's user.
+        if (mc != null) {
+            const k = j.kernel.?;
+            dotl.register(k, .{ .user = kern.user(), .user_map = m.opts.user_map, .io = m.io });
             // Where #ι caches compiled indexes.
-            hidx.register(@intFromPtr(x), .{ .cache_dir = m.opts.index_cache, .io = m.io });
+            hidx.register(k, .{ .cache_dir = m.opts.index_cache, .io = m.io });
             // What #ℓ redials a WebSocket root or mount with.
-            hstream.registerHost(@intFromPtr(x), if (m.rootUrl()) |r| if (r.kind == .ws) r.addr else null else null, m.rootStreamOptions(), m.mountStreamOptions());
+            hstream.registerHost(k, if (m.rootUrl()) |r| if (r.kind == .ws) r.addr else null else null, m.rootStreamOptions(), m.mountStreamOptions());
         }
         const r = m.startFirst(p);
         // What the root's index saved, for -v.
@@ -2361,7 +2375,7 @@ pub const Machine = struct {
     /// with, if it does.
     fn noted(p: *Proc, vcpu: *cpupool.Lease, u: *engine.Ureg, arg: i32) engine.Error!?[]const u8 {
         var msg: [kern.ERRMAX]u8 = undefined;
-        const how: kern.Noted = @enumFromInt(arg);
+        const how: kern.Noted = @fromBackingInt(@intCast(arg));
         switch (kern.noted(how, &msg) catch {
             p.sys.traceRet("noted", -1);
             u.sysReturn(@bitCast(@as(i64, -1)));
