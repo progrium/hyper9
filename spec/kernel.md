@@ -111,6 +111,7 @@ The devices that reach outside the machine are in `src/host/`, native devices th
 |---|---|---|
 | `#U` | `src/host/devfs.zig`, with `devfs_posix.zig` (POSIX and the web host) and `devfs_win32.zig` | the host's trees, each file opened beneath the machine's directory handle that holds it (`src/host/dirs.c`), with the policy's checks (`src/host/fscheck.c`), h9's FIFOs, links, attributes, and syncs |
 | `#I` | `src/host/devip.zig` | the host's network: drawterm's devip, with the dialer's and listener's checks, nonblocking connects, `shutdown`, socket options, and the Linux layer's calls; its socket layer is `src/host/ipsock-posix.c`, `ipsock-win32.c`, and `ipsock-wasm.c` (drawterm's `so_` calls, which raise), and `hostsock-*.c` (h9's) |
+| `#ū` | `src/host/devtree.zig` | an embedder's trees in memory (`host.Tree`), a directory handle with no host directory, read-only; namec walks a `#U` path such a handle holds here (`src/kern/chan.zig`) |
 | `#φ` | `src/host/devlfd.zig` | a host descriptor, or a `HANDLE`, read and written as it is: unix socket servers, embedders' descriptors, and drawterm's `oscmd` pipes. drawterm names it `#L`, which the Linux device has |
 
 The rest of the host's code is there too: the GUI backends (`gfx-cocoa.m`, `gfx-headless.c`, and `gfx-web.c`), the Windows glue (`glue-win32.c`), the host interfaces for netlink (`hostif-posix.c`), and the host's C headers (`src/host/glue.h`, which `src/kern/port.h` includes), so nothing under `src/kern/` includes a host OS header.

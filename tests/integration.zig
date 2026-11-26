@@ -835,7 +835,7 @@ test "--print shows the plan and doesn't run [baseline]" {
     try std.testing.expect(std.mem.indexOf(u8, r.out, "profile:  tight\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "net.disable") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "memory=512M timeout=1m") != null);
-    try std.testing.expect(std.mem.indexOf(u8, r.out, "devmask:  #C #I #ℏ #U #ι #b #i #m #μ\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "devmask:  #C #I #ℏ #U #ū #ι #b #i #m #μ\n") != null);
 }
 
 test "--memory caps guest memory [baseline]" {
@@ -5341,7 +5341,7 @@ test "--no-guest-tools leaves out the bind and masks #H [guest-tools]" {
     defer p.deinit();
     try std.testing.expect(std.mem.indexOf(u8, p.out, "#H/bin") == null);
     // The web host also masks #I, having no sockets.
-    const want = if (getenv(3, "H9_TEST_WEB") != null) "devmask:  #C #I #H #U #ι #b #i #m #μ\n" else "devmask:  #C #H #U #ι #b #i #m #μ\n";
+    const want = if (getenv(3, "H9_TEST_WEB") != null) "devmask:  #C #I #H #U #ū #ι #b #i #m #μ\n" else "devmask:  #C #H #U #ū #ι #b #i #m #μ\n";
     try std.testing.expect(std.mem.indexOf(u8, p.out, want) != null);
     const r = try run(e, &.{ "--no-guest-tools", "ls", "#H" });
     defer r.deinit();

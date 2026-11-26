@@ -46,6 +46,7 @@ extern Dev linuxdevtab;
 extern Dev evdevtab;
 extern Dev ptydevtab;
 extern Dev machinedevtab;	/* #μ, child machines (src/kern/dev/machine.zig) */
+extern Dev treedevtab;	/* #ū, an embedder's trees in memory (src/host/devtree.zig) */
 
 
 Dev *devtab[] = {
@@ -76,6 +77,7 @@ Dev *devtab[] = {
 	&evdevtab,
 	&ptydevtab,
 	&machinedevtab,
+	&treedevtab,
 	0
 };
 

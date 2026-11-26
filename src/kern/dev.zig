@@ -642,6 +642,8 @@ const natives = .{
     @import("dev/machine.zig").Device,
     // The host's network (src/host/devip.zig).
     @import("host_dev").ip.Device,
+    // An embedder's trees in memory (src/host/devtree.zig).
+    @import("host_dev").tree.Device,
 }) ++ (if (port.options.gfx) .{
     @import("dev/gfx.zig").Draw,
     @import("dev/gfx.zig").Kbd,

@@ -15,7 +15,8 @@ const policy = @import("policy.zig");
 const resolver = @import("resolver.zig");
 const consin = @import("consin.zig");
 const web = @import("web.zig");
-const Host = @import("host/host.zig").Host;
+const host_api = @import("host/host.zig");
+const Host = host_api.Host;
 const host_dirs = @import("host/dirs.zig");
 const dotl_kern = @import("dotl/kern.zig");
 const hidx_kern = @import("rootindex/kern.zig");
@@ -1616,6 +1617,13 @@ comptime {
         // Handle names in the namespace (src/kern/chan.zig).
         @export(&h9_host_nsname, .{ .name = "h9_host_nsname" });
         @export(&h9_host_nspath, .{ .name = "h9_host_nspath" });
+        // An embedder's trees in memory (src/host/devtree.zig).
+        @export(&h9_tree_path, .{ .name = "h9_tree_path" });
+        @export(&h9_tree_get, .{ .name = "h9_tree_get" });
+        @export(&h9_tree_entry, .{ .name = "h9_tree_entry" });
+        @export(&h9_tree_child, .{ .name = "h9_tree_child" });
+        @export(&h9_tree_parent, .{ .name = "h9_tree_parent" });
+        @export(&h9_tree_read, .{ .name = "h9_tree_read" });
     }
     if (available and nskernel) {
         if (host_dirs.supported) @export(&h9_host_dir, .{ .name = "h9_host_dir" });
@@ -1885,6 +1893,71 @@ fn h9_host_nspath(name: [*]const u8, len: c_int, out: [*]u8, n: c_int) callconv(
     if (dir.path.len > @as(usize, @intCast(@max(n, 0)))) return -1;
     @memcpy(out[0..dir.path.len], dir.path);
     return @intCast(dir.path.len);
+}
+
+/// For host path `path` held by one of the calling thread's machine's
+/// trees in memory (a `Dir` with a `tree`), the tree's name and the path
+/// relative to it, `name` or `name/rel`, into `out`: its length, or -1 if
+/// no such tree holds it (a host directory does, or nothing) or `out` is
+/// too short. namec walks such a path on `#ū` rather than `#U`.
+fn h9_tree_path(path: [*]const u8, len: c_int, out: [*]u8, n: c_int) callconv(.c) c_int {
+    const p = fs_plan orelse return -1;
+    const h = p.host orelse return -1;
+    const d = h.dirs orelse return -1;
+    const held = d.holding(path[0..@intCast(@max(len, 0))]) orelse return -1;
+    if (held.dir.tree == null) return -1;
+    var w: std.Io.Writer = .fixed(out[0..@intCast(@max(n, 0))]);
+    w.writeAll(held.dir.name) catch return -1;
+    if (held.rel.len > 0) w.print("/{s}", .{held.rel}) catch return -1;
+    return @intCast(w.end);
+}
+
+/// The tree in memory of the calling thread's machine's handle named
+/// `name`, if it has one and the plan doesn't hide its path.
+fn h9_tree_get(name: [*]const u8, len: c_int) callconv(.c) ?*const anyopaque {
+    const p = fs_plan orelse return null;
+    const h = p.host orelse return null;
+    const d = h.dirs orelse return null;
+    const dir = d.get(name[0..@intCast(@max(len, 0))]) orelse return null;
+    if (p.check(dir.path, .read) == .hidden) return null;
+    if (dir.tree) |*t| return t;
+    return null;
+}
+
+/// A `host.Tree.Entry`, for src/host/devtree.zig.
+const TreeEntry = extern struct {
+    id: u64,
+    len: u64,
+    name: [*:0]const u8,
+    dir: u8,
+    exec: u8,
+};
+
+fn treeEntry(e: ?host_api.Tree.Entry, out: *TreeEntry) c_int {
+    const x = e orelse return -1;
+    out.* = .{ .id = x.id, .len = x.len, .name = x.name.ptr, .dir = @intFromBool(x.dir), .exec = @intFromBool(x.exec) };
+    return 0;
+}
+
+fn treeOf(t: *const anyopaque) *const host_api.Tree {
+    return @ptrCast(@alignCast(t));
+}
+
+fn h9_tree_entry(t: *const anyopaque, id: u64, out: *TreeEntry) callconv(.c) c_int {
+    return treeEntry(treeOf(t).entry(id), out);
+}
+
+fn h9_tree_child(t: *const anyopaque, id: u64, i: c_int, out: *TreeEntry) callconv(.c) c_int {
+    if (i < 0) return -1;
+    return treeEntry(treeOf(t).child(id, @intCast(i)), out);
+}
+
+fn h9_tree_parent(t: *const anyopaque, id: u64) callconv(.c) u64 {
+    return treeOf(t).parent(id);
+}
+
+fn h9_tree_read(t: *const anyopaque, id: u64, off: u64, buf: [*]u8, n: c_int) callconv(.c) c_int {
+    return @intCast(treeOf(t).read(id, off, buf[0..@intCast(@max(n, 0))]));
 }
 
 /// src/host/dirs.c's: the calling thread's machine's directory handle that

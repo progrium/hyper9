@@ -1277,6 +1277,7 @@ pub fn namelenerror(aname: [*:0]const u8, len_: c_int, err: [*:0]const u8) error
 const NsFn = fn ([*]const u8, c_int, [*]u8, c_int) callconv(.c) c_int;
 const h9_host_nsname = @extern(?*const NsFn, .{ .name = "h9_host_nsname", .linkage = .weak });
 const h9_host_nspath = @extern(?*const NsFn, .{ .name = "h9_host_nspath", .linkage = .weak });
+const h9_tree_path = @extern(?*const NsFn, .{ .name = "h9_tree_path", .linkage = .weak });
 
 /// `#U` and `#U!c`, the host tree device's names, and where a host path
 /// or a handle name starts in `s`.
@@ -1311,6 +1312,26 @@ fn hostfsByHandle(name: [*:0]const u8) ?[*:0]u8 {
     return @ptrCast(out);
 }
 
+/// The name on the tree device, `#ū<name>/<path>`, of a host tree
+/// device name (`#U/mem/a`) for a path one of the calling thread's
+/// machine's trees in memory holds; null for any other.
+fn hostfsTree(name: [*:0]const u8) ?[*:0]u8 {
+    const s = std.mem.span(name);
+    const i = hostfsPrefix(s) orelse return null;
+    if (i >= s.len or s[i] != '/') return null;
+    const f = h9_tree_path orelse return null;
+    const dev_name = "#\u{16B}";
+    var buf: [4096]u8 = undefined;
+    const n = f(s[i..].ptr, @intCast(s.len - i), &buf, buf.len);
+    if (n < 0) return null;
+    const rest = buf[0..@intCast(n)];
+    const out: [*]u8 = @ptrCast(c.malloc(@intCast(dev_name.len + rest.len + 1)) orelse return null);
+    @memcpy(out[0..dev_name.len], dev_name);
+    @memcpy(out[dev_name.len..][0..rest.len], rest);
+    out[dev_name.len + rest.len] = 0;
+    return @ptrCast(out);
+}
+
 /// The name /proc/n/ns prints for a channel's path p: for the host tree
 /// device, the machine's handle that holds the host path, by its name
 /// (`#U/home/me/a` as `#Ucwd/a`), so no host path shows; p otherwise, or
@@ -1342,6 +1363,12 @@ pub fn namecx(aname_: [*:0]const u8, amode: c_int, omode: c_int, perm: c_uint, n
     var aname: [*:0]u8 = (try validnamedupAt(aname_, true, @returnAddress())).?;
     // h9: a host tree by its handle's name (design/host-handles.md).
     if (hostfsByHandle(aname)) |r| {
+        c.free(aname);
+        aname = r;
+    }
+    // A host path an embedder's tree in memory holds is on #ū
+    // (src/host/devtree.zig).
+    if (hostfsTree(aname)) |r| {
         c.free(aname);
         aname = r;
     }

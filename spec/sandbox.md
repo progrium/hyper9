@@ -67,7 +67,7 @@ A machine reaches outside only through its host ([host-handles](../design/host-h
 | `window` | The `--gfx` window, or the headless screen | drawterm's GUI backend | The canvas |
 | `spawn` | Host commands ([host-cmd](../design/host-cmd.md)) | None yet: `#C` is masked | None |
 
-`Machine.init` builds the host the compiled plan describes (`src/host/planned.zig`), on every host: its handles ask the plan, so what's allowed is the plan's, and `--net=disable` is no `dial` and no `listen`. An embedder can give its own in `Machine.Options.host`: the policy is still compiled beside it, and devfs still checks the plan's verdicts, so a file needs both a handle and the plan's leave, while devip asks the embedder's dialer and listener alone. The embedder's directory handles stay its own to close, and its console, when it has one, replaces `Options.stdio`'s. With `.host = .{}`, a 9front root mounted from the host is unreachable (`test "a kernel with an empty Host can reach nothing outside [host-handles]"`). A machine whose host has no clock, and a kernel thread with no machine, read the OS's clock.
+`Machine.init` builds the host the compiled plan describes (`src/host/planned.zig`), on every host: its handles ask the plan, so what's allowed is the plan's, and `--net=disable` is no `dial` and no `listen`. An embedder can give its own in `Machine.Options.host`: the policy is still compiled beside it, and devfs still checks the plan's verdicts, so a file needs both a handle and the plan's leave, while devip asks the embedder's dialer and listener alone. The embedder's directory handles stay its own to close, and its console, when it has one, replaces `Options.stdio`'s. With `.host = .{}`, a 9front root mounted from the host is unreachable (`test "a kernel with an empty Host can reach nothing outside [host-handles]"`). A directory handle can be a tree with no host directory, `Dir.tree` (a `host.Tree`, such as a `host.MemTree` built from a list of files): namec walks a `#U` path such a handle holds on the tree device, `#ū<name>`, instead (`src/host/devtree.zig`), which serves it read-only, so a mount of the handle's path reaches it, a root's under an overlay among them (`test "an embedder's in-memory dirs handle serves a root [host-handles]"`). The plan's rules still name the tree by its path, which nothing on the host need hold; the device asks the plan's verdict on that path at attach, and `#ū` is masked wherever `#U` is. A machine whose host has no clock, and a kernel thread with no machine, read the OS's clock.
 
 ### Device hooks
 
@@ -271,7 +271,7 @@ run mk
 # profile:  tight
 # enforces: env.scrub fs.read.scope fs.write.overlay fs.write.scope ipc.restrict kernel.isolation net.disable proc.timeout res.memory
 # limits:   write=overlay net=disable memory=512M timeout=1m
-# devmask:  #C #I #ℏ #U #ι #b #i #m #μ
+# devmask:  #C #I #ℏ #U #ū #ι #b #i #m #μ
 # namespace:
 #   bind '#/' /  # the kernel's names: bin dev env fd net proc root srv
 #   bind -r '#U/Users/me/h9root' '#Oroot' ro
