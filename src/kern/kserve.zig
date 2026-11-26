@@ -1390,7 +1390,31 @@ fn h9_kserve_close(v: *anyopaque) callconv(.c) void {
     c.free(s);
 }
 
+/// Ends every connection of server v as kserve_close does, without
+/// waiting for them, from any thread: a child machine's servers of its
+/// caller's paths (src/kern/dev/machine.zig) once the child has ended.
+fn h9_kserve_hangupall(v: *anyopaque) callconv(.c) void {
+    const s: *Kserver = @ptrCast(@alignCast(v));
+    c.lock(&s.lk);
+    var k_ = s.conns;
+    while (k_) |k| : (k_ = k.next) {
+        c.lock(&k.lk);
+        k.dead = 1;
+        var w_ = k.workers;
+        while (w_) |w| : (w_ = w.next) {
+            if (w.p) |p|
+                sync.procinterrupt(p);
+            _ = sync.wakeup(&w.r);
+        }
+        if (k.reader) |r|
+            sync.procinterrupt(r);
+        c.unlock(&k.lk);
+    }
+    c.unlock(&s.lk);
+}
+
 pub fn exportC() void {
+    @export(&h9_kserve_hangupall, .{ .name = "h9_kserve_hangupall" });
     @export(&h9_kserve_new, .{ .name = "h9_kserve_new" });
     @export(&h9_kserve_kns, .{ .name = "h9_kserve_kns" });
     @export(&h9_kserve_newnamed, .{ .name = "h9_kserve_newnamed" });

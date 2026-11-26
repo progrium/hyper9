@@ -28,7 +28,7 @@
 //! - `dev/pty.zig`: h9's src/kern/devpty.c, the Linux ABI's ptys.
 //! - `netcheck.zig`: h9's src/kern/netcheck.c, devip's sandbox hooks.
 //! - `dev/ns.zig`: h9's src/kern/devns.c, the namespace kernel's #N.
-//! - `fscheck.zig`: the kernel's half of h9's src/kern/fscheck.c, FIFOs
+//! - `fscheck.zig`: the kernel's half of h9's src/host/fscheck.c, FIFOs
 //!   by path for the Linux ABI.
 //! - `linuxnet.zig` and `dev/eventfd.zig`: h9's src/kern/linuxnet.c,
 //!   the Linux ABI's readiness and socket calls, and #ε.
@@ -57,6 +57,8 @@
 //! - `dev/hstream.zig`: devhstream.c, #ℏ, host streams.
 //! - `dev/hidx.zig`: devhidx.c, #ι, metadata indexes for 9P mounts.
 //! - `dev/dotl.zig`: devdotl.c, h9's 9P2000.L translation device, `#ℓ`.
+//! - `dev/machine.zig`: `#μ`, child machines (design/child-machines.md),
+//!   new in Zig.
 //!
 //! This file is the root the kernel builds compile (build.zig's addKern,
 //! and src/nskernel.zig), and holds what the ported files share: the C
@@ -102,6 +104,7 @@ pub const rootdial = @import("rootdial.zig");
 pub const devenv = @import("dev/env.zig");
 pub const devhstream = @import("dev/hstream.zig");
 pub const devhidx = @import("dev/hidx.zig");
+pub const devmachine = @import("dev/machine.zig");
 
 /// Whether this is the namespace kernel (src/nskernel.zig,
 /// design/epoch-0/namespace-kernel.md), which builds with H9_NSKERNEL and
@@ -140,6 +143,7 @@ comptime {
     if (!nskernel) devenv.exportC();
     devhstream.exportC();
     if (!nskernel) devhidx.exportC();
+    if (!nskernel) devmachine.exportC();
     devsrv.exportC();
     devoverlay.exportC();
     kserve.exportC();
@@ -148,6 +152,7 @@ comptime {
         linux.exportC();
     }
     devdotl.exportC();
+    @import("host_dev").exportC();
 }
 
 test {

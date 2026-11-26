@@ -7,8 +7,8 @@
 //! screen too, and `Options.gfx.screen` picks one per machine.
 //!
 //! The kernel side is src/kern/gfx.c, with the backend's own source and
-//! src/kern/gfx-headless.c, or src/kern/nogfx.c without graphics. On the
-//! browser host the backend is a page's canvas (src/kern/gfx-web.c,
+//! src/host/gfx-headless.c, or src/kern/nogfx.c without graphics. On the
+//! browser host the backend is a page's canvas (src/host/gfx-web.c,
 //! design/epoch-0/browser-gfx.md), with no headless screen.
 
 const std = @import("std");
@@ -275,7 +275,7 @@ fn fatal(msg: []const u8) noreturn {
     std.process.exit(125);
 }
 
-/// The headless screen's hooks (src/kern/gfx-headless.c), in any build
+/// The headless screen's hooks (src/host/gfx-headless.c), in any build
 /// with it (design/epoch-0/headless-screen.md): what a window system would do to
 /// a window, acting on the machine whose screen is headless. They may be
 /// called from any thread.

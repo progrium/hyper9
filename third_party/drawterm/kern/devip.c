@@ -6,8 +6,6 @@
 #include "ip.h"
 
 #include "devip.h"
-#include "netcheck.h"	/* h9: sandbox hooks */
-#include "hostsock.h"	/* h9: Linux sockets (design/0050-linux-net.md) */
 
 void	csclose(Chan*);
 long	csread(Chan*, void*, long, vlong);
@@ -62,7 +60,6 @@ struct Conv
 	ulong	ctime;
 	char	cerr[KNAMELEN];
 	Proto*	p;
-	int	h9opts[H9nopt];	/* h9: socket options, applied when sfd is made (src/kern/hostsock.h) */
 };
 
 struct Proto
@@ -259,9 +256,8 @@ ipinit(void)
 {
 	osipinit();
 
-	/* h9: 10 and 30 were too few for a Linux program's connection pool */
-	newproto("udp", S_UDP, 1024);
-	newproto("tcp", S_TCP, 4096);
+	newproto("udp", S_UDP, 10);
+	newproto("tcp", S_TCP, 30);
 
 	fmtinstall('I', eipfmt);
 	fmtinstall('E', eipfmt);
@@ -373,7 +369,7 @@ ipopen(Chan *c, int omode)
 		sfd = so_accept(lcv->sfd, raddr, &rport);
 		cv = protoclone(p, up->user, sfd);
 		if(cv == 0) {
-			h9so_close(sfd);	/* h9: closesocket on Windows */
+			close(sfd);
 			error(Enodev);
 		}
 		ipmove(cv->raddr, raddr);
@@ -412,9 +408,7 @@ ipclose(Chan *c)
 		ipzero(cc->raddr);
 		cc->lport = 0;
 		cc->rport = 0;
-		h9so_close(cc->sfd);	/* h9: closesocket on Windows */
-		cc->sfd = -1;	/* h9: not closed twice, nor watched once closed */
-		memset(cc->h9opts, 0, sizeof cc->h9opts);
+		close(cc->sfd);
 		break;
 	}
 }
@@ -482,7 +476,7 @@ setlport(Conv *c)
 		return;
 
 	if(c->sfd == -1)
-		c->sfd = h9so_socket(c->p->stype, c->laddr, c->h9opts);	/* h9: with its options */
+		c->sfd = so_socket(c->p->stype, c->laddr);
 
 	so_bind(c->sfd, c->restricted, c->lport, c->laddr);
 }
@@ -492,26 +486,21 @@ setladdrport(Conv *c, char *str)
 {
 	char *p;
 	uchar addr[IPaddrlen];
-	int port;
 
 	p = strchr(str, '!');
 	if(p == 0) {
 		p = str;
-		ipzero(addr);
+		ipzero(c->laddr);
 	}
 	else {
 		*p++ = 0;
 		parseip(addr, str);
+		ipmove(c->laddr, addr);
 	}
 	if(*p == '*')
-		port = 0;
+		c->lport = 0;
 	else
-		port = atoi(p);
-	/* h9: checked before anything is bound */
-	if(h9_net_check(H9_NETANNOUNCE, c->p->stype, addr, port) < 0)
-		error(Eperm);
-	ipmove(c->laddr, addr);
-	c->lport = port;
+		c->lport = atoi(p);
 
 	setlport(c);
 }
@@ -521,22 +510,14 @@ setraddrport(Conv *c, char *str)
 {
 	char *p;
 	uchar addr[IPaddrlen];
-	int port;
 
 	p = strchr(str, '!');
 	if(p == 0)
 		return "malformed address";
 	*p++ = 0;
 	parseip(addr, str);
-	port = atoi(p);
-	/* h9: checked before a port is bound or the host is dialed */
-	if(h9_net_check(H9_NETCONNECT, c->p->stype, addr, port) < 0)
-		error(Eperm);
-	/* h9: port 53 may go to the machine's resolver instead */
-	if(h9_net_redirect(c->p->stype, addr, &port, &c->sfd, c->h9opts) < 0)
-		error(Eperm);
 	ipmove(c->raddr, addr);
-	c->rport = port;
+	c->rport = atoi(p);
 	p = strchr(p, '!');
 	if(p) {
 		if(strcmp(p, "!r") == 0)
@@ -585,46 +566,10 @@ ipwrite(Chan *ch, void *a, long n, vlong offset)
 				break;
 			}
 			if(c->sfd == -1)
-				c->sfd = h9so_socket(c->p->stype, c->raddr, c->h9opts);	/* h9: with its options */
+				c->sfd = so_socket(c->p->stype, c->raddr);
 			so_connect(c->sfd, c->raddr, c->rport);
 			setladdr(c);
 			c->state = "Established";
-			return n;
-		}
-		/*
-		 * h9: a connect that doesn't wait (Linux's O_NONBLOCK
-		 * connect): the conversation reports writable when it
-		 * completes, and SO_ERROR says how (src/kern/linuxnet.c).
-		 */
-		if(strcmp(fields[0], "nbconnect") == 0){
-			if(nf != 2)
-				error("bad args to nbconnect");
-			p = setraddrport(c, fields[1]);
-			if(p != 0)
-				error(p);
-			if(c->sfd == -1)
-				c->sfd = h9so_socket(c->p->stype, c->raddr, c->h9opts);
-			if(h9so_connect_nb(c->sfd, c->raddr, c->rport) == 0)
-				c->state = "Established";
-			else
-				c->state = "Connecting";
-			setladdr(c);
-			return n;
-		}
-		/* h9: half-close, served by the host's shutdown */
-		if(strcmp(fields[0], "shutdown") == 0){
-			if(nf != 2)
-				error("bad args to shutdown");
-			if(c->sfd == -1)
-				error("not connected");
-			h9so_shutdown(c->sfd, fields[1]);
-			return n;
-		}
-		/* h9: socket options, kept for a socket made later */
-		if(strcmp(fields[0], "sockopt") == 0){
-			if(nf != 3)
-				error("bad args to sockopt");
-			h9so_setopt(c->sfd, c->h9opts, fields[1], atoi(fields[2]));
 			return n;
 		}
 		if(strcmp(fields[0], "announce") == 0) {
@@ -635,18 +580,7 @@ ipwrite(Chan *ch, void *a, long n, vlong offset)
 				setladdrport(c, fields[1]);
 				break;
 			}
-			/* h9: port 0 (any) needs a socket too, and UDP doesn't listen */
-			if(c->sfd == -1){
-				c->sfd = h9so_socket(c->p->stype, c->laddr, c->h9opts);
-				so_bind(c->sfd, 0, 0, c->laddr);
-			}
-			if(c->p->stype == S_UDP){
-				setladdr(c);
-				c->state = "Announced";
-				return n;
-			}
 			so_listen(c->sfd);
-			setladdr(c);	/* h9: getsockname after an ephemeral port */
 			c->state = "Announced";
 			return n;
 		}
@@ -665,8 +599,6 @@ ipwrite(Chan *ch, void *a, long n, vlong offset)
 	case Qdata:
 		x = &proto[PROTO(ch->qid)];
 		c = x->conv[CONV(ch->qid)];
-		if(h9_net_send(c->sfd) < 0)	/* h9: a probe-only connect sends nothing */
-			error(Eperm);
 		r = so_send(c->sfd, a, n, 0);
 		if(r < 0){
 			oserrstr();
@@ -921,20 +853,9 @@ cswrite(Chan *c, void *a, long n, vlong offset)
 			ips[0] = smprint("%I", ip);
 			nips = 1;
 		} else {
-			/* h9: names outside the policy never reach the host's resolver */
-			if(h9_net_lookup(h9_net_proto(f[0]), f[1], port) < 0)
-				error("no translation for host found");
 			nips = so_gethostbyname(f[1], ips, nelem(ips));
 			if(nips <= 0)
 				error("no translation for host found");
-			{
-				uchar addrs[nelem(ips)][IPaddrlen];
-
-				for(i=0; i<nips; i++)
-					if(parseip(addrs[i], ips[i]) == -1)
-						ipzero(addrs[i]);
-				h9_net_resolved(h9_net_proto(f[0]), f[1], port, addrs, nips);
-			}
 		}
 		ns = smprint("/net/%s/clone %s!%d", f[0], ips[0], port);
 		free(ips[0]);
@@ -974,45 +895,3 @@ Dev ipdevtab =
 	devwstat,
 };
 
-
-/*
- * h9: a conversation's host socket, for readiness and the Linux calls
- * that pass flags (src/kern/linuxnet.c). -1 if c isn't a conversation's
- * file or it has no socket yet. *udp says whether it's a datagram one.
- */
-int
-h9_ip_sfd(Chan *c, int *udp)
-{
-	Conv *cv;
-
-	switch(TYPE(c->qid)){
-	case Qctl:
-	case Qdata:
-	case Qlisten:
-		break;
-	default:
-		return -1;
-	}
-	if(PROTO(c->qid) >= np)
-		return -1;
-	cv = proto[PROTO(c->qid)].conv[CONV(c->qid)];
-	if(cv == nil)
-		return -1;
-	if(udp != nil)
-		*udp = cv->p->stype == S_UDP;
-	return cv->sfd;
-}
-
-/*
- * h9: writes a control message to the conversation behind any of its
- * files, as a write to its ctl would, for the Linux socket calls.
- */
-long
-h9_ip_ctl(Chan *c, char *msg)
-{
-	Chan t;
-
-	t = *c;
-	t.qid.path = QID(PROTO(c->qid), CONV(c->qid), Qctl);
-	return ipwrite(&t, msg, strlen(msg), 0);
-}

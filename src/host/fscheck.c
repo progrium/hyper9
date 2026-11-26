@@ -4,7 +4,8 @@
  * namespace, is src/kern/fscheck.zig.
  *
  * The devfs side of the sandbox policy (SPEC.md, "Vendor hooks" and
- * "Path resolution"). devfs-posix calls these before touching a host path.
+ * "Path resolution"). The host tree device (src/host/devfs_posix.zig and
+ * devfs_win32.zig) calls these before touching a host path.
  * Each host path is resolved (symlinks followed, as devfs's own stat and
  * open do) and the resolved path is checked against the calling machine's
  * policy through a Zig leaf, h9_policy_check, which never raises errors.
@@ -28,7 +29,6 @@
 #include "dat.h"
 #include "fns.h"
 #include "error.h"
-#define H9_FSCHECK_IMPL	/* the Win32 calls themselves, not fscheck.h's wrappers */
 #include "fscheck.h"
 
 /* Implemented in Zig (src/kern.zig): 0 allows, -1 hides, -2 is read-only. */
@@ -500,19 +500,6 @@ h9_fs_checkfd(int fd, int op)
 	return h9_policy_check(buf, strlen(buf), op);
 }
 
-void
-h9_fs_allowfd(int fd, int op)
-{
-	switch(h9_fs_checkfd(fd, op)){
-	case 0:
-		return;
-	case Readonly:
-		error(Eperm);
-	default:
-		error(Enonexist);
-	}
-}
-
 /*
  * The policy decision for the entry `name` within the directory `dfd` already
  * refers to, judged by that directory's own canonical path joined to `name`,
@@ -539,19 +526,6 @@ h9_fs_checkat(int dfd, char *name, int op)
 		buf[n++] = '/';
 	strcpy(buf+n, name);
 	return h9_policy_check(buf, strlen(buf), op);
-}
-
-void
-h9_fs_allowat(int dfd, char *name, int op)
-{
-	switch(h9_fs_checkat(dfd, name, op)){
-	case 0:
-		return;
-	case Readonly:
-		error(Eperm);
-	default:
-		error(Enonexist);
-	}
 }
 
 #else
@@ -1062,27 +1036,14 @@ h9_fs_checknamew(wchar_t *path, int op)
 	return checkw(path, op, 1);
 }
 
-void
-h9_fs_allow(wchar_t *path, int op)
-{
-	switch(h9_fs_checkw(path, op)){
-	case 0:
-		return;
-	case Readonly:
-		error(Eperm);
-	default:
-		error(Enonexist);
-	}
-}
-
 /*
  * The policy decision for an already-open handle, judged by the file the
  * handle actually opened (its final path name) rather than by resolving a
  * path string again: devfs-win32 opens, then checks the handle, so a swapped
  * component can't steer the open past the check (the check-then-open race).
- * h9_fs_checkhandlew returns 0/-1/-2 as h9_fs_checkw; h9_fs_allowhandlew
- * raises the matching error. The handle is passed as void* so the header
- * needn't include windows.h; HANDLE is a void* on Windows.
+ * h9_fs_checkhandlew returns 0/-1/-2 as h9_fs_checkw. The handle is passed
+ * as void* so the header needn't include windows.h; HANDLE is a void* on
+ * Windows.
  */
 int
 h9_fs_checkhandlew(void *handle, int op)
@@ -1096,33 +1057,5 @@ h9_fs_checkhandlew(void *handle, int op)
 	return h9_policy_check(buf, strlen(buf), op);
 }
 
-void
-h9_fs_allowhandlew(void *handle, int op)
-{
-	switch(h9_fs_checkhandlew(handle, op)){
-	case 0:
-		return;
-	case Readonly:
-		error(Eperm);
-	default:
-		error(Enonexist);
-	}
-}
-
-#endif
-
-#ifndef WINDOWS
-void
-h9_fs_allow(char *path, int op)
-{
-	switch(h9_fs_check(path, op)){
-	case 0:
-		return;
-	case Readonly:
-		error(Eperm);
-	default:
-		error(Enonexist);
-	}
-}
 #endif
 

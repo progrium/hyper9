@@ -82,3 +82,14 @@ void	h9so_unwatch(void *owner);
 
 /* Linux errno values for host ones (they differ on macOS and Windows). */
 int	h9so_linuxerrno(int hosterr);
+
+#ifdef _WIN32
+/*
+ * The host's error as the process's error string, with a socket error
+ * read as it is on a POSIX host and no closing period (src/host/win32.zig's
+ * oserr), in place of drawterm's oserrstr, which spells it as Windows does.
+ */
+void	h9_oserrstr(void);
+#define oserrstr()	h9_oserrstr()
+#define oserror()	(h9_oserrstr(), nexterror())
+#endif

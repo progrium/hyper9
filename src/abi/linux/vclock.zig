@@ -244,9 +244,7 @@ pub fn supported(eng: engine.Engine) bool {
 }
 
 fn engineId(b: engine.Engine) usize {
-    return switch (b) {
-        inline else => |p| @intFromPtr(p),
-    };
+    return b.id();
 }
 
 fn lockSpin() void {

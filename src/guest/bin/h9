@@ -1,0 +1,136 @@
+#!/bin/rc
+# h9 [flags] [--rc 'command' [args...] | --rc | [--] program [args...]]
+# Runs a child machine (design/child-machines.md) through /dev/machine,
+# with the host h9's flags. Its paths are this namespace's, and its
+# limits come out of this machine's.
+rfork e
+nl='
+'
+fn usage {
+	echo 'usage: h9 [--memory SIZE] [--pids N] [--cpus N] [--timeout DURATION]' >[1=2]
+	echo '          [--profile default|tight] [--net disable|outbound|enable] [--net-allow PATTERN]...' >[1=2]
+	echo '          [--write none|scope|ephemeral|overlay] [--dir PATH[:DST[:OPTS]]]...' >[1=2]
+	echo '          [--builtin[=DST[:OPTS]]]... [--tmp DST[:OPTS]]... [--bind SRC:DST[:OPTS]]...' >[1=2]
+	echo '          [--cwd PATH] [--readable PATH]... [--writable PATH]... [--read-deny PATH]...' >[1=2]
+	echo '          [--ns ''LINE; LINE''|@FILE]... [--env NAME=VALUE]... [--children] [--no-guest-tools]' >[1=2]
+	echo '          [--print] [--rc ''command'' [args...] | --rc | [--] program [args...]]' >[1=2]
+	exit usage
+}
+# $1 as ctl lines take a word, in $qv: in single quotes, with '' for a
+# quote.
+fn q {
+	ifs=$nl { qx=`{echo -n $1 | sed 's/''/''''/g'} }
+	qv=''''^$"qx^''''
+}
+ctl=()
+devs=(guest-tools)
+print=no
+prog=()
+while(! ~ $#* 0 && ~ $#prog 0){
+	f=$1
+	v=()
+	if(~ $f --*'='*){
+		ifs=$nl {
+			v=`{echo -n $f | sed 's/^[^=]*=//'}
+			f=`{echo -n $f | sed 's/=.*//'}
+		}
+		if(~ $#v 0) v=''
+	}
+	shift
+	switch($f){
+	case --memory --pids --cpus --timeout --profile --net --net-allow --write --dir --tmp --bind --cwd --readable --writable --read-deny --env --ns
+		if(~ $#v 0){
+			~ $#* 0 && usage
+			v=$1
+			shift
+		}
+		switch($f){
+		case --net-allow
+			w=netallow
+		case --read-deny
+			w=readdeny
+		case --ns
+			w=ns
+		case *
+			w=`{echo -n $f | sed 's/^--//'}
+		}
+		if(~ $w ns){
+			# Namespace lines, inline or in a file of this namespace.
+			if(~ $v @*){
+				ifs=$nl { nsl=`{cat `{echo -n $v | sed 's/^@//'}} } || exit ns
+			}
+			if not ifs=$nl { nsl=`{echo -n $v | sed 's/;/\n/g'} }
+			ctl=($ctl $nsl)
+		}
+		if not {
+				q $v
+				ctl=($ctl $w^' '^$qv)
+			}
+	case --builtin
+		if(~ $#v 0) ctl=($ctl builtin)
+		if not {
+			q $v
+			ctl=($ctl 'builtin '^$qv)
+		}
+	case --children
+		devs=($devs children)
+	case --no-guest-tools
+		devs=`{echo $devs | sed 's/guest-tools//'}
+	case --print
+		print=yes
+	case --rc
+		if(~ $#* 0) prog=(/bin/rc -l)
+		if not {
+			prog=(/bin/rc -c $1)
+			shift
+		}
+	case --
+		~ $#* 0 && usage
+		prog=$1
+		shift
+	case --engine --backend --arch --gfx --gfx-scale --gfx-size --serve --serve-root --serve-token --serve-origin --serve-net --host-cmd --url --archive --check --plan --host-fs --sandbox --index --index-cache --cred --user-map --trace -v --verbose
+		echo h9: $f: not in a child machine >[1=2]
+		exit usage
+	case -*
+		usage
+	case *
+		prog=$f
+	}
+}
+prog=($prog $*)
+~ $#prog 0 && ! ~ $print yes && usage
+if(! test -d /dev/machine){
+	echo 'h9: child machines are off in this machine (the h9 that started it needs --children)' >[1=2]
+	exit 'children off'
+}
+ctl=($ctl 'devices '^$"devs)
+x=()
+for(a in $prog){
+	q $a
+	x=($x $qv)
+}
+{
+	n=`{read <[0=3]}
+	d=/dev/machine/$n
+	for(l in $ctl) echo $l >$d/ctl || exit ctl
+	if(~ $print yes){
+		cat $d/plan || exit plan
+		exit ''
+	}
+	echo stderr >$d/ctl
+	echo exec $x >$d/ctl || exit exec
+	fn sigint { test -e $d/note && echo interrupt >$d/note }
+	fn sighup { test -e $d/note && echo hangup >$d/note }
+	cat <[0=4] >$d/data >[2]/dev/null &
+	incat=$apid
+	cat $d/stderr >[1=2] &
+	# A note to this rc interrupts the copy too, so it goes on.
+	tries=()
+	while(! cat $d/data && ! ~ $#tries 50) tries=($tries x)
+	st=`{cat $d/wait}
+	# A failed redirection would end this rc.
+	test -e /proc/$incat/note && echo kill >/proc/$incat/note
+	wait
+	if(~ $"st 0) exit ''
+	exit $"st
+} <[3]/dev/machine/clone <[4=0]

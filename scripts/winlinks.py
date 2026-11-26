@@ -11,7 +11,7 @@ C:\\Program Files\\Git\\usr\\bin\\busybox, which no Linux walk can follow,
 so every busybox applet is missing. This remakes each link whose target in
 the archive is absolute as a native link to the same target with
 backslashes, \\bin\\busybox, which h9 reads back as /bin/busybox and
-resolves from the Linux root (src/kern/fscheck.c, h9_fs_readlinkw).
+resolves from the Linux root (src/host/fscheck.c, h9_fs_readlinkw).
 Relative links are left as tar made them.
 
 DEPTH is how many leading names of a member's path are the Linux root

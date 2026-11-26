@@ -169,17 +169,17 @@ h9 --rc 'h9 --rc date'                                                       # n
 
 Integration cases, tagged `[child-machines]`:
 
-- [ ] `test "a child runs and its exit status comes back [child-machines]"`
-- [ ] `test "a child's memory is reserved from the parent's and returned at exit [child-machines]"`
-- [ ] `test "a child that wants more memory than is left fails at exec [child-machines]"`
-- [ ] `test "a child's processes count against the parent's pids [child-machines]"`
-- [ ] `test "a child can't broaden the network policy [child-machines]"`
-- [ ] `test "a child sees only the caller's namespace [child-machines]"`
-- [ ] `test "a child can't write what the caller can't [child-machines]"`
-- [ ] `test "an interrupt reaches the child, and the parent's exit kills it [child-machines]"`
-- [ ] `test "a grandchild is bounded by the root machine [child-machines]"`
-- [ ] `test "a Linux program starts a child through /9 [child-machines]"`
-- [ ] `test "children are masked without --children and under --profile=tight [child-machines]"`
+- [x] `test "a child runs and its exit status comes back [child-machines]"`
+- [x] `test "a child's memory is reserved from the parent's and returned at exit [child-machines]"`
+- [x] `test "a child that wants more memory than is left fails at exec [child-machines]"`
+- [x] `test "a child's processes count against the parent's pids [child-machines]"`
+- [x] `test "a child can't broaden the network policy [child-machines]"`
+- [x] `test "a child sees only the caller's namespace [child-machines]"`
+- [x] `test "a child can't write what the caller can't [child-machines]"`
+- [x] `test "an interrupt reaches the child, and the parent's exit kills it [child-machines]"`
+- [x] `test "a grandchild is bounded by the root machine [child-machines]"`
+- [x] `test "a Linux program starts a child through /9 [child-machines]"`
+- [x] `test "children are masked without --children and under --profile=tight [child-machines]"`
 
 The cases run on every backend, including HVF, where a second VM in the process is impossible.
 
@@ -199,3 +199,15 @@ The cases run on every backend, including HVF, where a second VM in the process 
 - **The Linux view.** A Linux program can reach the device's files through the Linux view's `/9`, but the `h9` on a Linux root's `PATH`, if any, is the Linux binary, not the guest-tools script. Whether that binary should act as a client when it finds the device, so `h9` does the same thing in both views, is undecided.
 - **A different architecture or backend for a child.** A child of 386 binaries on an amd64 parent would need a second backend in the process (emu), with its own memory, so it can't share the parent's quota as simply. Refused for now.
 - **Default memory.** Half of what the parent has left is a guess; a fixed default such as `--memory`'s 1 GiB, capped at what's left, is the alternative.
+
+## Updates
+
+- 2026-11-26: Implemented on the `child-machines` branch. Discoveries while implementing it:
+  - A channel to a directory doesn't carry the mounts and unions under it, which live in the caller's Pgrp, so the caller's `/` as a channel was only `#/`. Each path the child's plan names is instead served from the caller's namespace by the kernel's own 9P server (kserve, as the process that wrote `exec`, so walks cross its mounts and devfs checks its plan), over a pipe, and attached in the child as a 9P mount. The child's thread waits for those servers to end before its parent may.
+  - A path the child only reads is under a copy-on-write overlay of the child's own, so its writes there succeed in its memory, as a root's do, rather than failing; `--print` marks it. A path the caller can write is bound writable, so the child's cwd, the caller's, is writable unless the profile is `tight`, as a host machine's is.
+  - The quota is enforced where pages are allocated for every engine, in the `Engine` value (an engine and a `Quota`), not in `gphys.Ram` and emu's arena separately; `Engine.id()` keys the Linux ABI's per-engine tables by quota, so machines sharing an engine keep them apart. `cpupool.Pool` gained a parent, so each level's `--cpus` caps it.
+  - `children` is a `Policy` field (a capability), so it's a word of the plan's `devices` line, and `narrow` refuses adding it.
+  - `ctl` takes plan lines, so the `readable`, `writable`, and `readdeny` aliases are `allow read`, `allow write`, and `deny read`; `run` is refused, since `exec` is the program. `url`, `archive`, and `ns PATH` lines aren't taken: the guest script reads an `--ns @FILE` itself and writes its lines.
+  - A refusal at `exec` names the line, as `--plan` does: `memory 1G widens the plan, which has memory 523616K`. The script exits with status `exec`.
+  - rc reads an unquoted `=` in an argument as a syntax error, so the Done criteria's `--net=enable` inside an `--rc` string has to be written `--net enable`.
+  - The HVF, KVM, and WHP engines compile with the shared engine and quota, but the sharing hasn't run on them here; the cases run on sud and hcpu.

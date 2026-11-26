@@ -277,10 +277,8 @@ fn h9_linux_chanput(v: *anyopaque) callconv(.c) void {
     chan.cclose(@ptrCast(@alignCast(v)));
 }
 
-// devfs's syncs (src/kern/fscheck.h), which raise the host's error, so
-// they're called through dev.zig's `raising`.
-extern fn h9_fs_syncfs(ch: [*c]Chan) void;
-extern fn h9_fs_sync() void;
+// devfs's syncs (src/host/devfs.zig).
+const hostfs = @import("host_dev").fs;
 
 /// syncfs(2): syncs the host file system behind fd's channel. Only devfs
 /// has one; other devices, and 9P servers, have nothing to sync.
@@ -288,13 +286,13 @@ fn h9_linux_syncfs(fd: c_int) callconv(.c) c_int {
     const ch = sysfile.fdtochan(fd, -1, false, true) catch return syserr();
     defer chan.cclose(ch);
     if (dev.of(ch).dc == 'U')
-        dev.raising(&h9_fs_syncfs, .{ch}) catch return syserr();
+        hostfs.syncfs(ch) catch return syserr();
     return 0;
 }
 
 /// sync(2): syncs every host file system.
 fn h9_linux_sync() callconv(.c) c_int {
-    dev.raising(&h9_fs_sync, .{}) catch return syserr();
+    hostfs.sync() catch return syserr();
     return 0;
 }
 

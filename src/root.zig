@@ -73,6 +73,7 @@ test {
     _ = cred;
     _ = serve;
     _ = gfx;
+    _ = @import("child.zig");
     _ = @import("abi/linux/nr.zig");
     _ = @import("abi/linux/mm.zig");
     _ = @import("kern/mm.zig");

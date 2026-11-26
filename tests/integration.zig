@@ -480,9 +480,14 @@ test "a host #! script runs by its guest path [host-scripts]" {
     defer out.deinit();
     try std.testing.expectEqual(126, out.code);
     try std.testing.expect(std.mem.indexOf(u8, out.err, "--readable") != null);
-    // With the directory shared, it runs from /mnt/term at its host path.
-    var want_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const want = try std.fmt.bufPrint(&want_buf, "/mnt/term{s}/away\n", .{other_real});
+    // With the directory shared, it runs from /mnt/term at its host path:
+    // on Windows, /mnt/term/C:/... with / for each \.
+    var want_buf: [std.Io.Dir.max_path_bytes + 16]u8 = undefined;
+    const want = if (builtin.os.tag == .windows) blk: {
+        const w = try std.fmt.bufPrint(&want_buf, "/mnt/term/{s}/away\n", .{other_real});
+        std.mem.replaceScalar(u8, w, '\\', '/');
+        break :blk w;
+    } else try std.fmt.bufPrint(&want_buf, "/mnt/term{s}/away\n", .{other_real});
     const shared = try runBare(e, cwd, &.{ "--dir", e.root, "--readable", other_real, away }, &.{});
     defer shared.deinit();
     try std.testing.expectEqualStrings(want, shared.out);
@@ -830,7 +835,7 @@ test "--print shows the plan and doesn't run [baseline]" {
     try std.testing.expect(std.mem.indexOf(u8, r.out, "profile:  tight\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "net.disable") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "memory=512M timeout=1m") != null);
-    try std.testing.expect(std.mem.indexOf(u8, r.out, "devmask:  #C #I #ℏ #U #ι #b #i #m\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "devmask:  #C #I #ℏ #U #ι #b #i #m #μ\n") != null);
 }
 
 test "--memory caps guest memory [baseline]" {
@@ -5336,7 +5341,7 @@ test "--no-guest-tools leaves out the bind and masks #H [guest-tools]" {
     defer p.deinit();
     try std.testing.expect(std.mem.indexOf(u8, p.out, "#H/bin") == null);
     // The web host also masks #I, having no sockets.
-    const want = if (getenv(3, "H9_TEST_WEB") != null) "devmask:  #C #I #H #U #ι #b #i #m\n" else "devmask:  #C #H #U #ι #b #i #m\n";
+    const want = if (getenv(3, "H9_TEST_WEB") != null) "devmask:  #C #I #H #U #ι #b #i #m #μ\n" else "devmask:  #C #H #U #ι #b #i #m #μ\n";
     try std.testing.expect(std.mem.indexOf(u8, p.out, want) != null);
     const r = try run(e, &.{ "--no-guest-tools", "ls", "#H" });
     defer r.deinit();
@@ -9336,7 +9341,7 @@ test "Go GC with a goroutine in a call-free loop, at 1 ms slices [linux-threads]
 }
 
 // The web host's cases (design/epoch-0/browser-host.md). They run on
-// every engine; what they guard is the web host's: coroutines that park
+// every engine; what they guard is the web host's: tasks that park
 // for the event loop, a JIT over recycled pages, and stacks without
 // guard pages.
 
@@ -11962,7 +11967,16 @@ test "a 9front ls sees the same Dir as before [file-interface]" {
     defer r.deinit();
     errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
     try std.testing.expectEqual(0, r.code);
-    try std.testing.expectEqualStrings(
+    // The fixture's files are uid 1000. Where the host's uid is 1000 too
+    // (always on Windows, where the machine's user is uid 1000), the
+    // translator names them as the machine's user instead, so the owner
+    // and group columns are left out of the comparison there.
+    const uid: u32 = if (builtin.os.tag == .windows) 1000 else std.c.getuid();
+    const got = if (uid == 1000) try withoutOwners(r.out) else r.out;
+    try std.testing.expectEqualStrings(if (uid == 1000) try withoutOwners(ls_dir_before) else ls_dir_before, got);
+}
+
+const ls_dir_before =
         \\(0000000000000002 0 80) d-rwxr-xr-x M 2 1000 1000 0 Jan  1  1970 /n/l/etc
         \\(0000000000000006 0 80) d-rwxr-xr-x M 2 1000 1000 0 Jan  1  1970 /n/l/lib
         \\(0000000000000005 0 80) d-rwxr-xr-x M 2 1000 1000 0 Jan  1  1970 /n/l/usr
@@ -11974,7 +11988,33 @@ test "a 9front ls sees the same Dir as before [file-interface]" {
         \\(0000000000000007 0 00) --rw-r--r-- M 2 1000 1000  8 Jan  1  1970 /n/l/lib/notes
         \\d-rwxr-xr-x M 2 1000 1000 0 Jan  1  1970 /n/l/lib
         \\
-    , r.out);
+;
+
+/// ls -l output with its owner and group columns (the two after the
+/// device type and number) replaced by "-".
+fn withoutOwners(out: []const u8) ![]const u8 {
+    var b: std.ArrayList(u8) = .empty;
+    const a = std.heap.page_allocator;
+    var it = std.mem.splitScalar(u8, out, '\n');
+    var first = true;
+    while (it.next()) |l| {
+        if (!first) try b.append(a, '\n');
+        first = false;
+        // Mode, type, and dev come after an optional "(qid) " prefix.
+        const at = if (std.mem.startsWith(u8, l, "(")) (std.mem.indexOfScalar(u8, l, ')') orelse 0) + 2 else 0;
+        if (at > l.len) {
+            try b.appendSlice(a, l);
+            continue;
+        }
+        try b.appendSlice(a, l[0..at]);
+        var f = std.mem.tokenizeScalar(u8, l[at..], ' ');
+        var i: usize = 0;
+        while (f.next()) |w| : (i += 1) {
+            if (i > 0) try b.append(a, ' ');
+            try b.appendSlice(a, if (i == 3 or i == 4) "-" else w);
+        }
+    }
+    return b.items;
 }
 
 test "Rlerror errnos from the in-memory .L server become 9front error strings [dotl]" {
@@ -13514,4 +13554,214 @@ test "a pinned root with a different index is refused [plan-format]" {
         try std.testing.expectEqual(125, from_plan.code);
         try expectIn(from_plan.err, "not the pinned");
     }
+}
+
+// Child machines (design/child-machines.md): src/guest/bin/h9 in a
+// machine run with --children starts a child through #μ.
+
+test "a child runs and its exit status comes back [child-machines]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "--children", "--memory", "1g", "--rc", "h9 --memory 256m --rc 'cat /dev/sysname; echo; echo out; echo err >[1=2]; exit 3'; echo status $status; h9 --rc 'exit 0' && echo ok; h9 -- /bin/nonesuch >[2]/dev/null; echo $status" });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+    try expectIn(r.out, "h9\nout\nstatus ");
+    try expectIn(r.out, ": 3\nok\n");
+    try expectIn(r.out, ": 127\n");
+    try std.testing.expectEqualStrings("err\n", r.err);
+    // Its input is the caller's, and an argument reaches it whole, with
+    // its spaces and quotes.
+    const in = try runIn(e, &.{ "--children", "--rc", "h9 --rc cat; h9 -- /bin/echo 'a  b' 'it''s'" }, "hello\n");
+    defer in.deinit();
+    try std.testing.expectEqualStrings("hello\na  b it's\n", in.out);
+}
+
+test "a child's memory is reserved from the parent's and returned at exit [child-machines]" {
+    const e = try env(@src());
+    // 300M twice in a row fits in 512M, since the first is returned.
+    const r = try run(e, &.{ "--children", "--memory", "512m", "--rc", "h9 --memory 300m --rc 'echo a' && h9 --memory 300m --rc 'echo b'" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("a\nb\n", r.out);
+    // Two at once don't.
+    const two = try run(e, &.{ "--children", "--memory", "512m", "--rc", "h9 --memory 300m --rc 'sleep 3' & sleep 1; h9 --memory 300m --rc 'echo b'; echo $status; wait" });
+    defer two.deinit();
+    try expectIn(two.err, "memory");
+    try std.testing.expect(std.mem.indexOf(u8, two.out, "b\n") == null);
+    // Without --memory, a child gets half of what's left.
+    const half = try run(e, &.{ "--children", "--memory", "512m", "--rc", "h9 --print --rc date | grep '^memory'" });
+    defer half.deinit();
+    errdefer std.debug.print("stdout: {s}\n", .{half.out});
+    try std.testing.expect(std.mem.startsWith(u8, half.out, "memory "));
+    const v = std.mem.trimEnd(u8, half.out["memory ".len..], "\n");
+    const k = try std.fmt.parseInt(u64, v[0 .. v.len - 1], 10) * @as(u64, if (v[v.len - 1] == 'M') 1024 else 1);
+    try std.testing.expect(k > 128 * 1024 and k <= 256 * 1024);
+}
+
+test "a child that wants more memory than is left fails at exec [child-machines]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "--children", "--memory", "512m", "--rc", "h9 --memory 1g --rc date; echo $status" });
+    defer r.deinit();
+    try expectIn(r.err, "memory 1G widens");
+    try expectIn(r.out, "exec\n");
+}
+
+test "a child's processes count against the parent's pids [child-machines]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "--children", "--pids", "6", "--rc", "h9 --rc 'sleep 2 & sleep 2 & sleep 2 & sleep 2 & sleep 2 & sleep 2 & wait' >[2=1]" });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\n", .{r.out});
+    try expectIn(r.out, "no procs");
+    // Its own limit is what the parent has left.
+    const p = try run(e, &.{ "--children", "--pids", "20", "--rc", "h9 --print --rc date | grep '^pids'" });
+    defer p.deinit();
+    try std.testing.expect(std.mem.startsWith(u8, p.out, "pids 1"));
+    const wide = try run(e, &.{ "--children", "--pids", "6", "--rc", "h9 --pids 100 --rc date" });
+    defer wide.deinit();
+    try expectIn(wide.err, "widens");
+}
+
+test "a child can't broaden the network policy [child-machines]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "--children", "--net=disable", "--rc", "h9 --net enable --rc date; h9 --net outbound --rc date; h9 --rc 'test -e /net/tcp || echo no net'" });
+    defer r.deinit();
+    try expectIn(r.err, "net enable widens");
+    try expectIn(r.err, "net outbound widens");
+    try std.testing.expectEqualStrings("no net\n", r.out);
+}
+
+test "a child sees only the caller's namespace [child-machines]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "f", .data = "here\n" });
+    // A bind the caller made is the child's, and a host path the caller
+    // can't reach is no more reachable from the child.
+    var cb: [std.Io.Dir.max_path_bytes + 200]u8 = undefined;
+    const cmd = try std.fmt.bufPrint(&cb, "mkdir -p /tmp/x; echo made >/tmp/x/g; bind /tmp/x /usr; h9 --rc 'cat /usr/g; ls /mnt/term{s} >[2=1] || echo unreachable; ls ''#U'' >[2=1] || echo no U'", .{s.path});
+    const r = try run(e, &.{ "--children", "--rc", cmd });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try expectIn(r.out, "made\n");
+    try expectIn(r.out, "unreachable\n");
+    try expectIn(r.out, "no U\n");
+    // `--readable` names a caller path, at the same path, and --print
+    // shows it as the caller's.
+    const p = try run(e, &.{ "--children", "--rc", "h9 --print --readable /usr/glenda --rc date" });
+    defer p.deinit();
+    try expectIn(p.out, "bind '/usr/glenda' /usr/glenda");
+    try expectIn(p.out, "parent");
+}
+
+test "a child can't write what the caller can't [child-machines]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    var at_buf: [std.Io.Dir.max_path_bytes + 16]u8 = undefined;
+    const at = try std.fmt.bufPrint(&at_buf, "/mnt/term{s}", .{s.path});
+    // The caller reads the scratch directory only: --writable doesn't make
+    // it writable in the child, and a child's write without it stays in
+    // the child's memory. The caller's cwd it can write.
+    var cb: [3 * std.Io.Dir.max_path_bytes + 300]u8 = undefined;
+    const cmd = try std.fmt.bufPrint(&cb, "h9 --writable {s} --rc 'echo z >{s}/c' >[2]/dev/null; echo st $status; h9 --rc 'echo w >{s}/d && cat {s}/d'; h9 --rc 'echo y >b'", .{ at, at, at, at });
+    var other: Scratch = undefined;
+    try other.init();
+    defer other.deinit();
+    const r = try run(e, &.{ "--children", "--readable", s.path, "--cwd", other.path, "--rc", cmd });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "st \n") == null);
+    try expectIn(r.out, "st ");
+    try expectIn(r.out, "w\n");
+    try std.testing.expect(!s.exists("c"));
+    try std.testing.expect(!s.exists("d"));
+    try std.testing.expect(other.exists("b"));
+}
+
+test "an interrupt reaches the child, and the parent's exit kills it [child-machines]" {
+    const e = try env(@src());
+    // The interrupt h9's rc gets goes to the child, which exits by it.
+    const r = try run(e, &.{ "--children", "--rc", "h9 --rc 'sleep 100' & p=$apid; sleep 1; echo interrupt >/proc/$p/notepg; wait; echo after" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("after\n", r.out);
+    // A child never outlives its machine: this ends long before 100s.
+    const t0 = std.Io.Timestamp.now(std.testing.io, .awake);
+    const x = try run(e, &.{ "--children", "--rc", "h9 --rc 'sleep 100' & sleep 1; echo parent" });
+    defer x.deinit();
+    try std.testing.expectEqualStrings("parent\n", x.out);
+    try std.testing.expect(t0.untilNow(std.testing.io, .awake).toMilliseconds() < 20_000);
+}
+
+test "a grandchild is bounded by the root machine [child-machines]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "--children", "--memory", "512m", "--net=disable", "--rc", "h9 --children --memory 256m --rc 'h9 --memory 128m --rc ''echo grandchild''; h9 --memory 300m --rc date; h9 --net outbound --rc date'" });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqualStrings("grandchild\n", r.out);
+    try expectIn(r.err, "memory 300M widens");
+    try expectIn(r.err, "net outbound widens");
+    // A child without --children has none of its own.
+    const no = try run(e, &.{ "--children", "--rc", "h9 --rc 'h9 --rc date'" });
+    defer no.deinit();
+    try expectIn(no.err, "child machines are off");
+}
+
+test "a Linux program starts a child through /9 [child-machines]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    const r = try runLinux(&le, true, &.{ "--children", "sh", "-c", "/9/bin/h9 --rc 'echo from child'; echo code $?; /9/bin/h9 --rc 'exit 4'; echo code $?; echo in | /9/bin/h9 -- /bin/cat" });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqualStrings("from child\ncode 0\ncode 4\nin\n", r.out);
+}
+
+test "children are masked without --children and under --profile=tight [child-machines]" {
+    const e = try env(@src());
+    const off = try run(e, &.{ "--rc", "h9 --rc date; ls '#μ' >[2=1]" });
+    defer off.deinit();
+    try expectIn(off.err, "h9: child machines are off in this machine (the h9 that started it needs --children)");
+    try expectIn(off.out, "#μ: mount/attach disallowed");
+    const tight = try run(e, &.{ "--children", "--profile=tight", "--rc", "ls '#μ' >[2=1]" });
+    defer tight.deinit();
+    try expectIn(tight.out, "#μ: mount/attach disallowed");
+    const p = try run(e, &.{ "--children", "--print", "date" });
+    defer p.deinit();
+    try expectIn(p.out, "devices guest-tools children\n");
+    try expectIn(p.out, "proc.children");
+    const np = try run(e, &.{ "--print", "date" });
+    defer np.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, np.out, "proc.children") == null);
+}
+
+test "a child's ctl takes plan lines, bounded by its parent [plan-format]" {
+    const e = try env(@src());
+    // Lines as a plan has them, written to ctl, and checked as each is
+    // written; exec compiles them within the parent's plan.
+    const r = try run(e, &.{ "--children", "--memory", "512m", "--net=disable", "--rc",
+        \\{
+        \\    d=/dev/machine/`{read <[0=3]}
+        \\    echo 'memory 64M' >$d/ctl
+        \\    echo 'net disable; profile default' >$d/ctl
+        \\    echo frobnicate >$d/ctl || echo refused
+        \\    grep '^memory' $d/plan
+        \\    echo 'net enable' >$d/ctl
+        \\    echo exec /bin/rc -c 'echo hi' >$d/ctl || echo widens
+        \\} <[3]/dev/machine/clone
+        \\{
+        \\    d=/dev/machine/`{read <[0=3]}
+        \\    echo 'memory 64M' >$d/ctl
+        \\    echo exec /bin/rc -c '''echo hi''' >$d/ctl
+        \\    cat $d/data
+        \\    cat $d/wait
+        \\} <[3]/dev/machine/clone
+    });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try expectIn(r.out, "refused\n");
+    try expectIn(r.out, "widens\n");
+    try expectIn(r.err, "net enable widens");
+    try expectIn(r.out, "memory 64M\n");
+    try expectIn(r.out, "hi\n0");
 }

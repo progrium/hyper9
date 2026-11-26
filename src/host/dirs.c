@@ -549,7 +549,7 @@ h9_host_readlink(const char *path, char *buf, size_t n)
 #if defined(_WIN32)
 
 /*
- * Windows: devfs-win32's paths are "C:\a\b" (src/kern/fscheck.c spells
+ * Windows: devfs-win32's paths are "C:\a\b" (src/host/fscheck.c spells
  * them "\\?\C:\a\b" for the Win32 calls). A file beneath a handle is
  * opened with NtCreateFile relative to its directory, a name at a time,
  * each with FILE_OPEN_REPARSE_POINT, so the host follows no symbolic link
@@ -606,6 +606,11 @@ enum {
 #ifndef OBJ_INHERIT
 #define OBJ_INHERIT	0x02
 #endif
+
+/* The directories a walk keeps open beneath its handle, for "..". */
+enum {
+	Walkmax = 256,
+};
 
 /* What a walk met: a link (a name surrogate reparse point), or an error. */
 enum {
@@ -682,10 +687,11 @@ static int
 ntwalk(HANDLE top, const char *rel, ACCESS_MASK access, ULONG share, ULONG disp, ULONG opts, ULONG attrs, SECURITY_ATTRIBUTES *sa, int wantlink, HANDLE *out)
 {
 	wchar_t *w, *p, *e;
-	HANDLE cur, h;
-	int n, last;
+	HANDLE cur, h, up[Walkmax];
+	int n, last, depth, i;
 
 	*out = INVALID_HANDLE_VALUE;
+	depth = 0;
 	if((w = malloc((Longmax+1)*sizeof(wchar_t))) == NULL){
 		SetLastError(ERROR_NOT_ENOUGH_MEMORY);
 		return Werr;
@@ -713,9 +719,19 @@ ntwalk(HANDLE top, const char *rel, ACCESS_MASK access, ULONG share, ULONG disp,
 				}
 		}
 		if(n == 2 && p[0] == L'.' && p[1] == L'.'){
-			/* devfs's paths are clean: this would climb out. */
-			SetLastError(ERROR_ACCESS_DENIED);
-			goto err;
+			/*
+			 * A Linux program's paths keep their "..": back to the
+			 * directory this walk came through, but never above the
+			 * handle, which would climb out of the tree.
+			 */
+			if(depth == 0){
+				SetLastError(ERROR_ACCESS_DENIED);
+				goto err;
+			}
+			if(cur != top)
+				CloseHandle(cur);
+			cur = up[--depth];
+			n = 0;	/* and, if it's the last name, that directory itself */
 		}
 		if(n == 1 && p[0] == L'.')
 			n = 0;	/* the directory itself: an empty name relative to it */
@@ -732,21 +748,61 @@ ntwalk(HANDLE top, const char *rel, ACCESS_MASK access, ULONG share, ULONG disp,
 				CloseHandle(h);
 				goto link;
 			}
-			if(cur != top)
-				CloseHandle(cur);
+			/* Kept for a later "..". */
+			if(depth == Walkmax){
+				CloseHandle(h);
+				SetLastError(ERROR_FILENAME_EXCED_RANGE);
+				goto err;
+			}
+			up[depth++] = cur;
 			cur = h;
 			p = e;
 			continue;
 		}
-		h = ntopen(cur, p, n, access, share, disp, opts|FILE_OPEN_REPARSE_POINT, attrs, sa);
-		if(h == INVALID_HANDLE_VALUE)
-			goto err;
-		if(!wantlink && islink(h)){
-			CloseHandle(h);
-			goto link;
+		{
+			ULONG d;
+			int trunc;
+
+			/*
+			 * An overwriting open of a link would overwrite the link
+			 * itself, which FILE_OPEN_REPARSE_POINT opens, before
+			 * islink could see it: open without truncating, and
+			 * truncate once the name is known not to be a link.
+			 */
+			d = disp;
+			trunc = 0;
+			if(!wantlink && (disp == FILE_OVERWRITE || disp == FILE_OVERWRITE_IF || disp == FILE_SUPERSEDE)){
+				d = disp == FILE_OVERWRITE ? FILE_OPEN : FILE_OPEN_IF;
+				trunc = 1;
+			}
+			h = ntopen(cur, p, n, access, share, d, opts|FILE_OPEN_REPARSE_POINT, attrs, sa);
+			if(h == INVALID_HANDLE_VALUE)
+				goto err;
+			if(!wantlink && islink(h)){
+				CloseHandle(h);
+				goto link;
+			}
+			if(trunc){
+				FILE_END_OF_FILE_INFO eof;
+				LARGE_INTEGER size;
+
+				/* A file just made, or already empty, has nothing to cut. */
+				eof.EndOfFile.QuadPart = 0;
+				if(GetFileSizeEx(h, &size) && size.QuadPart != 0 && !SetFileInformationByHandle(h, FileEndOfFileInfo, &eof, sizeof eof)){
+					DWORD err;
+
+					err = GetLastError();
+					CloseHandle(h);
+					SetLastError(err);
+					goto err;
+				}
+			}
 		}
 		if(cur != top)
 			CloseHandle(cur);
+		for(i = 0; i < depth; i++)
+			if(up[i] != top)
+				CloseHandle(up[i]);
 		free(w);
 		*out = h;
 		return Wok;
@@ -754,6 +810,9 @@ ntwalk(HANDLE top, const char *rel, ACCESS_MASK access, ULONG share, ULONG disp,
 link:
 	if(cur != top)
 		CloseHandle(cur);
+	for(i = 0; i < depth; i++)
+		if(up[i] != top)
+			CloseHandle(up[i]);
 	free(w);
 	return Wlink;
 err:
@@ -763,6 +822,9 @@ err:
 		err = GetLastError();
 		if(cur != top)
 			CloseHandle(cur);
+		for(i = 0; i < depth; i++)
+			if(up[i] != top)
+				CloseHandle(up[i]);
 		free(w);
 		SetLastError(err);
 	}
@@ -958,7 +1020,7 @@ out:
 }
 
 /*
- * devfs-win32's CreateFileW (through src/kern/fscheck.c's
+ * devfs-win32's CreateFileW (through src/host/fscheck.c's
  * h9_fs_createfile): 1 with *out set, or 0 for the caller to call
  * CreateFileW itself.
  */

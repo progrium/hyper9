@@ -20,7 +20,7 @@
  *   clipboard. The guest never reads the clipboard itself.
  *
  * Like the headless backend, this is h9's own source, so it defines the
- * names src/kern/gfx-gui.h would otherwise rename, and isn't compiled with
+ * names src/host/gfx-gui.h would otherwise rename, and isn't compiled with
  * that header.
  */
 

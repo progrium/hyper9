@@ -284,6 +284,7 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
         .cpus = cfg.cpus,
         .cwd_writable = if (cfg.sandbox != null) true else cfg.cwd_writable,
         .host_fs = cfg.host_fs,
+        .children = cfg.children,
     };
     var base: h9.Machine.Options = .{
         .engine = cfg.engine,
@@ -537,6 +538,7 @@ fn readPlan(io: std.Io, arena: std.mem.Allocator, path: []const u8) ![]const u8 
 /// realpath, so the web host resolves one component at a time with
 /// readlink.
 fn realPath(io: std.Io, arena: std.mem.Allocator, p: []const u8) ![]u8 {
+    if (builtin.os.tag == .windows) return std.Io.Dir.cwd().realPathFileAlloc(io, try hostPath(arena, p), arena);
     if (!web) return std.Io.Dir.cwd().realPathFileAlloc(io, p, arena);
     var path = try std.fs.path.resolvePosix(arena, &.{ web_pwd, p });
     var links: usize = 0;
@@ -870,6 +872,35 @@ fn resolveAll(arena: std.mem.Allocator, io: std.Io, paths: []const []const u8, m
         o.* = kernPath(arena, resolved);
     }
     return out;
+}
+
+/// kernPath's `/C:/a/b` back as `C:\a\b`, so the paths `--print` writes
+/// in a plan (`cwd`, `allow`, and `deny`) name the same files when
+/// `--plan` reads them; any other path is unchanged. Windows only: `/C:`
+/// names nothing there otherwise.
+fn hostPath(arena: std.mem.Allocator, p: []const u8) ![]const u8 {
+    if (p.len < 3 or p[0] != '/' or !std.ascii.isAlphabetic(p[1]) or p[2] != ':' or (p.len > 3 and p[3] != '/')) return p;
+    const out = try arena.alloc(u8, if (p.len == 3) 3 else p.len - 1);
+    @memcpy(out[0..2], p[1..3]);
+    if (p.len == 3) {
+        out[2] = '\\';
+        return out;
+    }
+    for (p[3..], out[2..]) |c, *o| o.* = if (c == '/') '\\' else c;
+    return out;
+}
+
+test "hostPath reads kernPath's spelling back [plan-format]" {
+    const t = std.testing;
+    var ar = std.heap.ArenaAllocator.init(t.allocator);
+    defer ar.deinit();
+    const a = ar.allocator();
+    try t.expectEqualStrings("C:\\a\\b", try hostPath(a, "/C:/a/b"));
+    try t.expectEqualStrings("C:\\", try hostPath(a, "/C:"));
+    try t.expectEqualStrings("/usr/lib", try hostPath(a, "/usr/lib"));
+    try t.expectEqualStrings("rel/C:", try hostPath(a, "rel/C:"));
+    try t.expectEqualStrings("/C:x", try hostPath(a, "/C:x"));
+    if (builtin.os.tag == .windows) try t.expectEqualStrings("/C:/a/b", kernPath(a, try hostPath(a, "/C:/a/b")));
 }
 
 /// A resolved host path in the form `#U` takes: unchanged on Unix, and

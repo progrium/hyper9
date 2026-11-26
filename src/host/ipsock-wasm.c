@@ -1,6 +1,6 @@
 /*
  * devip's host socket layer on the web host (design/epoch-0/browser-host.md),
- * built instead of devip-posix.c. There's no socket API in a browser, and
+ * built instead of ipsock-posix.c. There's no socket API in a browser, and
  * the policy masks #I there, but devip.c links against these.
  */
 
