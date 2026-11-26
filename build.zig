@@ -2082,7 +2082,10 @@ pub fn build(b: *std.Build) void {
         run_c.addFileArg(host_hello);
         run_c.addArgs(&.{ "--engine", "hcpu" });
         run_c.addCheck(.{ .expect_stdout_match = "engine hcpu, arch " });
-        run_c.addCheck(.{ .expect_stdout_match = "hello\nexited \"\"\n" });
+        // The guest's line arrives as it wrote it, but hello.c's printf
+        // goes through the C runtime, whose stdout is in text mode on
+        // Windows and ends each line with \r\n.
+        run_c.addCheck(.{ .expect_stdout_match = if (os == .windows) "hello\nexited \"\"\r\n" else "hello\nexited \"\"\n" });
         run_c.addCheck(.{ .expect_term = .{ .exited = 0 } });
         test_step.dependOn(&run_c.step);
     }

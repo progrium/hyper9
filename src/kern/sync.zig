@@ -59,6 +59,31 @@ pub fn unpark(p: *c.Proc) void {
     c.procwakeup(p);
 }
 
+fn noCond(_: ?*anyopaque) callconv(.c) c_int {
+    return 0;
+}
+
+/// Waits about ms milliseconds, as osmsleep, for a loop that polls: a
+/// process on a continuation parks in tsleep, so its executor runs
+/// others meanwhile, and anything else sleeps its host thread. A note
+/// that ends the wait early is left pending, for the loop to see.
+pub fn msleep(ms: c_uint) void {
+    if (can_park) if (contOf(up())) |_| {
+        tsleep(&up().ksleep, noCond, null, ms) catch {
+            up().notepending = 1;
+        };
+        return;
+    };
+    c.osmsleep(@intCast(ms));
+}
+
+/// Ends the calling process's continuation, as pexit ends a host thread:
+/// its executor goes on with another. Only for a process with one.
+pub fn exitCont() noreturn {
+    c._setproc(null);
+    sched.cont.exit();
+}
+
 /// Runs processes' kernel calls on continuations, on the calling host
 /// thread (design/scheduler.md): `call` starts one, `resumeProc` goes on
 /// with one an unpark made runnable (its continuation's `ready` hook).
@@ -374,6 +399,7 @@ fn c_postnote(p: *c.Proc, x: c_int, msg: ?[*:0]const u8, flag: c_int) callconv(.
 }
 
 pub fn exportC() void {
+    @import("sched/kern.zig").exportC();
     @export(&c_qlock, .{ .name = "qlock" });
     @export(&c_canqlock, .{ .name = "canqlock" });
     @export(&c_qunlock, .{ .name = "qunlock" });

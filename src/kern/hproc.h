@@ -52,6 +52,14 @@ struct Hmach
 	int	nlive;		/* processes not yet released (h9_kern_release); under lk */
 	void	*srv;		/* devsrv.c's registry, made on first attach; under lk */
 	Proc	*procs;		/* its processes, on mnext, until they exit; under lk */
+	/*
+	 * Its scheduler (design/scheduler.md), or nil: a process it starts
+	 * runs on the scheduler's executors rather than a host thread of its
+	 * own. schedstart returns 0, or -1 to have the process get a thread.
+	 * Set before the first spawn.
+	 */
+	void	*sched;
+	int	(*schedstart)(void *sched, Proc *p);
 };
 
 /* 9front's Note. One note posted to a group is shared by its queues. */
@@ -75,6 +83,13 @@ struct Hwait
  * waiter is the caller's group leader. Not a 9front flag.
  */
 enum { RFLXTHREAD = 1<<30 };
+
+/*
+ * h9_kern_fork's flag for a process that keeps a host thread of its own
+ * where the machine has a scheduler: a helper that waits in the host
+ * (the pty and 9P servers). Not a 9front flag.
+ */
+enum { RFHOSTTHREAD = 1<<29 };
 
 
 /* proc.c, for devproc.c. Lookups take a reference; release it with h9_putproc. */
