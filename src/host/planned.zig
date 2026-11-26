@@ -1,17 +1,18 @@
 //! The host a compiled plan describes (design/host-handles.md, "The
-//! policy compiles to handles"). Each handle calls what the kernel calls
-//! today: the directory and network handles ask the plan, as devfs's
-//! `h9_policy_check` and devip's `h9_net_check` do, the clock is the
-//! kernel's, entropy is the machine's `std.Io`, as the Linux ABI's
-//! `getrandom` reads it, and the window is the GUI backend's claim.
-//! Nothing reaches the host through it yet; the devices move onto it a
-//! handle at a time.
+//! policy compiles to handles"). Its directory handles are the trees the
+//! plan allows, opened beneath (src/host/dirs.zig); they and the network
+//! handles also ask the plan, as devfs's `h9_policy_check` and devip's
+//! `h9_net_check` do; its sockets are the host's (src/host/net.zig); the
+//! clock is the OS's, entropy the machine's `std.Io`, and the window the
+//! GUI backend's claim.
 
 const std = @import("std");
 const policy = @import("../policy.zig");
 const kern = @import("../kern.zig");
 const gfx = @import("../gfx.zig");
 const host = @import("host.zig");
+const dirs = @import("dirs.zig");
+const net = @import("net.zig");
 
 const Host = host.Host;
 
@@ -20,6 +21,10 @@ pub const Extra = struct {
     console: ?host.Console = null,
     /// The screen asked for; with the plan's `gfx`, the window.
     gfx: ?gfx.Options = null,
+    /// Open each directory handle (src/host/dirs.zig), as a machine's
+    /// host does; `closeDirs` closes them. A host that's only described,
+    /// as a test's or `--print`'s, leaves them unopened.
+    open_dirs: bool = false,
 };
 
 /// Builds the host `plan` describes. `plan` and what's allocated in
@@ -31,7 +36,7 @@ pub fn fromPlan(arena: std.mem.Allocator, io: std.Io, plan: *const policy.Plan, 
     const rnd = try arena.create(std.Io);
     rnd.* = io;
     return .{
-        .dirs = .{ .list = try dirsOf(arena, plan), .ctx = ctx, .vtable = &dirs_vt },
+        .dirs = .{ .list = try dirsOf(arena, plan, extra.open_dirs), .ctx = ctx, .vtable = &dirs_vt },
         // `--net=disable` is no dial and no listen. Under outbound the
         // listener is there and refuses every guest address, as devip
         // does now: h9's own loopback listeners, such as the machine's
@@ -57,7 +62,7 @@ fn dirsCheck(ctx: *anyopaque, path: []const u8, op: policy.Op) policy.Verdict {
     return planOf(ctx).check(path, op);
 }
 
-const dial_vt: host.Dial.VTable = .{ .allows = dialAllows, .lookup = dialLookup, .resolved = dialResolved };
+const dial_vt: host.Dial.VTable = .{ .allows = dialAllows, .lookup = dialLookup, .resolved = dialResolved, .probe = dialProbe, .connect = dialConnect };
 
 fn dialAllows(ctx: *anyopaque, proto: ?policy.NetProto, addr: *const [16]u8, port: u16) bool {
     return planOf(ctx).netCheck(.connect, proto, addr, port);
@@ -71,7 +76,21 @@ fn dialResolved(ctx: *anyopaque, proto: ?policy.NetProto, name: []const u8, port
     planOf(ctx).netResolved(proto, name, port, addrs);
 }
 
-const listen_vt: host.Listen.VTable = .{ .allows = listenAllows };
+fn dialProbe(ctx: *anyopaque, proto: ?policy.NetProto, addr: *const [16]u8) bool {
+    return planOf(ctx).netProbe(proto, addr);
+}
+
+fn dialConnect(_: *anyopaque, kind: net.Transport, addr: *const [16]u8, port: u16, until: i64) ?net.Fd {
+    if (comptime !net.supported) return null;
+    return net.dial(kind, addr, port, until);
+}
+
+const listen_vt: host.Listen.VTable = .{ .allows = listenAllows, .bind = listenBind };
+
+fn listenBind(_: *anyopaque, kind: net.Transport, addr: *const [16]u8, port: u16) ?net.Listener {
+    if (comptime !net.supported) return null;
+    return net.listen(kind, addr, port);
+}
 
 fn listenAllows(ctx: *anyopaque, proto: ?policy.NetProto, addr: *const [16]u8, port: u16) bool {
     return planOf(ctx).netCheck(.announce, proto, addr, port);
@@ -80,11 +99,11 @@ fn listenAllows(ctx: *anyopaque, proto: ?policy.NetProto, addr: *const [16]u8, p
 const clock_vt: host.Clock.VTable = .{ .wall = clockWall, .mono = clockMono };
 
 fn clockWall(_: ?*anyopaque) i64 {
-    return kern.wallNs();
+    return kern.osWallNs();
 }
 
 fn clockMono(_: ?*anyopaque) i64 {
-    return kern.monoNs();
+    return kern.osMonoNs();
 }
 
 const random_vt: host.Random.VTable = .{ .fill = randomFill };
@@ -109,7 +128,7 @@ fn windowRelease(_: ?*anyopaque, claim: *const gfx.Claim) void {
 /// the root stack and `cwd` the host cwd; a path that's both has both
 /// names. Each other path an allow rule names is `d1`, `d2`, and so on,
 /// in rule order, once.
-fn dirsOf(arena: std.mem.Allocator, plan: *const policy.Plan) error{OutOfMemory}![]const host.Dir {
+fn dirsOf(arena: std.mem.Allocator, plan: *const policy.Plan, open: bool) error{OutOfMemory}![]const host.Dir {
     var list: std.ArrayList(host.Dir) = .empty;
     if (rootPath(plan)) |p| try list.append(arena, try dirOf(arena, plan, "root", p));
     if (cwdPath(plan)) |p| try list.append(arena, try dirOf(arena, plan, "cwd", p));
@@ -120,7 +139,31 @@ fn dirsOf(arena: std.mem.Allocator, plan: *const policy.Plan) error{OutOfMemory}
         n += 1;
         try list.append(arena, try dirOf(arena, plan, try std.fmt.allocPrint(arena, "d{d}", .{n}), r.path));
     }
+    if (open) for (list.items, 0..) |*d, i| {
+        // A path that's both the root and the cwd shares one handle.
+        const same: ?host.Dir = for (list.items[0..i]) |e| {
+            if (std.mem.eql(u8, e.path, d.path)) break e;
+        } else null;
+        if (same) |e| {
+            d.handle = e.handle;
+            d.leaf = e.leaf;
+        } else if (dirs.openTree(arena, d.path)) |o| {
+            d.handle = o.handle;
+            d.leaf = o.leaf;
+        }
+    };
     return list.items;
+}
+
+/// Closes the directory handles `fromPlan` opened.
+pub fn closeDirs(h: Host) void {
+    const d = h.dirs orelse return;
+    for (d.list, 0..) |x, i| {
+        const shared = for (d.list[0..i]) |e| {
+            if (e.handle == x.handle) break true;
+        } else false;
+        if (!shared) dirs.closeTree(x.handle);
+    }
 }
 
 fn dirOf(arena: std.mem.Allocator, plan: *const policy.Plan, name: []const u8, path: []const u8) error{OutOfMemory}!host.Dir {

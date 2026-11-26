@@ -28,6 +28,22 @@ enum {
 #define H9_ELOOP "too many symbolic links"
 
 #ifndef WINDOWS
+#if !defined(__wasi__) && !defined(H9_FSCHECK_IMPL)
+/*
+ * devfs-posix reaches host files beneath the machine's directory handles
+ * (src/host/dirs.c, design/host-handles.md): its opens through
+ * h9_host_open, and its stat, lstat, and readlink calls by path through
+ * these, so none of them follows a link out of a handle. Paths no handle
+ * holds, the ancestors devfs lists, are looked at by path.
+ */
+int	h9_host_open(const char *path, int flags, int mode, int nolinks);
+int	h9_host_stat(const char *path, struct stat *st);
+int	h9_host_lstat(const char *path, struct stat *st);
+ssize_t	h9_host_readlink(const char *path, char *buf, size_t n);
+#define	stat(p, s)	h9_host_stat(p, s)
+#define	lstat(p, s)	h9_host_lstat(p, s)
+#define	readlink(p, b, n)	h9_host_readlink(p, b, n)
+#endif
 /*
  * Resolves rel, '/'-separated, from dir inside the tree top: an absolute
  * link target starts again at top, and ".." stops there. top is canonical,

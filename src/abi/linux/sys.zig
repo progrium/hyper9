@@ -1267,7 +1267,7 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const engine.Ureg) Err!Outcome {
             var off: u64 = 0;
             while (off < n) {
                 const k = @min(tmp.len, n - off);
-                p.io.random(tmp[0..k]);
+                kern.random(p.io, tmp[0..k]);
                 try p.writeMem(c.a[0] + off, tmp[0..k]);
                 off += k;
             }

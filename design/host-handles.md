@@ -6,7 +6,7 @@ created: 2026-11-21
 authors: [progrium]
 depends: [kernel-port]
 areas: [kern, sandbox, web, tests]
-branch: [dev, host-handles]
+branch: [dev, host-handles, host-handles-2]
 ---
 
 # Proposal: Host access through handles
@@ -129,3 +129,12 @@ This is a security change. The guest can reach nothing new. What changes is how 
 - **Under `--net=outbound` there is a listener, and it refuses every guest address.** h9's own loopback listeners, such as [linux-dns](linux-dns.md)'s resolver, which takes the queries devip redirects to it, open through `listen` too, so only `--net=disable` leaves it out.
 - **The handles hold a pointer to the plan**, so `Machine` keeps a copy in its arena, which doesn't move when a `Machine` is returned by value. A `Kernel` that's a value will hold its `Host` the same way.
 - **`Machine.Stdio` is the host's `Console`**, which has the same fields.
+
+**2026-11-26, files, the network, and the rest.** Steps 2 to 4 are built. Some things they settled:
+
+- **devfs keeps its paths, and opens beneath the handle that holds each.** Each tree a plan allows is opened when the machine is made (`src/host/dirs.zig`): a directory fd (`O_PATH` on Linux), a `HANDLE`, or for a one-file tree its directory's and its name. devfs still names files by resolved host path, and `src/host/dirs.c` opens each beneath the deepest handle whose path holds it: `openat2` with `RESOLVE_BENEATH` on Linux, a walk of one name at a time with `O_NOFOLLOW` elsewhere, and `NtCreateFile` a name at a time with `FILE_OPEN_REPARSE_POINT` on Windows. devfs-posix's opens, `stat`s, `lstat`s, and `readlink`s go through it (`src/kern/fscheck.h`), and devfs-win32's `CreateFile` and `CreateDirectory`; its deletes, renames, attributes, and `FindFirstFile` are still by path. The `#U` attach specs, and so `/proc/n/ns`, still name host paths: handle names in the namespace are later work.
+- **A 9front program's links still reach other trees.** Its walks follow links anywhere, and the policy decides by the resolved path, so an open whose links leave its handle is made again by the path it resolves to, beneath the handle holding that, with no link followed; with no such handle it's a hidden file. A link swapped in meanwhile fails rather than being followed.
+- **Ancestors are looked at by path.** A path no handle holds is an ancestor that `/mnt/term` lists, or hidden; only directories are opened there, read-only, and devfs's checks decide.
+- **The policy checks stay**, as the second line: read-deny, and the verdict on what was opened. Removing them waits on handle names in the namespace and on devfs leaving `third_party/`.
+- **The resolver's sockets are the host's.** `Dial.connect` and `Listen.bind` make h9's own connections (`src/host/net.zig`, which was the resolver's `HostNet`), without asking `allows`; the resolver gets the machine's dialer and listener. Under `--net=outbound` the listener refuses every guest address and still binds the resolver's loopback sockets, as the open question above has it. devip's checks ask the dialer and listener (`allows`, `probe`, `lookup`, `resolved`), and a missing one refuses. `#ℏ`'s checks still ask the plan.
+- **The clock, entropy, the console, and the window.** `kern.wallNs` and `kern.monoNs` read the calling thread's host clock, which in a planned host is the OS's; `getrandom`, `AT_RANDOM`, and `/proc`'s uuids read its `random`; a run's console is its `console`, refreshed from `Options.stdio` at each run since an embedder may change it; and `--gfx` takes the screen through its `window`. devcons's `#c/random` is still drawterm's.

@@ -248,7 +248,7 @@ So devcons calls hooks: `#c/pid` and `#c/ppid` (machine-local pids, as `$pid` an
 
 The CPU count is `--cpus` if given, else the host's, capped by the engine's vCPU limit. The guest's `NPROC` is the same count, so `mk` runs that many jobs ([self-host](../design/epoch-0/self-host.md)).
 
-The clock is one per host process (`src/kern.zig`): wall time from the host's real-time clock, and monotonic time from its monotonic clock, offset to the wall time at the kernel's boot; ticks are the monotonic nanoseconds, so `fasthz` is 10⁹. Writes to `time` and `bintime` still fail.
+The clock is the machine's host's ([host-handles](../design/host-handles.md)): `kern.wallNs` and `kern.monoNs` (`src/kern.zig`) read the calling thread's machine's `Host.clock`, and a thread without one, and the clock a plan's host gives, read the OS: wall time from the host's real-time clock, and monotonic time from its monotonic clock, offset to the wall time at the kernel's boot. Entropy for the Linux ABI's `getrandom`, `AT_RANDOM`, and `/proc`'s uuids is the host's `random`, the console is its `console`, and the `--gfx` screen is taken through its `window`. Ticks are the monotonic nanoseconds, so `fasthz` is 10⁹. Writes to `time` and `bintime` still fail.
 
 #### Overlay device `#O` (`src/kern/dev/overlay.zig`)
 
