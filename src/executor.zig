@@ -219,6 +219,10 @@ pub const Exec = struct {
     kx: *anyopaque,
     /// Its vCPU, unless processes keep their own (`Sched.own`).
     vcpu: engine.Vcpu = undefined,
+    /// Whether `vcpu` is made yet: on the executor's first guest run, so
+    /// an executor that never runs guest code costs no vCPU (on HVF, a
+    /// vCPU's kernel pages come out of the machine's memory cap).
+    has_vcpu: bool = false,
     /// The vCPU running guest code, for the monitor's kick; under
     /// `run_lock`.
     running: ?*engine.Vcpu = null,
@@ -278,12 +282,6 @@ pub const Exec = struct {
     fn main(e: *Exec) void {
         const s = e.s;
         if (s.thread_init) |f| f(s.init_ctx);
-        if (!s.own) e.vcpu = s.eng.createVcpu() catch {
-            e.up.store(2, .release);
-            s.io.futexWake(u32, &e.up.raw, 1);
-            s.execEnded(e);
-            return;
-        };
         e.up.store(1, .release);
         s.io.futexWake(u32, &e.up.raw, 1);
         while (true) {
@@ -302,7 +300,7 @@ pub const Exec = struct {
         while (e.q.pop()) |t| s.global.push(t);
         s.wake();
         e.owner.store(null, .release);
-        if (!s.own) e.vcpu.destroy();
+        if (e.has_vcpu) e.vcpu.destroy();
         s.execEnded(e);
     }
 
@@ -351,7 +349,7 @@ pub const Exec = struct {
         c.h9_kern_locals(1, &t.locals);
         const l = t.lease orelse return;
         if (e.owner.load(.acquire) != l or l.home != @as(?*anyopaque, e)) return;
-        if (!l.extra_dirty) e.vcpu.getExtra(&l.extra) catch {};
+        if (!l.extra_dirty and e.has_vcpu) e.vcpu.getExtra(&l.extra) catch {};
     }
 };
 
@@ -664,6 +662,14 @@ pub fn leaseRun(l: *cpupool.Lease) engine.Error!engine.Exit {
     const t = currentTask() orelse return error.HypervisorFailed;
     t.lease = l;
     if (e.s.own) return runOwn(e, l);
+    if (!e.has_vcpu) {
+        // HVF binds a vCPU to the thread that makes it: this one.
+        e.vcpu = e.s.eng.createVcpu() catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfGuestMemory,
+            else => |x| x,
+        };
+        e.has_vcpu = true;
+    }
     const v = &e.vcpu;
     if (e.owner.load(.acquire) != l or l.home != @as(?*anyopaque, e)) {
         // Another ran here since, or it last ran elsewhere: its whole
@@ -703,7 +709,10 @@ pub fn leaseRun(l: *cpupool.Lease) engine.Error!engine.Exit {
 /// run: only the host thread is the executor's.
 fn runOwn(e: *Exec, l: *cpupool.Lease) engine.Error!engine.Exit {
     if (!l.owned) {
-        const v = e.s.eng.createVcpu() catch return error.HypervisorFailed;
+        const v = e.s.eng.createVcpu() catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfGuestMemory,
+            else => |x| x,
+        };
         l.lockKick();
         l.vcpu = v;
         l.owned = true;
