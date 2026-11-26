@@ -59,7 +59,7 @@ h9_cons_wake(ulong id)
 {
 	if(id < Maxcons)
 		wakeup(&hcons[id].r);
-	h9_pollwake();	/* a Linux poll or epoll on the console (linuxnet.c) */
+	h9_pollwake();	/* a Linux poll or epoll on the console (linuxnet.zig) */
 }
 
 static void

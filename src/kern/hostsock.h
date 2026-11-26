@@ -55,7 +55,7 @@ struct H9ifaddr {
 };
 int	h9so_ifaddrs(H9ifaddr *a, int max);
 
-/* For src/kern/linuxnet.c; these don't raise errors. */
+/* For src/kern/linuxnet.zig; these don't raise errors. */
 /* poll(2) bits that are ready on fd now (0 timeout); bits from POLLIN, POLLOUT, POLLERR, POLLHUP, POLLRDHUP. */
 int	h9so_ready(int fd, int events);
 /* The socket's pending error (SO_ERROR), as a Linux errno, and clears it. */

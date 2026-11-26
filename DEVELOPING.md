@@ -405,7 +405,7 @@ development builds report `git describe` (`-Dversion=V` overrides it).
 | Path | Contents |
 | --- | --- |
 | `src/main.zig`, `src/cli.zig`, `src/stdin.zig`, `src/hostsig.zig`, `src/tools.zig` | CLI: entry point, flag parsing with no I/O, the host stdin reader (cancellable, for the console's reader thread), Ctrl-C, hangup, and raw mode on the host terminal, and `--check`/`--version` |
-| `src/gfx.zig`, `src/kern/gfx*.c`, `src/kern/nogfx.c` | `--gfx`: the window claim and `h9.gfx.main`, the kernel glue around drawterm's GUI backends (lazy `#i`, the kbdfs `/dev/kbd`, `/dev/screen`, `/dev/mousein`, `/dev/kbdin`, the clipboard, and the choice of screen), the headless screen, and the stubs for builds without graphics |
+| `src/gfx.zig`, `src/kern/gfx*.c`, `src/kern/dev/gfx.zig`, `src/kern/nogfx.c` | `--gfx`: the window claim and `h9.gfx.main`, the kernel glue around drawterm's GUI backends (lazy `#i`, the kbdfs `/dev/kbd`, `/dev/screen`, `/dev/mousein`, `/dev/kbdin`, the clipboard, and the choice of screen), the headless screen, and the stubs for builds without graphics |
 | `src/root.zig` | library root; [docs/embedding.md](docs/embedding.md) explains using it |
 | `docs/` | guides that go further than the manual; `docs/embedding/embed.zig` is the embedding guide's example program |
 | `src/machine.zig` | one machine: builds its namespace, runs a process, and serves its syscalls |
@@ -419,7 +419,7 @@ development builds report `git describe` (`-Dversion=V` overrides it).
 | `src/engine.zig`, `src/engine/` | the engine interface and engines (HVF, KVM, WHP, sud, and hcpu, h9's own CPUs, which the web host uses too), with the guest-physical allocator and page tables the hypervisor engines share |
 | `src/engine/hcpu/hcpu.zig`, `src/engine/hcpu/jit/`, `src/engine/hcpu/interp/` | h9's own CPUs for the emulator (hcpu): the JIT's IR and its reference evaluator, the runtime ABI, the emitters (arm64, wasm), the front ends (`a64/`), and the interpreters and software TLB the two tiers share. `src/engine/hcpu/jit/README.md` has the contracts |
 | `src/web.zig`, `src/web/` | the web host: coroutines on JSPI, its `std.Io` and console, the JS host (`h9-web.js`, `h9-node`, `worker.js`, `wasi-mem.js`, and `statictree.js` for static dotfs trees) and the demo page |
-| `src/nskernel.zig`, `src/nskernel/`, `src/kern/devns.c`, `src/kern/nstab.c` | the namespace kernel: its Zig root (ctl lines, dials, serving, the native API), `h9ns.h`, the `#N` device, and its device table and stubs; `src/web/h9ns.js` and `h9ns-worker.js` are its JS host |
+| `src/nskernel.zig`, `src/nskernel/`, `src/kern/dev/ns.zig`, `src/kern/nstab.c` | the namespace kernel: its Zig root (ctl lines, dials, serving, the native API), `h9ns.h`, the `#N` device, and its device table and stubs; `src/web/h9ns.js` and `h9ns-worker.js` are its JS host |
 | `src/capi.zig`, `src/capi/` | libh9: machines behind a C ABI (`h9.h`), configured with the CLI's flags through `src/cli.zig`; `docs/embedding/hello.c` uses it |
 | `src/arch/` | per-architecture Ureg/ABI and the guest shims |
 | `third_party/drawterm` | vendored drawterm (git subtree; kern and libraries). Local changes: the sandbox hooks in `kern/devfs-posix.c` and `kern/devfs-win32.c` |

@@ -628,7 +628,7 @@ fn h9_kern_popnote(msg: [*]u8, pc: u64) callconv(.c) c_int {
     h.note[nn] = null;
     if (n.ref.ref == 1 and std.mem.startsWith(u8, &n.msg, "sys:")) {
         const l = std.mem.indexOfScalar(u8, &n.msg, 0).?;
-        _ = c.snprint(@as([*]u8, &n.msg) + l, @intCast(port.ERRMAX - l), @constCast(" pc=%#llux"), pc);
+        _ = c.snprint(@as([*]u8, &n.msg) + l, port.ERRMAX - @as(c_int, @intCast(l)), @constCast(" pc=%#llux"), pc);
     }
     var r: c_int = undefined;
     if (h.notify == 0 or h.notified != 0) {

@@ -28,7 +28,7 @@ void	h9_net_closed(int sfd);
 int	h9_net_lookup(int proto, char *name, int port);
 /* Records the addresses cs resolved for an allowed name. */
 void	h9_net_resolved(int proto, char *name, int port, uchar (*addrs)[IPaddrlen], int n);
-/* cs's protocol name as S_TCP or S_UDP, or -1 (src/kern/netcheck.c). */
+/* cs's protocol name as S_TCP or S_UDP, or -1 (src/kern/netcheck.zig). */
 int	h9_net_proto(char *name);
 
 /*
@@ -44,7 +44,7 @@ int	h9_net_proto(char *name);
  * a probe.
  */
 int	h9_net_redirect(int proto, uchar *addr, int *port, int *sfd, int *opts);
-/* h9_net_redirect for a sendto on host socket sfd (src/kern/linuxnet.c). */
+/* h9_net_redirect for a sendto on host socket sfd (src/kern/linuxnet.zig). */
 int	h9_net_redirectto(int proto, int sfd, uchar *addr, int *port);
 /* Gives a reply from the resolver on sfd the address the guest dialled. */
 void	h9_net_unredirect(int proto, int sfd, uchar *addr, ushort *port);

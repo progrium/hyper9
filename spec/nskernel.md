@@ -18,7 +18,7 @@ This describes, as built, the namespace kernel (`nskernel`): a build of h9's ker
 
 ## Namespaces and `#N`
 
-A namespace is a Pgrp, a root, and a dot, in `src/kern/devns.c`. `#N` is `clone`, and `N/ctl` and `N/ns` for each live id. Opening `clone` makes an empty namespace, whose root is a fresh bare `#O` the host can create in, and the fid becomes its `ctl`; reading `ctl` gives the id. Lines written to `ctl` (at most 8 KiB a write, one per line, blank and `#` lines skipped) run one at a time per namespace, each on a kernel process of its own, in that namespace:
+A namespace is a Pgrp, a root, and a dot, in `src/kern/dev/ns.zig`. `#N` is `clone`, and `N/ctl` and `N/ns` for each live id. Opening `clone` makes an empty namespace, whose root is a fresh bare `#O` the host can create in, and the fid becomes its `ctl`; reading `ctl` gives the id. Lines written to `ctl` (at most 8 KiB a write, one per line, blank and `#` lines skipped) run one at a time per namespace, each on a kernel process of its own, in that namespace:
 
 | Line | Effect |
 | --- | --- |

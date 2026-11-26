@@ -1,4 +1,8 @@
 /*
+ * The host's half of fscheck.h: the policy checks on host paths. The
+ * kernel's half, the Linux ABI's FIFOs by paths in the caller's
+ * namespace, is src/kern/fscheck.zig.
+ *
  * The devfs side of the sandbox policy (SPEC.md, "Vendor hooks" and
  * "Path resolution"). devfs-posix calls these before touching a host path.
  * Each host path is resolved (symlinks followed, as devfs's own stat and
@@ -1110,114 +1114,3 @@ h9_fs_allow(char *path, int op)
 }
 #endif
 
-/* src/kern/devoverlay.c */
-extern void h9_overlay_mkfifo(Chan*, char*, ulong);
-extern int h9_overlay_isfifo(Chan*);
-
-extern int h9_hidx_dotl(Chan*);
-
-/*
- * Whether the mount chan c is a 9P2000.L server's, through devdotl (#ℓ),
- * directly or under a mount index (#ι, devhidx.c).
- */
-static int
-dotlmount(Chan *c)
-{
-	if(c->mchan == nil)
-		return 0;
-	return devtab[c->mchan->type]->dc == 0x2113 || h9_hidx_dotl(c->mchan);
-}
-
-/*
- * Makes path a FIFO, for the Linux ABI's mknodat
- * (design/epoch-0/linux-fifo.md): a node in memory in an overlay, or a host FIFO
- * in a devfs tree, where the new name is checked like a create. Anywhere
- * else, such as a plain 9P root, it's "operation not permitted". On a
- * 9P2000.L root it's a Tmknod (src/dotl/client.zig). Returns 0, or
- * -1 with the error in errstr.
- */
-int
-h9_fs_mkfifopath(char *path, ulong perm)
-{
-	Chan *volatile c;
-	char *dir, *name, *p;
-
-	c = nil;
-	dir = nil;
-	if(waserror()){
-		if(c != nil)
-			cclose(c);
-		free(dir);
-		p = up->syserrstr;
-		up->syserrstr = up->errstr;
-		up->errstr = p;
-		return -1;
-	}
-	dir = strdup(path);
-	if(dir == nil)
-		error(Enomem);
-	name = strrchr(dir, '/');
-	if(name == nil){
-		name = dir;
-		c = namec(".", Aaccess, 0, 0);
-	}else{
-		*name++ = '\0';
-		c = namec(dir[0] != '\0' ? dir : "/", Aaccess, 0, 0);
-	}
-	if(name[0] == '\0' || strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
-		error(Eexist);
-	if((c->qid.type & QTDIR) == 0)
-		error(Enotdir);
-	switch(devtab[c->type]->dc){
-	case 'O':
-		p = (char*)c;
-		c = nil;
-		h9_overlay_mkfifo((Chan*)p, name, perm);
-		break;
-	case 'U':
-		h9_fs_mkfifo(c, name, perm);
-		break;
-	case 'M':
-		/* A 9P2000.L server's: devdotl's translator makes a create with H9_DMFIFO a Tmknod. */
-		if(dotlmount(c)){
-			c = devtab[c->type]->create(c, name, OREAD, (perm & 0777) | H9_DMFIFO);
-			break;
-		}
-		/* fall through */
-	default:
-		error("operation not permitted");	/* Linux's EPERM: no FIFOs here */
-	}
-	if(c != nil)
-		cclose(c);
-	free(dir);
-	poperror();
-	return 0;
-}
-
-/*
- * Whether c is a FIFO's chan: an overlay's FIFO node, a host FIFO in a
- * devfs tree, directly or below an overlay, or a FIFO on a 9P2000.L
- * server, whose Dir has H9_DMFIFO.
- */
-int
-h9_fs_chanisfifo(Chan *c)
-{
-	uchar buf[1024];
-	Dir d;
-	int n;
-
-	switch(devtab[c->type]->dc){
-	case 'O':
-		return h9_overlay_isfifo(c);
-	case 'U':
-		return h9_fs_isfifo(c);
-	case 'M':
-		if(!dotlmount(c))
-			return 0;
-		n = devtab[c->type]->stat(c, buf, sizeof buf);
-		if(convM2D(buf, n, &d, nil) != n)
-			return 0;
-		return (d.mode & H9_DMFIFO) != 0;
-	}
-	return 0;
-}
