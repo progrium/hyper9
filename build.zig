@@ -611,7 +611,7 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.O
     });
     kern.root_module.addCSourceFiles(.{
         .root = b.path("src/kern"),
-        .files = &.{ "glue.c", "proc.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "devproc.c", "devoverlay.c", "devsrv.c", "devhtools.c", "fscheck.c", "netcheck.c", "consx.c", "tsleep.c", "devshim.c", "werrstr.c", "sema.c", "rootdial.c", "devhstream.c", "devdotl.c", "devhidx.c", "kserve.c", "ns.c" },
+        .files = &.{ "glue.c", "proc.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "devproc.c", "devoverlay.c", "devsrv.c", "devhtools.c", "fscheck.c", "consx.c", "tsleep.c", "devshim.c", "werrstr.c", "sema.c", "rootdial.c", "devhstream.c", "devdotl.c", "devhidx.c", "kserve.c", "ns.c" },
         .flags = flags,
     });
     // The Linux ABI (design/epoch-0/linux-personality.md) and its host
@@ -677,12 +677,22 @@ fn kernPort(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.
     for (flags) |f| if (std.mem.startsWith(u8, f, "-D")) tc.defineCMacroRaw(f[2..]);
     if (target.result.os.tag == .macos) if (b.graph.environ_map.get("SDKROOT")) |sdk|
         tc.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr/include" }) });
+    // Which kernel the Zig is built into, for the files only one of them
+    // has: the namespace kernel leaves out devip, the Linux ABI, and the
+    // screen.
+    const options = b.addOptions();
+    var nskernel = false;
+    for (flags) |f| nskernel = nskernel or std.mem.eql(u8, f, "-DH9_NSKERNEL");
+    options.addOption(bool, "nskernel", nskernel);
     return b.createModule(.{
         .root_source_file = b.path("src/kern/port.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{.{ .name = "kern_c", .module = tc.createModule() }},
+        .imports = &.{
+            .{ .name = "kern_c", .module = tc.createModule() },
+            .{ .name = "kern_options", .module = options.createModule() },
+        },
     });
 }
 

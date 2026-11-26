@@ -168,7 +168,7 @@ drawterm has no semaphores. 9front's code is ported closely, with the wait lists
 
 `rendezvous` is 9front's on drawterm's Rgrp, so `procinterrupt` still pulls a process out of it, but it also checks for a note that arrived before the process was on the list.
 
-#### Sandbox hooks (`src/kern/fscheck.c`, `src/kern/netcheck.c`)
+#### Sandbox hooks (`src/kern/fscheck.c`, `src/kern/netcheck.zig`)
 
 The C side of the policy checks devfs and devip call; see Sandbox policy, "Vendor hooks".
 

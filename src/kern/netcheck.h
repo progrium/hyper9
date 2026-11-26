@@ -28,7 +28,7 @@ void	h9_net_closed(int sfd);
 int	h9_net_lookup(int proto, char *name, int port);
 /* Records the addresses cs resolved for an allowed name. */
 void	h9_net_resolved(int proto, char *name, int port, uchar (*addrs)[IPaddrlen], int n);
-/* cs's protocol name as S_TCP or S_UDP, or -1 (src/kern/netcheck.c). */
+/* cs's protocol name as S_TCP or S_UDP, or -1 (src/kern/netcheck.zig). */
 int	h9_net_proto(char *name);
 
 /*

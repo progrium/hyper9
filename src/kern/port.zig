@@ -17,6 +17,11 @@
 //! - `devmnt.zig`: devmnt.c, the 9P client.
 //! - `dev/pipe.zig` and `dev/root.zig`: devpipe.c and devroot.c.
 //! - `dev/pty.zig`: h9's src/kern/devpty.c, the Linux ABI's ptys.
+//! - `netcheck.zig`: h9's src/kern/netcheck.c, devip's sandbox hooks.
+//!
+//! The files only the full kernel has (devip's hooks, the Linux ABI, and
+//! the screen) export their C names only there: `options.nskernel` says
+//! the namespace kernel is being built.
 //!
 //! This file is the root the kernel builds compile (build.zig's addKern,
 //! and src/nskernel.zig), and holds what the ported files share: the C
@@ -27,6 +32,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 pub const c = @import("kern_c");
+pub const options = @import("kern_options");
 pub const qio = @import("qio.zig");
 pub const sync = @import("sync.zig");
 pub const dev = @import("dev.zig");
@@ -37,6 +43,7 @@ pub const devmnt = @import("devmnt.zig");
 pub const devpipe = @import("dev/pipe.zig");
 pub const devroot = @import("dev/root.zig");
 pub const devpty = @import("dev/pty.zig");
+pub const netcheck = @import("netcheck.zig");
 
 comptime {
     qio.exportC();
@@ -49,6 +56,9 @@ comptime {
     devpipe.exportC();
     devroot.exportC();
     devpty.exportC();
+    if (!options.nskernel) {
+        netcheck.exportC();
+    }
 }
 
 test {
@@ -65,6 +75,7 @@ test {
     _ = devpipe;
     _ = devroot;
     _ = devpty;
+    _ = netcheck;
 }
 
 /// A kernel error. The Plan 9 error string is on the process, in

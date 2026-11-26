@@ -200,3 +200,42 @@ h9_shim_fs_chanreadlink(Chan *c, char *buf, int nbuf, int *r)
 	poperror();
 	return 0;
 }
+
+#ifndef H9_NSKERNEL
+/*
+ * devip's host-socket calls, which raise, for src/kern/netcheck.zig:
+ * 0, or -1 with the error string set.
+ */
+#include "devip.h"
+#include "hostsock.h"
+
+int
+h9_shim_so_getsockname(int fd, uchar *laddr, ushort *lport)
+{
+	if(waserror())
+		return -1;
+	so_getsockname(fd, laddr, lport);
+	poperror();
+	return 0;
+}
+
+int
+h9_shim_so_bind(int fd, int su, ushort port, uchar *addr)
+{
+	if(waserror())
+		return -1;
+	so_bind(fd, su, port, addr);
+	poperror();
+	return 0;
+}
+
+int
+h9_shim_so_socket(int proto, uchar *addr, int *opts, int *r)
+{
+	if(waserror())
+		return -1;
+	*r = h9so_socket(proto, addr, opts);
+	poperror();
+	return 0;
+}
+#endif
