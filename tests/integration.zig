@@ -1242,6 +1242,82 @@ test "--cpus 1 still runs a pipeline [baseline]" {
     try std.testing.expectEqual(0, r.code);
 }
 
+test "1000 blocked processes use 8 host threads [scheduler]" {
+    // The host threads are counted in /proc/<pid>/task.
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const e = try env(@src());
+    const io = std.testing.io;
+    var ran = false;
+    var it = std.mem.tokenizeScalar(u8, e.engines, ',');
+    while (it.next()) |engine| {
+        ran = true;
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(gpa);
+        try argv.appendSlice(gpa, &.{ e.h9, "--engine", engine, "--dir", e.root, "--cpus", "1" });
+        if (e.arch) |a| try argv.appendSlice(gpa, &.{ "--arch", a });
+        // Each sleeps in the kernel until it's killed, so all 1000 are
+        // blocked at once whatever the host's speed; the output counts
+        // them, with the shell, ls, and wc.
+        try argv.appendSlice(gpa, &.{ "--rc", "pids=(); for(i in `{seq 1000}) { sleep 1000 & pids=($pids $apid) }; ls /proc | wc -l; for(p in $pids) echo kill > /proc/$p/note; wait" });
+        var child = try std.process.spawn(io, .{ .argv = argv.items, .stdin = .ignore, .stdout = .pipe, .stderr = .pipe, .create_no_window = true });
+        defer child.kill(io);
+        var task_buf: [64]u8 = undefined;
+        const path = try std.fmt.bufPrint(&task_buf, "/proc/{d}/task", .{child.id.?});
+        var most: usize = 0;
+        var mr_buf: std.Io.File.MultiReader.Buffer(2) = undefined;
+        var mr: std.Io.File.MultiReader = undefined;
+        mr.init(gpa, io, mr_buf.toStreams(), &.{ child.stdout.?, child.stderr.? });
+        defer mr.deinit();
+        // Counts its threads every 20 ms until it's done, for up to two
+        // minutes.
+        var ticks: u32 = 0;
+        while (true) {
+            if (mr.fill(64, .{ .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake } })) |_| continue else |err| switch (err) {
+                error.EndOfStream => break,
+                error.Timeout => {},
+                else => |x| return x,
+            }
+            ticks += 1;
+            if (ticks > slow(6000)) return error.Timeout;
+            var d = std.Io.Dir.openDirAbsolute(io, path, .{ .iterate = true }) catch continue;
+            defer d.close(io);
+            var n: usize = 0;
+            var di = d.iterate();
+            while (di.next(io) catch null) |_| n += 1;
+            most = @max(most, n);
+        }
+        _ = try child.wait(io);
+        const out = mr.reader(0).buffered();
+        errdefer std.debug.print("engine {s}: {s}{s}\n", .{ engine, out, mr.reader(1).buffered() });
+        const count = std.fmt.parseInt(u32, std.mem.trim(u8, out, " \t\n"), 10) catch 0;
+        try std.testing.expect(count >= 1000);
+        // main, the boot Proc, the timer kproc, one executor, and its
+        // monitor, and a few to spare for an executor started in place of
+        // one in a long kernel call.
+        errdefer std.debug.print("engine {s}: {d} host threads\n", .{ engine, most });
+        try std.testing.expect(most > 0 and most <= 8);
+    }
+    if (!ran) return error.SkipZigTest;
+}
+
+test "processes keep their own registers across executor switches [scheduler]" {
+    const e = try env(@src());
+    // Floating point in twelve processes at once, on one CPU, so their
+    // slices interleave: each result must be what it is run alone.
+    const script =
+        \\fn f { awk -v 'n='^$1 'BEGIN{s=0; for(j=1;j<=4000;j++) s+=sqrt(j*n)/(j+n); printf "%.9f\n", s}' > /tmp/o.$1 }
+        \\for(i in `{seq 12}) { f $i; mv /tmp/o.$i /tmp/p.$i }
+        \\for(i in `{seq 12}) { f $i & }
+        \\wait
+        \\for(i in `{seq 12}) cmp -s /tmp/o.$i /tmp/p.$i || echo differ $i
+        \\cat /tmp/o.1 /tmp/o.12
+    ;
+    const r = try runInFor(e, &.{ "--cpus", "1", "--tmp", "/tmp", "--rc", script }, null, 120_000);
+    defer r.deinit();
+    try std.testing.expectEqualStrings("123.210250514\n401.760077563\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
 test "--ns replays a namespace file [baseline]" {
     const e = try env(@src());
     var s: Scratch = undefined;

@@ -50,6 +50,7 @@ const c_stub = struct {
     fn h9_kern_newmach(_: ?*anyopaque) ?*anyopaque {
         return null;
     }
+    fn h9_kern_setsched(_: ?*anyopaque, _: ?*anyopaque, _: *const fn (?*anyopaque, ?*anyopaque) callconv(.c) c_int) void {}
     fn h9_kern_machkernel(_: ?*anyopaque) ?*anyopaque {
         return null;
     }
@@ -310,6 +311,7 @@ const c_real = struct {
     extern fn h9_kern_park() noreturn;
     extern fn h9_kern_spawn(mach: ?*anyopaque, name: [*:0]const u8, func: *const fn (?*anyopaque) callconv(.c) void, arg: ?*anyopaque) c_int;
     extern fn h9_kern_newmach(kernel: ?*anyopaque) ?*anyopaque;
+    extern fn h9_kern_setsched(mach: ?*anyopaque, sched: ?*anyopaque, start: *const fn (?*anyopaque, ?*anyopaque) callconv(.c) c_int) void;
     extern fn h9_kern_machkernel(mach: ?*anyopaque) ?*anyopaque;
     extern fn h9_kern_machdetach(mach: ?*anyopaque) void;
     extern fn h9_kern_kprocdetached(name: [*:0]const u8, func: *const fn (?*anyopaque) callconv(.c) void, arg: ?*anyopaque) c_int;
@@ -507,6 +509,14 @@ pub const Kernel = struct {
         return @ptrCast(@alignCast(c.h9_kern_machkernel(m)));
     }
 
+    /// Has the processes this kernel starts from now on run on a
+    /// scheduler's executors (design/scheduler.md): `start(ctx, proc)`
+    /// takes each, or returns -1 to have it get a host thread of its own.
+    pub fn setScheduler(k: *Kernel, ctx: *anyopaque, start: *const fn (?*anyopaque, ?*anyopaque) callconv(.c) c_int) void {
+        if (!available) return;
+        c.h9_kern_setsched(k.mach, ctx, start);
+    }
+
     pub fn lockSettings(k: *Kernel) void {
         while (!k.lock.tryLock()) std.atomic.spinLoopHint();
     }
@@ -561,6 +571,9 @@ pub const RF = struct {
     pub const NOWAIT = 1 << 6;
     /// Not 9front's: a Linux thread, whose children are its group leader's (hproc.h).
     pub const LXTHREAD = 1 << 30;
+    /// Not 9front's: the child keeps a host thread of its own where the
+    /// machine has a scheduler (hproc.h).
+    pub const HOSTTHREAD = 1 << 29;
     pub const CNAMEG = 1 << 10;
     pub const CENVG = 1 << 11;
     pub const CFDG = 1 << 12;

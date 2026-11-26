@@ -83,7 +83,7 @@ fn taketurn(h: *Hcons) Error!void {
             up().notepending = 0;
             return port.interrupted();
         }
-        c.osmsleep(5);
+        sync.msleep(5);
     }
 }
 

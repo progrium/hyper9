@@ -16,15 +16,15 @@ This describes, as built, how Plan 9 processes are run and what h9's kernel is: 
 
 ## Process model
 
-Each CLI invocation is one machine: one host process with one VM. Each Plan 9 process is a drawterm Proc plus a host thread that owns a vCPU, and the host OS schedules them, so there is no guest scheduler. Because every process lives in one VM and one kernel, rfork never has to serialize state across host processes. hyper-linux has to, because it can only use one VM per host process.
+Each CLI invocation is one machine: one host process with one VM. Each Plan 9 process is a drawterm Proc with a kernel continuation, and a machine's executors run them ([scheduler](../design/scheduler.md); see Executors below). Because every process lives in one VM and one kernel, rfork never has to serialize state across host processes. hyper-linux has to, because it can only use one VM per host process.
 
 | Plan 9 call | Implementation |
 | --- | --- |
-| `rfork(RFPROC)` | New Proc, new thread and vCPU, and the address space forked copy-on-write (see Memory below) |
+| `rfork(RFPROC)` | New Proc, queued on an executor, and the address space forked copy-on-write (see Memory below) |
 | `rfork(RFMEM)` | Share the text, data and bss, and segattach's `memory` segments; fork only the stack copy-on-write |
 | `RFNAMEG` / `RFFDG` / `RFENVG` / `RFNOTEG` / `RFREND` | Share or copy drawterm's Pgrp, Fgrp, Egrp, note group, and rendezvous group |
 | `exec` | Map the new a.out into a fresh address space, its text and data filled from the file on first touch, reset registers, keep the fds (honouring close-on-exec) and segattach's segments (except `SG_CEXEC` ones) |
-| `exits` / `await` | Wait records queued on the parent Proc; the thread and vCPU are torn down |
+| `exits` / `await` | Wait records queued on the parent Proc; the continuation ends and its executor takes the next process |
 | `brk_` | Grow the data segment by an anonymous mapping whose pages come on first touch, up to the stack's floor or the lowest attached segment above it |
 | `segattach` / `segdetach` | Attach or detach a `shared` or `memory` segment, up to five per process, with 9front's placement rules; a `memory` segment's pages come on first touch and a `shared` one's are allocated when it's attached, and neither is executable ([segattach](../design/epoch-0/segattach.md)) |
 | `segbrk` / `segfree` / `segflush` | Grow or shrink an attached segment's mapping; drop its pages (a `shared` segment's are zeroed in place); check the span and tell the engine the code changed |
@@ -36,7 +36,15 @@ Each CLI invocation is one machine: one host process with one VM. Each Plan 9 pr
 
 The kernel boots once per host process, on a private thread, because booting turns the calling thread into a Proc for good. Every guest process then runs on a kernel thread made by `h9_kern_spawn` in `src/kern/proc.zig`, which works like drawterm's `kproc` but can be called from a thread that isn't a Proc: it clones from the boot Proc, and the new thread sets up its groups once `up` is set.
 
-That thread creates the process's vCPU, which HVF binds to its creating thread, and runs the exit loop. `Machine.run` starts the first process this way and waits for it to exit; `rfork` uses the same path.
+On a machine with executors (every native build; the web host keeps a thread per process until it has them), `h9_kern_spawn` and `rfork` don't start a host thread: they hand the new Proc to the machine's scheduler (`Hmach.schedstart`), which runs its exit loop on a continuation. `Machine.run` starts the first process this way and waits for it to exit. A process forked with `RFHOSTTHREAD`, h9's own 9P and pty servers, gets a host thread of its own, as every process does on the web host, and that thread creates its vCPU, which HVF binds to its creating thread.
+
+### Executors
+
+A machine has `--cpus` executors (`src/executor.zig`), each a host thread with one vCPU, and a monitor thread. An executor takes a runnable process from its run queue, the machine's queue, or another executor's (it steals when its own is empty), loads the process's registers, FP state, and address space into its vCPU when another process ran there last, and runs it to its next exit. On sud a process keeps a vCPU of its own, a stub thread, since the stub's FP state is wider than what's saved, and the executor runs that.
+
+A kernel call runs on the process's continuation (`src/kern/sched/`), on the executor's host thread. A call that waits parks: sync.zig's `park` and `unpark` are the one place a process waits and is let go, and qio, devmnt, `tsleep`, `rendezvous`, the semaphores, and qlocks all wait through them, so the executor goes back to its queue and any executor resumes the process when it's readied. A continuation takes a kernel stack from a pool when it parks and gives it back when it resumes; `up` is set again on each switch in, since the host thread may differ. Kprocs and processes on host threads of their own wait in posix.c's `procsleep`, as before.
+
+A process runs for a 10 ms slice. The monitor checks every 2 ms: a run past its slice while others wait is kicked, ends with `interrupted`, and the process yields to the back of the queue. An executor that has been in one kernel call for 20 ms (a host read or a DNS lookup that blocks the thread, or a poll loop with `osmsleep`) is handed off: the monitor starts another executor in its place, and the blocked one retires when its call returns, so blocking host calls never stall the queue. Per-thread CPU time (`getrusage`, `/proc/n/status`) is the process's own, counted across switches.
 
 ### Memory
 
@@ -68,7 +76,7 @@ So on HVF 64 is a hard cap on *live* processes, not just running ones, and a pip
 
 KVM in a nested x86\_64 VM (Linux 6.12, Intel VT-x) reports 1024, and recycles its vCPUs (see KVM above), so its limit is on live vCPUs too; with fewer file descriptors it reports less.
 
-The answer (`src/cpupool.zig`) is a hybrid. A process creates and owns its vCPU on its own thread, as before, while the machine owns fewer than the limit less a reserve of 8.
+With executors a machine uses only `--cpus` vCPUs (one per process on sud, which has no limit), so the cap doesn't apply. On the web host, where each process has a host thread, the answer (`src/cpupool.zig`) is a hybrid. A process creates and owns its vCPU on its own thread, as before, while the machine owns fewer than the limit less a reserve of 8.
 
 Processes beyond that run guest code through a pool of 8 pool threads, each with a vCPU: the process thread hands its Ureg, FP/SIMD registers, and thread pointer to a pool thread, which runs the guest to its next exit and hands them back. Kernel calls stay on the process's own thread, so pool threads never block in the kernel and the pool always makes progress.
 
@@ -297,7 +305,7 @@ A missing architecture gets the skeleton only, with a warning; `-Drelease` fails
 1. drawterm raises errors with `waserror()`/`error()`, built on setjmp/longjmp. A longjmp across a Zig frame skips its `defer` and `errdefer`. So Zig code never sits between a `waserror` and an `error`, with one exception: the kernel's ported Zig (`src/kern/port.zig`), whose exported functions raise from their own outermost frame, with no `defer` pending, after the Zig under them has returned its error and cleaned up.
 2. drawterm already provides the seam. Each `sysX` wrapper in `kern/sysfile.c` (`sysopen`, `syspread`, `sysbind`, `sysmount`, and so on) runs `waserror`; on error it stores the string for `errstr` and returns -1. Zig calls these directly and turns -1 into an error union. New process and segment calls get wrappers in the same style.
 3. C calls Zig only for leaf work that cannot fail into the kernel: the engine layer, page allocation, the a.out parser, console I/O. A leaf returns a status, and the C side raises any kernel error. The ported kernel's functions (rule 1) are the exception: they're the kernel, and raise as the C they replace did.
-4. drawterm's `up` (`_getproc()`, per host thread) stays authoritative. Every guest thread is created through drawterm's kproc path (`h9_kern_spawn`), so `up` is set before any kernel call. Zig never uses bare `std.Thread` for anything that touches the kernel, and never boots the kernel on a caller's thread. The one exception is `--gfx` on macOS, where AppKit needs the main thread: `h9.gfx.main` boots the kernel on it and adopts it as a kernel Proc (`h9_kern_adopt`, through drawterm's clone path) before handing it to AppKit.
+4. drawterm's `up` (`_getproc()`, per host thread) stays authoritative. Every guest thread is created through drawterm's kproc path (`h9_kern_spawn`), so `up` is set before any kernel call; an executor sets it again each time it switches a continuation in. Zig never uses bare `std.Thread` for anything that touches the kernel, and never boots the kernel on a caller's thread. The one exception is `--gfx` on macOS, where AppKit needs the main thread: `h9.gfx.main` boots the kernel on it and adopts it as a kernel Proc (`h9_kern_adopt`, through drawterm's clone path) before handing it to AppKit.
 5. drawterm's Proc has no parent, note group, segments, or Egrp. We add these fields, plus a pointer to the Zig-side process record.
 6. The build uses `zig build`: C sources go through `addCSourceFiles` with drawterm's flags, and one `build.zig` produces binaries for every host.
 7. Guest memory reaches the kernel through `GuestBuf`, because drawterm's `validaddr` is a no-op and h9's translation is the only check. A data buffer (`pread`, `pwrite`, `stat`) is passed to the `sys*` wrapper in place when it is contiguous in host memory, and otherwise goes through a host bounce buffer, so each guest call is one kernel call. Only buffers of 1 GiB or more are split, since drawterm's `long` is 32 bits. Any unmapped byte posts "sys: bad address in syscall". Strings (paths, `errstr`) are always copied into a bounded host buffer first, so no other guest thread can change one during the call.
