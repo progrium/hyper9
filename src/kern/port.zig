@@ -17,6 +17,11 @@
 //! - `devmnt.zig`: devmnt.c, the 9P client.
 //! - `dev/pipe.zig` and `dev/root.zig`: devpipe.c and devroot.c.
 //!
+//! And h9's own C, as it's ported:
+//!
+//! - `glue.zig`: glue.c, booting the kernel, and the Zig side's small
+//!   calls into it.
+//!
 //! This file is the root the kernel builds compile (build.zig's addKern,
 //! and src/nskernel.zig), and holds what the ported files share: the C
 //! kernel's types (`c`, translated from port.h with the kernel's flags),
@@ -35,6 +40,7 @@ pub const sysfile = @import("sysfile.zig");
 pub const devmnt = @import("devmnt.zig");
 pub const devpipe = @import("dev/pipe.zig");
 pub const devroot = @import("dev/root.zig");
+pub const glue = @import("glue.zig");
 
 comptime {
     qio.exportC();
@@ -46,6 +52,7 @@ comptime {
     devmnt.exportC();
     devpipe.exportC();
     devroot.exportC();
+    glue.exportC();
 }
 
 test {
@@ -61,6 +68,7 @@ test {
     _ = devmnt;
     _ = devpipe;
     _ = devroot;
+    _ = glue;
 }
 
 /// A kernel error. The Plan 9 error string is on the process, in
