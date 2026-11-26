@@ -2084,8 +2084,8 @@ hello, world
   status `n`. `runtime.NumCPU` follows `--cpus`.
 - **Memory.** A Go program reserves several hundred MB at start. That's free
   until it's touched, but it counts against `--memory`, whose default is
-  1 GB. A program that uses `os/exec` needs `--memory 4G`, because `rfork`
-  copies the parent's memory eagerly.
+  1 GB. `rfork` shares the parent's pages until one side writes them, so a
+  program that runs `os/exec` many times fits in `--memory 512M`.
 - **Not yet:** running 9front commands from Go with `os/exec` unless your
   root tree has `/amd64/bin` (`zig build mkroot` on x86\_64, or
   `--arch amd64`).
@@ -2735,8 +2735,9 @@ host$ h9 --net-allow 'tcp!api.example.com!443' ./client
 
 Memory counts everything the machine uses for guests: each process's
 memory, the stacks, shared segments, and the files in `/tmp` and ephemeral
-overlays. `--memory 8m` is enough for `echo`; a Go program needs several
-hundred MB, or about 4 GB if it starts other processes.
+overlays. A page counts once it's touched, and pages a fork shares count
+once. `--memory 8m` is enough for `echo`; a Go program needs several hundred
+MB.
 
 ### 25. Namespace files with `--ns`
 
