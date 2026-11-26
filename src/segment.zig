@@ -553,16 +553,22 @@ pub const Space = struct {
         return w.end;
     }
 
-    /// How many processes run the text at `va`: the references to its
-    /// a.out's mapping (loader.zig's Image), one for each Mm, which RFMEM
-    /// siblings share.
+    /// How many processes run the text at `va`, as 9front counts its
+    /// text segment's references: the processes sharing the page there
+    /// copy-on-write once it's filled, so a debugger's write that gives
+    /// this one its own copy drops the count to 1, or else the Mms
+    /// holding the a.out's bytes (loader.zig's AoutSrc); plus the RFMEM
+    /// siblings that share this Mm.
     fn textRefs(s: *const Space, va: u64) usize {
+        const siblings = s.mm.nspaces() - 1;
+        const pages = s.mm.pageRefs(va);
+        if (pages > 0) return pages + siblings;
         var buf: [max_vmas]Vma = undefined;
         for (s.mm.labelled(&buf)) |v| if (v.start <= va and va < v.end) {
             const src = v.src orelse break;
-            return @max(1, src.refs.load(.acquire)) + s.mm.nspaces() - 1;
+            return @max(1, src.refs.load(.acquire)) + siblings;
         };
-        return s.mm.nspaces();
+        return 1 + siblings;
     }
 
     fn line(w: *std.Io.Writer, name: []const u8, ronly: bool, base: u64, top: u64, refs: usize) void {
