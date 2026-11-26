@@ -14,6 +14,8 @@
 //! - `chan.zig`: chan.c, channels, paths, mounts, walks, and namec.
 //! - `sysfile.zig`: sysfile.c, file descriptors and the file system
 //!   calls.
+//! - `syswide.zig`: h9's file calls beyond 9P2000's, readlink, symlink,
+//!   link, rename, getattr, and setattr (design/file-interface.md).
 //! - `devmnt.zig`: devmnt.c, the 9P client.
 //! - `dev/pipe.zig` and `dev/root.zig`: devpipe.c and devroot.c.
 //!
@@ -37,6 +39,7 @@ pub const dev = @import("dev.zig");
 pub const pgrp = @import("pgrp.zig");
 pub const chan = @import("chan.zig");
 pub const sysfile = @import("sysfile.zig");
+pub const syswide = @import("syswide.zig");
 pub const devmnt = @import("devmnt.zig");
 pub const devpipe = @import("dev/pipe.zig");
 pub const devroot = @import("dev/root.zig");
@@ -49,6 +52,7 @@ comptime {
     pgrp.exportC();
     chan.exportC();
     sysfile.exportC();
+    syswide.exportC();
     devmnt.exportC();
     devpipe.exportC();
     devroot.exportC();
@@ -65,6 +69,7 @@ test {
     _ = pgrp;
     _ = chan;
     _ = sysfile;
+    _ = syswide;
     _ = devmnt;
     _ = devpipe;
     _ = devroot;

@@ -7,6 +7,7 @@
 #include "dat.h"
 #include "fns.h"
 #include "error.h"
+#include "devx.h"
 
 extern Dev consdevtab;
 extern Dev rootdevtab;
@@ -159,3 +160,15 @@ Dev *devtab[] = {
 	0
 };
 
+/*
+ * The optional operations of the devices that have them
+ * (design/file-interface.md, src/kern/devx.h).
+ */
+extern Devx fsdevx;
+extern Devx overlaydevx;
+
+Devx *devxtab[] = {
+	&fsdevx,
+	&overlaydevx,
+	0
+};

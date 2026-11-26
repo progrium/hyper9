@@ -30,6 +30,7 @@ const Dirtab = c.Dirtab;
 const Qid = c.Qid;
 const Walkqid = c.Walkqid;
 const Block = c.Block;
+pub const Attr = c.Attr;
 
 /// DMDIR as a long, for a Dirtab perm or devdir.
 pub const dmdir: c_int = @bitCast(@as(c_uint, c.DMDIR));
@@ -473,6 +474,23 @@ pub const Ops = struct {
     /// The device's own Devgens, which are Zig that doesn't raise, so
     /// callgen calls them directly.
     gens: []const *const Devgen = &.{},
+
+    // The optional operations (design/file-interface.md, src/kern/devx.h):
+    // null takes the switch's default.
+
+    /// The target of the link ch is, into buf: its length, or null if
+    /// ch isn't a link.
+    readlink: ?*const fn (*Chan, []u8) Error!?usize = null,
+    symlink: ?*const fn (*Chan, [*:0]const u8, [*:0]const u8) Error!void = null,
+    /// False if the device can't, for the default (a copy).
+    link: ?*const fn (*Chan, *Chan, [*:0]const u8) Error!bool = null,
+    getattr: ?*const fn (*Chan, u64, *Attr) Error!void = null,
+    setattr: ?*const fn (*Chan, u64, *const Attr) Error!void = null,
+    /// False if the device can't, for the default to try.
+    rename: ?*const fn (*Chan, *Chan, [*:0]const u8) Error!bool = null,
+    /// Whether getattr says more than stat for ch, if it doesn't always,
+    /// so a stat needn't ask twice where it says no more.
+    hasattr: ?*const fn (*Chan) bool = null,
 };
 
 fn devbreadOpt(ch: *Chan, n: c_int, offset: c_uint) Error!?*Block {
@@ -691,6 +709,188 @@ pub fn wstat(d: *Dev, ch: *Chan, db: [*]u8, n: c_int) Error!c_int {
     var r: c_int = 0;
     try caught(h9_dev_wstat(d, ch, db, n, &r));
     return r;
+}
+
+// The optional operations (design/file-interface.md, src/kern/devx.h).
+// A native device has them in its Ops, and a C device in a Devx in
+// devxtab, called through the shim. Each one a device lacks has a
+// default here, or in sysfile.zig's path calls for those that need a
+// walk or a create.
+
+/// The C devices' optional operations, ended by nil (devtab.c, nstab.c).
+extern var devxtab: [0]?*c.Devx;
+
+/// d's optional operations, if it's a C device with any.
+fn devx(d: *Dev) ?*c.Devx {
+    const t: [*]?*c.Devx = @ptrCast(&devxtab);
+    var i: usize = 0;
+    while (t[i]) |x| : (i += 1) {
+        if (x.dc == d.dc) return x;
+    }
+    return null;
+}
+
+extern fn h9_dev_readlink(x: *c.Devx, ch: *Chan, buf: [*]u8, nbuf: c_int, r: *c_int) c_int;
+extern fn h9_dev_symlink(x: *c.Devx, ch: *Chan, name: [*:0]const u8, target: [*:0]const u8) c_int;
+extern fn h9_dev_link(x: *c.Devx, ch: *Chan, dir: *Chan, name: [*:0]const u8, r: *c_int) c_int;
+extern fn h9_dev_getattr(x: *c.Devx, ch: *Chan, mask: u64, a: *Attr) c_int;
+extern fn h9_dev_setattr(x: *c.Devx, ch: *Chan, mask: u64, a: *const Attr) c_int;
+extern fn h9_dev_rename(x: *c.Devx, ch: *Chan, dir: *Chan, name: [*:0]const u8, r: *c_int) c_int;
+
+/// Linux's EXDEV, as src/dotl/attr.zig names it.
+pub const Exdev = "cross-device link";
+
+/// Whether a and b are on one instance of one device, which a link and a
+/// rename need (design/file-interface.md, Security).
+pub fn sameinst(a: *const Chan, b: *const Chan) bool {
+    return a.type == b.type and a.dev == b.dev;
+}
+
+/// The target of the link ch is, as written, into buf: its length, or
+/// null if ch isn't a link. By default nothing is.
+pub fn readlink(ch: *Chan, buf: []u8) Error!?usize {
+    if (buf.len == 0) return null;
+    const d = of(ch);
+    if (nativeOps(d)) |o| {
+        const f = o.readlink orelse return null;
+        return f(ch, buf);
+    }
+    const x = devx(d) orelse return null;
+    if (x.readlink == null) return null;
+    var r: c_int = -1;
+    try caught(h9_dev_readlink(x, ch, buf.ptr, @intCast(@min(buf.len, std.math.maxInt(c_int))), &r));
+    return if (r < 0) null else @intCast(r);
+}
+
+/// Makes name in the directory ch a symbolic link to target. By default
+/// "permission denied".
+pub fn symlink(ch: *Chan, name: [*:0]const u8, target: [*:0]const u8) Error!void {
+    const d = of(ch);
+    if (nativeOps(d)) |o| {
+        const f = o.symlink orelse return port.kerror(&port.Eperm);
+        return f(ch, name, target);
+    }
+    const x = devx(d) orelse return port.kerror(&port.Eperm);
+    if (x.symlink == null) return port.kerror(&port.Eperm);
+    try caught(h9_dev_symlink(x, ch, name, target));
+}
+
+/// Makes name in the directory dir another name for ch's file: true, or
+/// false if the device has no links, or the two are on different
+/// instances, for the caller's default (a copy).
+pub fn link(ch: *Chan, dir: *Chan, name: [*:0]const u8) Error!bool {
+    if (!sameinst(ch, dir)) return false;
+    const d = of(ch);
+    if (nativeOps(d)) |o| {
+        const f = o.link orelse return false;
+        return f(ch, dir, name);
+    }
+    const x = devx(d) orelse return false;
+    if (x.link == null) return false;
+    var r: c_int = 1;
+    try caught(h9_dev_link(x, ch, dir, name, &r));
+    return r == 0;
+}
+
+/// Whether ch's device has its own getattr, so its stat doesn't say it
+/// all.
+pub fn hasgetattr(ch: *Chan) bool {
+    const d = of(ch);
+    if (nativeOps(d)) |o| {
+        if (o.getattr == null) return false;
+        const f = o.hasattr orelse return true;
+        return f(ch);
+    }
+    const x = devx(d) orelse return false;
+    return x.getattr != null;
+}
+
+/// ch's attributes, what mask asks for and whatever else the device
+/// has; a.valid says which. By default they're built from stat.
+pub fn getattr(ch: *Chan, mask: u64, a: *Attr) Error!void {
+    a.* = std.mem.zeroes(Attr);
+    const d = of(ch);
+    if (nativeOps(d)) |o| if (o.getattr) |f| return f(ch, mask, a);
+    if (devx(d)) |x| if (x.getattr != null) return caught(h9_dev_getattr(x, ch, mask, a));
+    return getattrdefault(ch, a);
+}
+
+/// The default getattr: from stat.
+pub fn getattrdefault(ch: *Chan, a: *Attr) Error!void {
+    const d = of(ch);
+    var buf: [c.Attrstatlen]u8 = undefined;
+    const n = try stat(d, ch, &buf, buf.len);
+    var dir: Dir = undefined;
+    var strs: [buf.len]u8 = undefined;
+    if (c.convM2D(&buf, @intCast(n), &dir, &strs) == 0)
+        return port.kerror(&port.Ebadstat);
+    attrfromdir(&dir, a);
+}
+
+/// The attributes a Dir gives: the mode, size, and times in seconds; no
+/// link count, ids, or change time.
+pub fn attrfromdir(dir: *const Dir, a: *Attr) void {
+    a.* = std.mem.zeroes(Attr);
+    a.valid = c.Amode | c.Aatime | c.Amtime | c.Aino | c.Asize;
+    a.qid = dir.qid;
+    a.mode = dir.mode;
+    a.size = @bitCast(dir.length);
+    a.atime = dir.atime;
+    a.mtime = dir.mtime;
+}
+
+/// Sets what mask names from a. By default a wstat, which has no ids,
+/// and times in seconds.
+pub fn setattr(ch: *Chan, mask: u64, a: *const Attr) Error!void {
+    const d = of(ch);
+    if (nativeOps(d)) |o| if (o.setattr) |f| return f(ch, mask, a);
+    if (devx(d)) |x| if (x.setattr != null) return caught(h9_dev_setattr(x, ch, mask, a));
+    return setattrdefault(ch, mask, a);
+}
+
+/// The default setattr: a wstat.
+pub fn setattrdefault(ch: *Chan, mask: u64, a: *const Attr) Error!void {
+    const d = of(ch);
+    if (mask & (c.Auid | c.Agid) != 0)
+        return port.kerror(&port.Eperm);
+    var dir: Dir = undefined;
+    nulldir(&dir);
+    if (mask & c.Amode != 0) dir.mode = a.mode;
+    if (mask & c.Asize != 0) dir.length = @bitCast(a.size);
+    const now: c_uint = @truncate(@as(c_ulong, @bitCast(@as(c_long, c.seconds()))));
+    if (mask & c.Aatime != 0) dir.atime = if (a.atimens == c.Anow) now else @truncate(@as(u64, @bitCast(a.atime)));
+    if (mask & c.Amtime != 0) dir.mtime = if (a.mtimens == c.Anow) now else @truncate(@as(u64, @bitCast(a.mtime)));
+    var buf: [c.STATFIXLEN + 16]u8 = undefined;
+    const n = c.convD2M(&dir, &buf, buf.len);
+    _ = try wstat(d, ch, &buf, @intCast(n));
+}
+
+/// A Dir a wstat changes nothing with: every field ~0, and every
+/// string empty.
+pub fn nulldir(dir: *Dir) void {
+    @memset(std.mem.asBytes(dir), 0xff);
+    const empty: [*c]u8 = @constCast("");
+    dir.name = empty;
+    dir.uid = empty;
+    dir.gid = empty;
+    dir.muid = empty;
+}
+
+/// Moves ch to name in the directory dir, replacing what's there: true,
+/// or false if the device has no rename of its own or can't do this
+/// one, or the two are on different instances, for the caller's default.
+pub fn rename(ch: *Chan, dir: *Chan, name: [*:0]const u8) Error!bool {
+    if (!sameinst(ch, dir)) return false;
+    const d = of(ch);
+    if (nativeOps(d)) |o| {
+        const f = o.rename orelse return false;
+        return f(ch, dir, name);
+    }
+    const x = devx(d) orelse return false;
+    if (x.rename == null) return false;
+    var r: c_int = 1;
+    try caught(h9_dev_rename(x, ch, dir, name, &r));
+    return r == 0;
 }
 
 /// (*gen)(c, name, tab, ntab, i, dp): devgen, or a native device's own,
