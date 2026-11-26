@@ -623,6 +623,8 @@ const natives = .{
     @import("dev/srv.zig").Device,
     @import("dev/overlay.zig").Device,
     @import("dev/dotl.zig").Device,
+    // The host's descriptors (src/host/devlfd.zig).
+    @import("host_dev").lfd.Device,
 } ++ (if (port.options.hostfs) .{
     // The host's tree (src/host/devfs.zig).
     @import("host_dev").fs.Device,

@@ -21,12 +21,12 @@ const kern_sources = [_][]const u8{
     "devssl.c",   "devtls.c",   "error.c",    "parse.c",
     "stub.c",     "term.c",     "waserror.c",
 };
-// OS=posix (Make.unix), and OS=win32 (Make.win64).
-const kern_posix = [_][]const u8{ "devlfd-posix.c", "posix.c" };
-const kern_win32 = [_][]const u8{ "devlfd-win32.c", "win32.c" };
-// The web host (design/epoch-0/browser-host.md): devlfd builds against
-// wasi-libc; posix.c is replaced by src/kern/os-wasm.c.
-const kern_web = [_][]const u8{"devlfd-posix.c"};
+// OS=posix (Make.unix), and OS=win32 (Make.win64), without devlfd,
+// which is src/host's. The web host (design/epoch-0/browser-host.md)
+// builds none: posix.c is replaced by src/kern/os-wasm.c.
+const kern_posix = [_][]const u8{"posix.c"};
+const kern_win32 = [_][]const u8{"win32.c"};
+const kern_web = [_][]const u8{};
 
 /// The drawterm libraries kern needs, with each Makefile's OFILES. The GUI,
 /// exportfs, libauth and drawterm's own main/cpu code are left out.
@@ -880,7 +880,7 @@ fn addNsKernel(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.la
         // As the kern library builds for Windows (addKern): drawterm's
         // win32.c and h9's host lock and timers in glue-win32.c, with no
         // host sockets (src/nskernel.zig has h9so_errstr).
-        m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/kern"), .files = &.{ "win32.c", "devlfd-win32.c" }, .flags = flags });
+        m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/kern"), .files = &.{"win32.c"}, .flags = flags });
         m.addCSourceFiles(.{ .root = b.path("src/host"), .files = &.{"glue-win32.c"}, .flags = flags });
         if (hostfs) {
             m.addCSourceFiles(.{ .root = b.path("src/host"), .files = &.{ "fscheck.c", "dirs.c" }, .flags = flags });
@@ -890,7 +890,7 @@ fn addNsKernel(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.la
         m.linkSystemLibrary("advapi32", .{});
         if (hostfs) m.linkSystemLibrary("ntdll", .{});
     } else {
-        m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/kern"), .files = &.{ "posix.c", "devlfd-posix.c" }, .flags = flags });
+        m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/kern"), .files = &.{"posix.c"}, .flags = flags });
         if (hostfs) {
             m.addCSourceFiles(.{ .root = b.path("src/host"), .files = &.{ "fscheck.c", "dirs.c" }, .flags = flags });
         }

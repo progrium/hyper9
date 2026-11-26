@@ -16,6 +16,7 @@
 #include "ip.h"
 
 #include "devip.h"
+#include "hostsock.h"
 
 #ifdef MSVC
 #pragma comment(lib, "wsock32.lib")

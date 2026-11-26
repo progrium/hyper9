@@ -137,3 +137,12 @@ pub fn oserr() error{Kernel} {
     p[q] = 0;
     return error.Kernel;
 }
+
+fn c_oserrstr() callconv(.c) void {
+    oserr() catch {};
+}
+
+/// oserr for the host's C (src/host/hostsock.h's oserrstr and oserror).
+pub fn exportC() void {
+    @export(&c_oserrstr, .{ .name = "h9_oserrstr" });
+}

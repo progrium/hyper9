@@ -26,6 +26,15 @@ const Dirtab = c.Dirtab;
 const Qid = c.Qid;
 const Walkqid = c.Walkqid;
 
+/// The host's error as the process's error string: drawterm's oserrstr,
+/// or on Windows src/host/win32.zig's, which reads a socket error as a
+/// POSIX host does.
+fn oserrstr() void {
+    if (@import("builtin").os.tag == .windows) {
+        @import("win32.zig").oserr() catch {};
+    } else c.oserrstr();
+}
+
 const IPaddrlen = 16;
 const KNAMELEN = c.KNAMELEN;
 
@@ -433,7 +442,7 @@ fn ipread(ch: *Chan, a: ?*anyopaque, n: c_int, offset: i64) Error!c_int {
             const cv = convof(ch.qid);
             const r = try dev.raising(&so_recv, .{ cv.sfd, a, n, @as(c_int, 0) });
             if (r < 0) {
-                c.oserrstr();
+                oserrstr();
                 return error.Kernel;
             }
             return r;
@@ -579,7 +588,7 @@ fn ipwrite(ch: *Chan, a: ?*const anyopaque, n_: c_int, offset: i64) Error!c_int 
             if (h9_net_send(cv.sfd) < 0) return port.kerror(&port.Eperm);
             const r = try dev.raising(&so_send, .{ cv.sfd, @constCast(a), n, @as(c_int, 0) });
             if (r < 0) {
-                c.oserrstr();
+                oserrstr();
                 return error.Kernel;
             }
             return r;
