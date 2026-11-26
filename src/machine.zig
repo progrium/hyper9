@@ -40,6 +40,7 @@ const kc = @import("abi/linux/kc.zig");
 const attr = @import("dotl/attr.zig");
 const gfx = @import("gfx.zig");
 const hostpty = @import("hostpty.zig");
+const handles = @import("host/host.zig");
 
 pub const Status = union(enum) {
     /// The `exits` string; empty means success.
@@ -343,21 +344,9 @@ pub const Machine = struct {
     pub const InitError = engine.CreateError || gfx.Error || error{PolicyConflict};
 
     /// Host streams behind the guest's console: reads from `in` (none means
-    /// EOF), writes to fd 1 go to `out` and to fd 2 to `err`.
-    pub const Stdio = struct {
-        in: ?*std.Io.Reader = null,
-        /// Makes a blocked read of `in` return, so a run can end while a
-        /// console read is pending. Without it such a run ends `stuck`.
-        in_cancel: ?consin.Cancel = null,
-        out: *std.Io.Writer,
-        err: *std.Io.Writer,
-        /// Called when the guest turns raw mode on or off (writing `rawon`
-        /// or `rawoff` to /dev/consctl, or closing its last consctl), and
-        /// echo (`echooff`, `echoon`). The CLI puts the host terminal in
-        /// raw mode or turns its echo off. The machine turns both back
-        /// when a run ends.
-        raw: ?Raw = null,
-    };
+    /// EOF), writes to fd 1 go to `out` and to fd 2 to `err`. They're the
+    /// machine's `Host` console (design/host-handles.md).
+    pub const Stdio = handles.Console;
 
     pub const Raw = kern.Console.Raw;
 
@@ -368,6 +357,10 @@ pub const Machine = struct {
     opts: Options,
     /// The compiled policy; allocated in `arena`.
     plan: policy.Plan,
+    /// The host the plan describes (design/host-handles.md), in `arena`:
+    /// the handles the kernel is to reach outside through. Built at init
+    /// and not yet used by any device, so nothing changes.
+    host: handles.Host,
     arena: *std.heap.ArenaAllocator,
     msg_buf: [256]u8 = undefined,
     err_buf: [256]u8 = undefined,
@@ -559,8 +552,14 @@ pub const Machine = struct {
             claim = &cl.claim;
         }
         errdefer if (claim) |cl| gfx.release(cl);
+        // The host's handles read the plan through a pointer, so they get
+        // a copy of it in the arena, which stays put when the Machine is
+        // moved; the plan isn't changed after it's compiled.
+        const plan_at = try arena.allocator().create(policy.Plan);
+        plan_at.* = plan;
+        const hst = try handles.fromPlan(arena.allocator(), io, plan_at, .{ .console = o.stdio, .gfx = o.gfx });
         const eng = try engine.create(gpa, io, opts.engine, .{ .arch = arch, .memory = plan.memory });
-        return .{ .gpa = gpa, .io = io, .opts = o, .arch = arch, .engine = eng, .plan = plan, .arena = arena, .gfx_claim = claim };
+        return .{ .gpa = gpa, .io = io, .opts = o, .arch = arch, .engine = eng, .plan = plan, .host = hst, .arena = arena, .gfx_claim = claim };
     }
 
     /// What closing the window does: a hangup, as for a closed terminal.
