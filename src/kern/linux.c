@@ -591,14 +591,15 @@ h9_linux_await(char *buf, int n, int block, long want, int peek)
 	return len;
 }
 
-/* The calling process's parent's pid, or 1 for a machine's first process. */
+/* The calling process's parent's pid, or 0 for a machine's first process,
+ * as for Linux's init or a container's first process. */
 ulong
 h9_linux_ppid(void)
 {
 	Hproc *h;
 
 	h = h9_uphproc();
-	return h->ppid != 0 ? h->ppid : 1;
+	return h->ppid;
 }
 
 /* The calling process's working directory as a path in its view. */
