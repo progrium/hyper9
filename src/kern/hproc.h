@@ -1,8 +1,9 @@
 /*
  * h9's machines, notes and wait records (proc.c), shared with devproc.c
  * and the other devices that look at processes. The process record is
- * Proc (h9proc.h). See proc.c.
+ * Hproc (h9proc.h). See proc.c.
  */
+#include "h9proc.h"
 
 enum
 {
@@ -51,7 +52,7 @@ struct Hmach
 	ulong	nextnoteid;
 	int	nlive;		/* processes not yet released (h9_kern_release); under lk */
 	void	*srv;		/* devsrv.c's registry, made on first attach; under lk */
-	Proc	*procs;		/* its processes, on mnext, until they exit; under lk */
+	Hproc	*procs;		/* its processes, on mnext, until they exit; under lk */
 	/*
 	 * Its scheduler (design/scheduler.md), or nil: a process it starts
 	 * runs on the scheduler's executors rather than a host thread of its
@@ -59,7 +60,7 @@ struct Hmach
 	 * Set before the first spawn.
 	 */
 	void	*sched;
-	int	(*schedstart)(void *sched, Proc *p);
+	int	(*schedstart)(void *sched, Hproc *p);
 };
 
 /* 9front's Note. One note posted to a group is shared by its queues. */
@@ -93,16 +94,16 @@ enum { RFHOSTTHREAD = 1<<29 };
 
 
 /* proc.c, for devproc.c. Lookups take a reference; release it with h9_putproc. */
-Proc*	h9_uphproc(void);
-void	wakewaits(Proc*);
-Proc*	h9_pidlookup(Hmach*, ulong);
-void	h9_putproc(Proc*);
+Hproc*	h9_uphproc(void);
+void	wakewaits(Hproc*);
+Hproc*	h9_pidlookup(Hmach*, ulong);
+void	h9_putproc(Hproc*);
 Hnote*	h9_mknote(char*, int);
 void	h9_freenote(Hnote*);
-int	h9_pushnote(Proc*, Hnote*);
+int	h9_pushnote(Hproc*, Hnote*);
 void	h9_postnotepg(Hmach*, ulong, char*, int);
-int	h9_setnoteid(Proc*, ulong);
-void	h9_killproc(Proc*);
+int	h9_setnoteid(Hproc*, ulong);
+void	h9_killproc(Hproc*);
 void	h9_fgrpclose(Fgrp*);
 int	h9_pids(Hmach*, ulong*, int);
 

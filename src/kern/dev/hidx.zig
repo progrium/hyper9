@@ -48,6 +48,7 @@ const chan = @import("../chan.zig");
 const sysfile = @import("../sysfile.zig");
 const c = port.c;
 const up = port.up;
+const hup = port.hup;
 const Error = port.Error;
 
 const Chan = c.Chan;
@@ -152,7 +153,7 @@ fn h9_hidx_wide(ch: *Chan) callconv(.c) c_int {
 
 /// The caller's machine, as proc.c's uphproc finds it.
 fn upmach() Error!?*anyopaque {
-    const m = up().mach orelse return port.kerror("not an h9 process");
+    const m = hup().mach orelse return port.kerror("not an h9 process");
     return m;
 }
 
@@ -514,7 +515,7 @@ fn hidxgen(ch_: [*c]Chan, name: [*c]u8, tab: [*c]Dirtab, ntab: c_int, s_: c_int,
             s -= 1;
             var i: c_int = 0;
             while (i < Maxconv) : (i += 1) {
-                if (lookupin(up().mach, i) == null)
+                if (lookupin(hup().mach, i) == null)
                     continue;
                 if (s == 0) {
                     convdir(ch, i, dp);

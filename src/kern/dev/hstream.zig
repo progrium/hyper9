@@ -48,6 +48,7 @@ const chan = @import("../chan.zig");
 const sysfile = @import("../sysfile.zig");
 const c = port.c;
 const up = port.up;
+const hup = port.hup;
 const Error = port.Error;
 
 const Chan = c.Chan;
@@ -250,7 +251,7 @@ pub fn hostfd(id: c_ulong) Error!c_int {
 
 /// The caller's machine, as proc.c's uphproc finds it.
 fn upmach() Error!?*anyopaque {
-    const m = up().mach orelse return port.kerror("not an h9 process");
+    const m = hup().mach orelse return port.kerror("not an h9 process");
     return m;
 }
 
@@ -291,7 +292,7 @@ fn portdir(ch: *Chan, dp: *Dir) void {
 
 /// Whether conversation n of the caller's machine is a port's.
 fn isportconv(n: c_int) bool {
-    const id = h9_hstream_conv(up().mach, n);
+    const id = h9_hstream_conv(hup().mach, n);
     return id >= 0 and h9_hstream_isport(@intCast(id)) != 0;
 }
 
@@ -309,7 +310,7 @@ fn protogen(ch: *Chan, isport: bool, s_: c_int, dp: *Dir) c_int {
     }
     const s = s_ - 1;
     var convs: [Maxconv]c_int = undefined;
-    const nc = h9_hstream_convs(up().mach, @intFromBool(isport), &convs, Maxconv);
+    const nc = h9_hstream_convs(hup().mach, @intFromBool(isport), &convs, Maxconv);
     if (s < nc) {
         convdir(ch, convs[@intCast(s)], dp);
         return 1;

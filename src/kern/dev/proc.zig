@@ -43,7 +43,7 @@ const Dir = c.Dir;
 const Dirtab = c.Dirtab;
 const Walkqid = c.Walkqid;
 const Qid = c.Qid;
-const Proc = c.Proc;
+const Hproc = c.Hproc;
 const Hmach = c.Hmach;
 const Hnote = c.Hnote;
 const Hwait = c.Hwait;
@@ -168,16 +168,13 @@ fn upmach() Error!*Hmach {
     return (try uphproc()).mach;
 }
 
-fn uphproc() Error!*Proc {
-    const p: ?*Proc = c._getproc();
-    if (p == null or p.?.mach == null)
-        return port.kerror("not an h9 process");
-    return p.?;
+fn uphproc() Error!*Hproc {
+    return port.uphproc();
 }
 
 /// The process the chan names, in the caller's machine, with a
 /// reference.
-fn chanproc(ch: *Chan) Error!*Proc {
+fn chanproc(ch: *Chan) Error!*Hproc {
     return proc.h9_pidlookup(try upmach(), PIDQ(ch.qid)) orelse port.kerror(&port.Eprocdied);
 }
 
@@ -260,7 +257,7 @@ fn procopen(ch: *Chan, omode0: c_int) Error!*Chan {
     const h = try chanproc(ch);
     defer proc.h9_putproc(h);
     const omode = try sysfile.openmode(@bitCast(omode0));
-    var vers = h.pid;
+    var vers = h.p.pid;
     switch (QID(ch.qid)) {
         Qstatus, Qppid, Qsegment, Qns, Qfd => if (omode != c.OREAD)
             return port.kerror(&port.Eperm),
@@ -301,7 +298,7 @@ fn procclose(ch: *Chan) Error!void {
     _ = ch;
 }
 
-fn procargs(h: *Proc, buf: [*]u8, nbuf: c_int) c_int {
+fn procargs(h: *Hproc, buf: [*]u8, nbuf: c_int) c_int {
     c.lock(&h.alk);
     defer c.unlock(&h.alk);
     if (h.setargs != 0)
@@ -351,17 +348,17 @@ const Groups = struct {
     dot: ?*Chan = null,
 };
 
-fn takegroups(h: *Proc) Error!Groups {
+fn takegroups(h: *Hproc) Error!Groups {
     var g: Groups = .{};
     sync.qlock(&h.debug);
     defer sync.qunlock(&h.debug);
-    const dot: *Chan = h.dot orelse return port.kerror(&port.Eprocdied);
+    const dot: *Chan = h.p.dot orelse return port.kerror(&port.Eprocdied);
     g.dot = dot;
     _ = chan.incref(&dot.ref);
-    g.pg = h.pgrp;
+    g.pg = h.p.pgrp;
     if (g.pg) |pg|
         _ = chan.incref(&pg.ref);
-    g.fg = h.fgrp;
+    g.fg = h.p.fgrp;
     if (g.fg) |fg|
         _ = chan.incref(&fg.ref);
     return g;
@@ -448,11 +445,11 @@ fn readfd1(ch: *Chan, g: *Groups, buf: [*]u8, nbuf: c_int) c_int {
 }
 
 fn prochaswaitq(x: ?*anyopaque) callconv(.c) c_int {
-    const h: *Proc = @ptrCast(@alignCast(x.?));
+    const h: *Hproc = @ptrCast(@alignCast(x.?));
     return @intFromBool(@as(*volatile c_int, &h.exited).* != 0 or @as(*volatile [*c]Hwait, &h.waitq).* != null);
 }
 
-fn statusread(h: *Proc, buf: [*]u8, nbuf: c_int) c_int {
+fn statusread(h: *Hproc, buf: [*]u8, nbuf: c_int) c_int {
     var state: [c.KNAMELEN]u8 = undefined;
     var mem: c_uint = 0;
 
@@ -478,7 +475,7 @@ fn statusread(h: *Proc, buf: [*]u8, nbuf: c_int) c_int {
 /// Moves n bytes of process h's memory or registers at off through the
 /// Zig side, with the error for a failure. Writes need it stopped, as on
 /// 9front.
-fn procdebugio(h: *Proc, what: c_int, write: bool, off: u64, va: ?*anyopaque, n: c_int) Error!c_int {
+fn procdebugio(h: *Hproc, what: c_int, write: bool, off: u64, va: ?*anyopaque, n: c_int) Error!c_int {
     c.lock(&h.nlk);
     if (write and h.stopped == 0) {
         c.unlock(&h.nlk);
@@ -515,7 +512,7 @@ fn procread(ch: *Chan, va_: ?*anyopaque, n_: c_int, off: i64) Error!c_int {
 
     var j: c_int = undefined;
     switch (QID(ch.qid)) {
-        Qctl => return c.readnum(offset, va, @bitCast(n), h.pid, c.NUMSIZE),
+        Qctl => return c.readnum(offset, va, @bitCast(n), h.p.pid, c.NUMSIZE),
         Qnoteid => return c.readnum(offset, va, @bitCast(n), h.noteid, c.NUMSIZE),
         Qmem => return procdebugio(h, c.Dmem, false, @bitCast(off), va, n),
         Qregs => return procdebugio(h, c.Dregs, false, @bitCast(off), va, n),
@@ -542,7 +539,7 @@ fn procread(ch: *Chan, va_: ?*anyopaque, n_: c_int, off: i64) Error!c_int {
                 defer sync.qunlock(&h.qwaitr);
                 c.lock(&h.exl);
                 while (h.waitq == null and h.exited == 0) {
-                    if (h == up() and h.nchild == 0) {
+                    if (h == port.hup() and h.nchild == 0) {
                         c.unlock(&h.exl);
                         return port.kerror(&port.Enochild);
                     }
@@ -630,7 +627,7 @@ fn procread(ch: *Chan, va_: ?*anyopaque, n_: c_int, off: i64) Error!c_int {
     return n;
 }
 
-fn procctlclosefiles(h: *Proc, all: bool, fd_: c_int) Error!void {
+fn procctlclosefiles(h: *Hproc, all: bool, fd_: c_int) Error!void {
     var fd = fd_;
     if (fd < 0)
         return port.kerror(&port.Ebadfd);
@@ -653,7 +650,7 @@ fn procctlclosefiles(h: *Proc, all: bool, fd_: c_int) Error!void {
 }
 
 fn stoppedorgone(a: ?*anyopaque) callconv(.c) c_int {
-    const h: *Proc = @ptrCast(@alignCast(a.?));
+    const h: *Hproc = @ptrCast(@alignCast(a.?));
     return @intFromBool(@as(*volatile c_int, &h.stopped).* != 0 or @as(*volatile c_int, &h.exited).* != 0);
 }
 
@@ -661,7 +658,7 @@ fn stoppedorgone(a: ?*anyopaque) callconv(.c) c_int {
 /// only waits) and waits until it has, unless it's the caller, which
 /// stops at its next stop point. A process spinning in guest code is
 /// kicked; one blocked in a syscall stops when the call returns.
-fn procstopwait(h: *Proc, ctl: c_int) Error!void {
+fn procstopwait(h: *Hproc, ctl: c_int) Error!void {
     const me = try uphproc();
     c.lock(&h.nlk);
     // Unlike 9front, a process may stop itself while a debugger waits
@@ -697,7 +694,7 @@ fn procstopwait(h: *Proc, ctl: c_int) Error!void {
 }
 
 /// Resumes a stopped process, for ctl start and startstop.
-fn procstart(h: *Proc, ctl: c_int) Error!void {
+fn procstart(h: *Hproc, ctl: c_int) Error!void {
     c.lock(&h.nlk);
     if (h.stopped == 0) {
         c.unlock(&h.nlk);
@@ -709,7 +706,7 @@ fn procstart(h: *Proc, ctl: c_int) Error!void {
     _ = sync.wakeup(&h.startr);
 }
 
-fn procctlreq(h: *Proc, va: [*]u8, n: c_int) Error!void {
+fn procctlreq(h: *Hproc, va: [*]u8, n: c_int) Error!void {
     const cb: *c.Cmdbuf = c.parsecmd(va, n);
     defer c.free(cb);
     const ct = try lookupcmd(cb, &proccmd);
