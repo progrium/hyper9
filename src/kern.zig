@@ -1612,6 +1612,11 @@ pub const nskernel = @hasDecl(build_options, "nskernel") and build_options.nsker
 comptime {
     // src/kern/dev/hstream.zig's leaves.
     _ = @import("hstream.zig");
+    if (available) {
+        // Handle names in the namespace (src/kern/chan.zig).
+        @export(&h9_host_nsname, .{ .name = "h9_host_nsname" });
+        @export(&h9_host_nspath, .{ .name = "h9_host_nspath" });
+    }
     if (available and nskernel) {
         if (host_dirs.supported) @export(&h9_host_dir, .{ .name = "h9_host_dir" });
         @export(&h9_plan_get, .{ .name = "h9_plan_get" });
@@ -1851,6 +1856,35 @@ fn h9_overlay_changed(track: ?*anyopaque, path: [*:0]const u8) callconv(.c) void
 
 fn h9_policy_active() callconv(.c) c_int {
     return @intFromBool(fs_plan != null);
+}
+
+/// src/kern/chan.zig's, for handle names in the namespace
+/// (design/host-handles.md): host path `path` as the name of the calling
+/// thread's machine's directory handle that holds it, the deepest, and
+/// the path relative to it, `name` or `name/rel`, into `out`. Its length,
+/// or -1 if no handle holds it or `out` is too short.
+fn h9_host_nsname(path: [*]const u8, len: c_int, out: [*]u8, n: c_int) callconv(.c) c_int {
+    const p = fs_plan orelse return -1;
+    const h = p.host orelse return -1;
+    const d = h.dirs orelse return -1;
+    const held = d.holding(path[0..@intCast(@max(len, 0))]) orelse return -1;
+    var w: std.Io.Writer = .fixed(out[0..@intCast(@max(n, 0))]);
+    w.writeAll(held.dir.name) catch return -1;
+    if (held.rel.len > 0) w.print("/{s}", .{held.rel}) catch return -1;
+    return @intCast(w.end);
+}
+
+/// The other way: the host path of the calling thread's machine's
+/// directory handle named `name`, into `out`. Its length, or -1 if there's
+/// no such handle or `out` is too short.
+fn h9_host_nspath(name: [*]const u8, len: c_int, out: [*]u8, n: c_int) callconv(.c) c_int {
+    const p = fs_plan orelse return -1;
+    const h = p.host orelse return -1;
+    const d = h.dirs orelse return -1;
+    const dir = d.get(name[0..@intCast(@max(len, 0))]) orelse return -1;
+    if (dir.path.len > @as(usize, @intCast(@max(n, 0)))) return -1;
+    @memcpy(out[0..dir.path.len], dir.path);
+    return @intCast(dir.path.len);
 }
 
 /// src/host/dirs.c's: the calling thread's machine's directory handle that

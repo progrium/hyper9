@@ -14,6 +14,7 @@ This describes, as built, h9's security stance and the sandbox policy: what a gu
   - [Access rules](#access-rules)
   - [Path resolution](#path-resolution)
   - [Files beneath a handle](#files-beneath-a-handle)
+  - [Handle names in the namespace](#handle-names-in-the-namespace)
   - [Contained trees](#contained-trees)
   - [Linux symlinks](#linux-symlinks)
   - [Default profile](#default-profile)
@@ -137,6 +138,10 @@ Each tree the plan allows is a directory handle ([host-handles](../design/host-h
 - **The web host.** No handles are opened: each tree is a WASI preopen, and wasi-libc resolves every path beneath the preopen that holds it, so the runtime keeps the result inside it. devfs opens by path there, with the checks above.
 
 A 9front program's walks follow links anywhere ([Path resolution](#path-resolution)), so an open whose links leave its handle is made again by the path it resolves to (its `/proc/self/fd` name, `F_GETPATH`, or on Windows its final path), beneath the handle that holds that, if one does, with no link followed; otherwise it fails as a hidden file does. A path no handle holds is an ancestor of one, listed for `/mnt/term/<path>`, or hidden: only directories are opened there, read-only, by path, and devfs's checks of what it opened decide. A thread with no host (a kernel thread, or a plan built without one) opens by path. `test "a symlink swapped in mid-walk can't escape a handle [host-handles]"` swaps a directory and a link to outside the tree under each kind of open.
+
+### Handle names in the namespace
+
+`/proc/n/ns` names a host tree by its handle ([host-handles](../design/host-handles.md)), not its host path: `#U<name>` for a handle's top and `#U<name>/<path>` beneath it, so the cwd is `bind -c '#Ucwd' /mnt/term/cwd` and another tree `bind '#Ud1' <target>`. `chan.nsname` rewrites each `#U` path that `/proc/n/ns` and `#O`'s union lines print, asking the machine's host which handle holds it (`h9_host_nsname`, the deepest). The namespace's own names are unchanged: a tree's channels are still named by resolved host paths, which devfs opens and checks. A walk of `#U<name>` goes the other way (`h9_host_nspath`), so a `bind`, a `mount`, and `--ns` take the names `/proc/n/ns` prints, and its output replays in a machine with the same handles (`test "--ns replays /proc/n/ns output in a machine with the same handles [host-handles]"`). A path no handle holds, an ancestor that `/mnt/term` lists, is printed as before. The guest paths of `--readable` and `--writable` trees outside the cwd are still `/mnt/term/<host path>`, as drawterm's are.
 
 ### Contained trees
 
@@ -298,7 +303,6 @@ run mk
 #   - hardlinks under writable paths can modify host files outside them
 #   - writes to writable paths are not capped (no res.disk)
 #   - paths are checked after resolving symlinks, so a host process renaming paths concurrently can race the check
-#   - /proc/n/ns shows the host paths of bound host trees
 #   - the h9 process itself is not host-sandboxed
 ```
 

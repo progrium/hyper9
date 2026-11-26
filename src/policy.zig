@@ -1058,7 +1058,6 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     }
     if (children) try caveats.append(arena, "child machines share this machine's kernel and host process: a kernel bug one can trigger affects them all");
     if (in.caller) try caveats.append(arena, "a path from the caller is reached through its channel, with the caller's rights; one the child only reads is under an overlay, so the child's writes to it stay in memory");
-    try caveats.append(arena, "/proc/n/ns shows the host paths of bound host trees");
     try caveats.append(arena, "the h9 process itself is not host-sandboxed");
 
     return .{

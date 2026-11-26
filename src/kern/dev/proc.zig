@@ -396,6 +396,10 @@ fn readns1(ch: *Chan, g: *Groups, buf: [*]u8, nbuf: c_int) Error!c_int {
         int2flag(f.mflag, &flag);
         const fp: [*]u8 = &flag;
         const from = chan.chanpath(f.umh.*.from);
+        // Host trees by their handles' names (design/host-handles.md).
+        var nb1: [1024]u8 = undefined;
+        var nb2: [1024]u8 = undefined;
+        const nfrom = chan.nsname(from, &nb1);
         if (dev.streq(chan.chanpath(f.to), "#M")) {
             // A posted channel prints as its /srv name, as on 9front
             // (design/epoch-0/devsrv.md).
@@ -403,19 +407,20 @@ fn readns1(ch: *Chan, g: *Groups, buf: [*]u8, nbuf: c_int) Error!c_int {
             const srv: [*c]const u8 = chan.srvname(mc) orelse chan.chanpath(mc);
             const spec: [*:0]u8 = @ptrCast(f.spec());
             i = if (spec[0] != 0)
-                c.snprint(buf, nbuf, @constCast("mount %s %q %q %q\n"), fp, srv, from, spec)
+                c.snprint(buf, nbuf, @constCast("mount %s %q %q %q\n"), fp, srv, nfrom, spec)
             else
-                c.snprint(buf, nbuf, @constCast("mount %s %q %q\n"), fp, srv, from);
+                c.snprint(buf, nbuf, @constCast("mount %s %q %q\n"), fp, srv, nfrom);
         } else {
             // An unnamed union as the bind -r lines that make it
             // (design/epoch-0/mounts.md).
             i = h9_overlay_nsunion(f.to, from, buf, nbuf);
             if (i < 0)
-                i = c.snprint(buf, nbuf, @constCast("bind %s %q %q\n"), fp, chan.chanpath(f.to), from);
+                i = c.snprint(buf, nbuf, @constCast("bind %s %q %q\n"), fp, chan.nsname(chan.chanpath(f.to), &nb2), nfrom);
         }
     } else {
         ch.nrock = -1;
-        i = c.snprint(buf, nbuf, @constCast("cd %q\n"), chan.chanpath(g.dot));
+        var nb: [1024]u8 = undefined;
+        i = c.snprint(buf, nbuf, @constCast("cd %q\n"), chan.nsname(chan.chanpath(g.dot), &nb));
     }
     return i;
 }

@@ -102,8 +102,8 @@ This is a security change. The guest can reach nothing new. What changes is how 
 - [ ] `test "an embedder's in-memory dirs handle serves a root [host-handles]"` passes.
 - [x] `git grep -lE '#include <(unistd|fcntl|sys/|windows)' src/kern/` finds nothing.
 - [ ] `h9 --print` output is the same as before for the policy cases, apart from handle names and the caveat that goes.
-- [ ] `test "/proc/n/ns shows handle names and no host path, in every profile [host-handles]"` passes.
-- [ ] `test "--ns replays /proc/n/ns output in a machine with the same handles [host-handles]"` passes.
+- [x] `test "/proc/n/ns shows handle names and no host path, in every profile [host-handles]"` passes.
+- [x] `test "--ns replays /proc/n/ns output in a machine with the same handles [host-handles]"` passes.
 - [x] [spec/sandbox.md](../spec/sandbox.md) describes handles, and its path resolution section describes what each host does beneath one.
 
 ## Implementation
@@ -146,3 +146,9 @@ This is a security change. The guest can reach nothing new. What changes is how 
 - **Two of drawterm's patches remain**: devcons's hooks (`pid`, `ppid`, the clock, and `sysstat`), and `dat.h`'s include of h9's `Proc` and `Chan.srvname`. Neither is host code; they end with devcons and `dat.h` ported, which is the kernel's, not this proposal's.
 - **An embedder's host is used as given.** The policy is still compiled beside it, and devfs still checks the plan's verdicts, so for files its handles can narrow what the plan allows but not widen it; devip's checks ask its dialer and listener, which decide. Its directory handles stay the embedder's to close, and its console, when it has one, replaces `Options.stdio`'s.
 - **The web host's table is the planned one**, with its trees as WASI preopens, described and not opened, and no listener. devfs opens by path there, which wasi-libc resolves beneath a preopen.
+
+**2026-11-26, handle names in the namespace.** `/proc/n/ns` and `#O`'s union lines name a host tree as `#U<name>` or `#U<name>/<path>`, by the deepest handle that holds it, and a walk of `#U<name>` reaches the handle's tree, so `--ns` replays what `/proc/n/ns` prints in a machine with the same handles. Some things it settled:
+
+- **Only what's printed changes.** A tree's channels are still named by resolved host paths, which devfs opens and checks; `chan.nsname` rewrites a `#U` path as it's printed, and `#U<name>` is rewritten to the handle's path as it's walked. A path no handle holds, an ancestor `/mnt/term` lists, is printed as before.
+- **The plan's caveat that `/proc/n/ns` shows host paths goes.** The guest paths of `--readable` and `--writable` trees outside the cwd are still `/mnt/term/<host path>`, which is drawterm's layout, not a leak of the namespace file.
+- **drawterm's devcons is h9's Zig** (`src/kern/dev/cons.zig`, with gfx's `#c` merged in), and `Chan.srvname` is a table beside the channel (`src/kern/chan.zig`), so of drawterm's patches only `dat.h`'s include of h9's `Proc` remains.

@@ -3609,6 +3609,10 @@ fn nsunion1(in: *Inst, old: [*c]const u8, p_: [*c]u8, e: [*c]u8, depth: c_int) [
                 p = nsunion1(sub, old, p, e, depth + 1);
         }
     }
+    // Host trees by their handles' names (design/host-handles.md).
+    var nb1: [1024]u8 = undefined;
+    var nb2: [1024]u8 = undefined;
+    const nold = chan.nsname(old, &nb2);
     i = j;
     while (i > 0 and @intFromPtr(p) < @intFromPtr(e)) {
         i -= 1;
@@ -3616,14 +3620,14 @@ fn nsunion1(in: *Inst, old: [*c]const u8, p_: [*c]u8, e: [*c]u8, depth: c_int) [
         if (m.at[0] != 0)
             continue;
         const fmt: [*c]const u8 = if (m.isup != 0) "bind -u %q %q\n" else if (m.create != 0) "bind -rbc %q %q\n" else "bind -rb %q %q\n";
-        p = c.seprint(p, e, @constCast(fmt), chan.chanpath(m.root), old);
+        p = c.seprint(p, e, @constCast(fmt), chan.nsname(chan.chanpath(m.root), &nb1), nold);
     }
     i = j + 1;
     while (i < mem.len and @intFromPtr(p) < @intFromPtr(e)) : (i += 1) {
         const m = &mem[i];
         if (m.at[0] == 0) {
             const fmt: [*c]const u8 = if (m.create != 0) "bind -rac %q %q\n" else "bind -ra %q %q\n";
-            p = c.seprint(p, e, @constCast(fmt), chan.chanpath(m.root), old);
+            p = c.seprint(p, e, @constCast(fmt), chan.nsname(chan.chanpath(m.root), &nb1), nold);
         }
     }
     return p;

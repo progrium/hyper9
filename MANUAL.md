@@ -2758,7 +2758,6 @@ run mk
 #   - hardlinks under writable paths can modify host files outside them
 #   - writes to writable paths are not capped (no res.disk)
 #   - paths are checked after resolving symlinks, so a host process renaming paths concurrently can race the check
-#   - /proc/n/ns shows the host paths of bound host trees
 #   - the h9 process itself is not host-sandboxed
 ```
 
