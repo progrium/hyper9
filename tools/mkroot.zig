@@ -52,7 +52,7 @@ const skip = [_][]const u8{
 };
 const skip_src = [_][]const u8{"sys/src"};
 
-const prompt = "H9> ";
+pub const prompt = "H9> ";
 
 /// Architectures --arch can name, as 9front names them. The image's
 /// binaries are arm64; the others are built.
@@ -72,9 +72,12 @@ const exe_suffix = if (builtin.os.tag == .windows) ".exe" else "";
 
 // Process-wide state, so die() can clean up as Python's atexit and
 // TemporaryDirectory did: kill QEMU and remove the scratch directory.
-var g_io: Io = undefined;
+pub var g_io: Io = undefined;
 var g_child: ?*std.process.Child = null;
-var g_tmp: ?[]const u8 = null;
+pub var g_tmp: ?[]const u8 = null;
+/// What die() and log() say they are: tools/conformance.zig boots 9front
+/// with this file's code too.
+pub var g_name: []const u8 = "mkroot";
 
 /// Kills QEMU with SIGKILL where there is one, as Python's Popen.kill did:
 /// SIGTERM makes QEMU print "terminating on signal 15".
@@ -83,7 +86,7 @@ fn killChild(c: *std.process.Child) void {
     c.kill(g_io);
 }
 
-fn cleanup() void {
+pub fn cleanup() void {
     if (g_child) |c| {
         killChild(c);
         g_child = null;
@@ -94,17 +97,17 @@ fn cleanup() void {
     }
 }
 
-fn die(comptime fmt: []const u8, args: anytype) noreturn {
+pub fn die(comptime fmt: []const u8, args: anytype) noreturn {
     cleanup();
-    std.debug.print("mkroot: " ++ fmt ++ "\n", args);
+    std.debug.print("{s}: " ++ fmt ++ "\n", .{g_name} ++ args);
     std.process.exit(1);
 }
 
-fn log(comptime fmt: []const u8, args: anytype) void {
-    std.debug.print("mkroot: " ++ fmt ++ "\n", args);
+pub fn log(comptime fmt: []const u8, args: anytype) void {
+    std.debug.print("{s}: " ++ fmt ++ "\n", .{g_name} ++ args);
 }
 
-fn oom() noreturn {
+pub fn oom() noreturn {
     die("out of memory", .{});
 }
 
@@ -271,7 +274,7 @@ pub fn commandOutput(gpa: std.mem.Allocator, raw: []const u8) ![]u8 {
 
 // ---- Host helpers ----
 
-const Ctx = struct {
+pub const Ctx = struct {
     gpa: std.mem.Allocator,
     io: Io,
     env: *const std.process.Environ.Map,
@@ -279,39 +282,39 @@ const Ctx = struct {
     local: []const u8,
     bsdtar: []const u8 = "bsdtar",
 
-    fn join(c: Ctx, parts: []const []const u8) []const u8 {
+    pub fn join(c: Ctx, parts: []const []const u8) []const u8 {
         return std.fs.path.join(c.gpa, parts) catch oom();
     }
 
-    fn rel(c: Ctx, path: []const u8) []const u8 {
+    pub fn rel(c: Ctx, path: []const u8) []const u8 {
         return std.fs.path.relative(c.gpa, c.repo, null, c.repo, path) catch path;
     }
 
-    fn isFile(c: Ctx, path: []const u8) bool {
+    pub fn isFile(c: Ctx, path: []const u8) bool {
         const st = Dir.cwd().statFile(c.io, path, .{}) catch return false;
         return st.kind == .file;
     }
 
-    fn isDir(c: Ctx, path: []const u8) bool {
+    pub fn isDir(c: Ctx, path: []const u8) bool {
         const st = Dir.cwd().statFile(c.io, path, .{}) catch return false;
         return st.kind == .directory;
     }
 
-    fn exists(c: Ctx, path: []const u8) bool {
+    pub fn exists(c: Ctx, path: []const u8) bool {
         Dir.cwd().access(c.io, path, .{}) catch return false;
         return true;
     }
 
-    fn makePath(c: Ctx, path: []const u8) void {
+    pub fn makePath(c: Ctx, path: []const u8) void {
         Dir.cwd().createDirPath(c.io, path) catch |e| die("creating {s}: {t}", .{ path, e });
     }
 
-    fn rmTree(c: Ctx, path: []const u8) void {
+    pub fn rmTree(c: Ctx, path: []const u8) void {
         Dir.cwd().deleteTree(c.io, path) catch {};
     }
 
     /// The path of `name` on $PATH, or null.
-    fn which(c: Ctx, name: []const u8) ?[]const u8 {
+    pub fn which(c: Ctx, name: []const u8) ?[]const u8 {
         const path = c.env.get("PATH") orelse return null;
         var it = std.mem.tokenizeScalar(u8, path, std.fs.path.delimiter);
         while (it.next()) |d| {
@@ -322,7 +325,7 @@ const Ctx = struct {
     }
 
     /// Runs a command with the terminal's stdio; dies unless it exits 0.
-    fn run(c: Ctx, argv: []const []const u8) void {
+    pub fn run(c: Ctx, argv: []const []const u8) void {
         var child = std.process.spawn(c.io, .{ .argv = argv }) catch |e| die("{s}: {t}", .{ argv[0], e });
         const term = child.wait(c.io) catch |e| die("{s}: {t}", .{ argv[0], e });
         switch (term) {
@@ -341,7 +344,7 @@ const Ctx = struct {
 };
 
 /// QEMU's serial console: what the guest prints, and a way to type at it.
-const Console = struct {
+pub const Console = struct {
     c: Ctx,
     child: std.process.Child,
     mr: File.MultiReader = undefined,
@@ -350,7 +353,7 @@ const Console = struct {
     transcript: std.ArrayList(u8) = .empty,
     eof: bool = false,
 
-    fn start(con: *Console, c: Ctx, argv: []const []const u8) void {
+    pub fn start(con: *Console, c: Ctx, argv: []const []const u8) void {
         con.* = .{
             .c = c,
             .child = std.process.spawn(c.io, .{ .argv = argv, .stdin = .pipe, .stdout = .pipe }) catch |e|
@@ -360,13 +363,13 @@ const Console = struct {
         con.mr.init(c.gpa, c.io, con.mr_buf.toStreams(), &.{con.child.stdout.?});
     }
 
-    fn close(con: *Console) void {
+    pub fn close(con: *Console) void {
         killChild(&con.child);
         g_child = null;
     }
 
     /// Waits for `pat` and returns what came before it, consuming both.
-    fn until(con: *Console, pat: []const u8, timeout_s: i64) []const u8 {
+    pub fn until(con: *Console, pat: []const u8, timeout_s: i64) []const u8 {
         const io = con.c.io;
         const deadline: Io.Timeout = .{ .deadline = .fromNow(io, .{
             .raw = .fromSeconds(timeout_s),
@@ -398,7 +401,7 @@ const Console = struct {
         die("timed out waiting for \"{f}\" from the guest", .{std.zig.fmtString(pat)});
     }
 
-    fn send(con: *Console, line: []const u8) void {
+    pub fn send(con: *Console, line: []const u8) void {
         const in = con.child.stdin.?;
         // The emulated UART drops input that arrives faster than rc reads it.
         for (line) |ch| con.sendByte(in, ch);
@@ -411,14 +414,14 @@ const Console = struct {
         io.sleep(.fromMilliseconds(5), .awake) catch {};
     }
 
-    fn cmd(con: *Console, line: []const u8, timeout_s: i64) []const u8 {
+    pub fn cmd(con: *Console, line: []const u8, timeout_s: i64) []const u8 {
         con.send(line);
         const out = con.until(prompt, timeout_s);
         return commandOutput(con.c.gpa, out) catch oom();
     }
 };
 
-fn pin(c: Ctx, name: []const u8) []const u8 {
+pub fn pin(c: Ctx, name: []const u8) []const u8 {
     const path = c.join(&.{ c.repo, "scripts", "pins.sh" });
     const text = Dir.cwd().readFileAlloc(c.io, path, c.gpa, .limited(1 << 20)) catch |e|
         die("reading scripts/pins.sh: {t}", .{e});
@@ -591,7 +594,7 @@ fn readImage(c: Ctx, image: []const u8, tmp: []const u8, name: []const u8, secto
     return Dir.cwd().readFileAlloc(c.io, raw, c.gpa, .unlimited) catch |e| die("reading {s}: {t}", .{ raw, e });
 }
 
-fn makeTmp(c: Ctx, parent: []const u8) []const u8 {
+pub fn makeTmp(c: Ctx, parent: []const u8) []const u8 {
     var rnd: [6]u8 = undefined;
     c.io.random(&rnd);
     var enc: [8]u8 = undefined;
@@ -599,6 +602,71 @@ fn makeTmp(c: Ctx, parent: []const u8) []const u8 {
     const p = c.join(&.{ parent, std.mem.concat(c.gpa, u8, &.{ "mkroot.", &enc }) catch oom() });
     Dir.cwd().createDir(c.io, p, .default_dir) catch |e| die("creating {s}: {t}", .{ p, e });
     return p;
+}
+
+/// Boots the image in QEMU, headless and with no network, on an overlay
+/// in `tmp` so the image is left untouched, with `disk`, a raw file, as
+/// the guest's /dev/sdG0, and waits for rc's prompt, which it sets to
+/// `prompt`.
+pub fn boot(c: Ctx, con: *Console, image: []const u8, tmp: []const u8, disk: []const u8) void {
+    const gpa = c.gpa;
+    const io = c.io;
+    const overlay = c.join(&.{ tmp, "overlay.qcow2" });
+    c.run(&.{ "qemu-img", "create", "-q", "-f", "qcow2", "-F", "qcow2", "-b", image, overlay });
+
+    // The kernel and plan9.ini live on the image's FAT partition, which
+    // U-Boot normally loads; QEMU loads them directly instead.
+    const mbr = readImage(c, image, tmp, "mbr.raw", 1);
+    // Partition type 0x0B is FAT32 in the table, but 9front formats it FAT16.
+    const part = mbrPartition(mbr, 0x0B) orelse die("no partition of type 0xb in the image", .{});
+    const start: u64 = part[0];
+    const count: u64 = part[1];
+    const img = readImage(c, image, tmp, "fat.raw", start + count);
+    const fat = img[@min(img.len, start * 512)..];
+    const kdata = fat16Read(gpa, fat, "9qemu.u") catch |e| switch (e) {
+        error.NotFat16 => die("boot partition is not FAT16", .{}),
+        error.NotFound => die("no 9qemu.u on the boot partition", .{}),
+        error.OutOfMemory => oom(),
+    };
+    const kernel = c.join(&.{ tmp, "9qemu.u" });
+    Dir.cwd().writeFile(io, .{ .sub_path = kernel, .data = kdata }) catch |e| die("writing {s}: {t}", .{ kernel, e });
+    const ini = c.join(&.{ tmp, "plan9.ini" });
+    Dir.cwd().writeFile(io, .{ .sub_path = ini, .data = "console=0\nnobootprompt=local!/dev/sdF0/fs\nuser=glenda\n" }) catch |e| die("writing {s}: {t}", .{ ini, e });
+
+    // Plain `virt`, which every QEMU has (QEMU 11 dropped versioned
+    // types such as virt-2.12), with highmem=off: from virt-3.0 on, PCIe
+    // config space moves above 4 GB, and 9front's kernel panics at boot
+    // (kenter: stack bytes left) when it's there.
+    con.start(c, &.{
+        "qemu-system-aarch64",
+        "-M",
+        "virt,highmem=off,gic-version=3",
+        "-cpu",
+        "cortex-a72",
+        "-m",
+        "2G",
+        "-smp",
+        "2",
+        "-nographic",
+        "-nic",
+        "none",
+        "-kernel",
+        kernel,
+        "-device",
+        std.fmt.allocPrint(gpa, "loader,file={s},addr=0x40010000,force-raw=on", .{ini}) catch oom(),
+        "-drive",
+        std.fmt.allocPrint(gpa, "file={s},format=qcow2,if=none,id=disk", .{overlay}) catch oom(),
+        "-device",
+        "virtio-blk-pci-non-transitional,drive=disk",
+        "-drive",
+        std.fmt.allocPrint(gpa, "file={s},format=raw,if=none,id=out", .{disk}) catch oom(),
+        "-device",
+        "virtio-blk-pci-non-transitional,drive=out",
+    });
+    // TCG on a host of another architecture takes minutes to boot.
+    _ = con.until("\n% ", 900);
+    con.send("prompt=('H'^'9> ' '\t')");
+    _ = con.until(prompt, 60);
 }
 
 pub fn main(init: std.process.Init) !u8 {
@@ -664,28 +732,6 @@ pub fn main(init: std.process.Init) !u8 {
     const tmp = makeTmp(c, cache);
     g_tmp = tmp;
     {
-        const overlay = c.join(&.{ tmp, "overlay.qcow2" });
-        c.run(&.{ "qemu-img", "create", "-q", "-f", "qcow2", "-F", "qcow2", "-b", image, overlay });
-
-        // The kernel and plan9.ini live on the image's FAT partition, which
-        // U-Boot normally loads; QEMU loads them directly instead.
-        const mbr = readImage(c, image, tmp, "mbr.raw", 1);
-        // Partition type 0x0B is FAT32 in the table, but 9front formats it FAT16.
-        const part = mbrPartition(mbr, 0x0B) orelse die("no partition of type 0xb in the image", .{});
-        const start: u64 = part[0];
-        const count: u64 = part[1];
-        const disk = readImage(c, image, tmp, "fat.raw", start + count);
-        const fat = disk[@min(disk.len, start * 512)..];
-        const kdata = fat16Read(gpa, fat, "9qemu.u") catch |e| switch (e) {
-            error.NotFat16 => die("boot partition is not FAT16", .{}),
-            error.NotFound => die("no 9qemu.u on the boot partition", .{}),
-            error.OutOfMemory => oom(),
-        };
-        const kernel = c.join(&.{ tmp, "9qemu.u" });
-        try Dir.cwd().writeFile(io, .{ .sub_path = kernel, .data = kdata });
-        const ini = c.join(&.{ tmp, "plan9.ini" });
-        try Dir.cwd().writeFile(io, .{ .sub_path = ini, .data = "console=0\nnobootprompt=local!/dev/sdF0/fs\nuser=glenda\n" });
-
         const out = c.join(&.{ tmp, "out.tar" });
         {
             const f = try Dir.cwd().createFile(io, out, .{});
@@ -695,39 +741,7 @@ pub fn main(init: std.process.Init) !u8 {
 
         log("booting 9front {s} in QEMU", .{release});
         var con: Console = undefined;
-        // Plain `virt`, which every QEMU has (QEMU 11 dropped versioned
-        // types such as virt-2.12), with highmem=off: from virt-3.0 on, PCIe
-        // config space moves above 4 GB, and 9front's kernel panics at boot
-        // (kenter: stack bytes left) when it's there.
-        con.start(c, &.{
-            "qemu-system-aarch64",
-            "-M",
-            "virt,highmem=off,gic-version=3",
-            "-cpu",
-            "cortex-a72",
-            "-m",
-            "2G",
-            "-smp",
-            "2",
-            "-nographic",
-            "-nic",
-            "none",
-            "-kernel",
-            kernel,
-            "-device",
-            try std.fmt.allocPrint(gpa, "loader,file={s},addr=0x40010000,force-raw=on", .{ini}),
-            "-drive",
-            try std.fmt.allocPrint(gpa, "file={s},format=qcow2,if=none,id=disk", .{overlay}),
-            "-device",
-            "virtio-blk-pci-non-transitional,drive=disk",
-            "-drive",
-            try std.fmt.allocPrint(gpa, "file={s},format=raw,if=none,id=out", .{out}),
-            "-device",
-            "virtio-blk-pci-non-transitional,drive=out",
-        });
-        _ = con.until("\n% ", 300);
-        con.send("prompt=('H'^'9> ' '\t')");
-        _ = con.until(prompt, 30);
+        boot(c, &con, image, tmp, out);
         const cputype = std.mem.trim(u8, con.cmd("cat /env/cputype", 60), "\x00 \n");
         if (!std.mem.eql(u8, cputype, "arm64")) die("guest cputype is '{s}', not arm64", .{cputype});
         const disks = con.cmd("ls /dev/sd*/data", 60);
