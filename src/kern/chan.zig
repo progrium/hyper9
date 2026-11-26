@@ -682,7 +682,7 @@ fn ccloneAt(ch: *Chan, pc: usize) Error!*Chan {
     return nc;
 }
 
-// h9: src/kern/devoverlay.c
+// h9: src/kern/dev/overlay.zig
 extern fn h9_overlay_lowerdev(c_int, c_int, Qid, *c_int, *c_int) c_int;
 // h9: devfs-posix.c and devfs-win32.c (src/kern/fscheck.h), through
 // src/kern/devshim.c, since they raise.
@@ -726,7 +726,7 @@ pub fn findmount(cp: *?*Chan, mp: ?*?*Mhead, type_: c_int, dev_: c_int, qid: Qid
     }
     sync.runlock(&pg.ns);
     // h9: a lower directory seen through a #O overlay keeps the mounts
-    // made on it before the overlay (src/kern/devoverlay.c), as when a
+    // made on it before the overlay (src/kern/dev/overlay.zig), as when a
     // namespace file's overlay goes over / after other binds.
     if (samepath and h9_overlay_lowerdev(@"type", devn, qid, &@"type", &devn) != 0)
         return findmount(cp, mp, @"type", devn, qid);

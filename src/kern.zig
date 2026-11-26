@@ -1687,7 +1687,7 @@ fn h9_root_table(n: *c_int) callconv(.c) [*]const Htool {
     return &root_table;
 }
 
-// Leaves called from devoverlay.c. They never raise kernel errors.
+// Leaves called from src/kern/dev/overlay.zig. They never raise kernel errors.
 
 fn h9_overlay_pool() callconv(.c) ?*anyopaque {
     return @ptrCast(@constCast(fs_pages));
