@@ -91,6 +91,7 @@ const c = struct {
     extern fn h9_sched_yield() void;
     extern fn h9_sched_park() void;
     extern fn h9_sched_unpark(t: *anyopaque) void;
+    extern fn h9_kern_locals(save: c_int, slots: *[4]usize) void;
 };
 
 /// A one-shot event that a task waits for by parking, and anything else
@@ -199,6 +200,11 @@ const Task = struct {
     /// last went on an executor.
     cpu: cputime.Times = .{},
     mark: cputime.Times = .{},
+    /// The kernel's threadlocals (the plan, pages, and CPUs that devfs
+    /// and #c go by) as it left them, set again when it's switched in,
+    /// since a process changes them for a while (h9's own dials go
+    /// without a plan) and can park meanwhile.
+    locals: [4]usize = @splat(0),
 
     fn readyC(ctx: ?*anyopaque) callconv(.c) void {
         const t: *Task = @ptrCast(@alignCast(ctx.?));
@@ -307,6 +313,7 @@ pub const Exec = struct {
         e.slice_start = now();
         e.setState(.kernel);
         t.mark = cputime.hostThread();
+        c.h9_kern_locals(0, &t.locals);
         const rc = if (!t.started) blk: {
             t.started = true;
             break :blk c.h9_sched_exec_start(e.kx, t.kt);
@@ -341,6 +348,7 @@ pub const Exec = struct {
         const e: *Exec = @ptrCast(@alignCast(exctx.?));
         const t: *Task = @ptrCast(@alignCast(taskctx.?));
         t.cpu = t.cpu.add(cputime.hostThread().since(t.mark));
+        c.h9_kern_locals(1, &t.locals);
         const l = t.lease orelse return;
         if (e.owner.load(.acquire) != l or l.home != @as(?*anyopaque, e)) return;
         if (!l.extra_dirty) e.vcpu.getExtra(&l.extra) catch {};
@@ -464,6 +472,8 @@ pub const Sched = struct {
         if (s.stopping.load(.acquire)) return -1;
         const t = s.gpa.create(Task) catch return -1;
         t.* = .{ .s = s, .kt = undefined };
+        // It starts with its starter's, until its first call sets them.
+        c.h9_kern_locals(1, &t.locals);
         t.kt = c.h9_sched_task_new(proc.?, Task.readyC, t) orelse {
             s.gpa.destroy(t);
             return -1;
