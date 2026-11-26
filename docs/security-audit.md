@@ -165,7 +165,7 @@ escape.
 | B2 | Guest kernel mode (the shim) vs. guest user mode | The shim's entry and restore paths (`src/arch/{amd64,arm64}/shim.S`), the host-set CPU state (`src/engine/x86.zig`), `arch.sanitize` (`src/arch/*.zig`) | Syscalls, faults, notes, `noted`, `rt_sigreturn`, `/proc/n/regs` writes |
 | B3 | Syscall arguments vs. the kernel | `src/abi/plan9/syscall.zig` (9front) and `src/abi/linux/sys.zig`, `mm.zig`, `signal.zig`, and the rest of `src/abi/linux/`; `GuestBuf` (see [kernel.md, seam rule 7](../spec/kernel.md#zigc-seam-rules)) | Every syscall |
 | B4 | The guest's namespace vs. the host's file system | The namespace builder (`src/newns.zig`, `src/mount.zig`, `src/machine.zig`), the device mask, and devfs's hooks into `src/kern/fscheck.c` and `h9_policy_check` in `src/policy.zig` | Walks, opens, creates, removes, renames, wstats, directory reads on `#U` |
-| B5 | The guest's network vs. the host's | devip's hooks (`h9_net_check`, `h9_net_lookup`, `h9_net_resolved`) into `src/kern/netcheck.c` and `src/policy.zig`; devhstream's connect check; the Linux socket layer (`src/kern/linuxnet.c`) | `connect`, `announce`, `cs` lookups, `sendto`, `/net/ws` |
+| B5 | The guest's network vs. the host's | devip's hooks (`h9_net_check`, `h9_net_lookup`, `h9_net_resolved`) into `src/kern/netcheck.zig` and `src/policy.zig`; devhstream's connect check; the Linux socket layer (`src/kern/linuxnet.zig`) | `connect`, `announce`, `cs` lookups, `sendto`, `/net/ws` |
 | B6 | Remote servers' bytes vs. h9's parsers | `src/dotl/` (`wire.zig`, `client.zig`, `server.zig`, `attr.zig`), `src/rootindex/`, `src/rootindex.zig`, `src/statictree.zig`, `src/hstream.zig`, `src/ws.zig`, and drawterm's devmnt | Every 9P reply, index, event record, HTTP response, and WebSocket frame |
 | B7 | Network clients vs. a served machine | `src/serve.zig`, `src/ws.zig`'s server side, `src/dotl/server.zig`, exportfs in the guest | Connections to `--serve` listeners |
 | B8 | One machine vs. another in the same process | Per-machine lookups in devproc, devsrv, `#O`, `#ℏ`, `#ℓ`, the console, and devenv (`src/kern/`) | Any path that names a pid, a post, a union number, or a conversation |
@@ -315,9 +315,9 @@ neighbours. See [spec/abi-linux.md](../spec/abi-linux.md).
 - **Threads**: `clone`, futexes in `src/kern/linux.c`, robust lists,
   `clear_child_tid`, `exit_group`, `execve` from a non-leader.
 - **Terminals**: the console's termios, and pseudoterminals in
-  `src/kern/devpty.c` with an `N_TTY`-like line discipline. There are no host
+  `src/kern/dev/pty.zig` with an `N_TTY`-like line discipline. There are no host
   ioctls such as `TIOCSTI`.
-- **Sockets** (`src/kern/linuxnet.c`): `socket(2)` opens `/net/tcp/clone` in
+- **Sockets** (`src/kern/linuxnet.zig`): `socket(2)` opens `/net/tcp/clone` in
   the process's namespace, so devip's policy applies. `sendto` is checked
   against the connect policy. `AF_UNIX` sockets are pipes posted in `#s`,
   `SCM_RIGHTS` passes fds within one machine, and `AF_NETLINK` answers link
@@ -340,8 +340,8 @@ devtls, devssl, devdraw, devmouse, devaudio, and qio. h9 adds devices in
 | `#s` srv | `devsrv.c` (from 9front) | One board per machine |
 | `#O` overlay and unions | `dev/overlay.zig` (about 5,000 lines) | Attaching checks the instance belongs to the caller's machine; memory from the guest-physical allocator; union walk cache keyed by the caller's access rules |
 | `#L` Linux view | `devlinux.c`, `linux.c` | The Linux root, `/proc`, `/sys`, `/dev`, chroot |
-| `#ε` eventfd/epoll | `linuxnet.c` | Readiness |
-| `#τ` pty | `devpty.c` | Per machine numbering |
+| `#ε` eventfd/epoll | `dev/eventfd.zig` | Readiness |
+| `#τ` pty | `dev/pty.zig` | Per machine numbering |
 | `#ℏ` host streams | `devhstream.c`, `src/hstream.zig`, `src/ws.zig` | Guest `/net/ws` connects are checked by the net policy; up to 32 conversations and 16 MiB unread per stream |
 | `#ℓ` 9P2000.L | `devdotl.c`, `src/dotl/` | Translator between devmnt and a server, or a client and exportfs |
 | `#ι` index | `devhidx.c`, `src/rootindex/` | Masked once `--ns` is replayed, since it could reach the host's index cache |
@@ -407,7 +407,7 @@ the [net-policy](../design/epoch-0/net-policy.md) proposal.
   can't reach them by name.
 - **Host-side code**: devip's host socket layer in
   `src/kern/hostsock-{posix,win32,wasm}.c`, and the Linux socket layer in
-  `src/kern/linuxnet.c`.
+  `src/kern/linuxnet.zig`.
 
 ### 6.8 9P, remote roots, and indexes
 
@@ -588,7 +588,7 @@ and queue code in the Linux ABI.
 | Engines | `src/engine.zig`, `src/engine/{hvf,kvm,kvm_abi,whp,whp_abi,gphys,pt_arm64,pt_amd64,x86,arena,hcpu,h86,ha64,hx64}.zig` |
 | Shims and register state | `src/arch/amd64/shim.S`, `src/arch/arm64/shim.S`, `src/arch/{amd64,arm64,i386}.zig` |
 | Emulator CPUs | `src/engine/hcpu/interp/` (especially `mem.zig`), `src/engine/hcpu/jit/` (especially `codemem.zig`, `cache.zig`, `dispatch.zig`, the emitters' memory paths), `src/web/` for wasm |
-| Linux ABI | `src/abi/linux/`, `src/kern/linux.c`, `src/kern/linuxnet.c`, `src/kern/devlinux.c`, `src/kern/devpty.c`, `src/kern/fifo.c` |
+| Linux ABI | `src/abi/linux/`, `src/kern/linux.c`, `src/kern/linuxnet.zig`, `src/kern/rconv.zig`, `src/kern/devlinux.c`, `src/kern/dev/pty.zig`, `src/kern/fifo.c` |
 | h9's kernel code | `src/kern/*.c` and `*.h` (hooks, devices, process model) |
 | Vendored kernel, as changed or reached | `third_party/drawterm/kern/` (devfs, devip, devmnt, chan, sysfile, qio, devpipe, devtls), and the libraries it calls from guest-reachable paths (`libsec`, `libip`, `libc`) |
 | 9P, indexes, and streams | `src/dotl/`, `src/rootindex/`, `src/rootindex.zig`, `src/statictree.zig`, `src/hstream.zig`, `src/ws.zig`, `src/cred.zig` |

@@ -58,7 +58,7 @@ By default, `/dev/cons` is the machine's console device, which maps to the `Stdi
 
 A read returns after one host read, as on a terminal, so a typed line reaches the guest when Enter is pressed.
 
-That host read happens on a reader thread for the machine run (`src/consin.zig`), never on the guest's thread: the guest sleeps in the kernel (`src/kern/devhcons.c`) until the thread has input, so a note or a teardown interrupts a console read as it does any other blocking call. Nothing is read ahead of a guest's request.
+That host read happens on a reader thread for the machine run (`src/consin.zig`), never on the guest's thread: the guest sleeps in the kernel (`src/kern/dev/hcons.zig`) until the thread has input, so a note or a teardown interrupts a console read as it does any other blocking call. Nothing is read ahead of a guest's request.
 
 At the end of a run the thread is stopped through `Stdio.in_cancel` (the CLI's stdin polls with a wake pipe on POSIX and uses `CancelSynchronousIo` on Windows).
 
@@ -80,7 +80,7 @@ The window opens lazily, on the first walk below `#i` or open of `/dev/snarf`, s
 
 `/dev/kbd` serves kbdfs's format (`k`/`K` for keys held, `c` for a key typed), which rio reads, and drops keys while it isn't open. `/dev/snarf` is the host clipboard, or under `--gfx=noclip` a buffer in the h9 process; machines without `#i` can't open it.
 
-With either screen, `gfx.c`'s wrappers around devdraw's, devmouse's, and devkbd's devtabs add three of 9front's files:
+With either screen, `src/kern/dev/gfx.zig`'s wrappers around devdraw's, devmouse's, and devkbd's devtabs add three of 9front's files:
 
 - `/dev/screen`, in `#i`'s top directory beside `draw` and `winname`: each open copies `gscreen` under `drawlock`, as an uncompressed image(6) file (a 60-byte header, then the rows), and reads come from that copy. Opening it opens the screen.
 - `/dev/mousein`, in `#m`: each write is one event in `/dev/mouse`'s format, as 9front's devmouse takes it, `A` for the pointer at x, y (`absmousetrack`), `a` for x and y scaled from 0 to 2³¹ across the screen, and any other letter for a move by x, y (`mousetrack`); a msec of 0 is now. It opens the screen, since the pointer stays put without one.

@@ -1,6 +1,6 @@
 //! A machine run's console input: a host thread that reads `Stdio.in` on
 //! behalf of guest console reads, so a guest process waits in drawterm's
-//! sleep (src/kern/devhcons.c), where a note or a teardown interrupts it,
+//! sleep (src/kern/dev/hcons.zig), where a note or a teardown interrupts it,
 //! and never in a host read. See SPEC.md, "Filesystem, boot, and I/O".
 //!
 //! The thread does one host read per guest request, as a terminal returns

@@ -1,6 +1,8 @@
 //! The host's stdin as a `std.Io.Reader`, for the guest's console, with a
 //! `cancel` that makes a blocked read return (`h9.consin.Cancel`), so a
-//! run can end while the console's reader thread is in a read.
+//! run can end while the console's reader thread is in a read. `initFd`
+//! reads another descriptor (or HANDLE) the same way, for libh9
+//! (src/capi.zig).
 //!
 //! On POSIX the reader polls stdin together with a wake pipe, and `cancel`
 //! writes to the pipe. Where poll can't wait on stdin (macOS reports
@@ -24,10 +26,17 @@ const PosixStdin = struct {
     /// The wake pipe, or -1s if it couldn't be made (reads then can't be
     /// cancelled).
     wake: [2]posix.fd_t = .{ -1, -1 },
+    fd: posix.fd_t = posix.STDIN_FILENO,
     interface: std.Io.Reader,
 
-    pub fn init(s: *PosixStdin, _: std.Io, buf: []u8) void {
-        s.* = .{ .interface = .{
+    pub fn init(s: *PosixStdin, io: std.Io, buf: []u8) void {
+        s.initFd(io, buf, posix.STDIN_FILENO);
+    }
+
+    /// Reads `fd` instead of stdin. The caller keeps it open, and closes
+    /// it; `deinit` closes only the wake pipe.
+    pub fn initFd(s: *PosixStdin, _: std.Io, buf: []u8, src: posix.fd_t) void {
+        s.* = .{ .fd = src, .interface = .{
             .vtable = &.{ .stream = stream },
             .buffer = buf,
             .seek = 0,
@@ -39,6 +48,13 @@ const PosixStdin = struct {
         const fl = std.c.fcntl(fds[0], posix.F.GETFL);
         _ = std.c.fcntl(fds[0], posix.F.SETFL, fl | @as(c_int, @bitCast(posix.O{ .NONBLOCK = true })));
         s.wake = fds;
+    }
+
+    pub fn deinit(s: *PosixStdin) void {
+        for (s.wake) |fd| if (fd >= 0) {
+            _ = std.c.close(fd);
+        };
+        s.wake = .{ -1, -1 };
     }
 
     pub fn reader(s: *PosixStdin) *std.Io.Reader {
@@ -67,7 +83,7 @@ const PosixStdin = struct {
         const dest = limit.slice(try wr.writableSliceGreedy(1));
         if (s.wake[0] >= 0) while (true) {
             var fds = [2]posix.pollfd{
-                .{ .fd = posix.STDIN_FILENO, .events = posix.POLL.IN, .revents = 0 },
+                .{ .fd = s.fd, .events = posix.POLL.IN, .revents = 0 },
                 .{ .fd = s.wake[0], .events = posix.POLL.IN, .revents = 0 },
             };
             _ = posix.poll(&fds, -1) catch break;
@@ -78,7 +94,7 @@ const PosixStdin = struct {
             if (fds[0].revents != 0) break;
         };
         while (true) {
-            const n = posix.read(posix.STDIN_FILENO, dest) catch |err| switch (err) {
+            const n = posix.read(s.fd, dest) catch |err| switch (err) {
                 // A non-blocking stdin with nothing to read yet.
                 error.WouldBlock => {
                     std.Thread.yield() catch {};
@@ -107,9 +123,14 @@ const WindowsStdin = struct {
     cancelled: std.atomic.Value(bool) = .init(false),
     interface: std.Io.Reader,
 
-    pub fn init(s: *WindowsStdin, _: std.Io, buf: []u8) void {
+    pub fn init(s: *WindowsStdin, io: std.Io, buf: []u8) void {
+        s.initFd(io, buf, w.peb().ProcessParameters.hStdInput);
+    }
+
+    /// Reads `handle` instead of stdin. The caller keeps it open.
+    pub fn initFd(s: *WindowsStdin, _: std.Io, buf: []u8, handle: ?w.HANDLE) void {
         s.cancelled = .init(false);
-        s.handle = w.peb().ProcessParameters.hStdInput;
+        s.handle = handle;
         var mode: w.DWORD = 0;
         s.console = if (s.handle) |h| GetConsoleMode(h, &mode).toBool() else false;
         s.interface = .{
@@ -119,6 +140,8 @@ const WindowsStdin = struct {
             .end = 0,
         };
     }
+
+    pub fn deinit(_: *WindowsStdin) void {}
 
     pub fn reader(s: *WindowsStdin) *std.Io.Reader {
         return &s.interface;

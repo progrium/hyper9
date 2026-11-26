@@ -1,5 +1,6 @@
 /*
- * h9's sandbox hooks for devfs (src/kern/fscheck.c). The operation
+ * h9's sandbox hooks for devfs (src/kern/fscheck.c, and the kernel's half in
+ * src/kern/fscheck.zig). The operation
  * numbers match policy.Op in src/policy.zig.
  */
 enum {
@@ -163,7 +164,7 @@ void	h9_fs_sync(void);
  * h9_fs_mkfifo makes name in the devfs directory c a host FIFO, and
  * h9_fs_isfifo says whether the devfs chan c is one. h9_fs_mkfifopath
  * makes one by a path in the caller's namespace, in an overlay or a
- * devfs tree (fscheck.c); 0, or -1 with the error in errstr.
+ * devfs tree (fscheck.zig); 0, or -1 with the error in errstr.
  * h9_fs_chanisfifo says whether any chan is a FIFO's, through an overlay.
  */
 #define	H9_DMFIFO	0x00200000

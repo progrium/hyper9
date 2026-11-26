@@ -90,11 +90,9 @@ extern fn h9_fs_linkwalk() c_int;
 extern fn h9_clock_mono() i64;
 // devfs's (src/kern/fscheck.h), which doesn't raise.
 extern fn h9_fs_isfifo(ch: *Chan) c_int;
-// fscheck.c's, which can raise (a 9P server's stat); only an exported
-// function with nothing to undo calls it.
-extern fn h9_fs_chanisfifo(ch: *Chan) c_int;
-// devfs's h9_fs_mkfifo, as a call that returns -1 with the error set.
-extern fn h9_fs_mkfifoz(ch: *Chan, name: [*:0]const u8, perm: c_uint) c_int;
+// src/kern/devshim.c's: devfs's h9_fs_mkfifo, which raises, as a call
+// that returns -1 with the error set.
+extern fn h9_shim_fs_mkfifo(ch: *Chan, name: [*:0]const u8, perm: c_uint) c_int;
 
 // src/kern/fscheck.h's.
 const H9_DMFIFO: c_uint = 0x00200000;
@@ -1257,7 +1255,7 @@ fn newpath(path: ?[*:0]const u8) Error!c_int {
 /// The lower chan for ch's name, for ovreadlink and ovgetattr,
 /// or nil if ch isn't an overlay chan or its name is in memory: a link
 /// copied up is a file now.
-fn lowerof(ch: *Chan) Error!?*Chan {
+pub fn lowerof(ch: *Chan) Error!?*Chan {
     if (dcof(ch) != 'O' or isctl(ch))
         return null;
     if (isunion(ch)) {
@@ -1334,7 +1332,7 @@ fn readlinkown(ch: *Chan, buf: []u8) ?usize {
 
 /// Makes name in the directory ch a FIFO, for the Linux ABI's
 /// mknodat. ch is an overlay chan, which this closes.
-fn mkfifo(ch_: *Chan, name: [*c]const u8, perm: c_uint) Error!void {
+pub fn mkfifo(ch_: *Chan, name: [*c]const u8, perm: c_uint) Error!void {
     var ch = ch_;
     {
         errdefer chan.cclose(ch);
@@ -1354,17 +1352,16 @@ fn mkfifo(ch_: *Chan, name: [*c]const u8, perm: c_uint) Error!void {
 }
 
 /// Whether the overlay chan ch is a FIFO's: a FIFO node in memory, or a
-/// host FIFO in the lower tree. Called from C: h9_fs_chanisfifo can
-/// raise, and nothing here has anything to undo when it does.
-fn isfifo(ch: *Chan) callconv(.c) c_int {
+/// host FIFO in the lower tree, for src/kern/fscheck.zig.
+pub fn isfifo(ch: *Chan) Error!bool {
     if (dcof(ch) != 'O' or isctl(ch))
-        return 0;
+        return false;
     if (isunion(ch)) {
         // The member's file that holds the name.
         const u = uncof(ch);
         if (u.n == 0 or u.mc[0] == null)
-            return 0;
-        return h9_fs_chanisfifo(u.n0());
+            return false;
+        return @import("../fscheck.zig").chanisfifo(u.n0());
     }
     const o = ovcof(ch);
     sync.qlock(&o.inst.ql);
@@ -1377,7 +1374,7 @@ fn isfifo(ch: *Chan) callconv(.c) c_int {
     sync.qunlock(&o.inst.ql);
     if (l) |x|
         r = h9_fs_isfifo(x);
-    return r;
+    return r != 0;
 }
 
 /// Frees an instance that was made but never attached.
@@ -2646,7 +2643,7 @@ fn mklink(dir: *Chan, name: [*c]const u8, target: [*c]const u8) Error!void {
 /// As mklink, a FIFO.
 fn mkfifo1(dir: *Chan, name: [*c]const u8, perm: c_uint) Error!void {
     switch (dcof(dir)) {
-        'U' => try dev.caught(h9_fs_mkfifoz(dir, z(name), perm)),
+        'U' => try dev.caught(h9_shim_fs_mkfifo(dir, z(name), perm)),
         'O' => try mkfifo(try chan.cclone(dir), name, perm),
         'M' => {
             // A 9P2000.L server's makes a create with H9_DMFIFO a Tmknod.
@@ -4910,21 +4907,11 @@ fn c_cowname(name: [*:0]const u8) callconv(.c) c_int {
         return -1;
     };
 }
-/// h9_overlay_lower and h9_overlay_mkfifo raise, for fifo.c and fscheck.c.
-fn c_lower(ch: *Chan) callconv(.c) ?*Chan {
-    return lowerof(ch) catch |e| port.raise(e);
-}
-fn c_mkfifo(ch: *Chan, name: [*:0]const u8, perm: c_uint) callconv(.c) void {
-    mkfifo(ch, name, perm) catch |e| port.raise(e);
-}
 
 pub fn exportC() void {
     @export(&Device.dev, .{ .name = "overlaydevtab" });
     @export(&c_new, .{ .name = "h9_overlay_new" });
     @export(&c_newpath, .{ .name = "h9_overlay_newpath" });
-    @export(&c_lower, .{ .name = "h9_overlay_lower" });
-    @export(&c_mkfifo, .{ .name = "h9_overlay_mkfifo" });
-    @export(&isfifo, .{ .name = "h9_overlay_isfifo" });
     @export(&drop, .{ .name = "h9_overlay_drop" });
     @export(&track, .{ .name = "h9_overlay_track" });
     @export(&lowerdev, .{ .name = "h9_overlay_lowerdev" });

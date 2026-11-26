@@ -474,6 +474,9 @@ pub const Ops = struct {
     /// The device's own Devgens, which are Zig that doesn't raise, so
     /// callgen calls them directly.
     gens: []const *const Devgen = &.{},
+    /// The device's own Devgens that can fail (`Egen`): callgen calls
+    /// their Zig directly.
+    egens: []const Egen = &.{},
 
     // The optional operations (design/file-interface.md, src/kern/devx.h):
     // null takes the switch's default.
@@ -493,6 +496,23 @@ pub const Ops = struct {
     hasattr: ?*const fn (*Chan) bool = null,
 };
 
+/// A Devgen in Zig that can fail, as a C Devgen can raise.
+pub const Zgen = fn (*Chan, ?[*:0]const u8, ?[*]Dirtab, c_int, c_int, *Dir) Error!c_int;
+
+/// A native device's Devgen that can fail: `z`, and `c`, its C form
+/// (which raises), the Devgen devwalk and the rest are handed.
+pub const Egen = struct { c: *const Devgen, z: *const Zgen };
+
+/// z as an Egen.
+pub fn egen(comptime z: Zgen) Egen {
+    const W = struct {
+        fn gen(ch: [*c]Chan, name: [*c]u8, tab: [*c]Dirtab, ntab: c_int, i: c_int, dp: [*c]Dir) callconv(.c) c_int {
+            return z(ch, name, tab, ntab, i, dp) catch |e| port.raise(e);
+        }
+    };
+    return .{ .c = &W.gen, .z = &z };
+}
+
 fn devbreadOpt(ch: *Chan, n: c_int, offset: c_uint) Error!?*Block {
     return try devbread(ch, n, offset);
 }
@@ -500,7 +520,7 @@ fn devbreadOpt(ch: *Chan, n: c_int, offset: c_uint) Error!?*Block {
 /// A native device: `ops`, which the switch calls directly, and `dev`,
 /// the C Dev the device table names, whose functions raise for C
 /// callers.
-pub fn Native(comptime dc: u8, comptime name: [:0]const u8, comptime o: Ops) type {
+pub fn Native(comptime dc: c_int, comptime name: [:0]const u8, comptime o: Ops) type {
     return struct {
         pub const ops = o;
 
@@ -577,8 +597,26 @@ const natives = .{
     @import("devmnt.zig").Device,
     @import("dev/pipe.zig").Device,
     @import("dev/root.zig").Device,
+    @import("dev/pty.zig").Device,
+    @import("dev/hstream.zig").Device,
+    @import("dev/srv.zig").Device,
     @import("dev/overlay.zig").Device,
-};
+} ++ (if (port.options.nskernel) .{
+    @import("dev/ns.zig").Device,
+} else .{
+    // h9's own, which the namespace kernel doesn't build.
+    @import("dev/proc.zig").Device,
+    @import("dev/eventfd.zig").Device,
+    @import("dev/hcons.zig").Device,
+    @import("dev/env.zig").Device,
+    @import("dev/hidx.zig").Device,
+    @import("dev/linux.zig").Device,
+}) ++ (if (port.options.gfx) .{
+    @import("dev/gfx.zig").Draw,
+    @import("dev/gfx.zig").Cons,
+    @import("dev/gfx.zig").Kbd,
+    @import("dev/gfx.zig").Mouse,
+} else .{});
 
 /// d's functions, if it's native.
 fn nativeOps(d: *Dev) ?*const Ops {
@@ -902,6 +940,8 @@ pub fn callgen(gen: *const Devgen, ch: *Chan, name: ?[*:0]const u8, tab: ?[*]Dir
     inline for (natives) |N| {
         for (N.ops.gens) |g| if (gen == g)
             return gen(ch, @constCast(name), tab, ntab, i, dp);
+        for (N.ops.egens) |g| if (gen == g.c)
+            return g.z(ch, name, tab, ntab, i, dp);
     }
     var r: c_int = 0;
     try caught(h9_dev_gen(gen, ch, name, tab, ntab, i, dp, &r));

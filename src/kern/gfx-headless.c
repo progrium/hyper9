@@ -25,7 +25,7 @@
 #include <memdraw.h>
 #include "screen.h"
 
-extern void h9_kbdkey(Rune, int);	/* gfx.c */
+extern void h9_kbdkey(Rune, int);	/* src/kern/dev/gfx.zig */
 extern int h9_gfx_headless_open(void);	/* gfx.c */
 void h9_hl_screensize(Rectangle, ulong);
 
