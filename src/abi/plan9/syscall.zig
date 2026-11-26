@@ -164,8 +164,28 @@ const Args = struct {
     space: ?*const segment.Space = null,
     base: u64,
     word: u64 = 8,
+    /// The first slots, copied at entry, as 9front copies its Sargs, when
+    /// they're in one run the address space translates: a call reads its
+    /// arguments with one translate, not one each. Otherwise none, and
+    /// each slot is read where it lies.
+    slots: [max_slots]u64 = undefined,
+    nslots: u8 = 0,
+
+    const max_slots = 6;
+
+    fn init(as: engine.AddressSpace, space: ?*const segment.Space, base: u64, word: u64) Args {
+        var a: Args = .{ .as = as, .space = space, .base = base, .word = word };
+        const b = as.translate(base, max_slots * word) orelse return a;
+        for (&a.slots, 0..) |*s, i| s.* = if (word == 4)
+            std.mem.readInt(u32, b[i * 4 ..][0..4], .little)
+        else
+            std.mem.readInt(u64, b[i * 8 ..][0..8], .little);
+        a.nslots = max_slots;
+        return a;
+    }
 
     fn u(a: Args, i: u64) gm.Error!u64 {
+        if (i < a.nslots) return a.slots[@intCast(i)];
         return gm.readWord(a.as, a.base + a.word * i, a.word) catch
             (a.space orelse return error.BadAddress).readWord(a.base + a.word * i, a.word);
     }
@@ -180,13 +200,17 @@ const Args = struct {
         return @truncate(try a.u(i));
     }
     fn vlong(a: Args, i: u64) gm.Error!i64 {
+        if (i + a.vlongSlots() <= a.nslots) {
+            const lo = a.slots[@intCast(i)];
+            return @bitCast(if (a.word == 4) lo | a.slots[@intCast(i + 1)] << 32 else lo);
+        }
         return @bitCast(gm.readU64(a.as, a.base + a.word * i) catch
             try (a.space orelse return error.BadAddress).readWord(a.base + a.word * i, 8));
     }
 };
 
 pub fn dispatch(p: *Process, u: *const engine.Ureg) Outcome {
-    const a: Args = .{ .as = p.as, .space = p.space, .base = u.syscallArgs(), .word = u.wordSize() };
+    const a: Args = .init(p.as, p.space, u.syscallArgs(), u.wordSize());
     p.targs_len = 0;
     const nr: Nr = @enumFromInt(u.syscallNumber());
     const out = serve(p, nr, a) catch |e| switch (e) {
@@ -292,15 +316,20 @@ fn serve(p: *Process, nr: Nr, a: Args) (gm.Error || std.mem.Allocator.Error)!Out
             const fd0 = fdArg(try a.int(0)) orelse return badFd();
             return result(kern.dup(fd0, try a.int(1)));
         },
+        // Each argument read once: these are the hot calls.
         .pread => {
-            p.note("{d} {d}", .{ try a.int(0), @as(u32, @truncate(try a.u(2))) });
-            const fd = fdArg(try a.int(0)) orelse return badFd();
-            return io(p, fd, try a.u(1), @as(u32, @truncate(try a.u(2))), try a.vlong(3), .read);
+            const fdn = try a.int(0);
+            const n: u32 = @truncate(try a.u(2));
+            p.note("{d} {d}", .{ fdn, n });
+            const fd = fdArg(fdn) orelse return badFd();
+            return io(p, fd, try a.u(1), n, try a.vlong(3), .read);
         },
         .pwrite => {
-            p.note("{d} {d}", .{ try a.int(0), @as(u32, @truncate(try a.u(2))) });
-            const fd = fdArg(try a.int(0)) orelse return badFd();
-            return io(p, fd, try a.u(1), @as(u32, @truncate(try a.u(2))), try a.vlong(3), .write);
+            const fdn = try a.int(0);
+            const n: u32 = @truncate(try a.u(2));
+            p.note("{d} {d}", .{ fdn, n });
+            const fd = fdArg(fdn) orelse return badFd();
+            return io(p, fd, try a.u(1), n, try a.vlong(3), .write);
         },
         .seek => {
             // seek(vlong *ret, int fd, vlong off, int whence)
@@ -653,9 +682,20 @@ test "386 arguments: 4-byte slots, and a vlong takes two" {
         }
     };
     const as: engine.AddressSpace = .initFake(&stack, Ctx.t);
-    const a: Args = .{ .as = as, .base = 0x100, .word = 4 };
-    try std.testing.expectEqual(@as(u64, 0x1000), try a.u(0));
-    try std.testing.expectEqual(@as(i32, 3), try a.int(1));
-    try std.testing.expectEqual(@as(i64, 0x0123456789abcdef), try a.vlong(2));
-    try std.testing.expectEqual(@as(i32, 2), try a.int(2 + a.vlongSlots()));
+    // Read where they lie, and copied at entry (the six slots fit).
+    const where: Args = .{ .as = as, .base = 0x100, .word = 4 };
+    const copied: Args = .init(as, null, 0x100, 4);
+    try std.testing.expectEqual(@as(u8, Args.max_slots), copied.nslots);
+    for ([_]Args{ where, copied }) |a| {
+        try std.testing.expectEqual(@as(u64, 0x1000), try a.u(0));
+        try std.testing.expectEqual(@as(i32, 3), try a.int(1));
+        try std.testing.expectEqual(@as(i64, 0x0123456789abcdef), try a.vlong(2));
+        try std.testing.expectEqual(@as(i32, 2), try a.int(2 + a.vlongSlots()));
+    }
+    // Slots past the run's end aren't copied: each is read, and the
+    // missing one is a bad address.
+    const short: Args = .init(as, null, 0x104, 4);
+    try std.testing.expectEqual(@as(u8, 0), short.nslots);
+    try std.testing.expectEqual(@as(i32, 3), try short.int(0));
+    try std.testing.expectError(error.BadAddress, short.u(5));
 }

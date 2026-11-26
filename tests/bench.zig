@@ -236,14 +236,18 @@ pub fn main(init: std.process.Init) !void {
     const w = &stdout.interface;
 
     var bad = false;
-    // zig build bench -- [compute | loop | syscall] [--repeat N]: the
-    // compute benchmarks only, the loop rows only without T0, or the
-    // system call rows only (pwrite and nsec); each timing the fastest of
-    // N runs (default 3).
+    // zig build bench -- [compute | loop | syscall] [--engine E] [--arch A]
+    // [--repeat N]: the compute benchmarks only, the loop rows only without
+    // T0, or the system call rows only (pwrite and nsec); --engine and
+    // --arch run one engine's or one architecture's rows only (some rows
+    // don't finish on some hosts, such as sud's amd64 pwrite on Linux);
+    // each timing the fastest of N runs (default 3).
     const argv = try init.minimal.args.toSlice(init.arena.allocator());
     var compute_only = false;
     var loop_only = false;
     var syscall_only = false;
+    var only_engine: ?engine.Choice = null;
+    var only_arch: ?aout.Arch = null;
     var repeat: usize = 3;
     var ai: usize = 1;
     while (ai < argv.len) : (ai += 1) {
@@ -253,11 +257,23 @@ pub fn main(init: std.process.Init) !void {
             loop_only = true;
         } else if (std.mem.eql(u8, argv[ai], "syscall")) {
             syscall_only = true;
+        } else if (std.mem.eql(u8, argv[ai], "--engine") and ai + 1 < argv.len) {
+            ai += 1;
+            only_engine = std.meta.stringToEnum(engine.Choice, argv[ai]) orelse {
+                std.debug.print("bench: no engine {s}\n", .{argv[ai]});
+                std.process.exit(2);
+            };
+        } else if (std.mem.eql(u8, argv[ai], "--arch") and ai + 1 < argv.len) {
+            ai += 1;
+            only_arch = std.meta.stringToEnum(aout.Arch, argv[ai]) orelse {
+                std.debug.print("bench: no arch {s}\n", .{argv[ai]});
+                std.process.exit(2);
+            };
         } else if (std.mem.eql(u8, argv[ai], "--repeat") and ai + 1 < argv.len) {
             ai += 1;
             repeat = @max(1, try std.fmt.parseUnsigned(usize, argv[ai], 10));
         } else {
-            std.debug.print("usage: bench [compute | loop | syscall] [--repeat N]\n", .{});
+            std.debug.print("usage: bench [compute | loop | syscall] [--engine E] [--arch A] [--repeat N]\n", .{});
             std.process.exit(2);
         }
     }
@@ -265,6 +281,8 @@ pub fn main(init: std.process.Init) !void {
     if (!compute_only) for (cases) |c| for ([_]engine.Choice{ .hvf, .kvm, .sud, .hcpu }) |kind| for (tiersOf(kind)) |tier| {
         if (loop_only and (!std.mem.eql(u8, c.name, "loop") or (tier != null and std.mem.eql(u8, tier.?, "t0")))) continue;
         if (syscall_only and !std.mem.eql(u8, c.name, "pwrite") and !std.mem.eql(u8, c.name, "nsec")) continue;
+        if (only_engine) |e| if (e != kind) continue;
+        if (only_arch) |a| if (a != c.arch) continue;
         if (tier) |t| _ = setenv("H9_HCPU_TIER", t, 1) else _ = unsetenv("H9_HCPU_TIER");
         defer _ = unsetenv("H9_HCPU_TIER");
         var ns: i96 = try runOne(gpa, io, kind, c) orelse continue;
@@ -279,9 +297,9 @@ pub fn main(init: std.process.Init) !void {
             const n: f64 = if (std.mem.eql(u8, c.name, "procs4")) 4 else 1;
             try w.print("{d:.2} G instructions/s in all\n", .{n * 2 * procs_iters / s / 1e9});
         } else if (std.mem.eql(u8, c.name, "nsec")) {
-            try w.print("{d:.0} ns per system call\n", .{s * 1e9 / syscall_iters});
+            try w.print("{d:.1} ns per system call\n", .{s * 1e9 / syscall_iters});
         } else {
-            try w.print("{d:.2} µs per round trip\n", .{s * 1e6 / syscall_iters});
+            try w.print("{d:.3} µs per round trip\n", .{s * 1e6 / syscall_iters});
         }
         try w.flush();
     };
