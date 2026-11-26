@@ -476,8 +476,8 @@ pub const Machine = struct {
     /// The compiled policy; allocated in `arena`.
     plan: policy.Plan,
     /// The host the plan describes (design/host-handles.md), in `arena`:
-    /// the handles the kernel is to reach outside through. Built at init
-    /// and not yet used by any device, so nothing changes.
+    /// the handles the kernel reaches outside through. Built at init, with
+    /// its directories opened; `plan.host` points at the arena's copy.
     host: handles.Host,
     arena: *std.heap.ArenaAllocator,
     msg_buf: [256]u8 = undefined,
@@ -676,8 +676,21 @@ pub const Machine = struct {
             },
         };
         var o = opts;
+        // The host's handles read the plan through a pointer, so they get
+        // a copy of it in the arena, which stays put when the Machine is
+        // moved; the plan isn't changed after it's compiled.
+        const plan_at = try arena.allocator().create(policy.Plan);
+        plan_at.* = plan;
+        // Its directory handles are opened now, before anything runs, and
+        // devfs opens beneath them (design/host-handles.md); the plan the
+        // machine's threads find holds it, in the arena.
+        const hst_at = try arena.allocator().create(handles.Host);
+        hst_at.* = try handles.fromPlan(arena.allocator(), io, plan_at, .{ .console = o.stdio, .gfx = o.gfx, .open_dirs = !web.enabled });
+        errdefer handles.closeDirs(hst_at.*);
+        var pl = plan;
+        pl.host = hst_at;
         var claim: ?*gfx.Claim = null;
-        if (opts.gfx) |g| {
+        if (hst_at.window) |window| {
             // Closing the window is a hangup, so a machine without
             // Signals gets its own.
             const sig = o.signals orelse blk: {
@@ -688,18 +701,18 @@ pub const Machine = struct {
             o.signals = sig;
             const cl = try arena.allocator().create(GfxClose);
             cl.* = .{ .signals = sig, .io = io, .claim = .{ .ctx = cl, .close = GfxClose.close } };
-            try gfx.acquire(io, &cl.claim, g);
+            try window.acquire(io, &cl.claim);
             claim = &cl.claim;
         }
-        errdefer if (claim) |cl| gfx.release(cl);
-        // The host's handles read the plan through a pointer, so they get
-        // a copy of it in the arena, which stays put when the Machine is
-        // moved; the plan isn't changed after it's compiled.
-        const plan_at = try arena.allocator().create(policy.Plan);
-        plan_at.* = plan;
-        const hst = try handles.fromPlan(arena.allocator(), io, plan_at, .{ .console = o.stdio, .gfx = o.gfx });
+        errdefer if (claim) |cl| hst_at.window.?.release(cl);
         const eng = try engine.create(gpa, io, opts.engine, .{ .arch = arch, .memory = plan.memory });
-        return .{ .gpa = gpa, .io = io, .opts = o, .arch = arch, .engine = eng, .plan = plan, .host = hst, .arena = arena, .gfx_claim = claim, .plan_run = plan_run };
+        return .{ .gpa = gpa, .io = io, .opts = o, .arch = arch, .engine = eng, .plan = pl, .host = hst_at.*, .arena = arena, .gfx_claim = claim, .plan_run = plan_run };
+    }
+
+    /// Entropy from the machine's host (design/host-handles.md), for
+    /// AT_RANDOM and /proc's uuids.
+    fn entropy(m: *const Machine, buf: []u8) void {
+        if (m.host.random) |r| r.fill(buf) else m.io.random(buf);
     }
 
     /// What closing the window does: a hangup, as for a closed terminal.
@@ -721,7 +734,8 @@ pub const Machine = struct {
         // A stuck process still uses the engine and the plan, so they're
         // leaked rather than freed under it.
         if (m.stuck) return;
-        if (m.gfx_claim) |cl| gfx.release(cl);
+        if (m.gfx_claim) |cl| if (m.host.window) |w| w.release(cl) else gfx.release(cl);
+        handles.closeDirs(m.host);
         vclock.forget(m.engine);
         m.engine.destroy();
         m.arena.deinit();
@@ -750,8 +764,13 @@ pub const Machine = struct {
         const a = m.arena.allocator();
         var servers: std.ArrayList(resolver.Server) = .empty;
         for (m.opts.nameservers) |ns| if (resolver.parseServer(ns)) |s| servers.append(a, s) catch return null;
+        // Its sockets are the host's dialer's and listener's
+        // (design/host-handles.md); a plan that resolves has a network,
+        // so both are there.
+        const dial = m.host.dial orelse return null;
+        const listen = m.host.listen orelse return null;
         const r = a.create(resolver.Resolver) catch return null;
-        r.* = .{ .gpa = m.gpa, .patterns = m.plan.net_allow, .names = names, .servers = servers.items };
+        r.* = .{ .gpa = m.gpa, .patterns = m.plan.net_allow, .names = names, .servers = servers.items, .dial = dial, .listen = listen };
         r.start() catch return null;
         m.plan.dns = r;
         return r;
@@ -830,12 +849,18 @@ pub const Machine = struct {
         defer if (dns) |r| r.stop();
         // Heap-allocated, with its own copy of the machine, so a stuck
         // process never refers to the caller's Machine.
+        // The guest's console is the host's (design/host-handles.md):
+        // `Options.stdio` as it is for this run, since an embedder may
+        // change it between runs.
+        m.host.console = m.opts.stdio;
+        if (m.plan.host) |h| @constCast(h).console = m.opts.stdio;
+        const sc = m.host.console.?;
         const job = try m.gpa.create(Job);
         const pool = cpupool.Pool.init(m.gpa, m.io, m.engine, m.plan.cpus, m.opts.owned_vcpus) catch |e| {
             m.gpa.destroy(job);
             return e;
         };
-        job.* = .{ .m = undefined, .mc = m.*, .prog = prog, .argv = argv, .con = .{ .in = null, .out = m.opts.stdio.out, .err = m.opts.stdio.err, .raw = m.opts.stdio.raw }, .pool = pool, .srv = srv };
+        job.* = .{ .m = undefined, .mc = m.*, .prog = prog, .argv = argv, .con = .{ .in = null, .out = sc.out, .err = sc.err, .raw = sc.raw }, .pool = pool, .srv = srv };
         // Host ptys can be asked for from here; the pty server takes them
         // once the namespace is built. Every process has exited (or is
         // stuck) by the time `end` fails the rest.
@@ -862,8 +887,8 @@ pub const Machine = struct {
             m.gpa.destroy(job);
             return e;
         };
-        if (m.opts.stdio.in) |src| {
-            job.con_in = .{ .io = m.io, .src = src, .cancel = m.opts.stdio.in_cancel, .id = job.con_id, .wake = kern.wakeConsole };
+        if (sc.in) |src| {
+            job.con_in = .{ .io = m.io, .src = src, .cancel = sc.in_cancel, .id = job.con_id, .wake = kern.wakeConsole };
             job.con.in = &job.con_in.?;
         }
         // The run's kernel (design/kernel-port.md): its processes, note
@@ -2511,7 +2536,7 @@ pub const Machine = struct {
         const interp_src = if (interp) |ii| imageSrc(m.gpa, exe.interp.?, ii.bytes, true) else null;
         defer if (interp_src) |s| s.put();
         var random: [16]u8 = undefined;
-        m.io.random(&random);
+        m.entropy(&random);
         const prog = lexec.build(m.gpa, m.engine, .{
             .arch = m.arch,
             .exe = &exe,
@@ -3294,7 +3319,7 @@ pub const Machine = struct {
             w.writeAll("nodev\tproc\nnodev\ttmpfs\n") catch {};
         } else if (eq(u8, name, "uuid") or eq(u8, name, "boot_id")) {
             var r: [16]u8 = undefined;
-            j.m.io.random(&r);
+            j.m.entropy(&r);
             r[6] = (r[6] & 0x0f) | 0x40;
             r[8] = (r[8] & 0x3f) | 0x80;
             const x = std.fmt.bytesToHex(r, .lower);

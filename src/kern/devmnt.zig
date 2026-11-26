@@ -1881,27 +1881,10 @@ pub const Server = struct {
         return true;
     }
 
-    /// Each fid's path (0 the root, 1 hello, -1 none), by fid: devmnt's
-    /// fids are its channels' numbers, however many cases made before.
-    const Fids = struct {
-        id: [32]u32 = undefined,
-        path: [32]i64 = @splat(-1),
-
-        fn at(t: *Fids, fid: u32) *i64 {
-            var free: ?usize = null;
-            for (t.path, 0..) |p, i| {
-                if (p >= 0 and t.id[i] == fid) return &t.path[i];
-                if (p < 0 and free == null) free = i;
-            }
-            const i = free orelse 0;
-            t.id[i] = fid;
-            t.path[i] = -1;
-            return &t.path[i];
-        }
-    };
-
     pub fn run(ch: *Chan) void {
-        var fids: Fids = .{};
+        // devmnt numbers fids across the h9 process, not per mount, so a
+        // run of other cases before this one leaves them well above 0.
+        var fids: [4096]i64 = @splat(-1);
         var in: [8192 + 24]u8 = undefined;
         var out: [8192 + 24]u8 = undefined;
         var data: [512]u8 = undefined;
@@ -1914,17 +1897,21 @@ pub const Server = struct {
             var r: Fcall = .{};
             r.type = f.type + 1;
             r.tag = f.tag;
-            switch (f.type) {
+            const nofid = f.type == c.Tversion or f.type == c.Tflush;
+            if (!nofid and (f.fid >= fids.len or (f.type == c.Twalk and f.newfid >= fids.len))) {
+                r.type = c.Rerror;
+                r.ename = @constCast("fid out of range on the test server");
+            } else switch (f.type) {
                 c.Tversion => {
                     r.msize = f.msize;
                     r.version = @constCast("9P2000");
                 },
                 c.Tattach => {
-                    fids.at(f.fid).* = 0;
+                    fids[f.fid] = 0;
                     r.qid = .{ .path = 0, .vers = 0, .type = c.QTDIR };
                 },
                 c.Twalk => {
-                    var path = fids.at(f.fid).*;
+                    var path = fids[f.fid];
                     var i: usize = 0;
                     while (i < f.nwname) : (i += 1) {
                         if (path != 0 or !std.mem.eql(u8, std.mem.span(f.wname[i]), "hello")) break;
@@ -1936,16 +1923,16 @@ pub const Server = struct {
                         r.ename = @constCast("file does not exist on the test server");
                     } else {
                         r.nwqid = @intCast(i);
-                        if (i == f.nwname) fids.at(f.newfid).* = path;
+                        if (i == f.nwname) fids[f.newfid] = path;
                     }
                 },
                 c.Topen => {
-                    const path: u64 = @intCast(fids.at(f.fid).*);
+                    const path: u64 = @intCast(fids[f.fid]);
                     r.qid = .{ .path = path, .vers = 0, .type = if (path == 0) c.QTDIR else 0 };
                 },
                 c.Tread => {
                     var n: usize = 0;
-                    if (fids.at(f.fid).* == 0) {
+                    if (fids[f.fid] == 0) {
                         if (f.offset == 0) n = dir(1, &data);
                     } else if (f.offset < hello.len) {
                         n = @min(hello.len - @as(usize, @intCast(f.offset)), f.count);
@@ -1955,10 +1942,10 @@ pub const Server = struct {
                     r.data = &data;
                 },
                 c.Tstat => {
-                    r.nstat = @intCast(dir(@intCast(fids.at(f.fid).*), &data));
+                    r.nstat = @intCast(dir(@intCast(fids[f.fid]), &data));
                     r.stat = &data;
                 },
-                c.Tclunk => fids.at(f.fid).* = -1,
+                c.Tclunk => fids[f.fid] = -1,
                 else => {
                     r.type = c.Rerror;
                     r.ename = @constCast("not on the test server");

@@ -11,6 +11,7 @@
 //! controls.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const policy = @import("../policy.zig");
 const kern = @import("../kern.zig");
 const consin = @import("../consin.zig");
@@ -18,6 +19,14 @@ const gfx = @import("../gfx.zig");
 
 pub const planned = @import("planned.zig");
 pub const fromPlan = planned.fromPlan;
+pub const closeDirs = planned.closeDirs;
+pub const net = @import("net.zig");
+
+/// An open directory handle: an fd, or on Windows a `HANDLE`.
+pub const Handle = if (builtin.os.tag == .windows) std.os.windows.HANDLE else c_int;
+/// No handle: a tree that couldn't be opened, or one that's described
+/// but not opened (a plan's in a test, or the web host's).
+pub const no_handle: Handle = if (builtin.os.tag == .windows) std.os.windows.INVALID_HANDLE_VALUE else -1;
 
 pub const Host = struct {
     /// Named directory handles: the host trees the machine can reach.
@@ -54,6 +63,11 @@ pub const Dir = struct {
     /// Read-deny paths beneath the tree, relative to it: the one rule a
     /// handle can't express alone.
     deny: []const []const u8 = &.{},
+    /// The tree's directory, opened before the machine starts; the host
+    /// tree device opens every file beneath it (src/host/dirs.c).
+    handle: Handle = no_handle,
+    /// For a tree that's one file, its name in `handle`'s directory.
+    leaf: ?[]const u8 = null,
 };
 
 pub const Dirs = struct {
@@ -84,6 +98,18 @@ pub const Dirs = struct {
         return .{ .dir = b, .rel = policy.relUnder(b.path, path).? };
     }
 
+    /// The open handle that holds host path `path`, the deepest if several
+    /// do, and the path relative to it: where the host tree device opens
+    /// a file.
+    pub fn opened(d: Dirs, path: []const u8) ?struct { dir: *const Dir, rel: []const u8 } {
+        var best: ?*const Dir = null;
+        for (d.list) |*x| if (x.handle != no_handle and policy.relUnder(x.path, path) != null) {
+            if (best == null or x.path.len > best.?.path.len) best = x;
+        };
+        const b = best orelse return null;
+        return .{ .dir = b, .rel = policy.relUnder(b.path, path).? };
+    }
+
     pub fn check(d: Dirs, path: []const u8, op: policy.Op) policy.Verdict {
         return d.vtable.check(d.ctx, path, op);
     }
@@ -99,6 +125,8 @@ pub const Dial = struct {
         allows: *const fn (ctx: *anyopaque, proto: ?policy.NetProto, addr: *const [16]u8, port: u16) bool,
         lookup: *const fn (ctx: *anyopaque, proto: ?policy.NetProto, name: []const u8, port: u16) bool,
         resolved: *const fn (ctx: *anyopaque, proto: ?policy.NetProto, name: []const u8, port: u16, addrs: []const [16]u8) void,
+        probe: *const fn (ctx: *anyopaque, proto: ?policy.NetProto, addr: *const [16]u8) bool,
+        connect: *const fn (ctx: *anyopaque, kind: net.Transport, addr: *const [16]u8, port: u16, until: i64) ?net.Fd,
     };
 
     /// Whether a connection to `addr!port` may be made.
@@ -116,6 +144,20 @@ pub const Dial = struct {
     pub fn resolved(d: Dial, proto: ?policy.NetProto, name: []const u8, port: u16, addrs: []const [16]u8) void {
         d.vtable.resolved(d.ctx, proto, name, port, addrs);
     }
+
+    /// Whether a connection to `addr` is getaddrinfo's route probe, a
+    /// UDP connect to an address recorded for an allowed name that sends
+    /// nothing (design/linux-dns.md): allowed, but not to send.
+    pub fn probe(d: Dial, proto: ?policy.NetProto, addr: *const [16]u8) bool {
+        return d.vtable.probe(d.ctx, proto, addr);
+    }
+
+    /// Dials `addr!port` for h9 itself, by `until` (monotonic ms): the
+    /// machine's resolver's forwarded queries. It's the host's to make,
+    /// so `allows` isn't asked.
+    pub fn connect(d: Dial, kind: net.Transport, addr: *const [16]u8, port: u16, until: i64) ?net.Fd {
+        return d.vtable.connect(d.ctx, kind, addr, port, until);
+    }
 };
 
 pub const Listen = struct {
@@ -124,11 +166,20 @@ pub const Listen = struct {
 
     pub const VTable = struct {
         allows: *const fn (ctx: *anyopaque, proto: ?policy.NetProto, addr: *const [16]u8, port: u16) bool,
+        bind: *const fn (ctx: *anyopaque, kind: net.Transport, addr: *const [16]u8, port: u16) ?net.Listener,
     };
 
     /// Whether the guest may announce on `addr!port`.
     pub fn allows(l: Listen, proto: ?policy.NetProto, addr: *const [16]u8, port: u16) bool {
         return l.vtable.allows(l.ctx, proto, addr, port);
+    }
+
+    /// Listens on `addr!port` for h9 itself (port 0 for one the host
+    /// picks): the machine's resolver's loopback sockets. Under
+    /// `--net=outbound`, where `allows` refuses every guest address, this
+    /// is why the listener exists at all.
+    pub fn bind(l: Listen, kind: net.Transport, addr: *const [16]u8, port: u16) ?net.Listener {
+        return l.vtable.bind(l.ctx, kind, addr, port);
     }
 };
 
@@ -224,6 +275,7 @@ pub const Spawn = struct {
 
 test {
     _ = planned;
+    _ = @import("dirs.zig");
 }
 
 test "an empty Host has no handles [host-handles]" {
