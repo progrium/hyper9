@@ -19,6 +19,7 @@ const port = @import("port.zig");
 const qio = @import("qio.zig");
 const chan = @import("chan.zig");
 const sysfile = @import("sysfile.zig");
+pub const rd = @import("ready.zig");
 const c = port.c;
 const up = port.up;
 const Error = port.Error;
@@ -494,6 +495,15 @@ pub const Ops = struct {
     /// Whether getattr says more than stat for ch, if it doesn't always,
     /// so a stat needn't ask twice where it says no more.
     hasattr: ?*const fn (*Chan) bool = null,
+
+    // Readiness (ready.zig, Part 1).
+
+    /// The events of ev ready on ch now (ready.zig's bits), plus an
+    /// error or a hangup, which are always reported.
+    ready: ?*const fn (*Chan, c_int) c_int = null,
+    /// Hangs w, with waker wk, on what ch's readiness comes from, for a
+    /// call when it may have changed; ready.unwatch takes it off.
+    watch: ?*const fn (*Chan, c_int, *rd.Watch, *rd.Waker) void = null,
 };
 
 /// A Devgen in Zig that can fail, as a C Devgen can raise.
@@ -931,6 +941,35 @@ pub fn rename(ch: *Chan, dir: *Chan, name: [*:0]const u8) Error!bool {
     var r: c_int = 1;
     try caught(h9_dev_rename(x, ch, dir, name, &r));
     return r == 0;
+}
+
+/// The events of ev ready on ch now, of ready.zig's, with an error or
+/// a hangup always reported. By default a read and a write: a file
+/// never blocks, so a read blocks as it would.
+pub fn ready(ch: *Chan, ev: c_int) c_int {
+    const d = of(ch);
+    if (nativeOps(d)) |o| {
+        const f = o.ready orelse return readydefault(ev);
+        return f(ch, ev);
+    }
+    if (devx(d)) |x| if (x.ready) |f| return f(ch, ev);
+    return readydefault(ev);
+}
+
+pub fn readydefault(ev: c_int) c_int {
+    return ev & (rd.In | rd.Out);
+}
+
+/// Hangs w, with waker wk, on ch, for a call when its readiness may
+/// have changed. By default nothing changes, and it's never called.
+pub fn watch(ch: *Chan, ev: c_int, w: *rd.Watch, wk: *rd.Waker) void {
+    w.* = .{ .waker = wk };
+    const d = of(ch);
+    if (nativeOps(d)) |o| {
+        if (o.watch) |f| f(ch, ev, w, wk);
+        return;
+    }
+    if (devx(d)) |x| if (x.watch) |f| f(ch, ev, w, wk);
 }
 
 /// (*gen)(c, name, tab, ntab, i, dp): devgen, or a native device's own,

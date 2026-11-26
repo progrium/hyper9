@@ -38,6 +38,13 @@
 //!
 //! kserve parses untrusted input in the kernel: convM2S bounds-checks
 //! each message, and a message it can't parse ends the connection.
+//!
+//! h9: a client that offers `9P2000.ready` in its Tversion gets it, and
+//! may send Tready (design/file-interface.md, Part 1): tag fid[4]
+//! events[4], which a worker answers with Rready events[4] once the
+//! fid's channel has one of the events (Linux's poll bits, through the
+//! device switch's `ready` and `watch`), or at once with the bit Rnow.
+//! A Tflush ends a waiting one, as it does a read.
 
 const std = @import("std");
 const port = @import("port.zig");
@@ -139,7 +146,14 @@ const Kconn = extern struct {
     nfid: c_int,
 
     aname: ?[*:0]u8, // the attach name the host fixed, or nil
+
+    xready: c_int, // h9: the client's version took Tready
 };
+
+// h9: readiness (design/file-interface.md), devmnt.zig's.
+const Vready = c.VERSION9P ++ ".ready";
+const Tready = 160;
+const Rnow: u32 = 0x40000000;
 
 /// Where attaches get their namespace (design/epoch-0/kernel-serve.md,
 /// Namespaces).
@@ -778,8 +792,57 @@ fn request(k: *Kconn, w: *Kworker, t: *Fcall, r: *Fcall) Error!void {
         c.Tremove => rremove(k, t),
         c.Tstat => rstat(k, w, t, r),
         c.Twstat => rwstat(k, t),
+        Tready => rready(k, t, r),
         else => port.kerror(Ebadmsg),
     };
+}
+
+/// Tready: the events of t.count ready on the fid's channel, waiting
+/// until one is unless Rnow asks for an answer now. Into r.count.
+fn rready(k: *Kconn, t: *Fcall, r: *Fcall) Error!void {
+    const f = try fidget(k, t.fid);
+    defer fidput(k, f);
+    if (f.open == 0)
+        return port.kerror(Enotopen);
+    usens(f.ns);
+    const ch = fidchan(k, f);
+    defer chan.cclose(ch);
+    const ev: c_int = @intCast(t.count & 0xffff);
+    const all = ev | dev.rd.Err | dev.rd.Hup;
+    if (t.count & Rnow != 0) {
+        r.count = @bitCast(dev.ready(ch, ev) & all);
+        return;
+    }
+    var s: dev.rd.Sleeper = .{};
+    var w: dev.rd.Watch = .{};
+    while (true) {
+        s.arm();
+        var got = dev.ready(ch, ev) & all;
+        if (got == 0) {
+            dev.watch(ch, ev, &w, &s.waker);
+            defer dev.rd.unwatch(&w);
+            got = dev.ready(ch, ev) & all;
+            if (got == 0)
+                _ = try s.wait(0);
+        }
+        if (got != 0) {
+            r.count = @bitCast(got);
+            return;
+        }
+    }
+}
+
+/// Writes an Rready, which convS2M doesn't know.
+fn replyready(k: *Kconn, r: *Fcall) void {
+    var b: [11]u8 = undefined;
+    std.mem.writeInt(u32, b[0..4], b.len, .little);
+    b[4] = Tready + 1;
+    std.mem.writeInt(u16, b[5..7], r.tag, .little);
+    std.mem.writeInt(u32, b[7..11], r.count, .little);
+    sync.qlock(&k.wlk);
+    if (k.dead == 0)
+        _ = dev.write(dev.of(k.c), k.c, &b, b.len, 0) catch 0;
+    sync.qunlock(&k.wlk);
 }
 
 /// Runs a request on worker w and replies.
@@ -803,7 +866,7 @@ fn run(k: *Kconn, w: *Kworker, q: *Kreq) void {
     q.done = 1;
     c.unlock(&k.lk);
     up().notepending = 0;
-    reply(k, &r, w.out);
+    if (r.type == Tready + 1) replyready(k, &r) else reply(k, &r, w.out);
     c.lock(&k.lk);
     w.cur = null;
     c.unlock(&k.lk);
@@ -1006,6 +1069,10 @@ fn version(k: *Kconn, t: *Fcall, buf: [*]u8) void {
     if (r.msize < 256)
         r.msize = 256;
     r.version = @constCast(if (c.strncmp(t.version, "9P2000", 6) == 0) "9P2000" else "unknown");
+    // h9: readiness, for a client that asks for it.
+    k.xready = @intFromBool(dev.streq(t.version, Vready));
+    if (k.xready != 0)
+        r.version = @constCast(Vready);
     // The workers' buffers are Maxmsg; only replies shrink.
     k.msize = r.msize;
     reply(k, &r, buf);
@@ -1067,7 +1134,19 @@ fn readone(k: *Kconn, buf: [*]u8, rbuf: [*]u8, have: *c_int) Error!bool {
     @memcpy(q.buf.?[0..sz], buf[0..sz]);
     have.* -= size;
     std.mem.copyForwards(u8, buf[0..@intCast(have.*)], buf[sz..][0..@intCast(have.*)]);
-    if (c.convM2S(q.buf.?, @intCast(size), &q.f) != size) {
+    if (k.xready != 0 and q.buf.?[4] == Tready) {
+        // h9: size[4] Tready tag[2] fid[4] events[4], which convM2S
+        // doesn't know.
+        if (size != 15) {
+            freereq(q);
+            return false;
+        }
+        const m = q.buf.?;
+        q.f.type = Tready;
+        q.f.tag = std.mem.readInt(u16, m[5..7], .little);
+        q.f.fid = std.mem.readInt(u32, m[7..11], .little);
+        q.f.count = std.mem.readInt(u32, m[11..15], .little);
+    } else if (c.convM2S(q.buf.?, @intCast(size), &q.f) != size) {
         freereq(q);
         return false;
     }

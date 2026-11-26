@@ -8983,6 +8983,23 @@ test "a Linux process that exits holding a mounted /net's connection closes it [
     try servedNetCase(@src(), "exit_eof");
 }
 
+// Readiness (design/file-interface.md, Part 1): a mounted /net's
+// conversation is ready when its server says so, by Tready, with
+// nothing read ahead.
+
+test "epoll on a mounted /net conversation without read-ahead [file-interface]" {
+    // Edge-triggered: the wait after a report still sees it become
+    // readable, and a drain to EAGAIN still sees the next data.
+    try servedNetCase(@src(), "tcp_et");
+    try servedNetCase(@src(), "tcp_et_drain");
+}
+
+test "poll on a pipe, a pty, and an eventfd through ready [file-interface]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/net", "poll_ready" }, "ok poll_ready\n");
+}
+
 test "Go net/http server and client in one Linux program [linux-net]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);

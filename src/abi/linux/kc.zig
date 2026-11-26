@@ -30,7 +30,7 @@ const real = struct {
     extern fn h9_poll(fds: [*]PollFd, n: c_int, ms: c_int, gen: ?*c_uint, once: c_int) c_int;
     extern fn h9_fdready(fd: c_int, events: c_int) c_int;
     extern fn h9_pollgen() c_uint;
-    extern fn h9_pollwake() void;
+    extern fn h9_pollkick() void;
     extern fn h9_futex_wait(key: *const anyopaque, addr: u64, word: *u32, val: u32, bitset: u32, ms: c_int) c_int;
     extern fn h9_futex_wake(key: *const anyopaque, addr: u64, n: c_int, bitset: u32, addr2: u64, nreq: c_int, word: ?*u32, val: u32) c_int;
     extern fn h9_linux_sockrecv(fd: c_int, buf: [*]u8, n: c_int, peek: c_int, dontwait: c_int, raddr: ?*[16]u8, rport: ?*u16) c_int;
@@ -44,10 +44,8 @@ const real = struct {
     extern fn h9so_hasv6() c_int;
     extern fn h9so_ifaddrs(a: [*]IfAddr, max: c_int) c_int;
     extern fn h9_linux_sockctl(fd: c_int, msg: [*:0]const u8) c_int;
-    extern fn h9_linux_rattach(datafd: c_int, ctlfd: c_int, id: c_int, udp: c_int, open: c_int) c_int;
     extern fn h9_linux_rconvid(fd: c_int) c_int;
     extern fn h9_linux_rclose(fd: c_int) void;
-    extern fn h9_linux_raccept(fd: c_int, cloexec: c_int) c_int;
     extern fn h9_linux_syncfs(fd: c_int) c_int;
     extern fn h9_linux_sync() c_int;
     extern fn h9_linux_isfifo(fd: c_int) c_int;
@@ -138,7 +136,7 @@ const stub = struct {
     fn h9_pollgen() c_uint {
         return 0;
     }
-    fn h9_pollwake() void {}
+    fn h9_pollkick() void {}
     fn h9_futex_wait(_: *const anyopaque, _: u64, _: *u32, _: u32, _: u32, _: c_int) c_int {
         return 1;
     }
@@ -166,16 +164,10 @@ const stub = struct {
     fn h9_linux_sockctl(_: c_int, _: [*:0]const u8) c_int {
         return -1;
     }
-    fn h9_linux_rattach(_: c_int, _: c_int, _: c_int, _: c_int, _: c_int) c_int {
-        return -1;
-    }
     fn h9_linux_rconvid(_: c_int) c_int {
         return -1;
     }
     fn h9_linux_rclose(_: c_int) void {}
-    fn h9_linux_raccept(_: c_int, _: c_int) c_int {
-        return -9;
-    }
     fn h9_linux_syncfs(_: c_int) c_int {
         return -1;
     }
@@ -274,6 +266,9 @@ pub const POLLERR = 8;
 pub const POLLHUP = 0x10;
 pub const POLLNVAL = 0x20;
 pub const POLLRDHUP = 0x2000;
+/// h9_poll's own: an entry to watch for its next change, not to ask
+/// (an edge-triggered epoll entry already reported; src/kern/linuxnet.zig).
+pub const POLLEDGE = 0x8000;
 
 /// Fills in each revents and returns how many fds are ready, sleeping up
 /// to `ms` (-1 forever, 0 not at all) until one is. `gen` gets the wake
@@ -324,7 +319,7 @@ pub fn futexWake(key: *const anyopaque, addr: u64, n: u32, bitset: u32, addr2: u
 
 /// Wakes every poll, select and epoll_wait, to look again.
 pub fn pollWake() void {
-    c.h9_pollwake();
+    c.h9_pollkick();
 }
 
 pub fn pollGen() u64 {
@@ -386,27 +381,15 @@ pub fn soError(fd: i32) u32 {
     return @intCast(c.h9_linux_soerror(fd));
 }
 
-/// Attaches a conversation from a mounted /net (not devip's), open on
-/// `data` and `ctl`, to the kernel's read-ahead (src/kern/rconv.zig),
-/// under the Linux layer's `id`. `open`: it's connected already.
-pub fn rattach(data: i32, ctl: i32, id: u32, udp: bool, open: bool) Error!void {
-    _ = try check(c.h9_linux_rattach(data, ctl, @intCast(id), @intFromBool(udp), @intFromBool(open)));
-}
-
-/// The id fd's mounted conversation was attached under, or null.
+/// The Linux layer's id for fd if it's a conversation of a mounted /net
+/// (its data file, by name), or null.
 pub fn rconvId(fd: i32) ?u32 {
     const r = c.h9_linux_rconvid(fd);
     return if (r < 0) null else @intCast(r);
 }
 
-/// accept on a listening mounted conversation: a new fd for the waiting
-/// call's ctl, or -errno (-EAGAIN when none waits yet).
-pub fn raccept(fd: i32, cloexec: bool) i64 {
-    return c.h9_linux_raccept(fd, @intFromBool(cloexec));
-}
-
-/// fd is closing: a mounted conversation goes with its description's
-/// last fd.
+/// fd is closing: what the kernel kept for a mounted conversation's
+/// peeks goes with its description's last fd.
 pub fn rclose(fd: i32) void {
     c.h9_linux_rclose(fd);
 }

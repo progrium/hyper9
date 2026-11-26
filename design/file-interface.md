@@ -90,8 +90,8 @@ Policy checks move with the operations: each new operation is checked where `ope
 
 Part 1:
 
-- [ ] `test "epoll on a mounted /net conversation without read-ahead [file-interface]"` passes, and `src/kern/linuxnet.c`'s read-ahead processes are deleted.
-- [ ] `test "poll on a pipe, a pty, and an eventfd through ready [file-interface]"` passes.
+- [x] `test "epoll on a mounted /net conversation without read-ahead [file-interface]"` passes, and `src/kern/linuxnet.c`'s read-ahead processes are deleted.
+- [x] `test "poll on a pipe, a pty, and an eventfd through ready [file-interface]"` passes.
 
 Part 2:
 
@@ -136,3 +136,10 @@ All parts:
 - **`setattr` has no device of its own yet** but devmnt's `Tsetattr`: the host tree and the overlay take the default `wstat`. The Linux ABI doesn't call it yet; `chmod`, `truncate`, and `utimensat` still `wstat`.
 - **stat's owner is unchanged**: the Linux ABI takes the link count, ctime, and nanoseconds from `getattr`, and still reports the caller as every file's owner.
 - The new cases are tagged `[file-interface]`, and pending until the proposal is accepted; with `H9_TEST_PENDING=1` they pass on sud and hcpu. The "9front ls" case's expected output is what dev's h9 printed.
+
+**2026-11-26, Part 1 on the file-interface-2 branch.** `ready` and `watch` are built (`src/kern/ready.zig`), as [spec/kernel.md](../spec/kernel.md) describes, on pipes, ptys, the console, `#ε`, devip, and devmnt, and `poll`, `select`, and `epoll` use them; the read-ahead (`src/kern/rconv.zig`) and qio's `h9_qwake` hook are deleted. Some things it found:
+
+- **How a server says so** (the second open issue): by version negotiation, which version(5) allows. devmnt offers `9P2000.ready` in a mount's own `Tversion`, and kserve answers it; a server that answers `9P2000` gets no `Tready`. `Tready` (type 160) is `tag[2] fid[4] events[4]`, with bit `0x40000000` asking for an answer at once, and `Rready` (161) is `tag[2] events[4]`, as [spec/ninep.md](../spec/ninep.md) gives. A waiting `Tready` is an asynchronous devmnt request, whose reply a reader kproc per mount reads when no process is waiting for one.
+- **A 9front server's `/net` is always ready**, so a non-blocking read of a conversation mounted from one blocks, where the read-ahead answered `EAGAIN`. So does one mounted through a `#ℓ` conversation, which answers devmnt `9P2000` itself.
+- **A remote `SO_ERROR` is a guess**: `ECONNREFUSED` when the server says `Err`, since the conversation's error isn't carried.
+- `MSG_PEEK` and `FIONREAD` on a remote conversation read into a buffer per conversation that later reads take first, the one place something is still read ahead.

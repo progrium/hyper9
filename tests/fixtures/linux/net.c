@@ -64,6 +64,49 @@ static void poll_pipe(void) {
 	printf("ok poll_pipe\n");
 }
 
+/* poll on a pipe, a pty, and an eventfd at once (design/file-interface.md):
+ * none is ready, and a write to each from a child, in turn, ends a poll
+ * that waits on all three, with that one ready alone. */
+static void poll_ready(void) {
+	int p[2];
+	CHECK("poll_ready", pipe(p) == 0);
+	int m = posix_openpt(O_RDWR | O_NOCTTY);
+	CHECK("poll_ready", m >= 0 && grantpt(m) == 0 && unlockpt(m) == 0);
+	int s = open(ptsname(m), O_RDWR | O_NOCTTY);
+	CHECK("poll_ready", s >= 0);
+	int e = eventfd(0, 0);
+	CHECK("poll_ready", e >= 0);
+	struct pollfd f[3] = {{p[0], POLLIN, 0}, {m, POLLIN, 0}, {e, POLLIN, 0}};
+	CHECK("poll_ready", poll(f, 3, 0) == 0);
+	pid_t c = fork();
+	if (c == 0) {
+		uint64_t one = 1;
+		usleep(100000);
+		write(p[1], "x", 1);
+		usleep(100000);
+		write(s, "y", 1);
+		usleep(100000);
+		write(e, &one, sizeof one);
+		_exit(0);
+	}
+	for (int i = 0; i < 3; i++) {
+		struct timespec t0;
+		clock_gettime(CLOCK_MONOTONIC, &t0);
+		CHECK("poll_ready", poll(f, 3, 5000) == 1 && (f[i].revents & POLLIN));
+		CHECK("poll_ready", ms_since(&t0) < 4000);
+		char b[8];
+		CHECK("poll_ready", read(f[i].fd, b, i == 2 ? 8 : 1) > 0);
+		CHECK("poll_ready", poll(f, 3, 0) == 0);
+	}
+	waitpid(c, 0, 0);
+	close(p[0]);
+	close(p[1]);
+	close(s);
+	close(m);
+	close(e);
+	printf("ok poll_ready\n");
+}
+
 /* readv from a pipe returns what's there, not waiting to fill the
  * second buffer once the first is full (Zig's test runner). */
 static void readv_pipe(void) {
@@ -1037,6 +1080,7 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "poll_pipe")) poll_pipe();
 		if (all || !strcmp(n, "nonblock_pipe")) nonblock_pipe();
 		if (all || !strcmp(n, "readv_pipe")) readv_pipe();
+		if (!strcmp(n, "poll_ready")) poll_ready();
 		if (all || !strcmp(n, "epoll_et")) epoll_et();
 		if (all || !strcmp(n, "eventfd")) eventfd_epoll();
 		if (all || !strcmp(n, "dupfd_threads")) dupfd_threads();

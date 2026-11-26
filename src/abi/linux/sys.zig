@@ -2020,8 +2020,8 @@ fn rwOne(p: *Process, fd: i32, buf: u64, len_in: u64, off: i64, comptime dir: Di
     var pipe_nb = false;
     var is_pty = false;
     if (off == -1) if (kc.fdInfo(fd) catch null) |info| {
-        // A socket from a mounted /net is read through the kernel's
-        // read-ahead, as recv reads it, and written as send writes.
+        // A socket from a mounted /net is read as recv reads it, once its
+        // server says it won't wait, and written as send writes.
         if (info.dc == 'M' and !info.dir) if (sockOf(p, fd)) |so| if (so.conv & conv_remote != 0) return remoteRw(p, fd, so.s, buf, len, dir);
         if (dir == .read and info.dc == ev_dc) {
             if (sigfdOf(p, info.qpath) != null) return sigfdRead(p, fd, info.qpath, buf, len);
@@ -4977,7 +4977,8 @@ fn convOf(fd: i32) ?u32 {
 }
 
 /// The bit that marks a conversation from a /net mounted from another
-/// machine (devmnt's, not devip's), which src/kern/rconv.zig reads ahead.
+/// machine (devmnt's, not devip's), whose readiness its server says
+/// (design/file-interface.md).
 const conv_remote: u32 = 1 << 30;
 
 fn protoOf(conv: u32) u32 {
@@ -5034,18 +5035,17 @@ fn netErr() i64 {
 
 /// Opens a new conversation's data file for socket(2) and accept(2):
 /// `clone` is a clone or listen file, opened for its new ctl, in the
-/// 9front view's /net or devip's. A conversation from a mounted /net is
-/// attached to the kernel's read-ahead; `accepted` says it's connected.
+/// 9front view's /net or devip's.
 const ConvOpened = union(enum) { fd: u31, err: i64 };
 
-fn openConv(p: *Process, clone: [:0]const u8, proto: u32, cloexec: bool, accepted: bool) Err!ConvOpened {
+fn openConv(p: *Process, clone: [:0]const u8, proto: u32, cloexec: bool) Err!ConvOpened {
     _ = p;
     const ctl = (if (clone[0] == '/') open9(clone, kern.ORDWR) else kern.open(clone, kern.ORDWR)) catch return .{ .err = netErr() };
-    return convFromCtl(ctl, proto, cloexec, accepted);
+    return convFromCtl(ctl, proto, cloexec);
 }
 
 /// openConv's rest, from the new conversation's ctl, which it closes.
-fn convFromCtl(ctl: u31, proto: u32, cloexec: bool, accepted: bool) ConvOpened {
+fn convFromCtl(ctl: u31, proto: u32, cloexec: bool) ConvOpened {
     defer kern.close(ctl) catch {};
     var b: [16]u8 = undefined;
     const n = kern.pread(ctl, &b, 0) catch return .{ .err = kerr() };
@@ -5053,10 +5053,6 @@ fn convFromCtl(ctl: u31, proto: u32, cloexec: bool, accepted: bool) ConvOpened {
     const remote = if (kc.fdInfo(ctl)) |info| info.dc == 'M' else |_| false;
     const conv = proto << 12 | num | if (remote) conv_remote else 0;
     const fd = convOpen(conv, "data", kern.ORDWR | if (cloexec) @as(c_int, OCEXEC) else 0) catch return .{ .err = kerr() };
-    if (remote) kc.rattach(fd, ctl, conv, proto == ip_udp, accepted) catch {
-        kern.close(fd) catch {};
-        return .{ .err = kerr() };
-    };
     return .{ .fd = fd };
 }
 
@@ -5077,7 +5073,7 @@ fn socketCall(p: *Process, domain: u32, type_in: u32, protocol: u32) Err!i64 {
     // Through the namespace, as dial(2) goes: /net is devip's unless
     // something else is mounted there, such as another machine's /net.
     const clone: [:0]const u8 = if (proto == ip_tcp) "/net/tcp/clone" else "/net/udp/clone";
-    const fd = switch (try openConv(p, clone, proto, type_in & SOCK_CLOEXEC != 0, false)) {
+    const fd = switch (try openConv(p, clone, proto, type_in & SOCK_CLOEXEC != 0)) {
         .fd => |f| f,
         .err => |e| return e,
     };
@@ -5306,19 +5302,13 @@ fn acceptCall(p: *Process, fd: i32, addr: u64, lenp: u64, flags: u32) Err!i64 {
         if (w < 0) return w;
     }
     var b: [64]u8 = undefined;
-    const listen = std.fmt.bufPrintSentinel(&b, "#I/{s}/{d}/listen", .{ protoName(conv), conv & 0xfff }, 0) catch unreachable;
-    // A mounted conversation's call was taken by the kernel's listener,
-    // which made it ready; devip's is opened here.
-    const opened = if (conv & conv_remote != 0) blk: {
-        const r = while (true) {
-            const r = kc.raccept(fd, false);
-            if (r != -E.AGAIN or flagsOf(p, fd).nonblock) break r;
-            const w = waitReady(fd, kc.POLLIN);
-            if (w < 0) return w;
-        };
-        if (r < 0) return r;
-        break :blk convFromCtl(@intCast(r), protoOf(conv), flags & SOCK_CLOEXEC != 0, true);
-    } else try openConv(p, listen, protoOf(conv), flags & SOCK_CLOEXEC != 0, true);
+    // A mounted conversation's listen is its server's, in the 9front
+    // view's /net, which says it's readable once a call waits.
+    const listen = if (conv & conv_remote != 0)
+        std.fmt.bufPrintSentinel(&b, "/net/{s}/{d}/listen", .{ protoName(conv), conv & 0xfff }, 0) catch unreachable
+    else
+        std.fmt.bufPrintSentinel(&b, "#I/{s}/{d}/listen", .{ protoName(conv), conv & 0xfff }, 0) catch unreachable;
+    const opened = try openConv(p, listen, protoOf(conv), flags & SOCK_CLOEXEC != 0);
     const nfd = switch (opened) {
         .fd => |f| f,
         .err => |e| return e,
@@ -7013,16 +7003,18 @@ fn epollWait(p: *Process, epfd: i32, events_va: u64, maxevents: i32, timeout_ms:
             ms = @divTrunc(left + std.time.ns_per_ms - 1, std.time.ns_per_ms);
         }
         // Sleep until something changes. An fd that's ready now but was
-        // reported edge-triggered is left out, so it doesn't end the wait
-        // at once; any wake ends it, and the loop asks again.
-        // An edge-triggered fd waits only for the events that aren't
-        // ready yet (a socket that can be written waits to be readable).
+        // reported edge-triggered is only watched (kc.POLLEDGE), so it
+        // doesn't end the wait at once; its next change ends it, and the
+        // loop asks again. An edge-triggered fd waits only for the
+        // events that aren't ready yet (a socket that can be written
+        // waits to be readable).
         var waiting: usize = 0;
         for (snap.items, 0..) |e, k| {
             if (e.disarmed) continue;
-            var want: u16 = @bitCast(pf.items[k].events);
+            const all: u16 = @bitCast(pf.items[k].events);
+            var want = all;
             if (e.events & EPOLLET != 0 and e.last_gen == gen) want &= ~@as(u16, @bitCast(pf.items[k].revents));
-            if (want == 0) continue;
+            if (want == 0) want = all | kc.POLLEDGE;
             pf.items[waiting] = .{ .fd = e.fd, .events = @bitCast(want), .revents = 0 };
             waiting += 1;
         }
