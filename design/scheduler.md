@@ -6,7 +6,7 @@ created: 2026-11-21
 authors: [progrium]
 depends: [kernel-port]
 areas: [kern, engine, web, tests]
-branch: []
+branch: [dev, scheduler]
 ---
 
 # Proposal: A scheduler, with processes on per-core executors
@@ -104,3 +104,12 @@ None for the guest's reach. The scheduler is new code in the trusted base, and a
 - The slice length, and whether interactive processes need a boost. 10 ms is a starting point.
 - Whether guest threads of one Linux process should prefer one executor's cache or spread across executors. As written, they spread.
 - How `--gfx`'s host event loop, which must own the main thread on macOS, fits beside the executors.
+
+## Updates
+
+**2026-11-26, kernel stacks and park and resume.** `src/kern/sched/` has the primitive, tested with no kernel or engine by `zig build sched-test`. Some things building it found:
+
+- **A process owns a kernel stack only while it's parked.** An executor keeps a spare stack and runs each kernel call on it. A call that returns leaves it with the executor, and one that parks takes it, so the executor takes another from the pool. The stack goes back when the parked call returns, as well as at exit. A process that never blocks never has one, as proposed, and one that blocked once doesn't keep one.
+- **A park commits on the executor's stack.** An unpark can come before the park, or while the parking process is still switching out, as with posix.c's counts. The executor marks the process parked only once it's off its stack, and goes straight back into it if an unpark came in the meantime, so the scheduler's hook that queues a runnable process never sees one still running.
+- **On wasm, a continuation switches with Binaryen's Asyncify.** wasm can't switch call stacks from inside a module, and the stack-switching proposal hasn't shipped, so `park` unwinds the process's wasm frames into a buffer at its stack's low end and `resume` rewinds them. JSPI is left for the executor, as proposed. This makes `wasm-opt` a dependency of the web build from step 6 on. A module with a park in it doesn't instantiate until Asyncify has run on it, since it imports Asyncify's functions. Emscripten doesn't combine Asyncify with wasm exception handling, which the C kernel's `setjmp` and `longjmp` use on the web, so step 6 must check that `wasm-opt` accepts h9.wasm, or keep parks off paths through C that catches.
+- **Thread-locals.** A continuation can resume on another host thread, so `up` can't be a host thread's: step 2 has to set it from the continuation on every switch in.

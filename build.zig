@@ -1893,6 +1893,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(mod_tests).step);
     // The kernel's Zig's own cases (design/kernel-port.md).
     test_step.dependOn(kern_test_step);
+    // The scheduler's primitives (design/scheduler.md).
+    test_step.dependOn(addSchedTests(b, target, optimize));
     // h9.wasm too, so a change to the shared engine or JIT code that breaks
     // wasm32 (64-bit atomics, threads) is caught where it's made.
     test_step.dependOn(&web.exe.step);
@@ -2097,6 +2099,45 @@ fn addX64check(b: *std.Build, hcpu: *std.Build.Module) void {
     cmp.addFileArg(cases);
     cmp.addFileArg(answers);
     step.dependOn(&cmp.step);
+}
+
+/// The scheduler's primitives' cases (src/kern/sched/, design/scheduler.md):
+/// kernel stacks, and park and resume, with no kernel or engine. They run
+/// for -Dtarget where the host can run it, and are only compiled for one
+/// it can't. On wasm32-wasi they're compiled too, and with Binaryen's
+/// wasm-opt on PATH, run through its Asyncify pass and under Node's WASI.
+fn addSchedTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) *std.Build.Step {
+    const step = b.step("sched-test", "Run the scheduler's kernel stack and park and resume cases (src/kern/sched/, design/scheduler.md)");
+    const mk = struct {
+        fn tests(bb: *std.Build, t: std.Build.ResolvedTarget, o: std.lang.Optimize) *std.Build.Step.Compile {
+            return bb.addTest(.{ .name = "sched", .root_module = bb.createModule(.{
+                .root_source_file = bb.path("src/kern/sched/sched.zig"),
+                .target = t,
+                .optimize = o,
+                .link_libc = t.result.os.tag != .windows,
+            }) });
+        }
+    };
+    const native = mk.tests(b, target, optimize);
+    const run = b.addRunArtifact(native);
+    run.skip_foreign_checks = true;
+    step.dependOn(&run.step);
+
+    const wasm = mk.tests(b, webTarget(b, false), optimize);
+    if (b.findProgram(.{ .names = &.{"wasm-opt"} })) |wasm_opt| {
+        const asyncify = b.addSystemCommand(&.{ wasm_opt, "--asyncify" });
+        for ([_][]const u8{ "bulk-memory", "mutable-globals", "sign-ext", "nontrapping-float-to-int", "multivalue", "reference-types" }) |f|
+            asyncify.addArg(b.fmt("--enable-{s}", .{f}));
+        asyncify.addArtifactArg(wasm);
+        asyncify.addArg("-o");
+        const out = asyncify.addOutputFileArg("sched.wasm");
+        const node = b.addSystemCommand(&.{ "node", "--no-warnings", "tests/web/wasi-test.mjs" });
+        node.addFileArg(out);
+        node.setCwd(b.path("."));
+        node.expectExitCode(0);
+        step.dependOn(&node.step);
+    } else step.dependOn(&wasm.step);
+    return step;
 }
 
 /// The JIT's test tools (src/engine/hcpu/jit/README.md, "Test tools"): lockstep against
