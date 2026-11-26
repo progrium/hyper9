@@ -192,11 +192,11 @@ const Compute = struct {
 };
 
 const computes = [_]Compute{
-    .{ .name = "fib", .sud = bench_fib, .arm64 = @embedFile("bench_fib_arm64"), .i386 = @embedFile("bench_fib_386") },
-    .{ .name = "sieve", .sud = bench_sieve, .arm64 = @embedFile("bench_sieve_arm64"), .i386 = @embedFile("bench_sieve_386") },
-    .{ .name = "md5", .sud = bench_md5, .arm64 = @embedFile("bench_md5_arm64"), .i386 = @embedFile("bench_md5_386") },
-    .{ .name = "qsort", .sud = bench_qsort, .arm64 = @embedFile("bench_qsort_arm64"), .i386 = @embedFile("bench_qsort_386") },
-    .{ .name = "fp", .sud = bench_fp, .arm64 = @embedFile("bench_fp_arm64"), .i386 = @embedFile("bench_fp_386") },
+    .{ .name = "fib", .native = bench_fib, .arm64 = @embedFile("bench_fib_arm64"), .i386 = @embedFile("bench_fib_386") },
+    .{ .name = "sieve", .native = bench_sieve, .arm64 = @embedFile("bench_sieve_arm64"), .i386 = @embedFile("bench_sieve_386") },
+    .{ .name = "md5", .native = bench_md5, .arm64 = @embedFile("bench_md5_arm64"), .i386 = @embedFile("bench_md5_386") },
+    .{ .name = "qsort", .native = bench_qsort, .arm64 = @embedFile("bench_qsort_arm64"), .i386 = @embedFile("bench_qsort_386") },
+    .{ .name = "fp", .native = bench_fp, .arm64 = @embedFile("bench_fp_arm64"), .i386 = @embedFile("bench_fp_386") },
 };
 
 /// Counts ECX down from 10⁹, then exits(nil).
