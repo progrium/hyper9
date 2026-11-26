@@ -31,7 +31,7 @@
 //! parent never touches freed memory. A parent that exits marks its
 //! record dead, and children's exits then leave no wait record.
 //!
-//! One C call that can raise is made through src/kern/procshim.c: the
+//! One C call that can raise is made through dev.zig's `raising`: the
 //! function h9_kern_isolated runs.
 
 const std = @import("std");
@@ -45,6 +45,12 @@ const up = port.up;
 const Error = port.Error;
 
 const Proc = c.Proc;
+
+// The C and the Zig must agree on the record: see errlab in h9proc.h.
+comptime {
+    std.debug.assert(@offsetOf(Proc, "errlab") == 0);
+    std.debug.assert(@sizeOf(@FieldType(Proc, "errlab")) % 16 == 0);
+}
 const Hmach = c.Hmach;
 const Hnote = c.Hnote;
 const Hwait = c.Hwait;
@@ -62,9 +68,6 @@ const unlock = c.unlock;
 extern fn h9_srvmachclose(m: *Hmach) void;
 extern fn h9_srvmachfree(m: *Hmach) void;
 extern fn h9_hstream_machend(m: ?*anyopaque) void;
-// src/kern/procshim.c: a call of fn(arg), returning -1 if it raised,
-// with the error string on the process.
-extern fn h9_shim_call(f: *const fn (?*anyopaque) callconv(.c) void, arg: ?*anyopaque) c_int;
 extern fn sysclose(fd: c_int) c_int; // sysfile.zig's, for C
 
 // dev/env.zig's environment groups, kept as void* on the record; the
@@ -263,7 +266,14 @@ fn pexit(msg: [*c]u8, freemem: c_int) callconv(.c) void {
     chan.cclose(p.slash);
     p.slash = null;
 
+    // A process the scheduler runs ends its continuation, not a thread.
+    // putproc may free p.
+    // And its record, which /proc may hold on to, keeps no pointer to
+    // the continuation the scheduler frees.
+    const on_cont = sync.contOf(p) != null;
+    p.cont = null;
     putproc(p);
+    if (on_cont) sync.exitCont();
     c.osexit();
 }
 
@@ -926,11 +936,30 @@ fn spawntramp(v: ?*anyopaque) callconv(.c) void {
 /// A machine's C half, for the Zig Kernel (src/kern.zig) that owns it:
 /// kernel is that Kernel, which h9_kern_machkernel returns until
 /// h9_kern_machdetach. Returns nil if allocation fails.
+/// Starts p, made by h9_kern_spawn or fork: on its machine's scheduler
+/// (design/scheduler.md), if it has one and p may go there, and otherwise
+/// on a host thread of its own.
+fn startproc(p: *Proc, hostthread: bool) void {
+    if (sync.can_park and !hostthread) {
+        if (@as(?*Hmach, p.mach)) |m| if (m.schedstart) |start| {
+            if (start(m.sched, p) == 0) return;
+        };
+    }
+    c.osproc(p);
+}
+
 fn h9_kern_newmach(kernel: ?*anyopaque) callconv(.c) ?*anyopaque {
     const m: *Hmach = @ptrCast(@alignCast(c.mallocz(@sizeOf(Hmach), 1) orelse return null));
     m.ref.ref = 1;
     m.kernel = kernel;
     return m;
+}
+
+/// Has machine m's processes start on a scheduler (design/scheduler.md):
+/// start(sched, p) takes each, or returns -1 to give it a host thread.
+fn h9_kern_setsched(m: *Hmach, s: ?*anyopaque, start: ?*const fn (?*anyopaque, ?*Proc) callconv(.c) c_int) callconv(.c) void {
+    m.sched = s;
+    m.schedstart = start;
 }
 
 /// The Kernel that owns machine m, or nil once it has let go of it.
@@ -973,7 +1002,7 @@ fn h9_kern_spawn(mach: *Hmach, name: [*c]const u8, f: Fn, arg: ?*anyopaque) call
     p.arg = s;
     strecpy(&p.text, name);
     enter(p);
-    c.osproc(p);
+    startproc(p, false);
     return 0;
 }
 
@@ -1012,7 +1041,7 @@ fn h9_kern_adopt(name: [*c]const u8) callconv(.c) c_int {
 /// Proc's own back after. The kprocs fn starts share these, not the
 /// caller's: a GUI backend's event and resize kprocs outlive the guest
 /// process whose attach of #i started them (src/kern/gfx.c). fn is C,
-/// which can raise: it's called through the shim, and its error raised
+/// which can raise: it's called through dev.zig's `raising`, and its error raised
 /// again once the Proc's own are back.
 fn h9_kern_isolated(f: Fn, arg: ?*anyopaque) callconv(.c) void {
     const p = up();
@@ -1026,7 +1055,7 @@ fn h9_kern_isolated(f: Fn, arg: ?*anyopaque) callconv(.c) void {
     p.rgrp = pgrp.newrgrp() catch |e| port.raise(e);
     p.slash = bootslash();
     p.dot = bootslash();
-    const rc = h9_shim_call(f, arg);
+    const rc = dev.raising(f, .{arg});
     pgrp.closepgrp(p.pgrp);
     fgrpclose(p.fgrp);
     pgrp.closergrp(p.rgrp);
@@ -1037,7 +1066,7 @@ fn h9_kern_isolated(f: Fn, arg: ?*anyopaque) callconv(.c) void {
     p.rgrp = rg;
     p.slash = slash;
     p.dot = dot;
-    dev.caught(rc) catch |e| port.raise(e);
+    rc catch |e| port.raise(e);
 }
 
 fn forktramp(v: ?*anyopaque) callconv(.c) void {
@@ -1167,7 +1196,7 @@ pub fn fork(flag: c_int, pid: c_uint, f: Fn, arg: ?*anyopaque) Error!void {
     p.@"fn" = forktramp;
     p.arg = s;
     enter(h);
-    c.osproc(p);
+    startproc(p, (flag & c.RFHOSTTHREAD) != 0);
 }
 
 /// fork for C: 0, or -1 with the error string set.
@@ -1684,6 +1713,7 @@ pub fn exportC() void {
     @export(&h9_kern_machkernel, .{ .name = "h9_kern_machkernel" });
     @export(&h9_kern_machdetach, .{ .name = "h9_kern_machdetach" });
     @export(&h9_kern_spawn, .{ .name = "h9_kern_spawn" });
+    @export(&h9_kern_setsched, .{ .name = "h9_kern_setsched" });
     @export(&h9_kern_kprocdetached, .{ .name = "h9_kern_kprocdetached" });
     @export(&h9_kern_adopt, .{ .name = "h9_kern_adopt" });
     @export(&h9_kern_isolated, .{ .name = "h9_kern_isolated" });

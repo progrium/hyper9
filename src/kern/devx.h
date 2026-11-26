@@ -4,7 +4,7 @@
  * some lists them in a Devx, named in devxtab (src/kern/devtab.c, or
  * nstab.c in the namespace kernel), by its device character; a device
  * in Zig has them in its dev.Native ops. The device switch
- * (src/kern/dev.zig) calls them through src/kern/devshim.c, so each may
+ * (src/kern/dev.zig) calls them through its `raising`, so each may
  * raise, and any a device leaves nil gets the switch's default, which
  * is what h9 did before: links are "permission denied" and read as no
  * link, a link is a copy, attributes are built from stat and set by
@@ -92,6 +92,15 @@ struct Devx
 	 * once where it can: 0, or 1 if it can't, for the default to try.
 	 */
 	int	(*rename)(Chan *c, Chan *dir, char *name);
+
+	/*
+	 * Readiness (file-interface, Part 1; src/kern/ready.zig): the
+	 * events of ev ready on c now, as Linux's poll bits, and a watch w
+	 * (a ready.zig Watch) with its waker wk, hung on what c's readiness
+	 * comes from. Neither raises.
+	 */
+	int	(*ready)(Chan *c, int ev);
+	void	(*watch)(Chan *c, int ev, void *w, void *wk);
 };
 
 extern Devx *devxtab[];

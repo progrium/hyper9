@@ -163,7 +163,7 @@ escape.
 | --- | --- | --- | --- |
 | B1 | Guest CPU and memory vs. the h9 process | The hypervisor's stage-2 tables and h9's page tables (`src/engine/{hvf,kvm,whp}.zig`, `pt_arm64.zig`, `pt_amd64.zig`, `gphys.zig`); on the emulator, hcpu's software TLB and region checks (`src/engine/hcpu/interp/mem.zig`, `src/engine/hcpu/jit/`) | Every exit, every page fault, `AddressSpace.translate` and `copy` |
 | B2 | Guest kernel mode (the shim) vs. guest user mode | The shim's entry and restore paths (`src/arch/{amd64,arm64}/shim.S`), the host-set CPU state (`src/engine/x86.zig`), `arch.sanitize` (`src/arch/*.zig`) | Syscalls, faults, notes, `noted`, `rt_sigreturn`, `/proc/n/regs` writes |
-| B3 | Syscall arguments vs. the kernel | `src/abi/plan9/syscall.zig` (9front) and `src/abi/linux/sys.zig`, `mm.zig`, `signal.zig`, and the rest of `src/abi/linux/`; `GuestBuf` (see [kernel.md, seam rule 7](../spec/kernel.md#zigc-seam-rules)) | Every syscall |
+| B3 | Syscall arguments vs. the kernel | `src/abi/plan9/syscall.zig` (9front) and `src/abi/linux/sys.zig`, `mm.zig`, `signal.zig`, and the rest of `src/abi/linux/`; `GuestBuf` (see [kernel.md](../spec/kernel.md#errors-calls-across-the-edge-and-guest-memory)) | Every syscall |
 | B4 | The guest's namespace vs. the host's file system | The namespace builder (`src/newns.zig`, `src/mount.zig`, `src/machine.zig`), the device mask, and devfs's hooks into `src/kern/fscheck.c` and `h9_policy_check` in `src/policy.zig` | Walks, opens, creates, removes, renames, wstats, directory reads on `#U` |
 | B5 | The guest's network vs. the host's | devip's hooks (`h9_net_check`, `h9_net_lookup`, `h9_net_resolved`) into `src/kern/netcheck.zig` and `src/policy.zig`; devhstream's connect check; the Linux socket layer (`src/kern/linuxnet.zig`) | `connect`, `announce`, `cs` lookups, `sendto`, `/net/ws` |
 | B6 | Remote servers' bytes vs. h9's parsers | `src/dotl/` (`wire.zig`, `client.zig`, `server.zig`, `attr.zig`), `src/rootindex/`, `src/rootindex.zig`, `src/statictree.zig`, `src/hstream.zig`, `src/ws.zig`, and drawterm's devmnt | Every 9P reply, index, event record, HTTP response, and WebSocket frame |
@@ -1019,7 +1019,7 @@ branches.
 | The whole system | [SPEC.md](../SPEC.md) |
 | Security stance, policy, access rules, `--print` | [spec/sandbox.md](../spec/sandbox.md) |
 | Engines and shims | [spec/engines.md](../spec/engines.md) |
-| Kernel, process model, seam rules | [spec/kernel.md](../spec/kernel.md) |
+| Kernel, process model, and errors across the edge to C | [spec/kernel.md](../spec/kernel.md) |
 | 9front ABI | [spec/abi-plan9.md](../spec/abi-plan9.md) |
 | Linux ABI | [spec/abi-linux.md](../spec/abi-linux.md) |
 | Mounts, 9P dialects, indexes, serving | [spec/ninep.md](../spec/ninep.md) |

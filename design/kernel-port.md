@@ -97,11 +97,11 @@ No new reach for a guest. Real address checks close a class of bug where a guest
 - [ ] `zig build test`, `zig build integration` on every engine, `zig build integration -Dweb`, and `zig build web-test` pass with no case removed or newly skipped.
 - [ ] [namespace-kernel](epoch-0/namespace-kernel.md)'s cases pass against the ported core.
 - [x] `zig build conformance` runs a script of namespace operations (binds, unions, mounts, `..` across mounts, creates in unions, `ORCLOSE`, and flush) on h9 and on a 9front kernel under QEMU, and the transcripts match.
-- [ ] `git grep -l waserror src/` finds nothing, and the build compiles none of `chan.c`, `pgrp.c`, `dev.c`, `devmnt.c`, `qio.c`, `devpipe.c`, `devroot.c`, or `sysfile.c` from `third_party/drawterm/kern/`.
+- [x] `git grep -l waserror src/` finds nothing, and the build compiles none of `chan.c`, `pgrp.c`, `dev.c`, `devmnt.c`, `qio.c`, `devpipe.c`, `devroot.c`, or `sysfile.c` from `third_party/drawterm/kern/`.
 - [ ] `test "two machines don't share /srv [kernel-port]"` and `test "two machines don't share devcmd conversations [kernel-port]"` pass with two machines in one process.
-- [ ] `test "a bad guest pointer is a fault, not a host crash [kernel-port]"` passes for read, write, and stat buffers.
+- [x] `test "a bad guest pointer is a fault, not a host crash [kernel-port]"` passes for read, write, and stat buffers.
 - [ ] `zig build bench` shows system call round trips within 5% of before the port.
-- [ ] [spec/kernel.md](../spec/kernel.md) describes the kernel as built, with no seam rules.
+- [x] [spec/kernel.md](../spec/kernel.md) describes the kernel as built, with no seam rules.
 
 ## Implementation
 
@@ -220,3 +220,23 @@ No new reach for a guest. Real address checks close a class of bug where a guest
 - **An open with a bad mode leaked a conversation.** `dotlopen` counted the open (or made the conversation, for `clone`) before `openmode` could fail, and a failed open isn't closed. The Zig checks the mode first, as `pipeopen` does. The directories and `status` still fail a write open with `Eperm` before the mode is checked.
 - **The translator's leaves take 64-bit counts** (`c_long` in `src/dotl/kern.zig`), where C passed drawterm's `long`, a C `int`, so their upper halves, and a `user` uid's, were undefined. The Zig passes them whole; the uid is still cut to 32 bits, as C's `strtol` into a `long` cut it.
 - **Not yet per kernel**: the 256 conversations are still the host process's, shared by its machines, as the Kernel note above lists.
+
+**2026-11-26, the last error labels in h9's sources.** `src/kern/devshim.c` and `src/kern/procshim.c` are gone, so `git grep -l waserror src/` finds nothing. The shims whose callees are Zig now (`pgrpcpy` and `h9_srvpost`) are direct calls. What's left is drawterm's own C, which still raises: its devices (devcons, devdraw, devfs, devip, devssl, devtls, devkbd, devmouse, devaudio, and devlfd), devfs's policy hooks and syncs, devip's socket calls, and gfx.c's screen setup, which `h9_kern_isolated` runs. Only C can set the label `error()` jumps to, so the Zig calls all of it through `dev.zig`'s `raising`, which packs the call into a Zig trampoline and runs it under one function, `h9_catch` in `third_party/drawterm-glue/catch.c`: the edge of drawterm's C, beside the vendored tree rather than in it. Some things the port found:
+
+- **linux.zig's syncs no longer pose as a Devgen.** `h9_linux_syncfs` and `h9_linux_sync` called devfs's `h9_fs_syncfs` and `h9_fs_sync` through `callgen` to reach the shim's label; they're `raising` calls now.
+- **devmnt's test server indexed its fids by fid**, which is the kernel's chan number and grows with every chan the test process has made, so the `#ℓ` case crashed when it ran after enough others. It indexes them modulo its table.
+
+**2026-11-26, address checks and widths.** Every guest pointer already reached the kernel through one place, `src/guestmem.zig` under each ABI's address space (`segment.Space` and the Linux `Mm`), which checks a buffer against the mappings before any I/O and posts "sys: bad address in syscall" (or returns `EFAULT`); the kernel's C never sees a guest address, so drawterm's no-op `validaddr` is never reached. `test "a bad guest pointer is a fault, not a host crash [kernel-port]"` (tests/engines.zig, with programs in tests/fixtures/badptr) checks it for read, write, and stat buffers. The system call path's counts are 64 bits down to the kernel: `src/kern.zig`'s `pread`, `pwrite`, `stat`, `fstat`, `wstat`, and `fwstat` call `sysfile.zig`'s `h9_pread` and the rest, which take a `usize` count and return an `isize`, where they passed through C's `int`. Some things the port found:
+
+- **A device's count is still C's `int`.** The `Dev` table is drawterm's, shared with its C devices, so `sysfile.zig` clamps a count to `maxcount` (2 GiB - 1) where it meets the device, and a longer read or write is short, as Linux's are past `MAX_RW_COUNT`; that's what `src/kern.zig`'s clamp did before. The Plan 9 ABI still splits a call of more than 1 GiB, as it did. Below `sysfile.zig` (the device switch, qio, and the devices) counts stay `c_int` until the C devices are gone.
+
+**2026-11-26, the spec, and the patches to drawterm's kern.** [spec/kernel.md](../spec/kernel.md) describes the kernel as built: h9's Zig, the drawterm C it still builds, and, in place of the seam rules, how errors cross the edge between them and how guest memory reaches the kernel. h9 no longer patches the files it ported: `chan.c`, `devpipe.c`, `qio.c`, and `sysfile.c`, which still carried h9's changes though nothing built them, are upstream's again, so all eight files the Done list names are as drawterm has them. What h9 still patches in `third_party/drawterm/kern/` is in files it builds and hasn't ported, and ending those is more than this step: each needs its file ported, or its hooks moved out of it.
+
+- **`dat.h`** includes h9's `Proc` (`src/kern/h9proc.h`) in place of its own, and has `Chan.srvname`. Every drawterm C file includes it from its own directory, so h9 can't supply another without a patch; it ends when drawterm's `Proc` is a prefix of h9's (h9's record reorders and widens drawterm's fields) or when no drawterm C reads a `Proc`.
+- **devfs-posix and devfs-win32** (about 1,800 changed lines between them): the sandbox hooks, the anchored attach, FIFOs, links, attributes, renames, and syncs. A port of both to Zig would also make the syncs, the anchor check, and `h9_fs_mkfifo` direct calls.
+- **devip, devip-posix, and devip-win32** (about 220): the network hooks, h9's socket options and calls (`nbconnect`, `shutdown`, and the rest), and Windows binds.
+- **devcons** (about 45): the hooks for `pid`, `ppid`, the clock, and `sysstat`.
+- **devlfd-posix and devlfd-win32** (4 lines each): its character, `φ`.
+- **`win32.c`** (13): socket error strings as POSIX names them.
+
+**2026-11-26, the bench.** `zig build bench -- syscall` runs only the system call rows. Here (an x86-64 Linux host with no KVM, so the arm64 rows on hcpu), one-byte `pwrite` round trips take 0.70 to 0.80 µs on dev and on this branch alike, and 0.54 to 0.59 µs on main, about 30% less, so that Done item stays open. The difference isn't the kernel's: a profile of the round trip shows [memory-model](memory-model.md)'s `Mm.pin` allocating, and `src/abi/plan9/syscall.zig`'s `io` freeing, a record per call (about 16 million of each in the run), which main, without memory-model, doesn't do, while the kernel's own path (`fdtochan`, the switch, and #y's write) is a few percent of it. The amd64 row on sud doesn't finish on this host, on main either.

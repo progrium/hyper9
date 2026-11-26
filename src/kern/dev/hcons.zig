@@ -1,6 +1,6 @@
 //! h9's #y, a machine's console (src/kern/devhcons.c,
 //! design/kernel-port.md). A close translation of the C: the same
-//! functions in the same order, with error unions in place of waserror.
+//! functions in the same order, with error unions in place of C's error labels.
 //! A native device (dev.zig's `Native`).
 //!
 //! drawterm's #c/cons reads and writes the host process's fds 0 and 1;
@@ -52,6 +52,7 @@ const Hcons = struct {
     busy: bool = false, // a reader has its turn
     nctl: c_int = 0, // open consctl files; the last close turns raw off
     r: c.Rendez = std.mem.zeroes(c.Rendez), // the reader with the turn, waiting for input
+    watch: dev.rd.Watchers = .{}, // pollers of cons (design/file-interface.md)
 };
 
 var hcons: [Maxcons]Hcons = @splat(.{});
@@ -61,13 +62,32 @@ fn ready(a: ?*anyopaque) callconv(.c) c_int {
     return h9_cons_ready(@intCast((@intFromPtr(h) - @intFromPtr(&hcons)) / @sizeOf(Hcons)));
 }
 
-// Called by the reader thread (not a Proc) when input arrives.
-extern fn h9_pollwake() void;
+// src/kern.zig: ready, or a read is asked for, whose input then calls
+// h9_cons_wake.
+extern fn h9_cons_poll(id: c_ulong) c_int;
 
+// Called by the reader thread (not a Proc) when input arrives.
 fn h9_cons_wake(id: c_ulong) callconv(.c) void {
-    if (id < Maxcons)
+    if (id < Maxcons) {
         _ = sync.wakeup(&hcons[id].r);
-    h9_pollwake(); // a Linux poll or epoll on the console (linuxnet.zig)
+        dev.rd.notify(&hcons[id].watch); // a Linux poll or epoll on the console
+    }
+}
+
+/// Readiness (design/file-interface.md): cons reads when there's input,
+/// and asking starts a host read, as a read would, whose input wakes
+/// the watchers. Everything else, and every write, is ready.
+fn hconsready(ch: *Chan, ev: c_int) c_int {
+    var r: c_int = dev.rd.Out;
+    if (ch.qid.path != Qcons or (ev & dev.rd.In) == 0 or h9_cons_poll(ch.dev) != 0)
+        r |= dev.rd.In;
+    return r & ev;
+}
+
+fn hconswatch(ch: *Chan, ev: c_int, w: *dev.rd.Watch, wk: *dev.rd.Waker) void {
+    _ = ev;
+    if (ch.qid.path != Qcons or ch.dev >= Maxcons) return;
+    dev.rd.add(&hcons[ch.dev].watch, w, wk);
 }
 
 fn taketurn(h: *Hcons) Error!void {
@@ -83,7 +103,7 @@ fn taketurn(h: *Hcons) Error!void {
             up().notepending = 0;
             return port.interrupted();
         }
-        c.osmsleep(5);
+        sync.msleep(5);
     }
 }
 
@@ -230,6 +250,8 @@ pub const Device = dev.Native('y', "hcons", .{
     .write = hconswrite,
     .remove = dev.devremove,
     .wstat = dev.devwstat,
+    .ready = hconsready,
+    .watch = hconswatch,
 });
 
 pub fn exportC() void {
@@ -248,7 +270,6 @@ const fake = struct {
     var nout: [2]usize = .{ 0, 0 };
     var raw: c_int = -1;
     var echo: c_int = -1;
-    var pollwakes: usize = 0;
 
     fn read(id: c_ulong, buf: ?*anyopaque, n: c_long) callconv(.c) c_long {
         if (id != 3) return -1;
@@ -278,8 +299,8 @@ const fake = struct {
         _ = id;
         echo = on;
     }
-    fn pollwake() callconv(.c) void {
-        pollwakes += 1;
+    fn poll(id: c_ulong) callconv(.c) c_int {
+        return isready(id);
     }
 };
 
@@ -290,7 +311,7 @@ comptime {
         @export(&fake.write, .{ .name = "h9_cons_write" });
         @export(&fake.setraw, .{ .name = "h9_cons_raw" });
         @export(&fake.setecho, .{ .name = "h9_cons_echo" });
-        @export(&fake.pollwake, .{ .name = "h9_pollwake" });
+        @export(&fake.poll, .{ .name = "h9_cons_poll" });
     }
 }
 
@@ -364,13 +385,19 @@ test "a #y read sleeps until input, and a note interrupts it and gives up its tu
     // Input wakes a sleeping reader, and its poller.
     try k.start(T.run, .{ &err, &got });
     try kt.waitAsleep(k.proc());
+    var s: dev.rd.Sleeper = .{};
+    var w: dev.rd.Watch = .{};
+    var cc: Chan = std.mem.zeroes(Chan);
+    cc.qid.path = Qcons;
+    cc.dev = 3;
+    hconswatch(&cc, dev.rd.In, &w, &s.waker);
+    defer dev.rd.unwatch(&w);
     fake.available.store(true, .release);
-    const wakes = fake.pollwakes;
     h9_cons_wake(3);
     k.join();
     try testing.expectEqual(null, err);
     try testing.expectEqual(1, got);
-    try testing.expectEqual(wakes + 1, fake.pollwakes);
+    try testing.expect(try s.wait(10));
     try testing.expect(!hcons[3].busy);
 }
 

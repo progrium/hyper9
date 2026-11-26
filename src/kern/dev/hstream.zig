@@ -3,7 +3,7 @@
 //! that h9 connects on the host becomes a channel devmnt can mount, and
 //! the guest can open WebSockets of its own through /net/ws. A close
 //! translation of the C: the same functions in the same order, with
-//! error unions in place of waserror. A native device (dev.zig's
+//! error unions in place of C's error labels. A native device (dev.zig's
 //! `Native`).
 //!
 //! It's #y's design (dev/hcons.zig) applied to a connection: reads and
@@ -161,7 +161,7 @@ fn taketurn(h: *Hs, kind: usize) Error!void {
             up().notepending = 0;
             return port.interrupted();
         }
-        c.osmsleep(5);
+        sync.msleep(5);
     }
 }
 

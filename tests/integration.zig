@@ -480,9 +480,14 @@ test "a host #! script runs by its guest path [host-scripts]" {
     defer out.deinit();
     try std.testing.expectEqual(126, out.code);
     try std.testing.expect(std.mem.indexOf(u8, out.err, "--readable") != null);
-    // With the directory shared, it runs from /mnt/term at its host path.
-    var want_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const want = try std.fmt.bufPrint(&want_buf, "/mnt/term{s}/away\n", .{other_real});
+    // With the directory shared, it runs from /mnt/term at its host path:
+    // on Windows, /mnt/term/C:/... with / for each \.
+    var want_buf: [std.Io.Dir.max_path_bytes + 16]u8 = undefined;
+    const want = if (builtin.os.tag == .windows) blk: {
+        const w = try std.fmt.bufPrint(&want_buf, "/mnt/term/{s}/away\n", .{other_real});
+        std.mem.replaceScalar(u8, w, '\\', '/');
+        break :blk w;
+    } else try std.fmt.bufPrint(&want_buf, "/mnt/term{s}/away\n", .{other_real});
     const shared = try runBare(e, cwd, &.{ "--dir", e.root, "--readable", other_real, away }, &.{});
     defer shared.deinit();
     try std.testing.expectEqualStrings(want, shared.out);
@@ -1239,6 +1244,82 @@ test "--cpus 1 still runs a pipeline [baseline]" {
     const r = try run(e, &.{ "--cpus", "1", "--rc", "echo one | cat | cat" });
     defer r.deinit();
     try std.testing.expectEqualStrings("one\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "1000 blocked processes use 8 host threads [scheduler]" {
+    // The host threads are counted in /proc/<pid>/task.
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const e = try env(@src());
+    const io = std.testing.io;
+    var ran = false;
+    var it = std.mem.tokenizeScalar(u8, e.engines, ',');
+    while (it.next()) |engine| {
+        ran = true;
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(gpa);
+        try argv.appendSlice(gpa, &.{ e.h9, "--engine", engine, "--dir", e.root, "--cpus", "1" });
+        if (e.arch) |a| try argv.appendSlice(gpa, &.{ "--arch", a });
+        // Each sleeps in the kernel until it's killed, so all 1000 are
+        // blocked at once whatever the host's speed; the output counts
+        // them, with the shell, ls, and wc.
+        try argv.appendSlice(gpa, &.{ "--rc", "pids=(); for(i in `{seq 1000}) { sleep 1000 & pids=($pids $apid) }; ls /proc | wc -l; for(p in $pids) echo kill > /proc/$p/note; wait" });
+        var child = try std.process.spawn(io, .{ .argv = argv.items, .stdin = .ignore, .stdout = .pipe, .stderr = .pipe, .create_no_window = true });
+        defer child.kill(io);
+        var task_buf: [64]u8 = undefined;
+        const path = try std.fmt.bufPrint(&task_buf, "/proc/{d}/task", .{child.id.?});
+        var most: usize = 0;
+        var mr_buf: std.Io.File.MultiReader.Buffer(2) = undefined;
+        var mr: std.Io.File.MultiReader = undefined;
+        mr.init(gpa, io, mr_buf.toStreams(), &.{ child.stdout.?, child.stderr.? });
+        defer mr.deinit();
+        // Counts its threads every 20 ms until it's done, for up to two
+        // minutes.
+        var ticks: u32 = 0;
+        while (true) {
+            if (mr.fill(64, .{ .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake } })) |_| continue else |err| switch (err) {
+                error.EndOfStream => break,
+                error.Timeout => {},
+                else => |x| return x,
+            }
+            ticks += 1;
+            if (ticks > slow(6000)) return error.Timeout;
+            var d = std.Io.Dir.openDirAbsolute(io, path, .{ .iterate = true }) catch continue;
+            defer d.close(io);
+            var n: usize = 0;
+            var di = d.iterate();
+            while (di.next(io) catch null) |_| n += 1;
+            most = @max(most, n);
+        }
+        _ = try child.wait(io);
+        const out = mr.reader(0).buffered();
+        errdefer std.debug.print("engine {s}: {s}{s}\n", .{ engine, out, mr.reader(1).buffered() });
+        const count = std.fmt.parseInt(u32, std.mem.trim(u8, out, " \t\n"), 10) catch 0;
+        try std.testing.expect(count >= 1000);
+        // main, the boot Proc, the timer kproc, one executor, and its
+        // monitor, and a few to spare for an executor started in place of
+        // one in a long kernel call.
+        errdefer std.debug.print("engine {s}: {d} host threads\n", .{ engine, most });
+        try std.testing.expect(most > 0 and most <= 8);
+    }
+    if (!ran) return error.SkipZigTest;
+}
+
+test "processes keep their own registers across executor switches [scheduler]" {
+    const e = try env(@src());
+    // Floating point in twelve processes at once, on one CPU, so their
+    // slices interleave: each result must be what it is run alone.
+    const script =
+        \\fn f { awk -v 'n='^$1 'BEGIN{s=0; for(j=1;j<=4000;j++) s+=sqrt(j*n)/(j+n); printf "%.9f\n", s}' > /tmp/o.$1 }
+        \\for(i in `{seq 12}) { f $i; mv /tmp/o.$i /tmp/p.$i }
+        \\for(i in `{seq 12}) { f $i & }
+        \\wait
+        \\for(i in `{seq 12}) cmp -s /tmp/o.$i /tmp/p.$i || echo differ $i
+        \\cat /tmp/o.1 /tmp/o.12
+    ;
+    const r = try runInFor(e, &.{ "--cpus", "1", "--tmp", "/tmp", "--rc", script }, null, 120_000);
+    defer r.deinit();
+    try std.testing.expectEqualStrings("123.210250514\n401.760077563\n", r.out);
     try std.testing.expectEqual(0, r.code);
 }
 
@@ -8334,6 +8415,61 @@ test "exec closing a child's last close-on-exec fd of a file releases its flock 
     try netCase(&le, &.{ "/mnt/term/cwd/files", "flock_exec" }, "ok flock_exec\n");
 }
 
+/// Runs the files fixture's case `name` in $DIR on a .L mount of the
+/// in-memory server `d` (started by the caller, for its counts), on one
+/// engine.
+fn dotlFiles(le: *const LinuxEnv, d: *DotlServer, name: []const u8) !void {
+    var allow_buf: [64]u8 = undefined;
+    const allow = try std.fmt.bufPrint(&allow_buf, "tcp!127.0.0.1!{d}", .{d.port()});
+    var cmd_buf: [512]u8 = undefined;
+    const cmd = try std.fmt.bufPrint(&cmd_buf, "mkdir -p /n/l; dotlfs {s} /n/l || exit mount; '#L/bin/busybox' env 'DIR=/9/n/l/usr' /mnt/term/cwd/files {s}", .{ d.dial(), name });
+    var one = le.*;
+    var it = std.mem.tokenizeScalar(u8, le.engines, ',');
+    one.engines = it.next() orelse "auto";
+    const r = try runLinux(&one, true, &.{ "--net-allow", allow, "--rc", cmd });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    var want_buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&want_buf, "ok {s}\n", .{name}), r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "fsync reaches a .L server as Tfsync [file-interface]" {
+    // fsync and fdatasync on a .L mount are the device's fsync, a Tfsync
+    // with datasync, not a null wstat the translator turns into one.
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    if (le.nine == null) return error.SkipZigTest;
+    var d: DotlServer = undefined;
+    try d.startShared(std.testing.io, dotlTree, "9P2000.L");
+    defer d.finish(std.testing.io);
+    try dotlFiles(&le, &d, "fsync_file");
+    const s = d.lock();
+    defer d.unlock();
+    try std.testing.expectEqual([2]u32{ 1, 1 }, s.fsyncs);
+}
+
+test "chmod, truncate, and utimensat on a .L mount are its Tsetattr, with nanoseconds [file-interface]" {
+    // The Linux ABI calls the device's setattr, so a Linux process on a
+    // .L mount translates once: a time keeps its nanoseconds, which the
+    // wstat it used to send can't carry.
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    if (le.nine == null) return error.SkipZigTest;
+    var d: DotlServer = undefined;
+    try d.startShared(std.testing.io, dotlTree, "9P2000.L");
+    defer d.finish(std.testing.io);
+    try dotlFiles(&le, &d, "setattr_ns");
+}
+
+test "a blocked fcntl lock wakes without polling [file-interface]" {
+    // An F_SETLKW and a flock wake when the lock goes, by Part 1's
+    // wakers, about as soon as a pipe's reader does, not at a 2 ms poll.
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "lock_wake" }, "ok lock_wake\n");
+}
+
 test "processes mapping a file MAP_SHARED see each other's stores, read and write agree, and the file keeps them [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
@@ -8981,6 +9117,23 @@ test "shutdown(SHUT_WR) and EPOLLRDHUP through a mounted /net [linux-net, serve]
 
 test "a Linux process that exits holding a mounted /net's connection closes it [linux-net, serve]" {
     try servedNetCase(@src(), "exit_eof");
+}
+
+// Readiness (design/file-interface.md, Part 1): a mounted /net's
+// conversation is ready when its server says so, by Tready, with
+// nothing read ahead.
+
+test "epoll on a mounted /net conversation without read-ahead [file-interface]" {
+    // Edge-triggered: the wait after a report still sees it become
+    // readable, and a drain to EAGAIN still sees the next data.
+    try servedNetCase(@src(), "tcp_et");
+    try servedNetCase(@src(), "tcp_et_drain");
+}
+
+test "poll on a pipe, a pty, and an eventfd through ready [file-interface]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/net", "poll_ready" }, "ok poll_ready\n");
 }
 
 test "Go net/http server and client in one Linux program [linux-net]" {
@@ -11814,7 +11967,16 @@ test "a 9front ls sees the same Dir as before [file-interface]" {
     defer r.deinit();
     errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
     try std.testing.expectEqual(0, r.code);
-    try std.testing.expectEqualStrings(
+    // The fixture's files are uid 1000. Where the host's uid is 1000 too
+    // (always on Windows, where the machine's user is uid 1000), the
+    // translator names them as the machine's user instead, so the owner
+    // and group columns are left out of the comparison there.
+    const uid: u32 = if (builtin.os.tag == .windows) 1000 else std.c.getuid();
+    const got = if (uid == 1000) try withoutOwners(r.out) else r.out;
+    try std.testing.expectEqualStrings(if (uid == 1000) try withoutOwners(ls_dir_before) else ls_dir_before, got);
+}
+
+const ls_dir_before =
         \\(0000000000000002 0 80) d-rwxr-xr-x M 2 1000 1000 0 Jan  1  1970 /n/l/etc
         \\(0000000000000006 0 80) d-rwxr-xr-x M 2 1000 1000 0 Jan  1  1970 /n/l/lib
         \\(0000000000000005 0 80) d-rwxr-xr-x M 2 1000 1000 0 Jan  1  1970 /n/l/usr
@@ -11826,7 +11988,33 @@ test "a 9front ls sees the same Dir as before [file-interface]" {
         \\(0000000000000007 0 00) --rw-r--r-- M 2 1000 1000  8 Jan  1  1970 /n/l/lib/notes
         \\d-rwxr-xr-x M 2 1000 1000 0 Jan  1  1970 /n/l/lib
         \\
-    , r.out);
+;
+
+/// ls -l output with its owner and group columns (the two after the
+/// device type and number) replaced by "-".
+fn withoutOwners(out: []const u8) ![]const u8 {
+    var b: std.ArrayList(u8) = .empty;
+    const a = std.heap.page_allocator;
+    var it = std.mem.splitScalar(u8, out, '\n');
+    var first = true;
+    while (it.next()) |l| {
+        if (!first) try b.append(a, '\n');
+        first = false;
+        // Mode, type, and dev come after an optional "(qid) " prefix.
+        const at = if (std.mem.startsWith(u8, l, "(")) (std.mem.indexOfScalar(u8, l, ')') orelse 0) + 2 else 0;
+        if (at > l.len) {
+            try b.appendSlice(a, l);
+            continue;
+        }
+        try b.appendSlice(a, l[0..at]);
+        var f = std.mem.tokenizeScalar(u8, l[at..], ' ');
+        var i: usize = 0;
+        while (f.next()) |w| : (i += 1) {
+            if (i > 0) try b.append(a, ' ');
+            try b.appendSlice(a, if (i == 3 or i == 4) "-" else w);
+        }
+    }
+    return b.items;
 }
 
 test "Rlerror errnos from the in-memory .L server become 9front error strings [dotl]" {

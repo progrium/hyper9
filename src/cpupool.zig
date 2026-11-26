@@ -26,6 +26,7 @@
 const std = @import("std");
 const engine = @import("engine.zig");
 const web = @import("web.zig");
+const executor = @import("executor.zig");
 
 /// Pooled vCPUs kept back from the engine's limit for processes that
 /// can't own one.
@@ -270,12 +271,24 @@ pub const Lease = struct {
     running_on: ?*engine.Vcpu = null,
     kicked: bool = false,
     kick_lock: std.atomic.Mutex = .unlocked,
+    /// On a machine's executors (src/executor.zig): it owns no vCPU, and
+    /// runs on whichever executor's its process is on.
+    scheduled: bool = false,
+    /// The executor whose vCPU last took its state, while scheduled.
+    home: ?*anyopaque = null,
+    as_dirty: bool = false,
 
-    fn lockKick(l: *Lease) void {
+    /// A lease for a process on the machine's executors.
+    pub fn initScheduled(l: *Lease, p: *Pool) void {
+        l.* = .{ .pool = p, .scheduled = true };
+    }
+
+    pub fn lockKick(l: *Lease) void {
         while (!l.kick_lock.tryLock()) std.atomic.spinLoopHint();
     }
 
     pub fn release(l: *Lease) void {
+        if (executor.enabled and l.scheduled) return executor.leaseRelease(l);
         if (!l.owned) return;
         const p = l.pool;
         l.lockKick();
@@ -290,6 +303,7 @@ pub const Lease = struct {
 
     pub fn setAddressSpace(l: *Lease, as: engine.AddressSpace) engine.Error!void {
         l.as = as;
+        l.as_dirty = true;
         if (l.owned) try l.vcpu.setAddressSpace(as);
     }
 
@@ -303,6 +317,7 @@ pub const Lease = struct {
 
     /// The FP/SIMD registers and thread pointer, as of the last exit.
     pub fn getExtra(l: *Lease, x: *engine.Extra) engine.Error!void {
+        if (executor.enabled and l.scheduled) return executor.leaseGetExtra(l, x);
         if (l.owned and !l.extra_dirty) try l.vcpu.getExtra(&l.extra);
         x.* = l.extra;
     }
@@ -314,6 +329,8 @@ pub const Lease = struct {
 
     /// Runs the guest until its next exit.
     pub fn run(l: *Lease) engine.Error!engine.Exit {
+        // An executor's vCPU, which `--cpus` already counts.
+        if (executor.enabled and l.scheduled) return executor.leaseRun(l);
         const p = l.pool;
         p.enter(l);
         defer p.leave(l);

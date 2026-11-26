@@ -236,12 +236,14 @@ pub fn main(init: std.process.Init) !void {
     const w = &stdout.interface;
 
     var bad = false;
-    // zig build bench -- [compute | loop] [--repeat N]: the compute
-    // benchmarks only, or the loop rows only without T0; each timing the
-    // fastest of N runs (default 3).
+    // zig build bench -- [compute | loop | syscall] [--repeat N]: the
+    // compute benchmarks only, the loop rows only without T0, or the
+    // system call rows only (pwrite and nsec); each timing the fastest of
+    // N runs (default 3).
     const argv = try init.minimal.args.toSlice(init.arena.allocator());
     var compute_only = false;
     var loop_only = false;
+    var syscall_only = false;
     var repeat: usize = 3;
     var ai: usize = 1;
     while (ai < argv.len) : (ai += 1) {
@@ -249,17 +251,20 @@ pub fn main(init: std.process.Init) !void {
             compute_only = true;
         } else if (std.mem.eql(u8, argv[ai], "loop")) {
             loop_only = true;
+        } else if (std.mem.eql(u8, argv[ai], "syscall")) {
+            syscall_only = true;
         } else if (std.mem.eql(u8, argv[ai], "--repeat") and ai + 1 < argv.len) {
             ai += 1;
             repeat = @max(1, try std.fmt.parseUnsigned(usize, argv[ai], 10));
         } else {
-            std.debug.print("usage: bench [compute | loop] [--repeat N]\n", .{});
+            std.debug.print("usage: bench [compute | loop | syscall] [--repeat N]\n", .{});
             std.process.exit(2);
         }
     }
     if (!compute_only) try w.print("{s: <7} {s: <6} {s: <7} {s: >8}  {s}\n", .{ "case", "arch", "engine", "time", "rate" });
     if (!compute_only) for (cases) |c| for ([_]engine.Choice{ .hvf, .kvm, .sud, .hcpu }) |kind| for (tiersOf(kind)) |tier| {
         if (loop_only and (!std.mem.eql(u8, c.name, "loop") or (tier != null and std.mem.eql(u8, tier.?, "t0")))) continue;
+        if (syscall_only and !std.mem.eql(u8, c.name, "pwrite") and !std.mem.eql(u8, c.name, "nsec")) continue;
         if (tier) |t| _ = setenv("H9_HCPU_TIER", t, 1) else _ = unsetenv("H9_HCPU_TIER");
         defer _ = unsetenv("H9_HCPU_TIER");
         var ns: i96 = try runOne(gpa, io, kind, c) orelse continue;
@@ -284,7 +289,7 @@ pub fn main(init: std.process.Init) !void {
 
     // The bare vCPU round trip: run returning .syscall and run again,
     // with no system call served (SVC or SYSCALL, and a branch back).
-    if (loop_only) return w.flush();
+    if (loop_only or syscall_only) return w.flush();
     if (!compute_only) for ([_]aout.Arch{ .arm64, .amd64 }) |arch| for ([_]engine.Choice{ .hvf, .kvm, .whp, .sud, .hcpu }) |kind| for (tiersOf(kind)) |tier| {
         if (tier) |t| _ = setenv("H9_HCPU_TIER", t, 1) else _ = unsetenv("H9_HCPU_TIER");
         defer _ = unsetenv("H9_HCPU_TIER");

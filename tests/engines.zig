@@ -1739,6 +1739,15 @@ test "an unmapped semaphore address is a bad address [semaphores]" {
     try expectRun(@embedFile("sema_unmapped"), null, 10 * std.time.ns_per_s, "killed sys: bad address in syscall pc=", "");
 }
 
+// A guest buffer is checked against the process's address space before
+// the kernel reads or writes through it (design/kernel-port.md), from
+// the programs in tests/fixtures/badptr.
+
+test "a bad guest pointer is a fault, not a host crash [kernel-port]" {
+    for ([_][]const u8{ @embedFile("badptr_read"), @embedFile("badptr_write"), @embedFile("badptr_stat") }) |text|
+        try expectRun(text, null, 10 * std.time.ns_per_s, "killed sys: bad address in syscall pc=", "");
+}
+
 test "a note interrupts rendezvous and semacquire, and the handler runs [semaphores]" {
     try expectRun(@embedFile("sema_interrupt"), null, 300 * std.time.ns_per_ms, "killed h9: timeout", "hhrinterrupted");
 }

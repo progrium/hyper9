@@ -4,7 +4,7 @@
 //! drawterm's, which has one machine-wide environment and imports the
 //! host process's environment on first attach (SPEC.md, env.scrub). A
 //! close translation of the C: the same functions in the same order,
-//! with error unions in place of waserror. A native device (dev.zig's
+//! with error unions in place of C's error labels. A native device (dev.zig's
 //! `Native`).
 //!
 //! drawterm's Proc has no egrp, and stays as it is, so a Proc's group is

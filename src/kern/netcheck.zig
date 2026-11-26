@@ -6,8 +6,8 @@
 //! contracts: h9_net_redirect raises for devip, and the rest return
 //! their status.
 //!
-//! devip's socket calls raise, so they're called through
-//! src/kern/devshim.c.
+//! devip's socket calls raise, so they're called through dev.zig's
+//! `raising`.
 
 const std = @import("std");
 const port = @import("port.zig");
@@ -32,24 +32,22 @@ extern fn h9_dns_register(proto: c_int, lport: c_int, orig: *[IPaddrlen]u8, opor
 extern fn h9_dns_peer(proto: c_int, lport: c_int, addr: *[IPaddrlen]u8, port: *u16) c_int;
 extern fn h9_dns_self(proto: c_int, addr: *[IPaddrlen]u8, port: c_int) c_int;
 
-// src/kern/devshim.c: devip's so_getsockname and so_bind, and
-// hostsock's h9so_socket, which raise; 0, or -1 with the error string set.
-extern fn h9_shim_so_getsockname(fd: c_int, laddr: *[IPaddrlen]u8, lport: *u16) c_int;
-extern fn h9_shim_so_bind(fd: c_int, su: c_int, port: u16, addr: *[IPaddrlen]u8) c_int;
-extern fn h9_shim_so_socket(proto: c_int, addr: *[IPaddrlen]u8, opts: ?*c_int, r: *c_int) c_int;
+// devip's so_getsockname and so_bind, and hostsock's h9so_socket, which
+// raise, so they're called through dev.zig's `raising`.
+extern fn so_getsockname(fd: c_int, laddr: [*c]u8, lport: [*c]u16) void;
+extern fn so_bind(fd: c_int, su: c_int, port: u16, addr: [*c]u8) void;
+extern fn h9so_socket(proto: c_int, addr: [*c]u8, opts: [*c]c_int) c_int;
 
-fn so_getsockname(sfd: c_int, laddr: *[IPaddrlen]u8, lport: *u16) Error!void {
-    try dev.caught(h9_shim_so_getsockname(sfd, laddr, lport));
+fn sogetsockname(sfd: c_int, laddr: *[IPaddrlen]u8, lport: *u16) Error!void {
+    try dev.raising(&so_getsockname, .{ sfd, laddr, lport });
 }
 
-fn so_bind(sfd: c_int, su: c_int, p: u16, addr: *[IPaddrlen]u8) Error!void {
-    try dev.caught(h9_shim_so_bind(sfd, su, p, addr));
+fn sobind(sfd: c_int, su: c_int, p: u16, addr: *[IPaddrlen]u8) Error!void {
+    try dev.raising(&so_bind, .{ sfd, su, p, addr });
 }
 
-fn h9so_socket(proto: c_int, addr: *[IPaddrlen]u8, opts: ?*c_int) Error!c_int {
-    var r: c_int = -1;
-    try dev.caught(h9_shim_so_socket(proto, addr, opts, &r));
-    return r;
+fn sosocket(proto: c_int, addr: *[IPaddrlen]u8, opts: ?*c_int) Error!c_int {
+    return dev.raising(&h9so_socket, .{ proto, addr, opts });
 }
 
 fn h9_net_proto(name: [*:0]const u8) callconv(.c) c_int {
@@ -66,12 +64,12 @@ fn h9_net_proto(name: [*:0]const u8) callconv(.c) c_int {
 fn dnslport(sfd: c_int, addr: *[IPaddrlen]u8) Error!c_int {
     var laddr: [IPaddrlen]u8 = undefined;
     var lport: u16 = 0;
-    so_getsockname(sfd, &laddr, &lport) catch {
+    sogetsockname(sfd, &laddr, &lport) catch {
         lport = 0;
     };
     if (lport == 0) {
-        try so_bind(sfd, 0, 0, addr);
-        try so_getsockname(sfd, &laddr, &lport);
+        try sobind(sfd, 0, 0, addr);
+        try sogetsockname(sfd, &laddr, &lport);
     }
     return lport;
 }
@@ -146,7 +144,7 @@ fn probe(proto: c_int, addr: *[IPaddrlen]u8, p: c_int, sfd: *c_int, opts: ?*c_in
         return 0;
     }
     if (sfd.* == -1)
-        sfd.* = try h9so_socket(proto, addr, opts);
+        sfd.* = try sosocket(proto, addr, opts);
     return probemark(sfd.*, true);
 }
 
@@ -160,7 +158,7 @@ fn redirect(proto: c_int, addr: *[IPaddrlen]u8, p: *c_int, sfd: *c_int, opts: ?*
         return r;
     // Made for the resolver's address, so it's an IPv4 socket whatever the guest dialled.
     if (sfd.* == -1)
-        sfd.* = try h9so_socket(proto, addr, opts);
+        sfd.* = try sosocket(proto, addr, opts);
     _ = probemark(sfd.*, false);
     h9_dns_register(proto, try dnslport(sfd.*, addr), &orig, oport);
     return 1;
@@ -187,7 +185,7 @@ pub fn h9_net_unredirect(proto: c_int, sfd: c_int, addr: *[IPaddrlen]u8, p: *u16
     var lport: u16 = 0;
     if (h9_dns_self(proto, addr, p.*) == 0)
         return;
-    so_getsockname(sfd, &laddr, &lport) catch return;
+    sogetsockname(sfd, &laddr, &lport) catch return;
     _ = h9_dns_peer(proto, lport, addr, p);
 }
 

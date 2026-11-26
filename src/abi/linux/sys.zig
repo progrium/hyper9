@@ -1039,7 +1039,8 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const engine.Ureg) Err!Outcome {
         .ftruncate => return ret(try truncateFd(p, c.int(0), c.a[1])),
         .fallocate => return ret(try fallocate(p, c.int(0), c.uint(1), c.a[2], c.a[3])),
         .truncate => return ret(try truncatePath(p, c.a[0], c.a[1])),
-        .fsync, .fdatasync => return ret(fsync(c.int(0))),
+        .fsync => return ret(fsync(c.int(0), false)),
+        .fdatasync => return ret(fsync(c.int(0), true)),
         // A hint to start writing back: fsync does the writing here.
         .sync_file_range => return ret(if (kc.fdInfo(c.int(0))) |_| 0 else |_| -E.BADF),
         .syncfs => return ret(syncfs(c.int(0))),
@@ -1895,8 +1896,7 @@ fn openAt(p: *Process, dirfd: i32, path_va: u64, flags: u32, mode: u32) Err!i64 
                 return -E.TXTBSY;
             }
             if (trunc) {
-                var w: [64]u8 = undefined;
-                if (fileKey(fd)) |k| if (kern.fwstat(fd, (Wstat{ .length = 0 }).encode(&w))) |_| {
+                if (fileKey(fd)) |k| if (kern.fsetattr(fd, kern.Attr.size_bit, &.{ .size = 0 })) |_| {
                     _ = file_writes.fetchAdd(1, .monotonic);
                     shmfile.truncated(k, 0);
                     pagecache.changed(k);
@@ -2020,8 +2020,8 @@ fn rwOne(p: *Process, fd: i32, buf: u64, len_in: u64, off: i64, comptime dir: Di
     var pipe_nb = false;
     var is_pty = false;
     if (off == -1) if (kc.fdInfo(fd) catch null) |info| {
-        // A socket from a mounted /net is read through the kernel's
-        // read-ahead, as recv reads it, and written as send writes.
+        // A socket from a mounted /net is read as recv reads it, once its
+        // server says it won't wait, and written as send writes.
         if (info.dc == 'M' and !info.dir) if (sockOf(p, fd)) |so| if (so.conv & conv_remote != 0) return remoteRw(p, fd, so.s, buf, len, dir);
         if (dir == .read and info.dc == ev_dc) {
             if (sigfdOf(p, info.qpath) != null) return sigfdRead(p, fd, info.qpath, buf, len);
@@ -2617,16 +2617,19 @@ fn recordLock(p: *Process, fd: i32, arg: u64, ofd: bool, get: bool, wait: bool, 
     if (t == .read and info.mode == kern.OWRITE) return -E.BADF;
     if (t == .write and info.mode != kern.OWRITE and info.mode != kern.ORDWR) return -E.BADF;
     while (true) {
+        // Read before trying, so a change after the try ends the wait.
+        const g = kc.lockGen();
         locks.set(key, owner, t, start, end) catch |e| switch (e) {
             error.OutOfMemory => return -E.NOLCK,
             error.WouldBlock => {
                 if (!wait) return -E.AGAIN;
-                // No wait queue: poll, and let a signal end the wait.
+                // Wait for the table to change, or a signal.
                 if (p.sig.deliverable()) return -E.INTR;
-                kern.sleep(2) catch return -E.INTR;
+                kc.lockWait(g) catch return -E.INTR;
                 continue;
             },
         };
+        kc.lockWake();
         return 0;
     }
 }
@@ -2642,15 +2645,17 @@ fn flockCall(p: *Process, fd: i32, op: u32) Err!i64 {
         else => return -E.INVAL,
     };
     while (true) {
+        const g = kc.lockGen();
         locks.flock(lockKey(info), ch.id, t) catch |e| switch (e) {
             error.OutOfMemory => return -E.NOLCK,
             error.WouldBlock => {
                 if (op & 4 != 0) return -E.AGAIN;
                 if (p.sig.deliverable()) return -E.INTR;
-                kern.sleep(2) catch return -E.INTR;
+                kc.lockWait(g) catch return -E.INTR;
                 continue;
             },
         };
+        kc.lockWake();
         return 0;
     }
 }
@@ -2665,6 +2670,7 @@ fn releaseLocks(p: *Process, fd: i32) void {
     const key = lockKey(info);
     locks.closedPosix(key, posixOwner(p).id);
     if (kc.fdChan(fd)) |ch| if (ch.refs <= 1) locks.closedOfd(key, ch.id);
+    kc.lockWake();
 }
 
 /// At the group's end, before the kernel closes its fds: what closing
@@ -2673,6 +2679,7 @@ pub fn releaseAllLocks(p: *Process) void {
     var buf: [1024]c_int = undefined;
     for (buf[0..@min(buf.len, kc.fds(&buf))]) |fd| releaseLocks(p, fd);
     locks.endedPosix(posixOwner(p).id);
+    kc.lockWake();
     itimer.cancel(@intFromPtr(p.g));
     for (buf[0..@min(buf.len, kc.fds(&buf))]) |fd| {
         unixClosed(p, fd);
@@ -2958,16 +2965,17 @@ fn isLdir(dirfd: i32, path: [:0]const u8) bool {
     return d.mode & DMDIR != 0;
 }
 
-/// fsync and fdatasync: a wstat that changes nothing, which a host file
-/// system serves with the host's fsync of the file or directory
-/// (third_party/drawterm/kern/devfs-*.c). Databases fsync a directory
-/// to make a rename or a create in it durable. Devices that don't keep
-/// data, and 9P servers that refuse it, have nothing to sync.
-fn fsync(fd: i32) i64 {
+/// fsync and fdatasync: the device's fsync (design/file-interface.md,
+/// Part 3), a Tfsync on a .L mount, and elsewhere a wstat that changes
+/// nothing, which a host file system serves with the host's fsync of
+/// the file or directory (third_party/drawterm/kern/devfs-*.c).
+/// Databases fsync a directory to make a rename or a create in it
+/// durable. Devices that don't keep data, and 9P servers that refuse
+/// it, have nothing to sync.
+fn fsync(fd: i32, datasync: bool) i64 {
     if (fd < 0) return -E.BADF;
     const info = kc.fdInfo(fd) catch return -E.BADF;
-    var b: [64]u8 = undefined;
-    _ = kern.fwstat(@intCast(fd), (Wstat{}).encode(&b)) catch {
+    kern.fsync(@intCast(fd), datasync) catch {
         // devfs raises the host's error; anything else means no sync.
         return if (info.dc == 'U') -E.IO else 0;
     };
@@ -2986,7 +2994,7 @@ var sync_opened: std.atomic.Value(bool) = .init(false);
 fn synced(p: *Process, fd: i32, n: i64) i64 {
     if (n <= 0 or !sync_opened.load(.monotonic)) return n;
     if (!flagsOf(p, fd).dsync) return n;
-    const r = fsync(fd);
+    const r = fsync(fd, !flagsOf(p, fd).sync);
     return if (r < 0) r else n;
 }
 
@@ -3155,8 +3163,7 @@ fn chmodFd(p: *Process, fd: i32, mode: u32) Err!i64 {
     var b: [1024]u8 = undefined;
     const n = kern.fstat(@intCast(fd), &b) catch return kerr();
     const d, _ = attr.Dir.parse(b[0..n]) orelse return -E.IO;
-    var w: [64]u8 = undefined;
-    _ = kern.fwstat(@intCast(fd), (Wstat{ .mode = (d.mode & ~@as(u32, 0o777)) | (mode & 0o777) }).encode(&w)) catch return kerr();
+    kern.fsetattr(@intCast(fd), kern.Attr.mode_bit, &.{ .mode = (d.mode & ~@as(u32, 0o777)) | (mode & 0o777) }) catch return kerr();
     return 0;
 }
 
@@ -3166,50 +3173,55 @@ fn chmodAt(p: *Process, dirfd: i32, path_va: u64, mode: u32) Err!i64 {
     var b: [1024]u8 = undefined;
     const n = at(dirfd, path, usize, kern.stat, .{ path, &b }) catch return kerr();
     const d, _ = attr.Dir.parse(b[0..n]) orelse return -E.IO;
-    var w: [64]u8 = undefined;
-    _ = at(dirfd, path, usize, kern.wstat, .{ path, (Wstat{ .mode = (d.mode & ~@as(u32, 0o777)) | (mode & 0o777) }).encode(&w) }) catch return kerr();
+    const a: kern.Attr = .{ .mode = (d.mode & ~@as(u32, 0o777)) | (mode & 0o777) };
+    at(dirfd, path, void, kern.setattr, .{ path, kern.Attr.mode_bit, &a }) catch return kerr();
     return 0;
 }
 
 fn utimens(p: *Process, dirfd: i32, path_va: u64, times: u64) Err!i64 {
     const UTIME_NOW = (1 << 30) - 1;
     const UTIME_OMIT = (1 << 30) - 2;
-    const now: u32 = @intCast(@divTrunc(kern.wallNs(), std.time.ns_per_s));
-    var ws: Wstat = .{ .atime = now, .mtime = now };
+    // The device's setattr: a .L mount takes the nanoseconds, and the
+    // default wstat whole seconds.
+    var a: kern.Attr = .{ .atimens = kern.now_ns, .mtimens = kern.now_ns };
+    var mask: u64 = kern.Attr.atime_bit | kern.Attr.mtime_bit;
     if (times != 0) {
         var b: [32]u8 = undefined;
         // Two timespecs, 32-bit for i386's utimensat (not _time64).
         const t32 = p.is32() and p.time32;
         try p.readMem(times, if (t32) b[0..16] else &b);
-        const fields = [2]*?u32{ &ws.atime, &ws.mtime };
+        const fields = [2]struct { *i64, *i64, u64 }{ .{ &a.atime, &a.atimens, kern.Attr.atime_bit }, .{ &a.mtime, &a.mtimens, kern.Attr.mtime_bit } };
         for (fields, 0..) |f, i| {
             const sec: i64 = if (t32) std.mem.readInt(i32, b[i * 8 ..][0..4], .little) else std.mem.readInt(i64, b[i * 16 ..][0..8], .little);
             const nsec: i64 = if (t32) std.mem.readInt(i32, b[i * 8 + 4 ..][0..4], .little) else std.mem.readInt(i64, b[i * 16 + 8 ..][0..8], .little);
-            f.* = if (nsec == UTIME_OMIT) null else if (nsec == UTIME_NOW) now else @intCast(std.math.clamp(sec, 0, std.math.maxInt(u32) - 1));
+            if (nsec == UTIME_OMIT) {
+                mask &= ~f[2];
+            } else if (nsec != UTIME_NOW) {
+                f[0].* = std.math.clamp(sec, 0, std.math.maxInt(u32) - 1);
+                f[1].* = std.math.clamp(nsec, 0, std.time.ns_per_s - 1);
+            }
         }
     }
-    var w: [64]u8 = undefined;
-    const msg = ws.encode(&w);
+    if (mask == 0) return 0;
     if (path_va == 0) {
         if (dirfd < 0) return -E.BADF;
-        _ = kern.fwstat(@intCast(dirfd), msg) catch return kerr();
+        kern.fsetattr(@intCast(dirfd), mask, &a) catch return kerr();
         return 0;
     }
     const path = try pathArg(p, path_va, &p.name_buf);
     if (path.len == 0) {
         if (dirfd < 0) return -E.NOENT;
-        _ = kern.fwstat(@intCast(dirfd), msg) catch return kerr();
+        kern.fsetattr(@intCast(dirfd), mask, &a) catch return kerr();
         return 0;
     }
-    _ = at(dirfd, path, usize, kern.wstat, .{ path, msg }) catch return kerr();
+    at(dirfd, path, void, kern.setattr, .{ path, mask, &a }) catch return kerr();
     return 0;
 }
 
 fn truncateFd(p: *Process, fd: i32, len: u64) Err!i64 {
     _ = p;
     if (fd < 0) return -E.BADF;
-    var w: [64]u8 = undefined;
-    _ = kern.fwstat(@intCast(fd), (Wstat{ .length = len }).encode(&w)) catch return kerr();
+    kern.fsetattr(@intCast(fd), kern.Attr.size_bit, &.{ .size = len }) catch return kerr();
     _ = file_writes.fetchAdd(1, .monotonic);
     if (fileKey(fd)) |k| {
         shmfile.truncated(k, len);
@@ -3245,8 +3257,7 @@ fn truncatePath(p: *Process, path_va: u64, len: u64) Err!i64 {
         defer kern.close(fd) catch {};
         if (busy.has(fd)) return -E.TXTBSY;
     } else |_| {};
-    var w: [64]u8 = undefined;
-    _ = kern.wstat(path, (Wstat{ .length = len }).encode(&w)) catch return kerr();
+    kern.setattr(path, kern.Attr.size_bit, &.{ .size = len }) catch return kerr();
     _ = file_writes.fetchAdd(1, .monotonic);
     return 0;
 }
@@ -4977,7 +4988,8 @@ fn convOf(fd: i32) ?u32 {
 }
 
 /// The bit that marks a conversation from a /net mounted from another
-/// machine (devmnt's, not devip's), which src/kern/rconv.zig reads ahead.
+/// machine (devmnt's, not devip's), whose readiness its server says
+/// (design/file-interface.md).
 const conv_remote: u32 = 1 << 30;
 
 fn protoOf(conv: u32) u32 {
@@ -5034,18 +5046,17 @@ fn netErr() i64 {
 
 /// Opens a new conversation's data file for socket(2) and accept(2):
 /// `clone` is a clone or listen file, opened for its new ctl, in the
-/// 9front view's /net or devip's. A conversation from a mounted /net is
-/// attached to the kernel's read-ahead; `accepted` says it's connected.
+/// 9front view's /net or devip's.
 const ConvOpened = union(enum) { fd: u31, err: i64 };
 
-fn openConv(p: *Process, clone: [:0]const u8, proto: u32, cloexec: bool, accepted: bool) Err!ConvOpened {
+fn openConv(p: *Process, clone: [:0]const u8, proto: u32, cloexec: bool) Err!ConvOpened {
     _ = p;
     const ctl = (if (clone[0] == '/') open9(clone, kern.ORDWR) else kern.open(clone, kern.ORDWR)) catch return .{ .err = netErr() };
-    return convFromCtl(ctl, proto, cloexec, accepted);
+    return convFromCtl(ctl, proto, cloexec);
 }
 
 /// openConv's rest, from the new conversation's ctl, which it closes.
-fn convFromCtl(ctl: u31, proto: u32, cloexec: bool, accepted: bool) ConvOpened {
+fn convFromCtl(ctl: u31, proto: u32, cloexec: bool) ConvOpened {
     defer kern.close(ctl) catch {};
     var b: [16]u8 = undefined;
     const n = kern.pread(ctl, &b, 0) catch return .{ .err = kerr() };
@@ -5053,10 +5064,6 @@ fn convFromCtl(ctl: u31, proto: u32, cloexec: bool, accepted: bool) ConvOpened {
     const remote = if (kc.fdInfo(ctl)) |info| info.dc == 'M' else |_| false;
     const conv = proto << 12 | num | if (remote) conv_remote else 0;
     const fd = convOpen(conv, "data", kern.ORDWR | if (cloexec) @as(c_int, OCEXEC) else 0) catch return .{ .err = kerr() };
-    if (remote) kc.rattach(fd, ctl, conv, proto == ip_udp, accepted) catch {
-        kern.close(fd) catch {};
-        return .{ .err = kerr() };
-    };
     return .{ .fd = fd };
 }
 
@@ -5077,7 +5084,7 @@ fn socketCall(p: *Process, domain: u32, type_in: u32, protocol: u32) Err!i64 {
     // Through the namespace, as dial(2) goes: /net is devip's unless
     // something else is mounted there, such as another machine's /net.
     const clone: [:0]const u8 = if (proto == ip_tcp) "/net/tcp/clone" else "/net/udp/clone";
-    const fd = switch (try openConv(p, clone, proto, type_in & SOCK_CLOEXEC != 0, false)) {
+    const fd = switch (try openConv(p, clone, proto, type_in & SOCK_CLOEXEC != 0)) {
         .fd => |f| f,
         .err => |e| return e,
     };
@@ -5306,19 +5313,13 @@ fn acceptCall(p: *Process, fd: i32, addr: u64, lenp: u64, flags: u32) Err!i64 {
         if (w < 0) return w;
     }
     var b: [64]u8 = undefined;
-    const listen = std.fmt.bufPrintSentinel(&b, "#I/{s}/{d}/listen", .{ protoName(conv), conv & 0xfff }, 0) catch unreachable;
-    // A mounted conversation's call was taken by the kernel's listener,
-    // which made it ready; devip's is opened here.
-    const opened = if (conv & conv_remote != 0) blk: {
-        const r = while (true) {
-            const r = kc.raccept(fd, false);
-            if (r != -E.AGAIN or flagsOf(p, fd).nonblock) break r;
-            const w = waitReady(fd, kc.POLLIN);
-            if (w < 0) return w;
-        };
-        if (r < 0) return r;
-        break :blk convFromCtl(@intCast(r), protoOf(conv), flags & SOCK_CLOEXEC != 0, true);
-    } else try openConv(p, listen, protoOf(conv), flags & SOCK_CLOEXEC != 0, true);
+    // A mounted conversation's listen is its server's, in the 9front
+    // view's /net, which says it's readable once a call waits.
+    const listen = if (conv & conv_remote != 0)
+        std.fmt.bufPrintSentinel(&b, "/net/{s}/{d}/listen", .{ protoName(conv), conv & 0xfff }, 0) catch unreachable
+    else
+        std.fmt.bufPrintSentinel(&b, "#I/{s}/{d}/listen", .{ protoName(conv), conv & 0xfff }, 0) catch unreachable;
+    const opened = try openConv(p, listen, protoOf(conv), flags & SOCK_CLOEXEC != 0);
     const nfd = switch (opened) {
         .fd => |f| f,
         .err => |e| return e,
@@ -6863,6 +6864,8 @@ pub const EpEntry = struct {
     data: u64,
     /// The wake generation of the last report, for EPOLLET.
     last_gen: u64 = std.math.maxInt(u64),
+    /// The events that held when it was last looked at, for EPOLLET.
+    last_rev: u32 = 0,
     /// Reported once under EPOLLONESHOT; rearmed by EPOLL_CTL_MOD.
     disarmed: bool = false,
 };
@@ -6983,14 +6986,21 @@ fn epollWait(p: *Process, epfd: i32, events_va: u64, maxevents: i32, timeout_ms:
             defer p.g.lock.unlock();
             for (snap.items, 0..) |s, k| {
                 const rev: u32 = @as(u16, @bitCast(pf.items[k].revents));
-                if (rev == 0 or s.disarmed) continue;
+                if (s.disarmed or (rev == 0 and s.events & EPOLLET == 0)) continue;
                 // The live entry, unless another thread removed or changed it.
                 const e = for (ep.entries.items) |*e| {
                     if (e.fd == s.fd and e.events == s.events and e.data == s.data) break e;
                 } else continue;
                 if (e.disarmed) continue;
                 if (e.events & EPOLLET != 0) {
-                    if (e.last_gen == gen) continue;
+                    // An edge: a wake since the last report, or an event
+                    // that didn't hold when this last looked (a remote
+                    // conversation's server changes it with no wake here
+                    // while nothing watches it).
+                    if (rev != 0 and out >= @as(usize, @intCast(maxevents))) break;
+                    const fresh = rev & ~e.last_rev;
+                    e.last_rev = rev;
+                    if (rev == 0 or (e.last_gen == gen and fresh == 0)) continue;
                     e.last_gen = gen;
                 }
                 if (out >= @as(usize, @intCast(maxevents))) break;
@@ -7013,16 +7023,18 @@ fn epollWait(p: *Process, epfd: i32, events_va: u64, maxevents: i32, timeout_ms:
             ms = @divTrunc(left + std.time.ns_per_ms - 1, std.time.ns_per_ms);
         }
         // Sleep until something changes. An fd that's ready now but was
-        // reported edge-triggered is left out, so it doesn't end the wait
-        // at once; any wake ends it, and the loop asks again.
-        // An edge-triggered fd waits only for the events that aren't
-        // ready yet (a socket that can be written waits to be readable).
+        // reported edge-triggered is only watched (kc.POLLEDGE), so it
+        // doesn't end the wait at once; its next change ends it, and the
+        // loop asks again. An edge-triggered fd waits only for the
+        // events that aren't ready yet (a socket that can be written
+        // waits to be readable).
         var waiting: usize = 0;
         for (snap.items, 0..) |e, k| {
             if (e.disarmed) continue;
-            var want: u16 = @bitCast(pf.items[k].events);
+            const all: u16 = @bitCast(pf.items[k].events);
+            var want = all;
             if (e.events & EPOLLET != 0 and e.last_gen == gen) want &= ~@as(u16, @bitCast(pf.items[k].revents));
-            if (want == 0) continue;
+            if (want == 0) want = all | kc.POLLEDGE;
             pf.items[waiting] = .{ .fd = e.fd, .events = @bitCast(want), .revents = 0 };
             waiting += 1;
         }

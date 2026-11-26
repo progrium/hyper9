@@ -1,23 +1,24 @@
 //! src/kern/linuxnet.c in Zig (design/kernel-port.md): readiness for
-//! Linux processes (design/epoch-0/linux-net.md). h9_poll asks each fd's
-//! channel whether a read or write would block, and sleeps until one
-//! wouldn't or the timeout passes. Pipes and other qio queues wake
-//! pollers from qio's own wakeups (h9_qwake, a hook in qio.zig), the
-//! console from its reader thread, and host sockets from the watcher in
-//! hostsock-*.c. Every wake bumps one generation number and wakes every
-//! poller, which then asks its channels again; edge-triggered epoll uses
-//! the generation to tell a new event from an old one.
+//! Linux processes (design/epoch-0/linux-net.md), on the device switch's
+//! `ready` and `watch` (design/file-interface.md, Part 1). h9_poll asks
+//! each fd's channel which events it has, and when none has any, hangs a
+//! watch on each, asks again, and sleeps until a watch fires or the
+//! timeout passes. Pipes and ptys are watched on their queues, eventfds
+//! on their counters, the console and devip's host sockets on the host
+//! watchers here (which the console's reader and the watcher in
+//! hostsock-*.c notify), and a file of a mount whose server answers
+//! Tready on its own (devmnt.zig), so a poller sleeps until something it
+//! polls changes.
 //!
-//! Also the Linux socket calls devip's files can't express. A close
-//! translation: the same functions in the same order, with error unions
-//! for the C's error labels, and the exported functions keep the C's
-//! contracts. The C's other two parts are files of their own: #ε, eventfd
-//! and epoll instances, is dev/eventfd.zig, and the read-ahead for remote
-//! conversations is rconv.zig, kept apart since file-interface replaces
-//! it (design/kernel-port.md).
+//! Every notify moves ready.zig's generation, which edge-triggered epoll
+//! uses to tell a new event from an old one.
 //!
-//! In the full kernel only: the namespace kernel has no Linux ABI, and
-//! src/kern/nstab.c stands in for h9_qwake.
+//! Also the Linux socket calls devip's files can't express. A socket on
+//! a /net mounted from another machine is devmnt's file, read and
+//! written as it is, after its server's readiness says it won't block;
+//! only what MSG_PEEK and FIONREAD look at is kept here, until it's read.
+//!
+//! In the full kernel only: the namespace kernel has no Linux ABI.
 
 const std = @import("std");
 const port = @import("port.zig");
@@ -27,16 +28,14 @@ const chan = @import("chan.zig");
 const qio = @import("qio.zig");
 const sysfile = @import("sysfile.zig");
 const netcheck = @import("netcheck.zig");
-const rconv = @import("rconv.zig");
 const devpipe = @import("dev/pipe.zig");
-const devpty = @import("dev/pty.zig");
 const eventfd = @import("dev/eventfd.zig");
+const rd = dev.rd;
 const c = port.c;
 const up = port.up;
 const Error = port.Error;
 
 const Chan = c.Chan;
-const Queue = c.Queue;
 
 const IPaddrlen = 16;
 
@@ -46,7 +45,6 @@ const S_UDP = 1;
 const H9_NETCONNECT = 0;
 
 extern fn h9_ip_sfd(ch: *Chan, udp: ?*c_int) c_int; // kern/devip.c
-extern fn h9_cons_poll(id: c_ulong) c_int; // src/kern.zig
 extern fn h9_net_check(op: c_int, proto: c_int, addr: *const [IPaddrlen]u8, port: c_int) c_int; // src/kern.zig
 
 // src/kern/hostsock.h: the host's sockets.
@@ -59,9 +57,9 @@ extern fn h9so_watchinit() void;
 extern fn h9so_watch(fd: c_int, events: c_int, owner: ?*anyopaque) void;
 extern fn h9so_unwatch(owner: ?*anyopaque) void;
 
-// src/kern/devshim.c: devip's h9_ip_ctl, which raises; -1 with the
-// error string set.
-extern fn h9_shim_ip_ctl(ch: *Chan, msg: [*:0]const u8) c_int;
+// devip's h9_ip_ctl, which raises, so it's called through dev.zig's
+// `raising`.
+extern fn h9_ip_ctl(ch: [*c]Chan, msg: [*c]u8) c_int;
 
 /// A call that failed: its error string becomes the process's
 /// syserrstr, as errstr(2) reads it, and -1, as proc.c's syserr does.
@@ -73,159 +71,139 @@ pub fn syserr() c_int {
     return -1;
 }
 
-pub const LPOLLIN = 1;
-pub const LPOLLPRI = 2;
-pub const LPOLLOUT = 4;
-pub const LPOLLERR = 8;
-pub const LPOLLHUP = 0x10;
+pub const LPOLLIN = rd.In;
+pub const LPOLLPRI = rd.Pri;
+pub const LPOLLOUT = rd.Out;
+pub const LPOLLERR = rd.Err;
+pub const LPOLLHUP = rd.Hup;
 pub const LPOLLNVAL = 0x20;
 pub const LPOLLRDNORM = 0x40;
 pub const LPOLLWRNORM = 0x100;
-pub const LPOLLRDHUP = 0x2000;
+pub const LPOLLRDHUP = rd.Rdhup;
 
-const Epsilon = eventfd.Epsilon; // #ε
-const Tau = devpty.Tau; // #τ, ptys
+/// In a pollfd's events from epollWait: an edge-triggered entry it has
+/// reported, which is watched for its next change and not asked
+/// (src/abi/linux/sys.zig).
+const Pedge: c_int = rd.Edge;
 
-const Poller = struct {
-    r: c.Rendez = std.mem.zeroes(c.Rendez),
-    gen: c_uint,
-    next: ?*Poller = null,
-};
+// The host's sources: the console and devip's sockets.
 
-var pollgen = std.atomic.Value(c_uint).init(0);
-var npollers = std.atomic.Value(c_int).init(0);
+/// The watches on host sockets and the console, which the host's own
+/// threads notify (h9_pollwake).
+var hostwatch: rd.Watchers = .{};
+
+/// A host socket or the console may have changed: tells their watchers.
+/// The watcher in hostsock-*.c calls it.
+pub fn h9_pollwake() callconv(.c) void {
+    rd.notify(&hostwatch);
+}
+
+pub fn h9_pollgen() callconv(.c) c_uint {
+    return rd.gen();
+}
+
+/// Every poller, for h9_pollkick.
 var plk: c.Lock = std.mem.zeroes(c.Lock);
 var pollers: ?*Poller = null;
 
-pub fn h9_pollgen() callconv(.c) c_uint {
-    return pollgen.load(.seq_cst);
-}
+const Poller = struct {
+    s: rd.Sleeper = .{},
+    next: ?*Poller = null,
+};
 
-/// Something may have become ready: wake every poller.
-pub fn h9_pollwake() callconv(.c) void {
-    _ = pollgen.fetchAdd(1, .seq_cst);
-    if (npollers.load(.seq_cst) == 0)
-        return;
+/// Wakes every poll, select, and epoll_wait, to ask again: an epoll's
+/// interest list changed under a waiting thread (src/abi/linux/sys.zig).
+pub fn h9_pollkick() callconv(.c) void {
+    rd.bump();
     c.lock(&plk);
     var p = pollers;
     while (p) |w| : (p = w.next)
-        _ = sync.wakeup(&w.r);
+        w.s.kick();
     c.unlock(&plk);
+}
+
+// Linux file locks (design/file-interface.md, Part 3): the table is the
+// ABI's (src/abi/linux/locks.zig), and a blocked lock waits here for a
+// change to it, on Part 1's wakers.
+
+var lockwatch: rd.Watchers = .{};
+var lockgen = std.atomic.Value(c_uint).init(0);
+/// Locks waiting, so a change with none waiting moves no poller's
+/// generation (every close comes to h9_lockwake).
+var lockwaiters = std.atomic.Value(c_uint).init(0);
+
+/// The lock table's changes, for h9_lockwait.
+fn h9_lockgen() callconv(.c) c_uint {
+    return lockgen.load(.seq_cst);
+}
+
+/// The lock table changed: wakes each blocked lock to try again.
+fn h9_lockwake() callconv(.c) void {
+    _ = lockgen.fetchAdd(1, .seq_cst);
+    // A waiter counts itself before it looks at lockgen.
+    if (lockwaiters.load(.seq_cst) != 0)
+        rd.notify(&lockwatch);
+}
+
+/// Waits until the table has changed since h9_lockgen said seen, or a
+/// note (-1, interrupted).
+fn h9_lockwait(seen: c_uint) callconv(.c) c_int {
+    lockwait(seen) catch return syserr();
+    return 0;
+}
+
+fn lockwait(seen: c_uint) Error!void {
+    var s: rd.Sleeper = .{};
+    var w: rd.Watch = .{};
+    rd.add(&lockwatch, &w, &s.waker);
+    defer rd.unwatch(&w);
+    _ = lockwaiters.fetchAdd(1, .seq_cst);
+    defer _ = lockwaiters.fetchSub(1, .seq_cst);
+    while (lockgen.load(.seq_cst) == seen) {
+        s.arm();
+        if (lockgen.load(.seq_cst) != seen)
+            break;
+        _ = try s.wait(0);
+    }
 }
 
 /// A recv or send on a host socket that finds it not ready (EAGAIN). An
 /// edge-triggered epoll entry that was reported ready and is still ready
-/// isn't waited on (linux/sys.zig's epollWait), and nothing watches the
-/// host socket then, so when its reader drains it and the next data
-/// arrives, no wake comes: the wait sleeps on until something else wakes
-/// it. Wake the pollers here, so the entry is looked at again, found not
-/// ready, and waited on, as Linux reports the next arrival after a reader
-/// drains the socket.
+/// is watched with Pedge, which doesn't watch the host socket itself (it
+/// would fire at once for what's already there), so when its reader
+/// drains it and the next data arrives, no wake comes. Tell the host
+/// watchers here, so the entry is looked at again, found not ready, and
+/// watched, as Linux reports the next arrival after a reader drains the
+/// socket.
 fn again(r: c_int) c_int {
     if (r == -11) // EAGAIN
         h9_pollwake();
     return r;
 }
 
-/// h9: called by qio after a queue changes (qio.zig).
-fn h9_qwake(q: ?*Queue) callconv(.c) void {
-    _ = q;
-    h9_pollwake();
+/// devip's readiness (src/kern/devtab.c's Devx for #I): a conversation's
+/// host socket's, and always for the rest.
+fn h9_ip_ready(ch: *Chan, ev: c_int) callconv(.c) c_int {
+    const s = h9_ip_sfd(ch, null);
+    if (s < 0)
+        return dev.readydefault(ev); // not a conversation, or no socket yet
+    return h9so_ready(s, ev | rd.Err | rd.Hup);
 }
 
-fn genchanged(a: ?*anyopaque) callconv(.c) c_int {
-    const w: *Poller = @ptrCast(@alignCast(a.?));
-    return @intFromBool(h9_pollgen() != w.gen);
+fn ipunhook(w: *rd.Watch) callconv(.c) void {
+    h9so_unwatch(w);
 }
 
-/// Sleeps until the generation moves past gen, ms passes (0: forever) or
-/// a note arrives (an error, as for any sleep). Returns whether it was
-/// the timeout.
-pub fn pollwait(gen: c_uint, ms: c_uint) Error!bool {
-    var w: Poller = .{ .gen = gen };
-    c.lock(&plk);
-    w.next = pollers;
-    pollers = &w;
-    _ = npollers.fetchAdd(1, .seq_cst);
-    c.unlock(&plk);
-    defer {
-        c.lock(&plk);
-        var l: *?*Poller = &pollers;
-        while (l.*) |p| : (l = &p.next) {
-            if (p == &w) {
-                l.* = w.next;
-                break;
-            }
-        }
-        _ = npollers.fetchSub(1, .seq_cst);
-        c.unlock(&plk);
-    }
-    const start = c.h9_tnow();
-    if (ms == 0)
-        try sync.sleep(&w.r, genchanged, &w)
-    else
-        try sync.tsleep(&w.r, genchanged, &w, ms);
-    return ms != 0 and genchanged(&w) == 0 and c.h9_tnow() - start >= @as(u64, ms) * 1000000;
-}
-
-/// The poll bits ready on ch now, of those in ev (plus errors and
-/// hangups, which are always reported). sfd.* is set to a host socket to
-/// watch when none is.
-fn chanready(ch: *Chan, ev_: c_int, sfd: *c_int) c_int {
-    sfd.* = -1;
-    const dc = dev.of(ch).dc;
-    const ev = ev_ | LPOLLERR | LPOLLHUP;
-    switch (dc) {
-        '|', Tau => {
-            const rq = if ((ch.qid.type & c.QTDIR) != 0)
-                null
-            else if (dc == Tau)
-                devpty.h9_ptyq(ch, 0)
-            else
-                devpipe.h9_pipeq(ch, 0);
-            const q = rq orelse return (LPOLLIN | LPOLLOUT) & ev;
-            const wq = (if (dc == Tau) devpty.h9_ptyq(ch, 1) else devpipe.h9_pipeq(ch, 1)).?;
-            var r: c_int = 0;
-            if (qio.qcanread(q))
-                r |= LPOLLIN
-            else if (qio.qisclosed(q) != 0)
-                r |= LPOLLIN | LPOLLHUP | LPOLLRDHUP;
-            if (qio.qisclosed(wq) != 0)
-                r |= LPOLLERR
-            else if (qio.qfull(wq) == 0)
-                r |= LPOLLOUT;
-            return r & ev;
-        },
-        'y' => {
-            var r: c_int = LPOLLOUT;
-            // Asking starts a host read, as a read would; its input wakes us.
-            if (ch.qid.path != 1 // Qcons
-            or (ev & LPOLLIN) == 0 or h9_cons_poll(ch.dev) != 0)
-                r |= LPOLLIN;
-            return r & ev;
-        },
-        'I' => {
-            var udp: c_int = 0;
-            const s = h9_ip_sfd(ch, &udp);
-            if (s < 0)
-                return (LPOLLIN | LPOLLOUT) & ev; // not a conversation, or no socket yet
-            const r = h9so_ready(s, ev);
-            if (r == 0)
-                sfd.* = s;
-            return r;
-        },
-        Epsilon => return eventfd.evready(ch, ev),
-        'M' => {
-            if (rconv.rget(ch)) |rc| {
-                const r = rconv.rready(rc, ev);
-                rconv.rput(rc);
-                return r;
-            }
-        },
-        else => {},
-    }
-    // Files, devmnt and the rest: ready, so a read blocks as it would.
-    return (LPOLLIN | LPOLLOUT) & ev;
+fn h9_ip_watch(ch: *Chan, ev: c_int, wv: ?*anyopaque, wkv: ?*anyopaque) callconv(.c) void {
+    const w: *rd.Watch = @ptrCast(@alignCast(wv.?));
+    const wk: *rd.Waker = @ptrCast(@alignCast(wkv.?));
+    const s = h9_ip_sfd(ch, null);
+    rd.add(&hostwatch, w, wk);
+    if (s < 0 or ev & Pedge != 0)
+        return;
+    h9so_watchinit();
+    w.unhook = ipunhook;
+    h9so_watch(s, ev, w);
 }
 
 /// Linux's struct pollfd.
@@ -240,75 +218,150 @@ const Lpollfd = extern struct {
 /// don't sleep). gen.* (if not null) gets the generation the answer is
 /// for. With once, it returns 0 after the first wake instead of asking
 /// again, for epoll's edge-triggered fds, and gen.* (if not null) is the
-/// generation the caller's own answer was for, so a wake that came after
-/// that answer ends the wait at once rather than being missed. -1 with
-/// the error string set when a note interrupts it.
+/// generation the caller's own answer was for, so a change that came
+/// after that answer ends the wait at once rather than being missed. -1
+/// with the error string set when a note interrupts it.
 fn h9_poll(fds: [*]Lpollfd, n: c_int, ms: c_int, gen: ?*c_uint, once: c_int) callconv(.c) c_int {
-    var owner: u8 = 0;
-    const ready = poll(fds, n, ms, gen, once != 0, &owner) catch {
-        h9so_unwatch(&owner);
-        return syserr();
-    };
-    return ready;
+    return poll(fds[0..@intCast(@max(n, 0))], ms, gen, once != 0) catch syserr();
 }
 
-fn poll(fds: [*]Lpollfd, n: c_int, ms: c_int, gen: ?*c_uint, once: bool, owner: *u8) Error!c_int {
+/// One fd of a poll: its channel, held for the poll, and its watch.
+const Pfd = struct {
+    ch: ?*Chan = null,
+    w: rd.Watch = .{},
+};
+
+fn poll(fds: []Lpollfd, ms: c_int, gen: ?*c_uint, once: bool) Error!c_int {
     const deadline: u64 = if (ms > 0) c.h9_tnow() + @as(u64, @intCast(ms)) * 1000000 else 0;
+    var small: [16]Pfd = undefined;
+    const pf: []Pfd = if (fds.len <= small.len) small[0..fds.len] else blk: {
+        const m: [*]Pfd = @ptrCast(@alignCast(port.malloc(@intCast(fds.len * @sizeOf(Pfd))) orelse return port.kerror(&port.Enomem)));
+        break :blk m[0..fds.len];
+    };
+    defer if (pf.ptr != &small) c.free(pf.ptr);
+    for (pf, fds) |*p, f| {
+        p.* = .{};
+        if (f.fd >= 0)
+            p.ch = sysfile.fdtochan(f.fd, -1, false, true) catch null;
+    }
+    defer for (pf) |*p| if (p.ch) |ch| chan.cclose(ch);
+    var pl: Poller = .{};
+    var listed = false;
+    defer if (listed) {
+        c.lock(&plk);
+        var l: *?*Poller = &pollers;
+        while (l.*) |x| : (l = &x.next) {
+            if (x == &pl) {
+                l.* = pl.next;
+                break;
+            }
+        }
+        c.unlock(&plk);
+    };
     var g: c_uint = undefined;
     var ready: c_int = undefined;
     while (true) {
-        // epollWait leaves out of fds the edge-triggered entries it
+        // epollWait marks with Pedge the edge-triggered entries it
         // already reported (an eventfd that stays readable, as tokio's
         // waker does), so only the generation tells their next event:
-        // starting from a fresh one here would miss a wake that came
+        // starting from a fresh one here would miss a change that came
         // between the caller's answer and this call, and sleep until
         // something else woke it, forever if nothing did (#276).
-        g = if (once and gen != null) gen.?.* else h9_pollgen();
-        ready = 0;
-        for (fds[0..@intCast(@max(n, 0))]) |*f| {
-            f.revents = 0;
-            if (f.fd < 0)
-                continue;
-            const ch = sysfile.fdtochan(f.fd, -1, false, true) catch {
-                f.revents = LPOLLNVAL;
-                ready += 1;
-                continue;
-            };
-            const events: c_int = @as(u16, @bitCast(f.events));
-            var sfd: c_int = undefined;
-            var rev = chanready(ch, events, &sfd);
-            if ((rev & LPOLLIN) != 0)
-                rev |= events & LPOLLRDNORM;
-            if ((rev & LPOLLOUT) != 0)
-                rev |= events & LPOLLWRNORM;
-            f.revents = @bitCast(@as(u16, @truncate(@as(c_uint, @bitCast(rev)))));
-            if (f.revents == 0 and sfd >= 0 and ms != 0) {
-                h9so_watchinit();
-                h9so_watch(sfd, f.events, owner);
-            }
-            chan.cclose(ch);
-            if (f.revents != 0)
-                ready += 1;
-        }
+        g = if (once and gen != null) gen.?.* else rd.gen();
+        pl.s.arm();
+        ready = scan(fds, pf);
         if (ready > 0 or ms == 0)
             break;
-        if (ms > 0) {
-            const now = c.h9_tnow();
-            if (now >= deadline)
-                break;
-            if (try pollwait(g, @intCast((deadline - now + 999999) / 1000000)))
-                break;
-        } else _ = try pollwait(g, 0);
-        h9so_unwatch(owner);
+        if (!listed) {
+            c.lock(&plk);
+            pl.next = pollers;
+            pollers = &pl;
+            c.unlock(&plk);
+            listed = true;
+        }
+        for (pf, fds) |*p, f| if (p.ch) |ch|
+            dev.watch(ch, @as(u16, @bitCast(f.events)), &p.w, &pl.s.waker);
+        // Asked again with the watches on: a change since the first
+        // answer has fired one, or shows here.
+        ready = scan(fds, pf);
+        if (ready == 0 and once and gen != null and rd.gen() != g) {
+            unwatchall(pf);
+            break;
+        }
+        var timedout = false;
+        if (ready == 0) {
+            if (ms > 0) {
+                const now = c.h9_tnow();
+                if (now >= deadline)
+                    timedout = true
+                else
+                    timedout = !(pl.s.wait(@intCast((deadline - now + 999999) / 1000000)) catch |e| {
+                        unwatchall(pf);
+                        return e;
+                    });
+            } else _ = pl.s.wait(0) catch |e| {
+                unwatchall(pf);
+                return e;
+            };
+        }
+        // A host socket's watch is dropped once it fires, so each wait
+        // watches afresh.
+        unwatchall(pf);
+        if (ready > 0 or timedout)
+            break;
         if (once) {
             ready = 0;
             break;
         }
     }
-    h9so_unwatch(owner);
     if (gen) |p|
         p.* = g;
     return ready;
+}
+
+fn unwatchall(pf: []Pfd) void {
+    for (pf) |*p| rd.unwatch(&p.w);
+}
+
+/// Fills in each revents from its channel's readiness: how many have
+/// some.
+fn scan(fds: []Lpollfd, pf: []Pfd) c_int {
+    var ready: c_int = 0;
+    for (fds, pf) |*f, p| {
+        f.revents = 0;
+        if (f.fd < 0)
+            continue;
+        const ch = p.ch orelse {
+            f.revents = LPOLLNVAL;
+            ready += 1;
+            continue;
+        };
+        const events: c_int = @as(u16, @bitCast(f.events));
+        if (events & Pedge != 0)
+            continue;
+        var rev = chanready(ch, events);
+        if ((rev & LPOLLIN) != 0)
+            rev |= events & LPOLLRDNORM;
+        if ((rev & LPOLLOUT) != 0)
+            rev |= events & LPOLLWRNORM;
+        f.revents = @bitCast(@as(u16, @truncate(@as(c_uint, @bitCast(rev)))));
+        if (f.revents != 0)
+            ready += 1;
+    }
+    return ready;
+}
+
+/// The poll bits ready on ch now, of those in ev, plus errors and
+/// hangups: the device's, and for a socket on a mounted /net what's
+/// waiting here for a peek.
+fn chanready(ch: *Chan, ev: c_int) c_int {
+    const e = ev | LPOLLERR | LPOLLHUP;
+    if (dev.of(ch).dc == 'M') if (pkget(ch)) |pk| {
+        defer pkput(pk);
+        if (pk.n > 0)
+            return (dev.ready(ch, ev & ~@as(c_int, LPOLLIN)) | LPOLLIN) & e;
+    };
+    return dev.ready(ch, ev) & e;
 }
 
 /// The poll bits ready on fd now, without sleeping; -1 if it's not open.
@@ -321,29 +374,209 @@ fn h9_fdready(fd: c_int, events: c_int) callconv(.c) c_int {
     return p.revents;
 }
 
-// Linux socket calls that devip's files can't express: recv and send
-// with flags, SO_ERROR, and control messages on the conversation behind
-// fd. They return -errno (Linux's) or set the error string and return
-// -1 as the other leaves do.
+// Sockets on a mounted /net (design/file-interface.md): devmnt's data
+// file of a conversation, which the Linux layer opened at
+// /net/{tcp,udp}/N/data in the 9front view. What a MSG_PEEK or FIONREAD
+// read is kept, by channel, until a recv takes it or the socket closes.
 
-fn sockof(fd: c_int, udp: ?*c_int) Error!c_int {
-    const ch = try sysfile.fdtochan(fd, -1, false, true);
-    if (dev.of(ch).dc != 'I') {
-        chan.cclose(ch);
-        return port.kerror("not a socket");
+const Pkbufsz = 64 * 1024;
+
+const Peek = struct {
+    next: ?*Peek = null,
+    ch: *Chan, // a reference of ours, the key
+    refs: c_int, // the table's, and each caller's; under pklk
+    lk: c.QLock = std.mem.zeroes(c.QLock),
+    udp: bool,
+    buf: [*]u8,
+    n: c_int = 0, // bytes held: a UDP socket's one message
+};
+
+var pklk: c.Lock = std.mem.zeroes(c.Lock);
+var peeks: ?*Peek = null;
+
+fn pkget(ch: *Chan) ?*Peek {
+    c.lock(&pklk);
+    defer c.unlock(&pklk);
+    var p = peeks;
+    while (p) |x| : (p = x.next) {
+        if (x.ch == ch) {
+            x.refs += 1;
+            return x;
+        }
     }
-    const s = h9_ip_sfd(ch, udp);
-    chan.cclose(ch);
-    return s;
+    return null;
+}
+
+fn pkput(pk: *Peek) void {
+    c.lock(&pklk);
+    pk.refs -= 1;
+    const last = pk.refs == 0;
+    c.unlock(&pklk);
+    if (last) {
+        chan.cclose(pk.ch);
+        c.free(pk.buf);
+        c.free(pk);
+    }
+}
+
+/// ch's Peek, made if it has none.
+fn pkmake(ch: *Chan, udp: bool) Error!*Peek {
+    if (pkget(ch)) |pk| return pk;
+    const buf: [*]u8 = @ptrCast(c.mallocz(Pkbufsz, 0) orelse return port.kerror(&port.Enomem));
+    const pk: *Peek = @ptrCast(@alignCast(port.malloc(@sizeOf(Peek)) orelse {
+        c.free(buf);
+        return port.kerror(&port.Enomem);
+    }));
+    pk.* = .{ .ch = ch, .refs = 2, .udp = udp, .buf = buf };
+    _ = chan.incref(&ch.ref);
+    c.lock(&pklk);
+    pk.next = peeks;
+    peeks = pk;
+    c.unlock(&pklk);
+    return pk;
+}
+
+/// The conversation fd is a mounted /net's, as the Linux layer names it:
+/// 1<<30 | proto<<12 | N, its proto src/abi/linux/sys.zig's (0 udp, 1
+/// tcp); or -1. From the channel's name, .../tcp/N/data, which holds on
+/// any server, whatever its qids.
+fn rconvid(ch: *Chan) c_int {
+    if (dev.of(ch).dc != 'M' or ch.qid.type & c.QTDIR != 0)
+        return -1;
+    const path = std.mem.span(chan.chanpath(ch));
+    var it = std.mem.splitBackwardsScalar(u8, path, '/');
+    if (!std.mem.eql(u8, it.next() orelse return -1, "data"))
+        return -1;
+    const num = std.fmt.parseInt(u12, it.next() orelse return -1, 10) catch return -1;
+    const proto = it.next() orelse return -1;
+    const pr: c_int = if (std.mem.eql(u8, proto, "tcp")) 1 else if (std.mem.eql(u8, proto, "udp")) 0 else return -1;
+    return 1 << 30 | pr << 12 | num;
+}
+
+fn h9_linux_rconvid(fd: c_int) callconv(.c) c_int {
+    const ch = sysfile.fdtochan(fd, -1, false, true) catch return -1;
+    defer chan.cclose(ch);
+    return rconvid(ch);
+}
+
+/// fd's channel if it's a mounted /net's conversation, referenced.
+fn rchan(fd: c_int, udp: *bool) ?*Chan {
+    const ch = sysfile.fdtochan(fd, -1, false, true) catch return null;
+    const id = rconvid(ch);
+    if (id < 0) {
+        chan.cclose(ch);
+        return null;
+    }
+    udp.* = (id >> 12) & 0xff == 0;
+    return ch;
+}
+
+/// fd is closing: if it's the last of its description, what's kept for
+/// its peeks goes.
+fn h9_linux_rclose(fd: c_int) callconv(.c) void {
+    const ch = sysfile.fdtochan(fd, -1, false, true) catch return;
+    defer chan.cclose(ch);
+    const pk = pkget(ch) orelse return;
+    // the fd's, fdtochan's, and the Peek's
+    if (ch.ref.ref > 3) {
+        pkput(pk);
+        return;
+    }
+    c.lock(&pklk);
+    var l: *?*Peek = &peeks;
+    while (l.*) |x| : (l = &x.next) {
+        if (x == pk) {
+            l.* = pk.next;
+            pk.refs -= 1; // the table's
+            break;
+        }
+    }
+    c.unlock(&pklk);
+    pkput(pk);
+}
+
+/// A Linux errno for a kernel error string from a remote conversation.
+fn rerrno(e_: [*c]const u8) c_int {
+    const e = std.mem.span(e_);
+    const has = struct {
+        fn f(s: []const u8, w: []const u8) bool {
+            return std.mem.indexOf(u8, s, w) != null;
+        }
+    }.f;
+    if (has(e, "refused"))
+        return 111; // ECONNREFUSED
+    if (has(e, "reset") or has(e, "hungup") or has(e, "hangup"))
+        return 104; // ECONNRESET
+    if (has(e, "timed out") or has(e, "timeout"))
+        return 110; // ETIMEDOUT
+    if (has(e, "permission") or has(e, "denied"))
+        return 13; // EACCES
+    if (has(e, "network") and has(e, "unreachable"))
+        return 101; // ENETUNREACH
+    if (has(e, "unreachable") or has(e, "no route"))
+        return 113; // EHOSTUNREACH
+    if (has(e, "in use"))
+        return 98; // EADDRINUSE
+    if (has(e, "interrupted"))
+        return 4; // EINTR
+    return 5; // EIO
+}
+
+/// Fills pk from its channel if it's empty and the server says a read
+/// won't wait: what it holds, 0 at end of file, -EAGAIN, or -errno.
+/// Under pk.lk.
+fn pkfill(pk: *Peek) c_int {
+    if (pk.n > 0)
+        return pk.n;
+    if (dev.ready(pk.ch, LPOLLIN | rd.Now) & (LPOLLIN | LPOLLHUP | LPOLLERR) == 0)
+        return -11; // EAGAIN
+    const m = dev.read(dev.of(pk.ch), pk.ch, pk.buf, Pkbufsz, 0) catch return -rerrno(up().errstr);
+    pk.n = m;
+    return m;
+}
+
+/// recv on a mounted /net's conversation: never waits (the Linux layer
+/// waits first): the bytes, a datagram's whole length, 0 at end of
+/// file, or -errno.
+fn rrecv(ch: *Chan, udp: bool, buf: [*]u8, n: c_int, peek: bool) c_int {
+    const pk = (if (peek) pkmake(ch, udp) catch return -12 else pkget(ch)) orelse return rread(ch, buf, n); // ENOMEM
+    defer pkput(pk);
+    sync.qlock(&pk.lk);
+    defer sync.qunlock(&pk.lk);
+    if (pk.n == 0 and !peek)
+        return rread(ch, buf, n);
+    const m = pkfill(pk);
+    if (m <= 0)
+        return m;
+    const got: c_int = @min(m, n);
+    @memcpy(buf[0..@intCast(got)], pk.buf[0..@intCast(got)]);
+    if (!peek) {
+        if (udp or got == m) {
+            pk.n = 0;
+        } else {
+            const k: usize = @intCast(got);
+            std.mem.copyForwards(u8, pk.buf[0..@intCast(m - got)], pk.buf[k..@intCast(m)]);
+            pk.n = m - got;
+        }
+    }
+    return if (udp) m else got;
+}
+
+/// A read straight into the caller's buffer, once the server says it
+/// won't wait.
+fn rread(ch: *Chan, buf: [*]u8, n: c_int) c_int {
+    if (dev.ready(ch, LPOLLIN | rd.Now) & (LPOLLIN | LPOLLHUP | LPOLLERR) == 0)
+        return -11; // EAGAIN
+    return dev.read(dev.of(ch), ch, buf, n, 0) catch -rerrno(up().errstr);
 }
 
 /// recvfrom on a socket fd's host socket: the count or -errno. raddr
 /// (16 bytes) and rport get the source if raddr isn't null.
 fn h9_linux_sockrecv(fd: c_int, buf: ?*anyopaque, n: c_int, peek: c_int, dontwait: c_int, raddr: ?*[IPaddrlen]u8, rport: ?*u16) callconv(.c) c_int {
-    if (rconv.rgetfd(fd)) |r| {
-        const m = rconv.rrecv(r, @ptrCast(buf.?), n, peek != 0);
-        rconv.rput(r);
-        return m;
+    var rudp = false;
+    if (rchan(fd, &rudp)) |ch| {
+        defer chan.cclose(ch);
+        return rrecv(ch, rudp, @ptrCast(buf.?), n, peek != 0);
     }
     var udp: c_int = 0;
     const s = sockof(fd, &udp) catch return -9; // EBADF
@@ -356,16 +589,34 @@ fn h9_linux_sockrecv(fd: c_int, buf: ?*anyopaque, n: c_int, peek: c_int, dontwai
     return m;
 }
 
+fn sockof(fd: c_int, udp: ?*c_int) Error!c_int {
+    const ch = try sysfile.fdtochan(fd, -1, false, true);
+    if (dev.of(ch).dc != 'I') {
+        chan.cclose(ch);
+        return port.kerror("not a socket");
+    }
+    const s = h9_ip_sfd(ch, udp);
+    chan.cclose(ch);
+    return s;
+}
+
 /// sendto on a socket fd's host socket, to raddr!rport if raddr isn't
 /// null, after the policy's check, as devip's connect does.
 fn h9_linux_socksend(fd: c_int, buf: ?*const anyopaque, n: c_int, dontwait: c_int, raddr_: ?*const [IPaddrlen]u8, rport_: u16) callconv(.c) c_int {
     var raddr = raddr_;
     var rport = rport_;
     var to: [IPaddrlen]u8 = undefined;
-    if (rconv.rgetfd(fd)) |r| {
-        const m = if (raddr != null) -106 else rconv.rsend(r, @ptrCast(buf.?), n); // EISCONN: one peer
-        rconv.rput(r);
-        return m;
+    var rudp = false;
+    if (rchan(fd, &rudp)) |ch| {
+        defer chan.cclose(ch);
+        if (raddr != null)
+            return -106; // EISCONN: one peer
+        if (dontwait != 0 and dev.ready(ch, LPOLLOUT | rd.Now) & (LPOLLOUT | LPOLLERR | LPOLLHUP) == 0)
+            return -11;
+        return dev.write(dev.of(ch), ch, buf, n, 0) catch {
+            const w = rerrno(up().errstr);
+            return if (w == 104) -32 else -w; // a reset write: EPIPE
+        };
     }
     var udp: c_int = 0;
     const s = sockof(fd, &udp) catch return -9;
@@ -435,10 +686,14 @@ fn h9_linux_pipetryread(fd: c_int, va: [*]u8, n: c_int) callconv(.c) c_int {
 /// its second answer by it, and with 0 it receives into none, and fails
 /// the lookup.
 fn h9_linux_socknread(fd: c_int) callconv(.c) c_int {
-    if (rconv.rgetfd(fd)) |r| {
-        const m = rconv.rnread(r);
-        rconv.rput(r);
-        return m;
+    var rudp = false;
+    if (rchan(fd, &rudp)) |ch| {
+        defer chan.cclose(ch);
+        const pk = pkmake(ch, rudp) catch return 0;
+        defer pkput(pk);
+        sync.qlock(&pk.lk);
+        defer sync.qunlock(&pk.lk);
+        return @max(pkfill(pk), 0);
     }
     const s = sockof(fd, null) catch return -9; // EBADF
     if (s < 0)
@@ -446,28 +701,46 @@ fn h9_linux_socknread(fd: c_int) callconv(.c) c_int {
     return h9so_nread(s);
 }
 
+/// SO_ERROR. A mounted /net's conversation says only that it failed, by
+/// its readiness, so a failed connect there is ECONNREFUSED.
 fn h9_linux_soerror(fd: c_int) callconv(.c) c_int {
-    if (rconv.rgetfd(fd)) |r| {
-        const s = rconv.rsoerror(r);
-        rconv.rput(r);
-        return s;
+    var rudp = false;
+    if (rchan(fd, &rudp)) |ch| {
+        defer chan.cclose(ch);
+        return if (dev.ready(ch, LPOLLOUT | rd.Now) & LPOLLERR != 0) 111 else 0;
     }
     const s = sockof(fd, null) catch return 9;
     return h9so_soerror(s);
 }
 
+/// Writes msg to the ctl of a mounted /net's conversation id, found in
+/// the 9front view's /net, as the Linux layer opened it.
+fn rctl(id: c_int, msg: [*:0]const u8) Error!void {
+    var num: [16]u8 = undefined;
+    const names = [4][*:0]const u8{
+        "net",
+        if ((id >> 12) & 0xff == 0) "udp" else "tcp",
+        (std.mem.printSentinel(&num, "{d}", .{id & 0xfff}, 0) catch unreachable).ptr,
+        "ctl",
+    };
+    var ch = try chan.namec("#/", c.Atodir, 0, 0);
+    defer chan.cclose(ch);
+    if (try chan.walk(&ch, &names, names.len, false, null) < 0)
+        return port.kerror(&port.Enonexist);
+    const ctl = try dev.open(dev.of(ch), try chan.cclone(ch), c.OWRITE);
+    defer chan.cclose(ctl);
+    _ = try dev.write(dev.of(ctl), ctl, msg, @intCast(std.mem.len(msg)), 0);
+}
+
 fn sockctl(fd: c_int, msg: [*:0]const u8) Error!void {
     const ch = try sysfile.fdtochan(fd, -1, false, true);
     defer chan.cclose(ch);
-    if (dev.of(ch).dc == 'M') {
-        if (rconv.rget(ch)) |r| {
-            defer rconv.rput(r);
-            return rconv.rsockctl(r, msg);
-        }
-    }
+    const id = rconvid(ch);
+    if (id >= 0)
+        return rctl(id, msg);
     if (dev.of(ch).dc != 'I')
         return port.kerror("not a socket");
-    try dev.caught(h9_shim_ip_ctl(ch, msg));
+    _ = try dev.raising(&h9_ip_ctl, .{ ch, @constCast(msg) });
 }
 
 fn h9_linux_sockctl(fd: c_int, msg: [*:0]const u8) callconv(.c) c_int {
@@ -478,9 +751,14 @@ fn h9_linux_sockctl(fd: c_int, msg: [*:0]const u8) callconv(.c) c_int {
 pub fn exportC() void {
     @export(&h9_pollgen, .{ .name = "h9_pollgen" });
     @export(&h9_pollwake, .{ .name = "h9_pollwake" });
-    @export(&h9_qwake, .{ .name = "h9_qwake" });
+    @export(&h9_pollkick, .{ .name = "h9_pollkick" });
+    @export(&h9_lockgen, .{ .name = "h9_lockgen" });
+    @export(&h9_lockwake, .{ .name = "h9_lockwake" });
+    @export(&h9_lockwait, .{ .name = "h9_lockwait" });
     @export(&h9_poll, .{ .name = "h9_poll" });
     @export(&h9_fdready, .{ .name = "h9_fdready" });
+    @export(&h9_ip_ready, .{ .name = "h9_ip_ready" });
+    @export(&h9_ip_watch, .{ .name = "h9_ip_watch" });
     @export(&h9_linux_sockrecv, .{ .name = "h9_linux_sockrecv" });
     @export(&h9_linux_socksend, .{ .name = "h9_linux_socksend" });
     @export(&h9_linux_pipequeued, .{ .name = "h9_linux_pipequeued" });
@@ -488,41 +766,77 @@ pub fn exportC() void {
     @export(&h9_linux_socknread, .{ .name = "h9_linux_socknread" });
     @export(&h9_linux_soerror, .{ .name = "h9_linux_soerror" });
     @export(&h9_linux_sockctl, .{ .name = "h9_linux_sockctl" });
+    @export(&h9_linux_rconvid, .{ .name = "h9_linux_rconvid" });
+    @export(&h9_linux_rclose, .{ .name = "h9_linux_rclose" });
     eventfd.exportC();
-    rconv.exportC();
 }
 
-// Cases (zig build kern-test): the wait, which needs no Linux ABI. The
-// namespace kernel's machine runs them, so pollwait sleeps as a process.
+// Cases (zig build kern-test): the poll over channels, which needs no
+// Linux ABI. The namespace kernel's machine runs them, so the poll
+// sleeps as a process.
 
 const testing = std.testing;
 
-test "pollwait times out when no wake comes [kernel-port]" {
-    _ = try port.testing.begin();
-    const g = h9_pollgen();
-    try testing.expect(try pollwait(g, 20));
+fn closefds(fds: []const c_int) void {
+    for (fds) |fd| _ = sysfile.close(fd) catch {};
 }
 
-test "pollwait returns at once for a generation already past [kernel-port]" {
-    _ = try port.testing.begin();
-    const g = h9_pollgen();
-    h9_pollwake();
-    try testing.expect(!try pollwait(g, 5000));
-    try testing.expect(pollers == null);
-    try testing.expectEqual(@as(c_int, 0), npollers.load(.seq_cst));
-}
-
-test "a wake from another process ends a pollwait [kernel-port]" {
-    _ = try port.testing.begin();
+test "a poll on a pipe times out empty, and a write from another process ends it [file-interface]" {
+    _ = try port.testing.namespace();
+    var fds: [2]c_int = undefined;
+    _ = try sysfile.pipe(&fds);
+    defer closefds(&fds);
+    var pf = [1]Lpollfd{.{ .fd = fds[0], .events = LPOLLIN, .revents = 0 }};
+    try testing.expectEqual(@as(c_int, 0), try poll(&pf, 20, null, false));
+    pf[0].events = LPOLLOUT;
+    try testing.expectEqual(@as(c_int, 1), try poll(&pf, 0, null, false));
+    try testing.expectEqual(@as(i16, LPOLLOUT), pf[0].revents);
+    const wr = try sysfile.fdtochan(fds[1], -1, false, true);
+    defer chan.cclose(wr);
     var k: port.testing.Kproc = undefined;
-    const g = h9_pollgen();
     try k.start(struct {
-        fn run(gen: c_uint) void {
-            while (h9_pollgen() == gen and npollers.load(.seq_cst) == 0)
-                std.Thread.yield() catch {};
-            h9_pollwake();
+        fn run(ch: *Chan) void {
+            c.osmsleep(20);
+            _ = dev.write(dev.of(ch), ch, "x", 1, 0) catch {};
         }
-    }.run, .{g});
-    try testing.expect(!try pollwait(g, 10000));
+    }.run, .{wr});
+    pf[0].events = LPOLLIN;
+    try testing.expectEqual(@as(c_int, 1), try poll(&pf, 10000, null, false));
+    try testing.expectEqual(@as(i16, LPOLLIN), pf[0].revents);
     k.join();
+    try testing.expect(pollers == null);
+}
+
+test "a closed fd polls as invalid, and a hung-up pipe as readable and hung up [file-interface]" {
+    _ = try port.testing.namespace();
+    var fds: [2]c_int = undefined;
+    _ = try sysfile.pipe(&fds);
+    defer closefds(fds[0..1]);
+    closefds(fds[1..]);
+    var pf = [2]Lpollfd{
+        .{ .fd = fds[0], .events = LPOLLIN, .revents = 0 },
+        .{ .fd = fds[1], .events = LPOLLIN, .revents = 0 },
+    };
+    try testing.expectEqual(@as(c_int, 2), try poll(&pf, -1, null, false));
+    try testing.expect(pf[0].revents & LPOLLHUP != 0);
+    try testing.expectEqual(@as(i16, LPOLLNVAL), pf[1].revents);
+}
+
+test "an edge-triggered poll waits for the next change, and ends at once for one it missed [file-interface]" {
+    _ = try port.testing.namespace();
+    var fds: [2]c_int = undefined;
+    _ = try sysfile.pipe(&fds);
+    defer closefds(&fds);
+    _ = try sysfile.pwrite(fds[1], "x", 1, -1);
+    // Reported, and still readable: the poll waits for a change.
+    var pf = [1]Lpollfd{.{ .fd = fds[0], .events = @bitCast(@as(u16, LPOLLIN | Pedge)), .revents = 0 }};
+    var g = rd.gen();
+    var t0 = c.h9_tnow();
+    try testing.expectEqual(@as(c_int, 0), try poll(&pf, 30, &g, true));
+    try testing.expect(c.h9_tnow() - t0 >= 25 * 1000000);
+    // A write after that answer ends the next wait at once.
+    _ = try sysfile.pwrite(fds[1], "y", 1, -1);
+    t0 = c.h9_tnow();
+    try testing.expectEqual(@as(c_int, 0), try poll(&pf, 10000, &g, true));
+    try testing.expect(c.h9_tnow() - t0 < 5000 * 1000000);
 }

@@ -3,7 +3,7 @@
 //! connection, and the small calls the Zig side makes into the kernel
 //! (src/kern.zig's). The screen is src/kern/gfx.c with a GUI backend, or
 //! src/kern/nogfx.c without one (design/epoch-0/gfx.md). See SPEC.md,
-//! "Kernel: drawterm kern/ and the Zig seam".
+//! "Kernel: h9's Zig and drawterm's C" in spec/kernel.md.
 //!
 //! A close translation of the C, with error unions in place of
 //! the C's error labels. Each function is exported under its C name.
@@ -138,6 +138,20 @@ fn h9_kern_sleep(ms_: c_int) callconv(.c) c_int {
         return 0;
     }
     const deadline = tnow() + @as(u64, @intCast(ms_)) * 1000000;
+    // A process on the scheduler's executors (design/scheduler.md) parks
+    // in tsleep, and its executor runs others meanwhile.
+    if (sync.contOf(up()) != null) {
+        while (true) {
+            const now = tnow();
+            if (now >= deadline) break;
+            const ms: u64 = (deadline - now + 999999) / 1000000;
+            sync.tsleep(&up().ksleep, never, null, @intCast(@min(ms, std.math.maxInt(c_uint)))) catch {
+                chan.kstrcpy(up().syserrstr, &port.Eintr, port.ERRMAX);
+                return -1;
+            };
+        }
+        return 0;
+    }
     while (true) {
         if (up().notepending != 0) {
             up().notepending = 0;
@@ -149,6 +163,10 @@ fn h9_kern_sleep(ms_: c_int) callconv(.c) c_int {
         const ms: u64 = (deadline - now + 999999) / 1000000;
         c.osmsleep(@intCast(@min(ms, 20)));
     }
+    return 0;
+}
+
+fn never(_: ?*anyopaque) callconv(.c) c_int {
     return 0;
 }
 

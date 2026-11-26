@@ -1,7 +1,7 @@
 //! h9's #ι, metadata indexes for 9P roots and mounts (src/kern/devhidx.c,
 //! design/epoch-0/mount-index.md, design/kernel-port.md). A close
 //! translation of the C: the same functions in the same order, with error
-//! unions in place of waserror. A native device (dev.zig's `Native`).
+//! unions in place of C's error labels. A native device (dev.zig's `Native`).
 //!
 //! A conversation puts the index layer (src/rootindex/layer.zig) between
 //! devmnt and a server connection: devmnt mounts the conversation's data

@@ -1,7 +1,9 @@
-//! Zig side of the drawterm kern seam (SPEC.md, "Kernel: drawterm kern/
-//! and the Zig seam"). Each call goes through one of kern's `sys*` wrappers,
-//! which catch kernel errors with waserror and return -1; `errstr` then
-//! holds the message. No Zig frame sits between a waserror and an error.
+//! The kernel as the rest of h9 calls it (spec/kernel.md). Each call is
+//! one of the kernel's functions under its C name (src/kern/sysfile.zig's
+//! `sysopen`, `h9_pread`, and the rest), which returns -1 on an error;
+//! `errstr` then holds the message. Guest buffers are host slices by now,
+//! checked against the address space by src/guestmem.zig, and counts
+//! are usize down to the kernel.
 //!
 //! The kernel boots once per host process, on a private thread. Each guest
 //! process runs on a thread made by `Kernel.spawn` (or `fork`) in its
@@ -51,6 +53,7 @@ const c_stub = struct {
     fn h9_kern_newmach(_: ?*anyopaque) ?*anyopaque {
         return null;
     }
+    fn h9_kern_setsched(_: ?*anyopaque, _: ?*anyopaque, _: *const fn (?*anyopaque, ?*anyopaque) callconv(.c) c_int) void {}
     fn h9_kern_machkernel(_: ?*anyopaque) ?*anyopaque {
         return null;
     }
@@ -184,10 +187,10 @@ const c_stub = struct {
     fn sysclose(_: c_int) c_int {
         return -1;
     }
-    fn syspread(_: c_int, _: [*]u8, _: c_int, _: i64) c_int {
+    fn h9_pread(_: c_int, _: [*]u8, _: usize, _: i64) isize {
         return -1;
     }
-    fn syspwrite(_: c_int, _: [*]const u8, _: c_int, _: i64) c_int {
+    fn h9_pwrite(_: c_int, _: [*]const u8, _: usize, _: i64) isize {
         return -1;
     }
     fn sysseek(_: c_int, _: i64, _: c_int) i64 {
@@ -215,19 +218,19 @@ const c_stub = struct {
     fn h9_dupfrom(_: c_int, _: c_int, _: c_int) c_int {
         return -1;
     }
-    fn sysstat(_: [*:0]const u8, _: [*]u8, _: c_int) c_int {
+    fn h9_stat(_: [*:0]const u8, _: [*]u8, _: usize) isize {
         return -1;
     }
-    fn sysfstat(_: c_int, _: [*]u8, _: c_int) c_int {
+    fn h9_fstat(_: c_int, _: [*]u8, _: usize) isize {
         return -1;
     }
     fn sysremove(_: [*:0]const u8) c_int {
         return -1;
     }
-    fn syswstat(_: [*:0]const u8, _: [*]u8, _: c_int) c_int {
+    fn h9_wstat(_: [*:0]const u8, _: [*]u8, _: usize) isize {
         return -1;
     }
-    fn sysfwstat(_: c_int, _: [*]u8, _: c_int) c_int {
+    fn h9_fwstat(_: c_int, _: [*]u8, _: usize) isize {
         return -1;
     }
     fn h9_overlay_newpath(_: ?[*:0]const u8) c_int {
@@ -249,6 +252,15 @@ const c_stub = struct {
         return -1;
     }
     fn h9_fgetattr(_: c_int, _: u64, _: *Attr, _: [*]u8, _: c_int) c_int {
+        return -1;
+    }
+    fn h9_fsync(_: c_int, _: c_int) c_int {
+        return -1;
+    }
+    fn h9_setattr(_: [*:0]const u8, _: c_int, _: u64, _: *const Attr) c_int {
+        return -1;
+    }
+    fn h9_fsetattr(_: c_int, _: u64, _: *const Attr) c_int {
         return -1;
     }
     fn h9_fs_mkfifopath(_: [*:0]const u8, _: c_uint) c_int {
@@ -317,6 +329,7 @@ const c_real = struct {
     extern fn h9_kern_park() noreturn;
     extern fn h9_kern_spawn(mach: ?*anyopaque, name: [*:0]const u8, func: *const fn (?*anyopaque) callconv(.c) void, arg: ?*anyopaque) c_int;
     extern fn h9_kern_newmach(kernel: ?*anyopaque) ?*anyopaque;
+    extern fn h9_kern_setsched(mach: ?*anyopaque, sched: ?*anyopaque, start: *const fn (?*anyopaque, ?*anyopaque) callconv(.c) c_int) void;
     extern fn h9_kern_machkernel(mach: ?*anyopaque) ?*anyopaque;
     extern fn h9_kern_machdetach(mach: ?*anyopaque) void;
     extern fn h9_kern_kprocdetached(name: [*:0]const u8, func: *const fn (?*anyopaque) callconv(.c) void, arg: ?*anyopaque) c_int;
@@ -376,8 +389,9 @@ const c_real = struct {
     extern fn sysopen(name: [*:0]const u8, mode: c_int) c_int;
     extern fn syscreate(name: [*:0]const u8, mode: c_int, perm: c_uint) c_int;
     extern fn sysclose(fd: c_int) c_int;
-    extern fn syspread(fd: c_int, buf: [*]u8, n: c_int, off: i64) c_int;
-    extern fn syspwrite(fd: c_int, buf: [*]const u8, n: c_int, off: i64) c_int;
+    // src/kern/sysfile.zig's, with 64-bit counts.
+    extern fn h9_pread(fd: c_int, buf: [*]u8, n: usize, off: i64) isize;
+    extern fn h9_pwrite(fd: c_int, buf: [*]const u8, n: usize, off: i64) isize;
     extern fn sysseek(fd: c_int, off: i64, whence: c_int) i64;
     extern fn sysbind(old: [*:0]const u8, new: [*:0]const u8, flag: c_int) c_int;
     extern fn sysmount(fd: c_int, afd: c_int, new: [*:0]const u8, flag: c_int, spec: [*:0]const u8) c_int;
@@ -394,11 +408,11 @@ const c_real = struct {
     extern var h9_procsegment: ?*const fn (?*anyopaque, [*]u8, c_int) callconv(.c) c_int;
     extern fn sysdup(fd0: c_int, fd1: c_int) c_int;
     extern fn h9_dupfrom(fd0: c_int, min: c_int, cexec: c_int) c_int;
-    extern fn sysstat(name: [*:0]const u8, buf: [*]u8, n: c_int) c_int;
-    extern fn sysfstat(fd: c_int, buf: [*]u8, n: c_int) c_int;
+    extern fn h9_stat(name: [*:0]const u8, buf: [*]u8, n: usize) isize;
+    extern fn h9_fstat(fd: c_int, buf: [*]u8, n: usize) isize;
     extern fn sysremove(name: [*:0]const u8) c_int;
-    extern fn syswstat(name: [*:0]const u8, buf: [*]u8, n: c_int) c_int;
-    extern fn sysfwstat(fd: c_int, buf: [*]u8, n: c_int) c_int;
+    extern fn h9_wstat(name: [*:0]const u8, buf: [*]u8, n: usize) isize;
+    extern fn h9_fwstat(fd: c_int, buf: [*]u8, n: usize) isize;
     extern fn h9_overlay_newpath(path: ?[*:0]const u8) c_int;
     extern fn h9_readlink(path: [*:0]const u8, buf: [*]u8, nbuf: c_int) c_int;
     extern fn h9_symlink(path: [*:0]const u8, target: [*:0]const u8) c_int;
@@ -406,6 +420,9 @@ const c_real = struct {
     extern fn h9_rename(old: [*:0]const u8, new: [*:0]const u8) c_int;
     extern fn h9_getattr(path: [*:0]const u8, nofollow: c_int, mask: u64, a: *Attr, dir: [*]u8, ndir: c_int) c_int;
     extern fn h9_fgetattr(fd: c_int, mask: u64, a: *Attr, dir: [*]u8, ndir: c_int) c_int;
+    extern fn h9_fsync(fd: c_int, datasync: c_int) c_int;
+    extern fn h9_setattr(path: [*:0]const u8, nofollow: c_int, mask: u64, a: *const Attr) c_int;
+    extern fn h9_fsetattr(fd: c_int, mask: u64, a: *const Attr) c_int;
     extern fn h9_fs_mkfifopath(path: [*:0]const u8, perm: c_uint) c_int;
 
     extern fn h9_overlay_drop(id: c_int) void;
@@ -518,6 +535,14 @@ pub const Kernel = struct {
         return @ptrCast(@alignCast(c.h9_kern_machkernel(m)));
     }
 
+    /// Has the processes this kernel starts from now on run on a
+    /// scheduler's executors (design/scheduler.md): `start(ctx, proc)`
+    /// takes each, or returns -1 to have it get a host thread of its own.
+    pub fn setScheduler(k: *Kernel, ctx: *anyopaque, start: *const fn (?*anyopaque, ?*anyopaque) callconv(.c) c_int) void {
+        if (!available) return;
+        c.h9_kern_setsched(k.mach, ctx, start);
+    }
+
     pub fn lockSettings(k: *Kernel) void {
         while (!k.lock.tryLock()) std.atomic.spinLoopHint();
     }
@@ -572,6 +597,9 @@ pub const RF = struct {
     pub const NOWAIT = 1 << 6;
     /// Not 9front's: a Linux thread, whose children are its group leader's (hproc.h).
     pub const LXTHREAD = 1 << 30;
+    /// Not 9front's: the child keeps a host thread of its own where the
+    /// machine has a scheduler (hproc.h).
+    pub const HOSTTHREAD = 1 << 29;
     pub const CNAMEG = 1 << 10;
     pub const CENVG = 1 << 11;
     pub const CFDG = 1 << 12;
@@ -1100,6 +1128,23 @@ pub fn fgetattr(fd: u31, a: *Attr, dir: []u8) Error!usize {
     return try check(c.h9_fgetattr(fd, Attr.basic, a, dir.ptr, clampLen(dir.len)));
 }
 
+/// Sets what `mask` names from `a` on `path` (following a link in its
+/// last name): the device's setattr, a Tsetattr on a .L mount, and by
+/// default a wstat, in whole seconds. `a.mode` is Plan 9's, with DMDIR
+/// and the rest as a stat gave them; a time's nanoseconds `now_ns` mean
+/// the time now.
+pub fn setattr(path: [*:0]const u8, mask: u64, a: *const Attr) Error!void {
+    _ = try check(c.h9_setattr(path, 0, mask, a));
+}
+
+/// fd's, as setattr.
+pub fn fsetattr(fd: u31, mask: u64, a: *const Attr) Error!void {
+    _ = try check(c.h9_fsetattr(fd, mask, a));
+}
+
+/// In a setattr's atimens or mtimens: the time now (devx.h's Anow).
+pub const now_ns: i64 = (1 << 30) - 1;
+
 /// Makes `path` a FIFO with permissions `perm`: a node in memory in an
 /// overlay, or a host FIFO in a devfs tree, where the new name is checked
 /// like a create (design/epoch-0/linux-fifo.md). For the Linux ABI's
@@ -1213,6 +1258,12 @@ fn check(r: c_int) Error!u31 {
     return @intCast(r);
 }
 
+/// A count from one of the kernel's 64-bit calls.
+fn checkn(r: isize) Error!usize {
+    if (r < 0) return error.Kern;
+    return @intCast(r);
+}
+
 fn clampLen(n: usize) c_int {
     return @intCast(@min(n, std.math.maxInt(c_int)));
 }
@@ -1229,14 +1280,16 @@ pub fn close(fd: u31) Error!void {
     _ = try check(c.sysclose(fd));
 }
 
-/// One read of at most 2 GiB - 1; `off` -1 uses and advances the fd offset.
+/// One read, of at most 2 GiB - 1 (the device's count is C's int, so a
+/// longer one is short); `off` -1 uses and advances the fd offset.
 pub fn pread(fd: u31, buf: []u8, off: i64) Error!usize {
-    return try check(c.syspread(fd, buf.ptr, clampLen(buf.len), off));
+    return checkn(c.h9_pread(fd, buf.ptr, buf.len, off));
 }
 
-/// One write of at most 2 GiB - 1; `off` -1 uses and advances the fd offset.
+/// One write, of at most 2 GiB - 1, as pread; `off` -1 uses and advances
+/// the fd offset.
 pub fn pwrite(fd: u31, buf: []const u8, off: i64) Error!usize {
-    return try check(c.syspwrite(fd, buf.ptr, clampLen(buf.len), off));
+    return checkn(c.h9_pwrite(fd, buf.ptr, buf.len, off));
 }
 
 pub fn seek(fd: u31, off: i64, whence: c_int) Error!i64 {
@@ -1420,19 +1473,25 @@ pub fn dupFrom(fd0: u31, min: u31, cexec: bool) Error!u31 {
 /// Returns the length of the stat message written to `buf`, or, if `buf`
 /// is too small, the BIT16SZ size prefix that tells the caller how big.
 pub fn stat(name: [*:0]const u8, buf: []u8) Error!usize {
-    return try check(c.sysstat(name, buf.ptr, clampLen(buf.len)));
+    return checkn(c.h9_stat(name, buf.ptr, buf.len));
 }
 
 pub fn fstat(fd: u31, buf: []u8) Error!usize {
-    return try check(c.sysfstat(fd, buf.ptr, clampLen(buf.len)));
+    return checkn(c.h9_fstat(fd, buf.ptr, buf.len));
 }
 
 pub fn wstat(name: [*:0]const u8, buf: []u8) Error!usize {
-    return try check(c.syswstat(name, buf.ptr, clampLen(buf.len)));
+    return checkn(c.h9_wstat(name, buf.ptr, buf.len));
+}
+
+/// Makes what was written to fd's file durable, only its data if
+/// datasync: the device's fsync, by default the null wstat.
+pub fn fsync(fd: u31, datasync: bool) Error!void {
+    _ = try check(c.h9_fsync(fd, @intFromBool(datasync)));
 }
 
 pub fn fwstat(fd: u31, buf: []u8) Error!usize {
-    return try check(c.sysfwstat(fd, buf.ptr, clampLen(buf.len)));
+    return checkn(c.h9_fwstat(fd, buf.ptr, buf.len));
 }
 
 pub fn remove(name: [*:0]const u8) Error!void {

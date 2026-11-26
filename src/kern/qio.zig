@@ -1,10 +1,11 @@
 //! drawterm's allocb.c and qio.c (design/kernel-port.md): blocks, and the
 //! I/O queues pipes, devmnt's conversations, and h9's streams are made
 //! of. A close translation: the same functions in the same order, with
-//! error unions in place of waserror, and h9's two patches kept: the
-//! readiness hook (`h9_qwake`, which wakes Linux pollers whenever a
-//! queue's state changes), and reader and writer locks that a note
-//! interrupts (`qlockintr`).
+//! error unions in place of C's error labels, and h9's two patches kept: a
+//! queue's watchers (design/file-interface.md, Part 1: `watch`, a
+//! ready.zig list its owner hangs on it, notified whenever its state
+//! changes), and reader and writer locks that a note interrupts
+//! (`qlockintr`).
 //!
 //! A process waits in a queue in three places, each one small function:
 //! `qlockintr` (behind another reader or writer), `qwait` (for data), and
@@ -17,6 +18,7 @@
 const std = @import("std");
 const port = @import("port.zig");
 const sync = @import("sync.zig");
+const rd = @import("ready.zig");
 const c = port.c;
 const up = port.up;
 const Error = port.Error;
@@ -160,7 +162,33 @@ pub fn checkb(b: *Block, msg: [*:0]const u8) void {
 // qio.c
 
 /// h9: wakes Linux pollers (src/kern/linuxnet.zig).
-extern fn h9_qwake(q: *Queue) void;
+/// h9: the queue changed: tells its watchers (design/file-interface.md).
+fn qwake(q: *Queue) void {
+    if (q.watch) |w| rd.notify(w);
+}
+
+/// h9: the events of ev (ready.zig's) ready on a channel that reads rq
+/// and writes wq, with an error or hangup always reported: what a pipe
+/// and a pty answer (design/file-interface.md).
+pub fn qready(rq: *Queue, wq: *Queue, ev_: c_int) c_int {
+    const ev = ev_ | rd.Err | rd.Hup;
+    var r: c_int = 0;
+    if (qcanread(rq))
+        r |= rd.In
+    else if (qisclosed(rq) != 0)
+        r |= rd.In | rd.Hup | rd.Rdhup;
+    if (qisclosed(wq) != 0)
+        r |= rd.Err
+    else if (qfull(wq) == 0)
+        r |= rd.Out;
+    return r & ev;
+}
+
+/// h9: hangs w, the owner's watchers, on q, for every change of its
+/// state; a pipe hangs one on both its queues.
+pub fn qsetwatch(q: *Queue, w: ?*rd.Watchers) void {
+    q.watch = w;
+}
 
 /// h9: qlock for a queue's reader or writer lock, which a note
 /// interrupts. A reader waiting behind another reader (one pipe that
@@ -205,6 +233,8 @@ pub const Queue = extern struct {
     wr: c.Rendez, // process waiting to write
 
     err: [port.ERRMAX]u8,
+
+    watch: ?*rd.Watchers, // h9: notified at each change (qsetwatch)
 };
 
 const Maxatomic = 64 * 1024;
@@ -552,7 +582,7 @@ fn iunlock_consumer(q: *Queue) c_int {
         q.state = s & ~@as(c_int, Qflow);
 
     c.iunlock(&q.lk);
-    h9_qwake(q); // h9
+    qwake(q); // h9
 
     if (s & Qflow != 0) {
         // Wake up flow-controlled writers. Note that this is done even
@@ -587,7 +617,7 @@ fn iunlock_producer(q: *Queue) c_int {
 
     q.state = s & ~@as(c_int, Qstarve);
     c.iunlock(&q.lk);
-    h9_qwake(q); // h9
+    qwake(q); // h9
 
     if (s & Qstarve != 0)
         _ = sync.wakeup(&q.rr);
@@ -958,7 +988,7 @@ pub fn qread(q: *Queue, vp: [*]u8, len: c_int) Error!c_int {
 
     sync.qunlock(&q.rlock);
 
-    // C guards this copy with waserror, for a fault on a user buffer;
+    // C guards this copy with an error label, for a fault on a user buffer;
     // h9 copies to and from guest memory outside the kernel, so it can't
     // fail here.
     const r = readblist(first, vp, len, 0);
@@ -1047,7 +1077,7 @@ pub fn qwrite(q: *Queue, vp: [*]const u8, len: c_int) Error!c_int {
 
         const b = allocb(n);
         const k: usize = @intCast(n);
-        // C guards this copy with waserror, as qread's.
+        // C guards this copy with an error label, as qread's.
         @memmove(b.wp[0..k], (p + @as(usize, @intCast(sofar)))[0..k]);
         b.wp += k;
 
@@ -1159,7 +1189,7 @@ pub fn qclose(q_: ?*Queue) void {
     // Wake up readers and writers.
     _ = sync.wakeup(&q.rr);
     _ = sync.wakeup(&q.wr);
-    h9_qwake(q); // h9
+    qwake(q); // h9
 
     // Free queued blocks.
     freeblist(tofree);
@@ -1186,7 +1216,7 @@ pub fn qhangup(q: *Queue, msg_: ?[*:0]const u8) void {
     // Wake up readers and writers.
     _ = sync.wakeup(&q.rr);
     _ = sync.wakeup(&q.wr);
-    h9_qwake(q); // h9
+    qwake(q); // h9
 }
 
 /// Return non-zero if the queue is hung up.
