@@ -4,7 +4,7 @@ title: Linux terminals in 9front windows
 status: draft
 created: 2026-11-26
 authors: [progrium]
-depends: [linux-pty]
+depends: [linux-pty, linux-threads]
 areas: [linux, kern]
 branch: []
 ---
@@ -13,104 +13,152 @@ branch: []
 
 ## Abstract
 
-A Linux program whose standard input or output is a 9front console file, such as a rio window's, vt's, or a 9/UX Run Command window's `/dev/cons`, gets a real terminal. On its first terminal call on such an fd, h9 connects a `#τ` pty pair to that console. A kernel process of the machine puts the window in raw mode through its `consctl` and copies bytes between the window and the pair's master. The program's fds for that console then move to the pair's slave, which becomes its controlling terminal. devpty's line discipline handles echo, line editing, and signals. The window size comes from vt's `/env/LINES` and `/env/COLS`, or from `/dev/wctl` and the font. A resize becomes `TIOCSWINSZ` and `SIGWINCH`. When the last program using the pair closes it, the window goes back to cooked mode. vi, less, htop, fzf, and readline then work in vt under rio, in 9/UX's Run Command, and in any other 9front terminal, with no change to rio, vt, or the Linux programs.
+A Linux program whose standard input or output is a 9front console file gets a real terminal. That covers a rio window's `/dev/cons`, vt's, and a 9/UX Run Command window's. On the program's first terminal call on such an fd, h9 connects a `#τ` pty pair to that console, through a **bridge** owned by the machine's kernel. The bridge puts the window in raw mode through its `consctl`, holds that `consctl` open, and copies bytes between the window and the pair's master. It reads the window only while a program on the slave is waiting for input. The program's fds for that console move to the pair's slave, which becomes its controlling terminal, so devpty's line discipline handles echo, editing, ^C, ^Z, and the rest exactly as in any pty.
+
+The size comes from the terminal's `/env/LINES` and `/env/COLS`. A resize arrives as the terminal's `winchon` note, which h9 matches against `/env/WINCH` and turns into `TIOCSWINSZ` and `SIGWINCH` instead of `SIGINT`. A window without `TERM`, such as a plain rio window, gets `TERM=dumb`. When the last program using the pair closes it, the bridge returns the window to cooked mode. vi, less, htop, fzf, top, and readline then work in vt, in 9/UX's Run Command, and in any 9front terminal that follows vt's conventions, with no change to rio, vt, 9/UX, or the Linux programs.
 
 ## Background
 
-- **Terminals only work from the host.** In the Linux personality, `isatty` and the termios ioctls succeed only on h9's own console (`#c` and `#y`), and only when h9's stdin and stdout are host terminals (`console_tty`, spec/abi-linux.md, "Roots, environment, and console"). That console has one termios per machine (`console_term` in src/abi/linux/sys.zig), and `TCSETS` switches the host terminal through `kern.setConsoleMode`. A window's `/dev/cons` is a file served by rio (or vt, or libux), so every terminal ioctl on it returns `ENOTTY`.
-- **What that breaks.** On Nov 26, 2026, 9/UX ran under h9 at de11fc3 with Alpine 3.22 on `#L`, driven headless through `/dev/kbdin`. Line-oriented Linux programs worked in Run Command: busybox, `apk`, pipes in both directions with 9front programs, `sh -i`, and Delete interrupting a Linux `sleep`. Anything that needs a tty failed. `tty` printed "not a tty", `stty size` failed, and busybox vi printed its escape sequences as text. In a `vt -x` window, vi drew correctly, but the window stayed in cooked mode, so vi got keys a line at a time and Esc never reached it.
-- **linux-pty left this out on purpose.** [linux-pty](epoch-0/linux-pty.md) built `#τ` pairs with Linux's `N_TTY` line discipline in devpty.c, and host masters for embedders (src/hostpty.zig: a kernel process that opens `#τ/ptmx` and pumps the master). Its Rationale says "9front's `vt` and rio windows are its own terminals. This proposal doesn't add anything for the 9front side." This proposal is that side.
-- **What 9front terminals give us.** rio's and vt's `consctl` take `rawon` and `rawoff`, and both reset raw mode when the `consctl` fd that set it closes. vt also takes `winchon` and `winchoff`. vt runs its child in vt's environment group and keeps `/env/TERM`, `/env/LINES`, `/env/COLS`, `/env/XPIXELS`, `/env/YPIXELS`, and `/env/WINCH`, a counter it increments on every resize, current. With `winchon` set, it also posts `interrupt` to the child's note group after a resize. A Linux program's environment is already the machine's `/env`, so `TERM` from vt already reaches it. A plain rio window has no `TERM` and doesn't interpret escape sequences, but `/dev/wctl` gives its rectangle.
-- **9/UX's Run Command is an xterm.** Since 9ux's "Run Command is an xterm" change (progrium/9ux#29), its console emulates `xterm-256color`, with an alternate screen for full-screen programs. Like vt, it shares its environment group with its shell and keeps `TERM`, `LINES`, `COLS`, `XPIXELS`, `YPIXELS`, and `WINCH` current there, and once `winchon` is written to its `consctl` it posts `interrupt` to the shell's note group after a resize. So a bridge treats a Run Command window the way it treats a vt window.
+- **Terminals only work from the host.** In the Linux personality, `isatty` and the termios ioctls succeed only on h9's own console (`#c` and `#y`), and only when h9's stdin and stdout are host terminals (`console_tty`, spec/abi-linux.md, "Roots, environment, and console"). `ioctl` in src/abi/linux/sys.zig returns `ENOTTY` for any other fd that isn't a `#τ` pty: `if (!isConsole(fd) or !p.console_tty) return -E.NOTTY`. The console has one termios per machine (`console_term`), and `TCSETS` switches the host terminal through `kern.setConsoleMode`. A window's `/dev/cons` is a file that rio, vt, or libux serves over a mount, so it's never `isConsole`.
+- **What that breaks.** On Nov 26, 2026, 9/UX ran under h9 at de11fc3 with Alpine 3.22 on `#L`, driven headless through `/dev/kbdin`. Line-oriented Linux programs worked in Run Command: busybox, `apk`, pipes in both directions with 9front programs, `sh -i`, and Delete interrupting a Linux `sleep`. Anything that needs a tty failed. `tty` printed "not a tty", `stty size` failed, and busybox vi printed its escape sequences as text. In a `vt -x` window vi drew correctly, but the window stayed in cooked mode, so vi got keys a line at a time and Esc never reached it.
+- **linux-pty left this out on purpose.** [linux-pty](epoch-0/linux-pty.md) built `#τ` pairs with Linux's `N_TTY` line discipline in src/kern/devpty.c. It also built host masters for embedders (src/hostpty.zig, `ptyServerMain` in src/machine.zig): kernel processes of the machine that open `#τ/ptmx` and pump the master. Its Rationale says "9front's `vt` and rio windows are its own terminals. This proposal doesn't add anything for the 9front side." This proposal is that side.
+- **What 9front terminals provide.** rio, vt, and Run Command all serve `cons` and `consctl` beside it.
+  - `consctl` takes `rawon` and `rawoff`. Each of the three drops raw mode when the `consctl` fd that set it is closed (rio's `xfidclose`, vt's `fsdestroyfid`, and Run Command's console), so whoever wants raw mode has to hold `consctl` open.
+  - In raw mode, keys are passed as typed, Delete included. rio adds raw keys to the read queue without posting a note when the insertion point is at the end (`wkeyctl` in rio's wind.c). vt sends Delete as its escape sequence in raw mode instead of posting `interrupt` (main.c). So in raw mode ^C, ^Z, ^\, Esc, and Delete reach the reader as bytes.
+  - vt and Run Command share their environment group with the program they run. They keep `TERM`, `LINES`, `COLS`, `XPIXELS`, and `YPIXELS` current there, and they count resizes in `WINCH`. After `winchon` is written to `consctl`, they post `interrupt` to the note group after each resize, and the reader tells a resize from a keyboard interrupt by `WINCH` having changed. 9front's ssh uses the same protocol. Run Command has followed it since 9ux's "Run Command is an xterm" change (progrium/9ux#29), which gives its console an `xterm-256color` emulator with an alternate screen.
+  - A plain rio window has no `TERM` and interprets no escape sequences. Its `wctl` gives the window's rectangle, but rio lets only one fd at a time open `wctl` for reading (`Einuse`), and a read after the first blocks until the window changes.
+  - A Linux program's environment is built from the machine's `/env` when it execs, so `TERM` from vt or Run Command already reaches it.
+- **A user-space spike.** On Nov 26, 2026, a static Linux program, `wtty`, did a bridge's job by hand. It ran as `wtty prog args... >[3]/dev/consctl`: it wrote `rawon` and `winchon` to fd 3, opened `/dev/ptmx`, ran the program on the slave as a session leader with it as the controlling terminal, and pumped the window's `cons` to and from the master. Under h9 at de11fc3, in Run Command and in `vt -x` windows under 9/UX's rio:
+  - `tty` printed `/dev/pts/0`, `stty size` gave the window's `LINES` and `COLS` (41 114), and `TERM` was `xterm-256color`.
+  - busybox vi inserted text, took Esc, opened a line, and saved with `:wq`. busybox top drew and quit on `q`. `read -s` read a password without echoing it.
+  - ^C typed as a byte became `SIGINT` through devpty's `ISIG`, and an `INT` trap in ash caught it. A resize ran ash's `WINCH` trap, and `stty size` then gave the new width.
+  - Three things went wrong, and the design below addresses each.
+    1. **Stolen keys.** The text typed after a program exited lost its first several characters, because they went to the bridge's outstanding read on `cons`. h9's `poll` counts 9P files as always ready (spec/abi-linux.md, "Readiness"), so a user-space bridge can't wait for input without a read in flight, and the read stays in flight after its program is done.
+    2. **Resize notes reach everyone.** The `interrupt` from `winchon` goes to the whole note group, which includes the program on the slave as well as the bridge. A resize fired ash's `INT` trap as well as its `WINCH` trap.
+    3. **Counting notes.** One resize, which advanced `WINCH` once, delivered two interrupts to the bridge. With "WINCH unchanged means a real interrupt", the second turned into a spurious ^C. The bridge had two threads, and the note likely reached each.
+  - Separately, a Linux program with a `SIGINT` handler that was in the background under rc died when `interrupt` was written to its `/proc/N/notepg`, on both the sud engine and the emulator, where on Linux it would have run the handler. That wasn't reproduced in the foreground under the bridge, where the handler ran. It's recorded under Open issues.
 
 ## Proposal
 
-### Which fds are window consoles
+### Window consoles
 
-A **window console** is an fd whose path (`fd2path`) ends in `/cons`, with a `consctl` beside it, on any device other than `#c` and `#y`. In practice that's a file served by rio, vt, libux, or any other 9front terminal. h9's own console keeps the behavior it has today, including `console_tty` and `kern.setConsoleMode`.
+A **window console** is an fd that meets three conditions. Its path (`fd2path`) ends in `/cons`. A `consctl` exists beside it in the same directory of the process's namespace. And its channel's device is neither `#c` nor `#y`. In practice that means a file served by rio, vt, libux, or another 9front terminal. h9's own console keeps the behaviour it has today, including `console_tty` and `kern.setConsoleMode`.
 
-### Connecting a window console
+A window console's **identity** is its channel's `type`, `dev`, `qid.path`, and mount. Two fds that are the same window have the same identity, whatever path they were opened by.
 
-The first terminal ioctl on a window console makes the connection. That's `TCGETS` (which is what `isatty` calls), `TCSETS` in any form, `TIOCGWINSZ`, `TIOCGPGRP`, or `TIOCSCTTY`. Programs that never ask, such as `cat` and `grep` in a pipeline, are never connected, and the window stays as it is. Connecting does the following:
+### Connecting
 
-1. h9 finds or makes the **bridge** for that console. There is one bridge per open console, identified by its channel (`type`, `dev`, `qid.path`, and mount), and every Linux process on the console shares it.
-2. To make a bridge, a kernel process of the machine opens `#τ/ptmx`, sets the slave's window size (below), and opens the sibling `consctl` and writes `rawon`. It keeps that `consctl` fd open for as long as the bridge lives, because the server drops raw mode when it closes. It then runs two loops, built the way hostpty.zig's control and reader processes are. One reads the window's `cons` and writes the bytes to the master. The other reads the master and writes the bytes to the window's `cons`.
-3. Every fd in the calling process's fd table that refers to that console is replaced by a dup of the slave, so fds 0, 1, and 2 usually move together. If the caller leads a session (or is the machine's first Linux process on that console), the slave becomes its controlling terminal, as `TIOCSCTTY` would make it, and its process group becomes the foreground group. Otherwise the pair joins the caller's session as its terminal.
-4. The ioctl then runs on the slave, as for any `#τ` fd.
+The first terminal ioctl on a window console makes the connection. That's `TCGETS` (which `isatty` and `tcgetattr` call), `TCSETS` in any of its forms, `TIOCGWINSZ`, `TIOCGPGRP`, `TIOCSPGRP`, or `TIOCSCTTY`. Any other ioctl on a window console still returns `ENOTTY`. Programs that never ask, such as `cat` and `grep` in a pipeline, are never connected, and the window stays cooked.
 
-From then on, the program and its children see `/dev/pts/N`. That covers `ttyname`, `/dev/tty`, `/proc/self/fd`, and job control, with everything else exactly as linux-pty specifies. In raw mode, rio and vt pass every key as typed, so ^C, ^Z, ^\, Esc, and arrow keys arrive as bytes, and devpty's `ISIG` turns them into signals for the foreground group.
+Connecting does the following:
 
-### Reading without stealing input
+1. h9 finds the bridge for the console's identity, or makes one. There is at most one bridge per window console in a machine, and every Linux process on that console shares it.
+2. To make a bridge, the machine's pty server starts a kernel process, as `ptyServerMain` does for a host master. That process opens `#τ/ptmx` and unlocks the slave at the window's size (below). In the calling process's namespace, it opens the `cons` and `consctl` beside the fd's path, writes `rawon` and then `winchon` to `consctl`, and keeps that fd open for the bridge's whole life. Opening by path in the caller's namespace reaches the same window the caller's fd does. If any step fails, the ioctl returns `ENOTTY`, as it does today, and nothing changes.
+3. In the calling process's fd table, every fd whose channel has the console's identity is replaced by a dup of the slave, with its `O_CLOEXEC` and status flags kept. That's usually fds 0, 1, and 2 together. The fd table is the process's, so threads that share it (`CLONE_FILES`) see the change too. Fds in other processes, including the 9front shell that started the program, are untouched.
+4. If the caller has no controlling terminal, the slave becomes its controlling terminal, as `TIOCSCTTY` makes it (linux-pty's session rules), and the caller's process group becomes the pair's foreground group. If the caller already has a controlling terminal that isn't this console, the fds are still replaced, but the controlling terminal stays as it was.
+5. The ioctl then runs on the slave, as on any `#τ` fd.
 
-The window reader loop reads `cons` only while a slave read is waiting, or while canonical mode has a partial line to echo. devpty gains a call that reports a waiting slave reader and wakes the bridge when one starts. This way, a Linux program left running in the background with `&` doesn't take keys that rc, sharing the same window, is waiting for.
+From then on the program and the children it forks see `/dev/pts/N`. That covers `ttyname`, `/dev/tty`, `/proc/self/fd`, job control, `poll`, `epoll`, `FIONREAD`, and the line discipline, all exactly as linux-pty specifies. In raw mode every key reaches the master as a byte, so devpty's `ISIG` turns ^C, ^Z, and ^\ into `SIGINT`, `SIGTSTP`, and `SIGQUIT` for the foreground group, and Esc and arrow keys pass through as the escape sequences the terminal sends.
 
-### Window size and SIGWINCH
+A second Linux process that connects to the same console later, such as one started by rc after the first has exited, shares the existing bridge if it's still alive, and starts a new one otherwise. A Linux process started from a bridged program inherits the slave fds, so it doesn't connect again.
 
-The bridge sets the pair's size when it starts and again after each resize:
+### The bridge's loops
 
-- If `/env/LINES` and `/env/COLS` are set in the console's environment group, which vt keeps current, h9 uses them, with `XPIXELS` and `YPIXELS` for the pixel fields.
-- Otherwise h9 reads the window's rectangle from the `wctl` beside `cons` and divides by the character size of `$font`, less rio's border and margin. If neither works, the size is 80x24.
+A bridge has three kernel processes, built the way hostpty.zig's control process and reader are.
 
-Resize detection follows vt's protocol. The bridge writes `winchon` on its `consctl`, and vt then posts `interrupt` to the note group. h9's note-to-signal mapping (src/abi/linux/signal.zig) checks `/env/WINCH` before turning `interrupt` into `SIGINT` for a process whose controlling terminal is a bridged pair. If the counter advanced since the bridge last read it, the note is consumed, and the bridge runs `TIOCSWINSZ`, which sends `SIGWINCH` to the foreground group as linux-pty does. In a plain rio window, the `wctl` reader loop blocks on `wctl` reads, which return when the window changes.
+- **The input loop** reads `cons` and writes what it reads to the master. It reads only while devpty reports that a read is waiting on the slave, or while canonical mode has a partial line on the master side that's still being edited. Otherwise it blocks on devpty, not on `cons`. devpty gains `h9_pty_wantinput(fd)`, which blocks until a slave read starts or the pair closes, and reports which one happened. With this rule, a Linux job left running in the background with `&` doesn't take the keys rc is waiting for, and the window isn't read after the last program on the slave has stopped reading.
+- **The output loop** reads the master and writes what it reads to `cons`. In raw mode, devpty's `OPOST` with `ONLCR` gives the terminal `\r\n`, which vt and Run Command expect. A write that fails because the window has gone ends the bridge (see Disconnecting).
+- **The note loop** handles resizes (below).
+
+When the input loop is blocked in a read on `cons` and the pair closes, the bridge flushes that read (9P `Tflush`) before it writes `rawoff`. Bytes that rio has already queued as the answer to the read are passed to the master if the pair is still open, and dropped otherwise. That's at most the keys typed in the moment the program exits.
+
+### Window size
+
+The bridge sets the pair's size when it starts, and again after each resize:
+
+- If the console's environment group has `/env/LINES` and `/env/COLS`, which vt and Run Command keep current, those are the rows and columns, with `XPIXELS` and `YPIXELS` as the pixel fields. They're read from `/env` in the namespace the bridge was started in, which is the program's.
+- Otherwise, if `wctl` beside `cons` can be opened and read, the bridge reads the rectangle once and closes `wctl` again, because rio allows only one reader. It then divides by the character size of `/env/font`, after taking off rio's border and text margin. Without either, the size is 80x24.
+
+### Resizes and notes
+
+A terminal following vt's protocol posts one `interrupt` to the note group for each increase of `WINCH`. Every Linux process on the bridged console is in that group, so the note reaches the program and its children as well as the bridge. In raw mode, the keyboard doesn't post notes (Background), so an `interrupt` while the bridge holds raw mode is a resize, a 9front program's `postnote`, or a terminal's own "Interrupt" command, such as Run Command's Shell menu.
+
+h9 handles the note in two places:
+
+- **The note loop** keeps `handled`, the `WINCH` value it last acted on. When it's woken by an `interrupt`, it reads `WINCH`. If `WINCH` is greater than `handled`, it sets `handled` to `WINCH`, re-reads the size, and runs `TIOCSWINSZ` on the master if the size changed. linux-pty's `TIOCSWINSZ` sends `SIGWINCH` to the foreground group. The bridge's note loop is a kernel process, so it receives the note without being a Linux process.
+- **The note-to-signal path** in src/machine.zig (`lsig.noteSignal`) treats `interrupt` specially for a Linux process whose controlling terminal is a bridged pair. Each such pair keeps `pending`, the number of resize notes not yet consumed, which is `WINCH` less `consumed`. When `interrupt` reaches the process, and `pending` is above zero, h9 consumes one and drops the note. Otherwise the note becomes `SIGINT`, as it does today. Counting is per process, not per thread: a group note that reaches several threads of one Linux process is counted once, the way linux-threads delivers a process's signal once.
+
+The process-level count is what makes the spike's two failures go away. The program isn't interrupted by a resize, and a resize that one process sees through two threads isn't counted as two.
 
 ### TERM
 
-A Linux program gets `TERM` from `/env/TERM` as it does today. When a bridged console's environment has no `TERM`, which is the case for plain rio windows (vt and Run Command set one), h9 sets `TERM=dumb` for Linux processes on it. Programs then line-edit, prompt, and stop colouring, instead of printing escape sequences that the window shows as text. Full-screen programs need a terminal emulator: vt, or 9/UX's Run Command.
+A Linux program gets `TERM` from `/env/TERM`, as it does today. When a bridged console's environment has no `TERM`, as in a plain rio window, h9 sets `TERM=dumb` in the environment of Linux programs that exec on the slave. Programs then line-edit, prompt, and stop colouring, instead of sending escape sequences that the window would show as text. Full-screen programs need a terminal emulator: vt, or 9/UX's Run Command.
 
 ### Disconnecting
 
-When every slave fd has closed, the master reads `EIO`. The bridge then writes `winchoff` and `rawoff`, closes `consctl`, closes the master, and exits. The window is back in cooked mode for rc or whatever reads it next. If the window's `cons` hangs up (the window was deleted), the bridge closes the master, so the slave is hung up and its foreground group gets `SIGHUP`, as for any pty master that closes.
+When every slave fd has closed, the master reads `EIO`, and the bridge ends. It writes `winchoff` and `rawoff`, closes `consctl`, `cons`, and the master, and exits. The window is back in cooked mode for rc or whatever reads it next. A bridge never outlives its pair.
+
+If the window's `cons` hangs up, because the window was deleted or its terminal exited, the bridge closes the master. The slave hangs up, and its foreground group gets `SIGHUP`, as for any pty master that closes.
 
 ### 9front programs on a bridged console
 
-A 9front program exec'd from a bridged Linux process inherits the slave as its fds 0, 1, and 2 and reads lines from it in canonical mode, as from a pipe. A 9front program that opens `/dev/cons` by name still reaches the window directly, and while the bridge holds the window raw, it reads raw keys. Linux programs rarely run such programs in the middle of a session, and Open issues lists a fix.
+A 9front program exec'd from a bridged Linux process inherits the slave as its fds 0, 1, and 2, and reads lines from it in canonical mode, as from a pipe. A 9front program that opens `/dev/cons` by name still reaches the window directly. While the bridge holds the window raw, it reads raw keys there and competes with the input loop for them. Linux programs rarely run such programs in the middle of a session, and Open issues has a fix.
 
 ## Rationale
 
-- **A pty pair rather than termios on the window.** The alternative is to keep a termios per window console and map `ICANON` and `ECHO` onto `rawon` and `rawoff`, as `TCSETS` does for h9's console today. A 9front `cons` has only two modes, though. Cooked means rio's line editing with echo, and raw means no echo and no editing. There's no `ECHO` without `ICANON`, no echo-off with line editing (`read -s`), no `VMIN` or `VTIME`, no `ISIG` in raw mode, and no foreground group. All of that would have to be written again next to the console. devpty.c already has every piece, along with the controlling-terminal and job-control rules, so a bridge reuses them unchanged.
-- **Connecting on the first terminal call rather than at exec.** Connecting at exec would put the window in raw mode for every Linux program whose stdio is a window, including `grep` reading a line you type, and it would take away rio's own line editing for no reason. Connecting on the first terminal call costs nothing for programs that never call one.
+- **A pty pair rather than termios on the window.** The alternative is to keep a termios per window console and map `ICANON` and `ECHO` onto `rawon` and `rawoff`, as `TCSETS` does for h9's console today. A 9front `cons` has only two modes, though. Cooked means the terminal's own line editing with echo, and raw means no echo and no editing. There's no `ECHO` without `ICANON`, no echo-off with line editing (`read -s`), no `VMIN` or `VTIME`, no `ISIG` in raw mode, and no foreground group. All of that would have to be written again next to the console. devpty.c already has every piece, along with the controlling-terminal and job-control rules, so a bridge reuses them unchanged. The spike showed that vi, top, `read -s`, ^C, and `SIGWINCH` all work through a pair.
+- **In the kernel, not a user-space bridge.** The spike shows what a bridge outside the kernel can't do. It can't wait for a slave reader, because `poll` counts 9P files as always ready, so it steals keys. It can't stop the terminal's resize note from reaching the program as `SIGINT`. And it has to be run by hand before each program. As a kernel process, the bridge can block on devpty instead of on `cons`, and the note path can consume resize notes.
+- **Connecting on the first terminal call rather than at exec.** Connecting at exec would put the window in raw mode for every Linux program whose stdio is a window, including `grep` reading a line you type, and it would take away the terminal's own line editing for no reason. Connecting on the first terminal call costs nothing for programs that never call one.
 - **Replacing the fds rather than proxying the console.** A proxy would have to make every console read and write through the personality honour the pair's termios, while `poll`, `epoll`, `FIONREAD`, and `/proc/self/fd` still saw the console. Dup'ing the slave over the fds puts the process on an ordinary `#τ` fd, so the existing paths apply.
-- **Using vt's environment and `winchon` rather than a new protocol.** vt already publishes its size this way, and 9front's ssh uses `/env/WINCH` the same way. Other 9front terminals can do the same, which 9/UX's console could adopt.
-- **A guest tool instead.** A `script`-like 9front command could open a pty, set the window raw, and pump bytes, and it would work today with no change to h9. It would need to be run by hand before each program, though, and it couldn't hand the controlling terminal to the program's session. It's still useful as a stopgap and as a way to test the bridge's loops.
+- **vt's protocol rather than a new one.** vt, Run Command, and 9front's ssh already agree on `TERM`, `LINES`, `COLS`, `WINCH`, and `winchon`. Using them needs no change to any terminal, and a new 9front terminal gets Linux programs right by following the same protocol.
+- **Counting resize notes rather than comparing WINCH.** "`WINCH` changed means resize, unchanged means interrupt" breaks when two notes arrive before the first is handled. The spike saw exactly that. Counting consumed notes against `WINCH` is exact for any terminal that posts one note per increment.
+- **Not blocking on `wctl`.** rio allows only one `wctl` reader, and a bridge that held it would make other programs' opens fail with `Einuse`. Plain rio windows get `TERM=dumb`, which rules out the full-screen programs that care about live resizes, so reading the size when the bridge connects is enough there.
 - **The host's ptys.** These were rejected in linux-pty for the same reasons: they leave the sandbox's view, and they don't exist on Windows or the browser host.
 
 ## Compatibility
 
 - **CLI and `Machine.Options`:** no changes.
 - **h9's own console:** unchanged. The bridge applies only to window consoles.
-- **Linux programs on a window console:** `isatty`, `tcgetattr`, and `TIOCGWINSZ` now succeed where they returned `ENOTTY`. A program that checks `isatty` before colouring sees a terminal, but it also sees `TERM=dumb` unless the window is a vt, so output to plain rio windows stays plain.
-- **rio, vt, and 9/UX:** no changes. While a bridge holds the window raw, rio's line editing and mouse selection of the input line are replaced by the Linux line discipline. That's what you'd expect while a Linux program runs, and it ends when the program does.
+- **Linux programs on a window console:** `isatty`, `tcgetattr`, and `TIOCGWINSZ` now succeed where they returned `ENOTTY`, and `ttyname` gives `/dev/pts/N`. A program that checks `isatty` before colouring sees a terminal, but it also sees `TERM=dumb` unless the window sets `TERM`, so output to plain rio windows stays plain.
+- **Notes:** `interrupt` stops reaching a bridged Linux process as `SIGINT` when it stands for a resize. Every other note maps as it does today.
+- **rio, vt, and 9/UX:** no changes. While a bridge holds the window raw, the terminal's own line editing and mouse selection of the input line are replaced by the Linux line discipline. That's what you'd expect while a Linux program runs, and it ends when the program does.
 - **`third_party/`:** no changes.
 
 ## Security
 
-The bridge reaches nothing the program couldn't already reach. It opens the `consctl` and `wctl` beside a `cons` the program already holds, in the program's own namespace, and a `#τ` pair, which is machine-local. The pty cap from linux-pty covers the bridges. No host resources are involved.
+The bridge reaches nothing the program couldn't already reach. It opens `cons`, `consctl`, `wctl`, and `/env` entries in the program's own namespace, beside a `cons` the program already holds, plus a `#τ` pair, which is machine-local. The pty cap from linux-pty covers the bridges. No host resources are involved, and the terminals see only what they'd see from a 9front program that set raw mode.
 
 ## Done criteria
 
-Integration cases on the headless screen, tagged `[linux-window-tty]`, with the 9front root and the Alpine root. Each case runs rio with a vt window (or a plain window) and types through `/dev/kbdin`.
+Integration cases on the headless screen, tagged `[linux-window-tty]`, with the 9front root and the Alpine root. Each case runs rio with a vt window, or a plain window where it says so, and types through `/dev/kbdin`.
 
 - [ ] `test "isatty is true on a vt window's cons, and tty prints /dev/pts/0 [linux-window-tty]"`
+- [ ] `test "cat and grep in a pipeline leave the window cooked [linux-window-tty]"`
 - [ ] `test "a Linux program in raw mode reads Esc and arrow keys as bytes [linux-window-tty]"`
 - [ ] `test "read -s in ash reads a line without echoing it [linux-window-tty]"`
 - [ ] `test "Ctrl-C in raw mode sends SIGINT to the foreground group [linux-window-tty]"`
-- [ ] `test "stty size follows vt's LINES and COLS, and a resize sends SIGWINCH [linux-window-tty]"`
-- [ ] `test "a plain rio window gets TERM=dumb and its size from wctl [linux-window-tty]"`
+- [ ] `test "stty size follows vt's LINES and COLS, and a resize sends SIGWINCH and not SIGINT [linux-window-tty]"`
+- [ ] `test "a resize seen by two threads of one process is consumed once [linux-window-tty]"`
+- [ ] `test "an interrupt that isn't a resize still sends SIGINT [linux-window-tty]"`
 - [ ] `test "the window is back in cooked mode for rc after the program exits [linux-window-tty]"`
+- [ ] `test "keys typed after the program exits reach rc whole [linux-window-tty]"`
 - [ ] `test "a background Linux job doesn't take rc's input [linux-window-tty]"`
-- [ ] `test "cat and grep in a pipeline leave the window cooked [linux-window-tty]"`
-- [ ] Demo: busybox vi in `vt -x` under rio edits and saves a file, and htop draws and quits on `q`, in a 9/UX session.
+- [ ] `test "a plain rio window gets TERM=dumb and its size from wctl [linux-window-tty]"`
+- [ ] `test "deleting the window sends SIGHUP to the foreground group [linux-window-tty]"`
+- [ ] Demo: in a 9/UX session, busybox vi in Run Command edits and saves a file, and htop draws, follows a resize of the window, and quits on `q`.
 
 ## Implementation
 
-1. devpty.c: a call that reports whether a slave read is waiting, and wakes a waiter when one starts.
-2. The bridge: a kernel process per window console, with its window reader, master reader, and size loops, built the way hostpty.zig's processes are, in src/machine.zig.
-3. sys.zig: window console detection, connecting on the first terminal ioctl, the fd swap, the controlling terminal, and `TERM=dumb`.
-4. signal.zig: the `/env/WINCH` check before `interrupt` becomes `SIGINT`.
-5. The headless cases, and the "Roots, environment, and console" section of spec/abi-linux.md.
+1. devpty.c: `h9_pty_wantinput`, which blocks until a slave read starts or the pair closes, and the pair's resize-note count.
+2. src/machine.zig: the bridge's three kernel processes, started by the pty server, with the flush on close.
+3. src/abi/linux/sys.zig: window console detection and identity, connecting on the first terminal ioctl, the fd swap, the controlling terminal, and `TERM=dumb` at exec.
+4. src/machine.zig and src/abi/linux/signal.zig: consuming resize notes per process before `interrupt` becomes `SIGINT`.
+5. The headless cases. Then the "Roots, environment, and console" section of spec/abi-linux.md, and MANUAL.md's "Linux programs" chapter on terminals.
 
 ## Open issues
 
-- **9front programs that open `/dev/cons` by name under a bridge.** h9 could bind the slave over `/dev/cons` in a bridged process's namespace when it execs a 9front program. That needs `consctl` semantics on a pty, either served by devpty or mapped onto termios.
+- **`interrupt` killing a handled Linux program.** In the spike, a background Linux program with a `SIGINT` handler died on an `interrupt` written to its `notepg`, instead of running the handler. If that's a bug in the note-to-signal path, it needs fixing before the bridge's note handling relies on that path, probably under linux-threads.
+- **9front programs that open `/dev/cons` by name under a bridge.** When a bridged process execs a 9front program, h9 could bind the slave over `/dev/cons` in that program's namespace. That needs `consctl` semantics on a pty, either served by devpty or mapped onto termios.
 - **rio's margins.** Working out the character size from `wctl` and `$font` can be off by a column if rio's border width changes. Asking terminals to publish `LINES` and `COLS` avoids the guess.
 - **Two machines on one window.** A window served over 9P to a second machine would get a bridge in each machine. Only one can hold raw mode sensibly, and the second could fall back to `ENOTTY`.
+- **A guest tool for older h9 builds.** The spike's `wtty` is a usable stopgap where losing a few keys after each program is acceptable. It doesn't need to ship once the bridge exists.
