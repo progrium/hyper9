@@ -100,9 +100,9 @@ drawterm only ever ran its own kprocs.
 
 The device table, listing drawterm's devices plus ours.
 
-#### Per-machine console device `#y` (`src/kern/devhcons.c`)
+#### Per-machine console device `#y` (`src/kern/dev/hcons.zig`)
 
-drawterm's `#c/cons` reads and writes the host's fds 0 and 1 directly. `#y<id>` serves machine `id`'s `Stdio` through leaf calls into Zig, and is bound before `#c` on `/dev`, so `/dev/cons` is ours and the rest of `#c` stays visible. It also has `/dev/stderr`, which the guest's fd 2 is opened on, so fd 2 reaches the host's stderr.
+drawterm's `#c/cons` reads and writes the host's fds 0 and 1 directly. `#y<id>`, a native device ([kernel-port](../design/kernel-port.md)), serves machine `id`'s `Stdio` through calls into `src/kern.zig` that return -1 rather than fail, and is bound before `#c` on `/dev`, so `/dev/cons` is ours and the rest of `#c` stays visible. It also has `/dev/stderr`, which the guest's fd 2 is opened on, so fd 2 reaches the host's stderr.
 
 #### devenv `#e`, from 9front (`src/kern/devenv.c`)
 

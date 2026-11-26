@@ -1254,7 +1254,7 @@ pub fn fd2path(fd: u31, buf: []u8) Error!void {
     _ = try check(c.h9_fd2path(fd, buf.ptr, @intCast(@min(buf.len, std.math.maxInt(c_uint)))));
 }
 
-/// One machine's console, behind `#y<id>` (src/kern/devhcons.c).
+/// One machine's console, behind `#y<id>` (src/kern/dev/hcons.zig).
 pub const Console = struct {
     /// Input from the run's reader thread; none means EOF.
     in: ?*consin.ConsoleInput,
@@ -1353,7 +1353,8 @@ fn console(id: c_ulong) ?*Console {
     return consoles[id].load(.acquire);
 }
 
-// Leaves called from devhcons.c. They never raise kernel errors.
+// Leaves called from src/kern/dev/hcons.zig and the C devices. They never
+// raise kernel errors.
 
 /// Whether this is the namespace kernel's build (design/epoch-0/namespace-kernel.md),
 /// which has no console, policy, guest tools, or built-in root: it
