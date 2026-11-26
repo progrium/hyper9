@@ -509,6 +509,8 @@ pub const Ops = struct {
     /// Hangs w, with waker wk, on what ch's readiness comes from, for a
     /// call when it may have changed; ready.unwatch takes it off.
     watch: ?*const fn (*Chan, c_int, *rd.Watch, *rd.Waker) void = null,
+    /// The list ch's watch goes on, for its generation (`changes`).
+    watchers: ?*const fn (*Chan) ?*rd.Watchers = null,
 
     // Part 3.
 
@@ -980,6 +982,14 @@ pub fn ready(ch: *Chan, ev: c_int) c_int {
     }
     if (devx(d)) |x| if (x.ready) |f| return f(ch, ev);
     return readydefault(ev);
+}
+
+/// The generation of what ch's readiness comes from, which moves with
+/// each change to it, or null if the device doesn't say.
+pub fn changes(ch: *Chan) ?u32 {
+    const o = nativeOps(of(ch)) orelse return null;
+    const f = o.watchers orelse return null;
+    return rd.changes(f(ch) orelse return null);
 }
 
 pub fn readydefault(ev: c_int) c_int {

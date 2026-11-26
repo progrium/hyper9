@@ -281,6 +281,8 @@ fn fdclose(fd_: c_int, flag: c_int) void {
     }
     c.unlock(&f.ref.lk);
     chan.cclose(ch);
+    // h9: a poll holding the channel lets it go (ready.zig's `closed`).
+    if (dev.rd.closed) |k| k();
 }
 
 pub fn close(fd: c_int) Error!c_int {

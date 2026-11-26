@@ -534,16 +534,26 @@ h9so_watch(int fd, int events, void *owner)
 	kick();
 }
 
+/*
+ * The watcher's poll holds a reference to each socket it's waiting on,
+ * so a socket closed while it waits isn't closed on the host, and its
+ * peer sees no EOF, until that poll returns: kick it, so it lets go of a
+ * socket nobody watches any more.
+ */
 void
 h9so_unwatch(void *owner)
 {
-	int i;
+	int i, n;
 
+	n = 0;
 	lock(&wlk);
 	for(i = 0; i < nwatch; )
-		if(watches[i].owner == owner)
+		if(watches[i].owner == owner){
 			watches[i] = watches[--nwatch];
-		else
+			n++;
+		}else
 			i++;
 	unlock(&wlk);
+	if(n > 0)
+		kick();
 }

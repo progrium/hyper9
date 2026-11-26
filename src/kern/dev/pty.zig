@@ -744,6 +744,7 @@ pub const Device = dev.Native(Tau, "pty", .{
     .gens = &.{&ptygen},
     .ready = ptyready,
     .watch = ptywatch,
+    .watchers = ptywatchers,
 });
 
 /// Readiness (design/file-interface.md): an open side's queues.
@@ -751,6 +752,12 @@ fn ptyready(ch: *Chan, ev: c_int) c_int {
     if (ch.qid.type & c.QTDIR != 0) return dev.readydefault(ev);
     const rq = h9_ptyq(ch, 0) orelse return dev.readydefault(ev);
     return qio.qready(rq, h9_ptyq(ch, 1).?, ev);
+}
+
+fn ptywatchers(ch: *Chan) ?*dev.rd.Watchers {
+    if (ch.qid.type & c.QTDIR != 0 or h9_ptyq(ch, 0) == null) return null;
+    const p: *Pty = @ptrCast(@alignCast(dev.aux(ch).*.?));
+    return &p.watch;
 }
 
 fn ptywatch(ch: *Chan, ev: c_int, w: *dev.rd.Watch, wk: *dev.rd.Waker) void {

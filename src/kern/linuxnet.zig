@@ -101,6 +101,17 @@ pub fn h9_pollgen() callconv(.c) c_uint {
     return rd.gen();
 }
 
+/// The generation of what fd's readiness comes from, which moves with
+/// each change to it (ready.changes): a host socket's is every host
+/// socket's, and a device that doesn't say has the global one.
+fn h9_fdgen(fd: c_int) callconv(.c) c_uint {
+    const ch = sysfile.fdtochan(fd, -1, false, true) catch return rd.gen();
+    defer chan.cclose(ch);
+    if (dev.of(ch).dc == 'I')
+        return rd.changes(&hostwatch);
+    return dev.changes(ch) orelse rd.gen();
+}
+
 /// Every poller, for h9_pollkick.
 var plk: c.Lock = std.mem.zeroes(c.Lock);
 var pollers: ?*Poller = null;
@@ -164,6 +175,19 @@ fn lockwait(seen: c_uint) Error!void {
             break;
         _ = try s.wait(0);
     }
+}
+
+/// An fd was closed (ready.closed): every waiting poll looks again, and
+/// an epoll_wait, which polls once, returns and lets its channels go, as
+/// Linux's epoll holds no reference to a file in its set.
+fn pollclosed() void {
+    if (@as(*volatile ?*Poller, &pollers).* == null)
+        return;
+    c.lock(&plk);
+    var p = pollers;
+    while (p) |w| : (p = w.next)
+        w.s.kick();
+    c.unlock(&plk);
 }
 
 /// A recv or send on a host socket that finds it not ready (EAGAIN). An
@@ -236,14 +260,26 @@ fn poll(fds: []Lpollfd, ms: c_int, gen: ?*c_uint, once: bool) Error!c_int {
         break :blk m[0..fds.len];
     };
     defer if (pf.ptr != &small) c.free(pf.ptr);
+    var pl: Poller = .{};
+    var listed = false;
+    // Listed and armed before the fds are looked up, so a close after
+    // the lookup (which this holds the channel through) kicks the wait.
+    if (ms != 0) {
+        rd.closed = &pollclosed;
+        c.lock(&plk);
+        pl.next = pollers;
+        pollers = &pl;
+        c.unlock(&plk);
+        listed = true;
+    }
+    pl.s.arm();
     for (pf, fds) |*p, f| {
         p.* = .{};
         if (f.fd >= 0)
             p.ch = sysfile.fdtochan(f.fd, -1, false, true) catch null;
     }
     defer for (pf) |*p| if (p.ch) |ch| chan.cclose(ch);
-    var pl: Poller = .{};
-    var listed = false;
+    var first = true;
     defer if (listed) {
         c.lock(&plk);
         var l: *?*Poller = &pollers;
@@ -265,17 +301,12 @@ fn poll(fds: []Lpollfd, ms: c_int, gen: ?*c_uint, once: bool) Error!c_int {
         // between the caller's answer and this call, and sleep until
         // something else woke it, forever if nothing did (#276).
         g = if (once and gen != null) gen.?.* else rd.gen();
-        pl.s.arm();
+        if (!first)
+            pl.s.arm();
+        first = false;
         ready = scan(fds, pf);
         if (ready > 0 or ms == 0)
             break;
-        if (!listed) {
-            c.lock(&plk);
-            pl.next = pollers;
-            pollers = &pl;
-            c.unlock(&plk);
-            listed = true;
-        }
         for (pf, fds) |*p, f| if (p.ch) |ch|
             dev.watch(ch, @as(u16, @bitCast(f.events)), &p.w, &pl.s.waker);
         // Asked again with the watches on: a change since the first
@@ -747,6 +778,7 @@ fn h9_linux_sockctl(fd: c_int, msg: [*:0]const u8) callconv(.c) c_int {
 
 pub fn exportC() void {
     @export(&h9_pollgen, .{ .name = "h9_pollgen" });
+    @export(&h9_fdgen, .{ .name = "h9_fdgen" });
     @export(&h9_pollwake, .{ .name = "h9_pollwake" });
     @export(&h9_pollkick, .{ .name = "h9_pollkick" });
     @export(&h9_lockgen, .{ .name = "h9_lockgen" });
@@ -834,4 +866,54 @@ test "an edge-triggered poll waits for the next change, and ends at once for one
     t0 = c.h9_tnow();
     try testing.expectEqual(@as(c_int, 0), try poll(&pf, 10000, &g, true));
     try testing.expect(c.h9_tnow() - t0 < 5000 * 1000000);
+}
+
+test "a blocked lock waits for a change to the lock table, and no clock ends it [file-interface]" {
+    _ = try port.testing.begin();
+    var done = std.atomic.Value(bool).init(false);
+    var k: port.testing.Kproc = undefined;
+    try k.start(struct {
+        fn run(seen: c_uint, d: *std.atomic.Value(bool)) void {
+            lockwait(seen) catch {};
+            d.store(true, .seq_cst);
+        }
+    }.run, .{ h9_lockgen(), &done });
+    // A poll would have looked many times by now.
+    c.osmsleep(100);
+    try testing.expect(!done.load(.seq_cst));
+    h9_lockwake();
+    var i: usize = 0;
+    while (!done.load(.seq_cst) and i < 10000) : (i += 1)
+        c.osmsleep(1);
+    try testing.expect(done.load(.seq_cst));
+    k.join();
+}
+
+test "closing an fd ends a once poll waiting on it, which lets the channel go [file-interface]" {
+    _ = try port.testing.namespace();
+    var fds: [2]c_int = undefined;
+    _ = try sysfile.pipe(&fds);
+    defer _ = sysfile.close(fds[1]) catch {};
+    const rd0 = try sysfile.fdtochan(fds[0], -1, false, true);
+    defer chan.cclose(rd0);
+    const refs = rd0.ref.ref;
+    var k: port.testing.Kproc = undefined;
+    try k.start(struct {
+        // In the poller's fd group, as another thread of its program.
+        fn run(fd: c_int, fg: *c.Fgrp) void {
+            const own = port.up().fgrp;
+            port.up().fgrp = fg;
+            defer port.up().fgrp = own;
+            c.osmsleep(50);
+            _ = sysfile.close(fd) catch {};
+        }
+    }.run, .{ fds[0], port.up().fgrp });
+    var g: c_uint = rd.gen();
+    var pf = [1]Lpollfd{.{ .fd = fds[0], .events = LPOLLIN, .revents = 0 }};
+    const t0 = c.h9_tnow();
+    _ = try poll(&pf, 10000, &g, true);
+    try testing.expect(c.h9_tnow() - t0 < 5000 * 1000000);
+    k.join();
+    // The fd's and this case's references were all; the poll's is gone.
+    try testing.expect(rd0.ref.ref <= refs);
 }

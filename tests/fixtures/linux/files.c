@@ -4,6 +4,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -106,79 +107,38 @@ static void ofd_flock(void) {
 	printf("ok ofd_flock\n");
 }
 
-static double now_us(void) {
-	struct timespec t;
-	clock_gettime(CLOCK_MONOTONIC, &t);
-	return t.tv_sec * 1e6 + t.tv_nsec / 1e3;
-}
-
-static int cmpd(const void *a, const void *b) {
-	double x = *(const double *)a, y = *(const double *)b;
-	return x < y ? -1 : x > y;
-}
-
-/* One round of lock_wake: how long from the parent's letting a child go
- * to the child's running, where the child waits in an F_SETLKW (kind 0),
- * a flock (1), or a read of a pipe (2), a wake that never polled. */
-static double wake_round(int fd, int kind) {
-	int p[2], q[2];
-	if (pipe(p) != 0 || pipe(q) != 0)
-		return -1;
-	if (kind == 0 && setlk(fd, F_SETLK, F_WRLCK, 0, 1) != 0) return -1;
-	if (kind == 1 && flock(fd, LOCK_EX) != 0) return -1;
-	pid_t c = fork();
-	if (c == 0) {
-		char b;
-		int f = open(path, O_RDWR);
-		if (f < 0) _exit(1);
-		if (kind == 0 && setlk(f, F_SETLKW, F_WRLCK, 0, 1) != 0) _exit(2);
-		if (kind == 1 && flock(f, LOCK_EX) != 0) _exit(2);
-		if (kind == 2 && read(q[0], &b, 1) != 1) _exit(2);
-		double t = now_us();
-		if (write(p[1], &t, sizeof t) != sizeof t) _exit(3);
-		_exit(0);
-	}
-	close(p[1]);
-	close(q[0]);
-	usleep(20000);
-	double t0 = now_us(), t1 = -1;
-	int ok = kind == 0 ? setlk(fd, F_SETLK, F_UNLCK, 0, 1) == 0 : kind == 1 ? flock(fd, LOCK_UN) == 0 : write(q[1], "x", 1) == 1;
-	if (!ok || read(p[0], &t1, sizeof t1) != sizeof t1)
-		t1 = -1;
-	close(p[0]);
-	close(q[1]);
-	if (child_status(c) != 0 || t1 < 0)
-		return -1;
-	return t1 - t0;
-}
-
 /* A blocked F_SETLKW or flock wakes when the lock goes (design/
- * file-interface.md, Part 3), not at a poll's next look: the median from
- * the unlock to the waiter's running is within a little of a pipe
- * reader's, where a 2 ms poll added most of a millisecond or more. A
- * loaded host can slow one set of rounds, so it gets three tries. */
+ * file-interface.md, Part 3): each round a child blocks on the lock the
+ * parent holds, and runs once the parent lets it go, and not before. How
+ * soon is the engine's, so this checks only that it happens: that the
+ * wait is a waker and not a poll is src/kern/linuxnet.zig's case. */
 static void lock_wake(void) {
-	enum { N = 31 };
-	double lat[3][N];
 	int fd = fresh("lockwake");
 	CHECK("lock_wake", fd >= 0);
-	for (int attempt = 0; attempt < 3; attempt++) {
-		for (int i = 0; i < N; i++)
-			for (int k = 0; k < 3; k++) {
-				lat[k][i] = wake_round(fd, k);
-				CHECK("lock_wake", lat[k][i] >= 0);
-			}
-		for (int k = 0; k < 3; k++)
-			qsort(lat[k], N, sizeof lat[k][0], cmpd);
-		if (lat[0][N / 2] <= lat[2][N / 2] + 400 && lat[1][N / 2] <= lat[2][N / 2] + 400) {
-			close(fd);
-			printf("ok lock_wake\n");
-			return;
+	for (int i = 0; i < 20; i++) {
+		int fl = i & 1, p[2];
+		CHECK("lock_wake", pipe(p) == 0);
+		CHECK("lock_wake", fl ? flock(fd, LOCK_EX) == 0 : setlk(fd, F_SETLK, F_WRLCK, 0, 1) == 0);
+		pid_t c = fork();
+		if (c == 0) {
+			int f = open(path, O_RDWR);
+			if (f < 0) _exit(1);
+			if (fl ? flock(f, LOCK_EX) != 0 : setlk(f, F_SETLKW, F_WRLCK, 0, 1) != 0) _exit(2);
+			if (write(p[1], "x", 1) != 1) _exit(3);
+			_exit(0);
 		}
+		close(p[1]);
+		/* Still blocked while the parent holds it. */
+		struct pollfd pf = {.fd = p[0], .events = POLLIN};
+		CHECK("lock_wake", poll(&pf, 1, i == 0 ? 200 : 10) == 0);
+		CHECK("lock_wake", fl ? flock(fd, LOCK_UN) == 0 : setlk(fd, F_SETLK, F_UNLCK, 0, 1) == 0);
+		char b;
+		CHECK("lock_wake", read(p[0], &b, 1) == 1);
+		close(p[0]);
+		CHECK("lock_wake", child_status(c) == 0);
 	}
 	close(fd);
-	printf("FAIL lock_wake: median wake %.0f us (fcntl), %.0f us (flock), %.0f us (pipe)\n", lat[0][N / 2], lat[1][N / 2], lat[2][N / 2]);
-	failed = 1;
+	printf("ok lock_wake\n");
 }
 
 /* A flock goes with the last fd of its open file, even when that's a

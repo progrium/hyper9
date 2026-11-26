@@ -853,7 +853,13 @@ fn run(k: *Kconn, w: *Kworker, q: *Kreq) void {
     r.type = t.type + 1;
     r.tag = t.tag;
     r.fid = t.fid;
-    request(k, w, t, &r) catch {
+    // A Tflush that came while the request waited for this worker (on
+    // w.req, where it isn't interrupted) ends it before it starts: a
+    // Tready would otherwise wait on, holding its file open.
+    c.lock(&k.lk);
+    const early = q.nftag > 0;
+    c.unlock(&k.lk);
+    (if (early) port.kerror(&port.Eintr) else request(k, w, t, &r)) catch {
         chan.kstrcpy(&ebuf, up().errstr, ebuf.len);
         r = std.mem.zeroes(Fcall);
         r.type = c.Rerror;
