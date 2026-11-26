@@ -739,7 +739,14 @@ fn fsclose(ch: *Chan) Error!void {
 
 fn seek(uif: *Ufsinfo, offset: i64) Error!void {
     if (uif.offset != offset) {
-        if (hc.lseek(uif.fd, @intCast(offset), 0) < 0) return oserr();
+        if (wasi) {
+            // WASI's own seek: lld links wasi-libc's lseek to this call
+            // through a stub that traps, as if the two disagreed on its
+            // type. WASI's error numbers are wasi-libc's errno values.
+            var pos: std.os.wasi.filesize_t = undefined;
+            const rc = std.os.wasi.fd_seek(uif.fd, offset, .SET, &pos);
+            if (rc != .SUCCESS) return oserrOf(@intFromEnum(rc));
+        } else if (hc.lseek(uif.fd, @intCast(offset), 0) < 0) return oserr();
         uif.offset = offset;
     }
 }
