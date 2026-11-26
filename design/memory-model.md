@@ -6,7 +6,7 @@ created: 2026-11-21
 authors: [progrium]
 depends: [baseline-1, cow-fork]
 areas: [kern, linux, engine, tests]
-branch: []
+branch: [dev, memory-model]
 ---
 
 # Proposal: One memory model under both ABIs
@@ -56,13 +56,13 @@ None new for reach. Copy-on-write across processes is the property to get right:
 ## Done criteria
 
 - [ ] `test "rfork shares pages until a write (9front) [memory-model]"` passes on every engine, with the parent and the child each seeing only their own writes.
-- [ ] `test "rfork RFMEM still shares data and bss [memory-model]"` passes.
-- [ ] `test "a.out text is filled on touch [memory-model]"` passes, with resident memory after exec of a large binary less than its text size.
-- [ ] `test "segattach, segbrk, segdetach, and segfree on Mm [memory-model]"` passes, with `/proc/n/segment` unchanged from before.
-- [ ] A Go program for `GOOS=plan9` that runs `os/exec` 100 times passes under `--memory 512M`.
+- [x] `test "rfork RFMEM still shares data and bss [memory-model]"` passes.
+- [x] `test "a.out text is filled on touch [memory-model]"` passes, with resident memory after exec of a large binary less than its text size.
+- [x] `test "segattach, segbrk, segdetach, and segfree on Mm [memory-model]"` passes, with `/proc/n/segment` unchanged from before.
+- [x] A Go program for `GOOS=plan9` that runs `os/exec` 100 times passes under `--memory 512M`.
 - [ ] The self-host cases pass, and `zig build integration` passes on every engine with none newly skipped.
-- [ ] `src/segment.zig` has no fault handler, page walker, or engine calls of its own.
-- [ ] [spec/kernel.md](../spec/kernel.md) describes one memory model.
+- [x] `src/segment.zig` has no fault handler, page walker, or engine calls of its own.
+- [x] [spec/kernel.md](../spec/kernel.md) describes one memory model.
 
 ## Implementation
 
@@ -76,3 +76,14 @@ None new for reach. Copy-on-write across processes is the property to get right:
 
 - Whether a 9front binary's pages need a smaller chunk than `Mm`'s for copy-on-write to pay off in small processes such as rc.
 - Whether the shared text of one binary run many times should be one set of pages across processes, as on 9front. As written it is, through the file mapping.
+
+## Updates
+
+- 2026-11-26: Steps 1 to 5 are built on the `memory-model` branch. Step 2's build option was left out: both models never ran side by side, and `/proc/n/segment` was compared with a build of `dev` instead. What the work found:
+  - **Two `Mm`s, not one.** A 9front address space (`segment.Space`) is two: one for text, data, bss, the heap, and segattach's segments, which `RFMEM` siblings share and which is mapped into each sibling's engine address space (`Mm.attach`), and one for the process's own stack. One `Mm` per address space can't give `RFMEM` siblings shared data with stacks of their own, and making data and bss shared mappings, as the Proposal says, would leave them shared with a plain fork child of an `RFMEM` process too, where 9front copies them. Go and libthread do just that: threads by `RFMEM`, then `os/exec` by a plain fork. A plain fork forks both `Mm`s copy-on-write.
+  - **Labels.** A mapping carries its segment's class and slot (`Vma.label`), and mappings with different labels never merge, so `/proc/n/segment` and the `seg*` calls find a segment as the span of its mappings.
+  - **Shared segments get their own pages.** segattach can put a `shared` segment and a `memory` one in the same 64 KiB chunk, and fork shares a chunk whole or not at all, so a `shared` segment's pages are page-sized overlays allocated when it's attached (`Mm.insertOverlaid`). A `memory` segment's pages come on first touch, so `--memory` limits a `memory` segment as its pages are touched, not when it's attached; the `[segattach]` case for the cap uses a `shared` segment.
+  - **Text isn't one set of pages across processes yet.** Text and data fill from a copy of the a.out's bytes that exec already read (`AoutSrc` in `src/abi/plan9/loader.zig`), not from the page cache, so two runs of one binary each have their own text pages, and a fork shares its parent's copy-on-write. The second open issue stays open.
+  - **Semaphores** pin the word's chunk for the call, so a fork meanwhile copies that chunk rather than share it, and the wait list's key, the word's host address, stays the same.
+  - **Known differences from 9front.** `RFMEM` siblings see each other's segattach and segdetach, since they share one `Mm`; a `shared` segment grown with segbrk after a plain fork doesn't grow in the child; and a debugger's write to text, through `/proc/n/mem`, is seen by `RFMEM` siblings.
+  - **Checking.** The `[memory-model]` cases pass on sud and hcpu with `-Dpending`, which they need while the proposal is a draft. The first criterion stays open until they run on HVF, KVM, and WHP, which this host lacks. The self-host and full integration criterion stays open: on this host 20 cases fail, in `[upper-layers]`, `[dotl]`, `[websocket-9p]`, `[mounts]`, `[ninep-roots]`, `[linux-fifo]`, `[headless-screen]`, `[browser-host]`, `[cow-fork]`, and acid's `[self-host]` case, and each fails the same way with a build of `dev`.

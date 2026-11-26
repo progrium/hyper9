@@ -821,12 +821,15 @@ fn stxr(m: *Machine, o: *const Op, pc: u64, comptime is_pair: bool) Next {
     const size: u8 = if (is_pair) 2 * sizeOfX(o.x) else sizeOfX(o.x);
     if (addr % size != 0) return alignmentFault(m, pc, addr, .write);
     const mon = cpu.monitor;
-    cpu.monitor = .{};
     if (o.sh == 1) fence();
     if (!mon.valid or mon.addr != addr or mon.size != size) {
+        cpu.monitor = .{};
         cpu.r[o.d] = 1;
         return .next;
     }
+    // The monitor stays set if the access faults, so the STXR run again
+    // once the kernel has made the page writable (a copy-on-write page is
+    // read-only until its first write) can still succeed.
     var f: MemFault = undefined;
     const h = host(m, addr, @min(size, 8), .write, &f) orelse return dataFault(m, pc, f.addr, .write, f.kind);
     const v = cpu.r[o.m];
@@ -851,6 +854,7 @@ fn stxr(m: *Machine, o: *const Op, pc: u64, comptime is_pair: bool) Next {
         p2.* = @truncate(new >> 64);
         break :blk true;
     };
+    cpu.monitor = .{};
     cpu.r[o.d] = @intFromBool(!ok);
     return .next;
 }

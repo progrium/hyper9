@@ -74,7 +74,7 @@ fn engineId(b: engine.Engine) usize {
 
 /// A chunk's shared pages, with a reference for the caller, and how many
 /// of their bytes came from the file.
-pub const Shared = struct { pages: *mm.Pages, n: u64 };
+pub const Shared = mm.Shared;
 
 /// The pages of chunk `index` of file `id`, read with `fill(ctx, dst,
 /// off)` (which returns the bytes it read, zeroing the rest) if no

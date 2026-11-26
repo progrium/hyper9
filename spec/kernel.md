@@ -20,14 +20,14 @@ Each CLI invocation is one machine: one host process with one VM. Each Plan 9 pr
 
 | Plan 9 call | Implementation |
 | --- | --- |
-| `rfork(RFPROC)` | New Proc, new thread and vCPU, and an eager copy of the address space (no copy-on-write) |
-| `rfork(RFMEM)` | Share the text, data and bss, and segattach's `memory` segments; copy only the stack |
+| `rfork(RFPROC)` | New Proc, new thread and vCPU, and the address space forked copy-on-write (see Memory below) |
+| `rfork(RFMEM)` | Share the text, data and bss, and segattach's `memory` segments; fork only the stack copy-on-write |
 | `RFNAMEG` / `RFFDG` / `RFENVG` / `RFNOTEG` / `RFREND` | Share or copy drawterm's Pgrp, Fgrp, Egrp, note group, and rendezvous group |
-| `exec` | Load the new a.out into fresh segments, rebuild page tables, reset registers, keep the fds (honouring close-on-exec) and segattach's segments (except `SG_CEXEC` ones) |
+| `exec` | Map the new a.out into a fresh address space, its text and data filled from the file on first touch, reset registers, keep the fds (honouring close-on-exec) and segattach's segments (except `SG_CEXEC` ones) |
 | `exits` / `await` | Wait records queued on the parent Proc; the thread and vCPU are torn down |
-| `brk_` | Grow the data segment and map pages from the guest-physical allocator, up to the stack's floor or the lowest attached segment above it |
-| `segattach` / `segdetach` | Attach or detach a `shared` or `memory` segment, up to five per process, with 9front's placement rules; pages are allocated up front and never executable ([segattach](../design/epoch-0/segattach.md)) |
-| `segbrk` / `segfree` / `segflush` | Move an attached segment's top; zero its pages in place; check the span and do nothing else |
+| `brk_` | Grow the data segment by an anonymous mapping whose pages come on first touch, up to the stack's floor or the lowest attached segment above it |
+| `segattach` / `segdetach` | Attach or detach a `shared` or `memory` segment, up to five per process, with 9front's placement rules; a `memory` segment's pages come on first touch and a `shared` one's are allocated when it's attached, and neither is executable ([segattach](../design/epoch-0/segattach.md)) |
+| `segbrk` / `segfree` / `segflush` | Grow or shrink an attached segment's mapping; drop its pages (a `shared` segment's are zeroed in place); check the span and tell the engine the code changed |
 | `notify` / `noted` | Push a Ureg and the note string onto the user stack and point the PC at the handler; `noted` restores or kills the process |
 | `/proc/n/ctl` `stop` / `start` / `hang` | Park the process on its own thread at its next stop point (syscall entry, note delivery, a breakpoint exit, or before the first instruction after `exec` with `hang`), with its Ureg and Extra copied to its record ([self-host](../design/epoch-0/self-host.md)) |
 | `rendezvous` / `semacquire` / `tsemacquire` / `semrelease` | Host kernel primitives built on drawterm's sleep/wakeup (`src/kern/sema.c`): 9front's `rendezvous` on drawterm's rendezvous group, and 9front's semaphores, with the wait lists in a kernel-wide table keyed by the host address of the guest word; `tsemacquire` waits with `tsleep` ([semaphores](../design/epoch-0/semaphores.md)) |
@@ -37,6 +37,12 @@ Each CLI invocation is one machine: one host process with one VM. Each Plan 9 pr
 The kernel boots once per host process, on a private thread, because booting turns the calling thread into a Proc for good. Every guest process then runs on a kernel thread made by `h9_kern_spawn` in `src/kern/proc.c`, which works like drawterm's `kproc` but can be called from a thread that isn't a Proc: it clones from the boot Proc, and the new thread sets up its groups once `up` is set.
 
 That thread creates the process's vCPU, which HVF binds to its creating thread, and runs the exit loop. `Machine.run` starts the first process this way and waits for it to exit; `rfork` uses the same path.
+
+### Memory
+
+Every process's memory, 9front's and Linux's, is an `Mm` (`src/kern/mm.zig`, [memory-model](../design/memory-model.md)): a sorted list of mappings over 64 KiB chunks that are allocated on first touch, forked copy-on-write, and filled from a file when the mapping has one. Faults, the host's reads and writes of guest memory for a syscall, `--memory` accounting, and the engine's map and unmap calls are its, once for both ABIs; the Linux ABI adds its layout, `mmap`'s flags, and `brk` (see Linux ABI, Memory).
+
+A 9front process's address space (`segment.Space`, `src/segment.zig`) is two Mms in one engine address space: one holding text, data, bss, the heap, and segattach's segments, which `RFMEM` siblings share and which is mapped into each of their address spaces, and the process's own stack. `rfork` without `RFMEM` forks both, so what `RFMEM` siblings share is still copy-on-write for a plain fork child, as on 9front. Text and the initialized part of data are private mappings of the a.out, filled from a copy of its bytes on first touch; bss, the heap, and the stack (its whole 16 MiB) are anonymous; and a `shared` segment is a shared mapping with its own pages, so fork shares them even in a chunk that private mappings also use. Each mapping carries its segment's class and slot as a label, which `/proc/n/segment`, `segbrk`, and `segdetach` go by. `segment.zig` keeps only what's Plan 9's own: segment names and classes, segattach's placement, and the `seg*` calls and `/proc/n/segment` as calls on the Mms.
 
 The boot also starts one kernel thread of its own, the timer kproc (`src/kern/tsleep.c`), which idles on a host condition variable until the earliest `tsleep` deadline.
 
@@ -108,7 +114,7 @@ rc, kill, and ps need `/proc/n/{note,notepg,noteid,ctl,status,ns,fd,args,ppid,wa
 
 It serves h9's process records (`src/kern/proc.c`, shared through `src/kern/hproc.h`) instead of 9front's Proc table: a qid holds the machine-local pid, and every walk, open, read, and write looks it up in the caller's machine, so a machine can't see, signal, or kill another's processes.
 
-`status` has the 12 fields `ps` reads: the user is the machine's user (the guest's `$user`), the state is the syscall being served (as 9front's `psstate`, so `Await`, `Sleep`, `Pread`) or `Running`, memory is the process's mapped segments, and the user and system times read 0 until there's per-thread CPU accounting.
+`status` has the 12 fields `ps` reads: the user is the machine's user (the guest's `$user`), the state is the syscall being served (as 9front's `psstate`, so `Await`, `Sleep`, `Pread`) or `Running`, memory is the bytes of the process's pages that are allocated (shared pages count in each process that maps them), and the user and system times read 0 until there's per-thread CPU accounting.
 
 `segment` lists the stack (its whole 16 MiB), text, data up to the break, and segattach's segments (`Shared`, or `Bss` for `memory`) in 9front's format, with the number of address spaces each is attached to.
 
@@ -156,7 +162,7 @@ The list is guarded by a host lock (`glue.c`, `glue-win32.c`) that the kproc hol
 
 drawterm has no semaphores. 9front's code is ported closely, with the wait lists in 64 hashed buckets keyed by the host address of the semaphore word rather than in the segment, since h9's segments are Zig objects; the word is changed with host atomics.
 
-`src/abi/plan9/syscall.zig` checks the address first (aligned, mapped, in a writable segment), and the pages it names never move while it's shared.
+`src/abi/plan9/syscall.zig` checks the address first (aligned, mapped, in a writable segment) and pins the word's chunk for the call, writable, so it doesn't move: a fork meanwhile copies the chunk rather than sharing it copy-on-write, and the waiters' key stays the same page.
 
 `rendezvous` is 9front's on drawterm's Rgrp, so `procinterrupt` still pulls a process out of it, but it also checks for a note that arrived before the process was on the list.
 

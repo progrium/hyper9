@@ -842,13 +842,13 @@ pub fn dispatch(p: *Process, u: *const engine.Ureg) Outcome {
 
 fn memCall(p: *Process, s: Sys, c: Call) Err!Outcome {
     switch (s) {
-        .brk => return ret(@intCast(p.mm.setBrk(c.a[0]))),
+        .brk => return ret(@intCast(mm.setBrk(p.mm, c.a[0]))),
         .mmap => return ret(try mmap(p, c.a[0], c.a[1], c.uint(2), c.uint(3), c.int(4), c.a[5])),
         .munmap => {
             const a = c.a[0];
             if (a % page != 0 or c.a[1] == 0) return ret(-E.INVAL);
             const len = std.mem.alignForward(u64, c.a[1], page);
-            if (a >= p.mm.lay.user_top or len > p.mm.lay.user_top - a) return ret(-E.INVAL);
+            if (a >= mm.layout(p.mm).user_top or len > mm.layout(p.mm).user_top - a) return ret(-E.INVAL);
             p.mm.unmap(a, a + len) catch return ret(-E.NOMEM);
             return ret(0);
         },
@@ -857,7 +857,7 @@ fn memCall(p: *Process, s: Sys, c: Call) Err!Outcome {
             if (a % page != 0) return ret(-E.INVAL);
             const len = std.mem.alignForward(u64, c.a[1], page);
             if (len == 0) return ret(0);
-            p.mm.protect(a, a + len, .fromLinux(c.a[2])) catch |e| return ret(if (e == error.BadAddress) -E.NOMEM else -E.NOMEM);
+            p.mm.protect(a, a + len, mm.protFromLinux(c.a[2])) catch |e| return ret(if (e == error.BadAddress) -E.NOMEM else -E.NOMEM);
             return ret(0);
         },
         .madvise => {
@@ -4176,13 +4176,13 @@ pub const LazyFile = struct {
 fn mmap(p: *Process, addr: u64, len_in: u64, prot_bits: u32, flags: u32, fd: i32, off: u64) Err!i64 {
     if (len_in == 0) return -E.INVAL;
     const len = std.mem.alignForward(u64, len_in, page);
-    const top = p.mm.lay.user_top;
+    const top = mm.layout(p.mm).user_top;
     if (len > top or len < len_in) return -E.NOMEM;
     if (off % page != 0) return -E.INVAL;
     const shared = flags & 3 == MAP_SHARED or flags & 3 == 3;
     if (flags & 3 == 0) return -E.INVAL;
     const anon = flags & MAP_ANONYMOUS != 0;
-    const prot: mm.Prot = .fromLinux(prot_bits);
+    const prot = mm.protFromLinux(prot_bits);
     var info: ?kc.FdInfo = null;
     if (!anon) {
         if (fd < 0) return -E.BADF;
@@ -4216,7 +4216,7 @@ fn mmap(p: *Process, addr: u64, len_in: u64, prot_bits: u32, flags: u32, fd: i32
         if (hint >= mm.min_addr and hint < top and len <= top - hint and !shared and p.mm.isFree(hint, hint + len)) {
             start = hint;
         } else {
-            const at_ = p.mm.findFree(span + if (placed) mm.chunk_size else 0) orelse return -E.NOMEM;
+            const at_ = mm.findFree(p.mm, span + if (placed) mm.chunk_size else 0) orelse return -E.NOMEM;
             start = if (placed) std.mem.alignForward(u64, at_, mm.chunk_size) + delta else at_;
         }
     }
@@ -4339,7 +4339,7 @@ fn shmat(p: *Process, id: i32, addr: u64, flags: u32) i64 {
         start = if (flags & SHM_RND != 0) std.mem.alignBackward(u64, addr, mm.chunk_size) else addr;
         if (start % mm.chunk_size != 0) return -E.INVAL;
     } else {
-        const at_ = p.mm.findFree(len + 2 * mm.chunk_size) orelse return -E.NOMEM;
+        const at_ = mm.findFree(p.mm, len + 2 * mm.chunk_size) orelse return -E.NOMEM;
         start = std.mem.alignForward(u64, at_, mm.chunk_size);
     }
     var v: mm.Vma = .{ .start = start, .end = start + len, .prot = if (flags & SHM_RDONLY != 0) .{ .read = true } else .rw, .shared = true, .kind = .shm, .offset = @intCast(id) };
@@ -4450,7 +4450,7 @@ fn mremap(p: *Process, old: u64, old_len_in: u64, new_len_in: u64, flags: u32, n
         return @intCast(old);
     }
     // Grow in place when the space after it is free.
-    if (old + old_len == vma.end and p.mm.isFree(old + old_len, old + new_len) and old + new_len <= p.mm.lay.user_top) {
+    if (old + old_len == vma.end and p.mm.isFree(old + old_len, old + new_len) and old + new_len <= mm.layout(p.mm).user_top) {
         var ext = vma;
         ext.start = old + old_len;
         ext.end = old + new_len;
@@ -4460,7 +4460,7 @@ fn mremap(p: *Process, old: u64, old_len_in: u64, new_len_in: u64, flags: u32, n
     }
     if (flags & MREMAP_MAYMOVE == 0) return -E.NOMEM;
     _ = new_addr;
-    const dst = p.mm.findFree(new_len) orelse return -E.NOMEM;
+    const dst = mm.findFree(p.mm, new_len) orelse return -E.NOMEM;
     var nv = vma;
     nv.start = dst;
     nv.end = dst + new_len;
@@ -4845,7 +4845,7 @@ fn rlimit(p: *Process, res: u32) ?[2]u64 {
     const RLIMIT_NOFILE = 7;
     const RLIMIT_AS = 9;
     return switch (res) {
-        RLIMIT_STACK => .{ p.mm.lay.stack_size, inf },
+        RLIMIT_STACK => .{ mm.layout(p.mm).stack_size, inf },
         RLIMIT_NOFILE => .{ 1024, 1024 },
         RLIMIT_AS => .{ if (p.mem_limit > 0) p.mem_limit else inf, if (p.mem_limit > 0) p.mem_limit else inf },
         else => if (res < 16) .{ inf, inf } else null,

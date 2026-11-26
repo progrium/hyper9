@@ -619,6 +619,60 @@ test "dispatch: a store to the code being run finishes in T0 and retranslates" {
     try testing.expectEqual(@as(u64, 5), t1.cpu.r[0]);
 }
 
+test "dispatch: an STXR to a page read-only until its first write faults, and succeeds once it's writable [memory-model]" {
+    // T0, T1 through ir_eval (x86_64 only), and T1 through this host's
+    // own emitter, so an arm64 host runs it too.
+    const host_emit = switch (builtin.cpu.arch) {
+        .x86_64 => @import("emit/x64.zig"),
+        .aarch64 => @import("emit/arm64.zig"),
+        else => return error.SkipZigTest,
+    };
+    if (!codemem.available()) return error.SkipZigTest;
+    const c = try testing.allocator.create(cache_mod.Cache);
+    defer testing.allocator.destroy(c);
+    c.* = try cache_mod.Cache.init(testing.allocator, 1 << 20);
+    defer c.deinit();
+    const ms = try testing.allocator.alloc(Machine, 3);
+    defer testing.allocator.free(ms);
+    for (ms) |*m| m.* = .{};
+    try ms[0].init(null);
+    defer ms[0].deinit();
+    try ms[1].init(c);
+    defer ms[1].deinit();
+    ms[1].em = host_emit.emitter_def;
+    const with_eval = eval_emit.supported;
+    if (with_eval) try ms[2].init(c);
+    defer if (with_eval) ms[2].deinit();
+    defer if (with_eval) eval_emit.reset();
+    const prog = [_]u32{
+        0xD2A00042, // movz x2, #0x20000
+        0xC85F7C40, // loop: ldxr x0, [x2]   (0x1004)
+        0x91000400, //   add x0, x0, #1
+        0xC8017C40, //   stxr w1, x0, [x2]   (0x100c)
+        0x35FFFFA1, //   cbnz w1, loop
+        0xD4000001, // svc #0
+    };
+    for (ms[0..if (with_eval) 3 else 2]) |*m| {
+        // The data page as a copy-on-write page starts: readable, and
+        // read-only until the kernel handles its first write fault.
+        m.maps[1].perms.write = false;
+        m.load(&prog, &.{}, 0);
+        // The STXR's write faults, rather than failing and looping on
+        // LDXR and STXR forever, which it did on T1 when the monitor was
+        // cleared before the swap and T0 ran the STXR again without it.
+        const e = try m.run();
+        try testing.expect(e == .fault);
+        try testing.expectEqual(@as(u64, Machine.data_va), e.fault.addr);
+        try testing.expectEqual(@as(u64, Machine.code_va + 12), m.cpu.pc);
+        // The kernel makes the page writable, and the STXR runs again.
+        m.maps[1].perms.write = true;
+        m.tlb.flush();
+        try testing.expectEqual(a64.t0.Exit.syscall, try m.run());
+        try testing.expectEqual(@as(u64, 0x1001), m.cpu.r[0]);
+        try testing.expectEqual(@as(u64, 0x1001), std.mem.readInt(u64, m.pages[2 * mem.page_size ..][0..8], .little));
+    }
+}
+
 test "dispatch: IC IVAU drops what was decoded or compiled from its page" {
     const c = try testCache(1 << 20);
     defer freeCache(c);

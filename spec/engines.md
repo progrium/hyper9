@@ -181,7 +181,7 @@ User-mode arm64, amd64, and 386 code only. On an `SVC`, `SYSCALL`, or `INT $64`,
 
 Guest pages come from one reserved range of host memory, twice the memory cap in address space (`src/engine/arena.zig`: first fit below a bump pointer; a freed range is given back to the host, mapped over with fresh zero pages on POSIX and decommitted on Windows, so neither allocation nor free touches the pages), and the host and the guest share the pages, so syscall arguments are read in place. An address space is a list of regions of that memory.
 
-Its pages are zero and stay unbacked until touched, and rfork's eager copy skips pages that are still zero (`src/segment.zig`), so the several hundred MB of `brk` a Go program reserves at start cost next to nothing until it uses them. They still count against `--memory`.
+Its pages are zero and stay unbacked until touched. A process's `Mm` (`src/kern/mm.zig`) allocates a chunk only when the guest first touches it, so the several hundred MB of `brk` a Go program reserves at start cost nothing until it uses them, and count against `--memory` only then.
 
 ### What it's for
 
