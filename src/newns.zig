@@ -150,8 +150,9 @@ fn isAccess(s: []const u8) bool {
 /// Splits one line into arguments on blanks, honouring `'` quoting. It
 /// ends at a `;` outside quotes, or the end of `line`, and a `#` that
 /// starts a word begins a comment up to either. Returns what's left of
-/// `line` after the `;`.
-fn split(arena: std.mem.Allocator, line: []const u8, out: *std.ArrayList([]const u8)) Error![]const u8 {
+/// `line` after the `;`. Plans (design/plan-format.md) are split the
+/// same way.
+pub fn split(arena: std.mem.Allocator, line: []const u8, out: *std.ArrayList([]const u8)) Error![]const u8 {
     var i: usize = 0;
     while (true) {
         while (i < line.len and (line[i] == ' ' or line[i] == '\t' or line[i] == '\r')) i += 1;

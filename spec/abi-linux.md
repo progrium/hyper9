@@ -113,7 +113,7 @@ A conversation from a mounted `/net`, such as another h9's served with `--serve-
 
 DNS is the Linux program's own: when the Linux root has no `/etc/resolv.conf`, the machine binds `#Letc` (devlinux's attach for files a root may lack) after the root's `/etc`, which is bound over itself first with `MCREATE` so files made in `/etc` go to the root, and its `resolv.conf` names the host's DNS servers, read by the CLI from the host's `/etc/resolv.conf` (Google's public servers where it names none, as on Windows).
 
-Port 53 on those servers is allowed even when they're link-local, as a cloud VM's resolver is, and `--print` says so in a caveat; `--net-allow` patterns must cover them.
+Without name patterns, port 53 on those servers is allowed even when they're link-local, as a cloud VM's resolver is, and `--print` says so in a caveat; `--net-allow` address patterns must cover them. With a name pattern, the machine answers DNS itself ([linux-dns](../design/linux-dns.md), and [The machine's resolver](sandbox.md#the-machines-resolver) in the sandbox's spec): every connect or `sendto` to port 53, to whatever server the program names (the host's from `#Letc`, or a root's own), goes to the machine's resolver on the host's loopback, which refuses names no pattern covers and records the addresses it answers with, so a program's lookup of an allowed name leads to an allowed connect. The socket is otherwise a host socket, as any other is, and a `recvfrom` or `getpeername` on it gives the server the program asked.
 
 `socketpair` is a 9front pipe, and a named or abstract `AF_UNIX` socket is a pipe end too, connected through `#s`: a listener posts its pipe's write end under the bound file's identity, and a connect posts its connection's pipe end and writes that post's name to the listener, for `accept` to open.
 
@@ -121,7 +121,7 @@ A listening socket's bound file `stat`s as `S_IFSOCK`. `sendmsg` and `recvmsg` c
 
 `AF_NETLINK` with `NETLINK_ROUTE` answers the link and address dumps (`RTM_GETLINK`, `RTM_GETADDR`) from the host's interfaces (`src/abi/linux/netlink.zig`), which `getifaddrs` and Go's `net.Interfaces` make. `recvmmsg` and `sendmmsg` loop over the single-message calls, and `IPV6_V6ONLY` is passed to the host socket, so an IPv4 and an IPv6 wildcard listener can share a port.
 
-Readiness is kernel code (`src/kern/linuxnet.c`): `h9_poll` asks each fd's channel whether it would block (qio queues, the console, host sockets with a zero-timeout `poll`; files and 9P are always ready) and sleeps on a wake generation that qio's wakeups (a hook in `qio.c`), the console reader and a host-socket watcher thread bump.
+Readiness is kernel code (`src/kern/linuxnet.c`): `h9_poll` asks each fd's channel whether it would block (qio queues, the console, host sockets with a zero-timeout `poll`; files and 9P are always ready) and sleeps on a wake generation that qio's wakeups (a hook in `src/kern/qio.zig`), the console reader and a host-socket watcher thread bump.
 
 `poll`, `ppoll`, `select` and `pselect6` use it, `epoll` keeps interest lists in the Linux layer (edge-triggered by generation), and `#ε` serves eventfd and epoll instances. `O_NONBLOCK` asks first and returns `EAGAIN`, and a blocking socket read waits in `h9_poll` so a signal can interrupt it. A Linux pipe read takes everything queued.
 ### Threads

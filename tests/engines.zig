@@ -1824,6 +1824,65 @@ test "a name pattern allows a connect through cs, and only through cs [net-polic
     try expectNet(net_cs, &.{ "t", "tcp!localhost!2" }, pol, "exited no translation for host found");
 }
 
+// The machine's resolver (design/linux-dns.md), with a stub server as the
+// machine's nameserver.
+
+const net_dns = @embedFile("net_dns");
+const dnsstub = @import("dnsstub.zig");
+
+/// expectNet, with `nameservers`.
+fn expectNetNs(text: []const u8, argv: []const []const u8, pol: h9.Policy, nameservers: []const []const u8, want_status: []const u8) !void {
+    const gpa = std.testing.allocator;
+    const bytes = try image(gpa, .arm64, text);
+    defer gpa.free(bytes);
+    var p = pol;
+    p.timeout_ns = 20 * std.time.ns_per_s;
+    var ran: usize = 0;
+    for ([_]engine.Choice{ .hvf, .kvm, .whp, .sud, .hcpu }) |kind| {
+        var out: std.Io.Writer.Allocating = .init(gpa);
+        defer out.deinit();
+        var m = h9.Machine.init(gpa, std.testing.io, .{
+            .engine = kind,
+            .arch = .arm64,
+            .policy = p,
+            .nameservers = nameservers,
+            .stdio = .{ .out = &out.writer, .err = &out.writer },
+        }) catch |e| switch (e) {
+            error.HypervisorUnavailable, error.EngineNotBuilt, error.WrongArch => continue,
+            else => return e,
+        };
+        defer m.deinit();
+        const status = try m.run(.{ .bytes = bytes }, argv);
+        errdefer std.debug.print("engine {t}\n", .{kind});
+        var sb: [300]u8 = undefined;
+        try std.testing.expectEqualStrings(want_status, switch (status) {
+            .exited => |t| try std.fmt.bufPrint(&sb, "exited {s}", .{t}),
+            .killed => |t| try std.fmt.bufPrint(&sb, "killed {s}", .{t}),
+        });
+        ran += 1;
+    }
+    if (ran == 0) return error.SkipZigTest;
+}
+
+test "the backends' lookups go through the resolver to a stub given as 127.0.0.1!PORT [linux-dns]" {
+    if (!h9.resolver.supported or !dnsstub.supported) return error.SkipZigTest;
+    var stub: dnsstub.Stub = .{ .records = &.{.{ .name = "svc.test", .a = .{ 127, 0, 0, 1 } }} };
+    try stub.start();
+    defer stub.stop();
+    const ns: []const []const u8 = &.{stub.nameserver()};
+    const pol: h9.Policy = .{ .net_allow = &.{"tcp!svc.test!1"} };
+    // An address no server is at: the query goes to the resolver, which
+    // forwards it, and the answer allows the connect.
+    try expectNetNs(net_dns, &.{ "t", "connect 192.0.2.53!53", "svc.test", "connect 127.0.0.1!1" }, pol, ns, refused);
+    const seen = stub.queries();
+    try std.testing.expect(seen > 0);
+    // A name no pattern covers is refused, and never reaches the stub.
+    try expectNetNs(net_dns, &.{ "t", "connect 192.0.2.53!53", "other.test", "connect 127.0.0.1!1" }, pol, ns, "exited rcode 5");
+    try std.testing.expectEqual(seen, stub.queries());
+    // Without a lookup, the address is refused.
+    try expectNetNs(net_ctl, &.{ "t", "#I/tcp/clone", "connect 127.0.0.1!1" }, pol, ns, denied);
+}
+
 // Overlays (design/epoch-0/ephemeral-writes.md).
 
 /// A host root tree with the mount points the namespace builder needs.
@@ -3121,4 +3180,79 @@ test "--print writes an .fd mount as a comment, and the rest replays [fd-mounts]
     const r = try runFd(a, &base, &.{ns}, @embedFile("fdmount_create"), &.{ "create", "/tmp/f" }) orelse return error.SkipZigTest;
     errdefer std.debug.print("err: {s}\n", .{r.err});
     try std.testing.expectEqualStrings("exited ", r.status);
+}
+
+test "Machine.init from a plan equals Machine.init from Options [plan-format]" {
+    // design/plan-format.md: Options.toPlan's text, given as `plan`, is
+    // the same machine. The compiled plans print the same, and a program
+    // runs the same in both.
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "out");
+    try tmp.dir.createDirPath(io, "data/secret");
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var kb: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const dir = try a.dupe(u8, kernPath(&kb, buf[0..try tmp.dir.realPath(io, &buf)]));
+    const out = try std.fmt.allocPrint(a, "{s}/out", .{dir});
+    const data = try std.fmt.allocPrint(a, "{s}/data", .{dir});
+    const secret = try std.fmt.allocPrint(a, "{s}/data/secret", .{dir});
+    const bytes = try image(gpa, .amd64, &hello.amd64_text);
+    defer gpa.free(bytes);
+    const Case = struct {
+        mounts: []const h9.Machine.Mount = &.{},
+        policy: h9.Policy = .{},
+        env: []const h9.EnvVar = &.{},
+        cwd: ?[]const u8 = null,
+    };
+    const cases = [_]Case{
+        .{},
+        .{ .mounts = &.{ .{ .kind = .tmp, .dst = "/" }, .{ .kind = .dir, .src = dir, .dst = "/n/d", .access = .ro } }, .cwd = dir },
+        .{ .policy = .{ .write = .scope, .writable = &.{out}, .readable = &.{data}, .read_deny = &.{secret} }, .cwd = dir },
+        .{ .policy = .{ .net = .enable, .net_allow = &.{"tcp!*.example.com!443"}, .memory = 256 << 20, .pids = 32, .timeout_ns = 90 * std.time.ns_per_s } },
+        .{ .policy = .{ .net = .disable, .write = .none }, .env = &.{.{ .name = "A", .value = "two words" }} },
+    };
+    var ran = false;
+    for ([_]engine.Choice{ .hcpu, .sud, .kvm, .hvf, .whp }) |kind| for (cases) |c| {
+        var got: [2]struct { plan: []const u8, out: []const u8 } = undefined;
+        var text: []const u8 = "";
+        for (&got, 0..) |*g, i| {
+            var o: std.Io.Writer.Allocating = .init(a);
+            var e: std.Io.Writer.Allocating = .init(a);
+            const opts: h9.Machine.Options = .{
+                .engine = kind,
+                .arch = .amd64,
+                .mounts = c.mounts,
+                .policy = c.policy,
+                .env = c.env,
+                .cwd = c.cwd,
+                .stdio = .{ .out = &o.writer, .err = &e.writer },
+            };
+            if (i == 0) text = try opts.toPlan(a);
+            var why: []const u8 = "";
+            var m = h9.Machine.initExplained(gpa, io, if (i == 0) opts else .{ .plan = text, .stdio = opts.stdio }, &why) catch |err| switch (err) {
+                error.HypervisorUnavailable, error.EngineNotBuilt, error.WrongArch => break,
+                else => {
+                    std.debug.print("{s}\n{s}\n", .{ text, why });
+                    return err;
+                },
+            };
+            defer m.deinit();
+            var pw: std.Io.Writer.Allocating = .init(a);
+            try m.plan.print(&pw.writer);
+            _ = try m.run(.{ .bytes = bytes }, &.{"hello"});
+            g.* = .{ .plan = pw.written(), .out = o.written() };
+        } else {
+            errdefer std.debug.print("engine {t}, plan:\n{s}\n", .{ kind, text });
+            try std.testing.expectEqualStrings(got[0].plan, got[1].plan);
+            try std.testing.expectEqualStrings(got[0].out, got[1].out);
+            try std.testing.expectEqualStrings(hello.msg, got[1].out);
+            ran = true;
+        }
+    };
+    if (!ran) return error.SkipZigTest;
 }

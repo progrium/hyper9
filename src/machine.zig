@@ -30,6 +30,7 @@ const ws = @import("ws.zig");
 const cred = @import("cred.zig");
 const statictree = @import("statictree.zig");
 const serve = @import("serve.zig");
+const resolver = @import("resolver.zig");
 const lsys = @import("abi/linux/sys.zig");
 const lsig = @import("abi/linux/signal.zig");
 const lexec = @import("abi/linux/exec.zig");
@@ -40,6 +41,7 @@ const kc = @import("abi/linux/kc.zig");
 const attr = @import("dotl/attr.zig");
 const gfx = @import("gfx.zig");
 const hostpty = @import("hostpty.zig");
+const handles = @import("host/host.zig");
 
 pub const Status = union(enum) {
     /// The `exits` string; empty means success.
@@ -226,8 +228,11 @@ pub const Machine = struct {
         /// The host's DNS servers, as addresses: a Linux root without an
         /// /etc/resolv.conf gets one naming them, and the network policy
         /// lets port 53 reach them even when they're link-local
-        /// (design/epoch-0/linux-net.md). The CLI reads the host's
-        /// resolv.conf.
+        /// (design/epoch-0/linux-net.md). A machine that resolves for the
+        /// guest forwards its queries to them, in order
+        /// (design/linux-dns.md). Each may give a port, `ADDR!PORT`, for a
+        /// server of an embedder's or a test's own; resolv.conf names
+        /// the address. The CLI reads the host's resolv.conf.
         nameservers: []const []const u8 = &.{},
         /// Resolve a guest program in the 9front view even with a Linux
         /// root: `--rc` always means 9front's rc.
@@ -295,7 +300,121 @@ pub const Machine = struct {
         /// hands the machine to serve (design/epoch-0/port-streams.md), as
         /// `serve`'s connections are served, with no listener.
         serve_ports: bool = false,
+        /// A plan (design/plan-format.md), the text `h9 --plan` takes. Its
+        /// lines replace the fields a plan covers (the mounts, binds, and
+        /// namespace lines, the policy, the engine and architecture, the
+        /// environment, the cwd, the window, and serving), and the rest
+        /// (stdio, trace, signals, caches, credential helpers, and the
+        /// like) are taken from these options, as are `serve_token`, when
+        /// the plan has no `servetoken`, and `.fd` mounts, which a plan
+        /// can't hold as text. Host paths in it are taken as written, so
+        /// they're absolute. Its run line is `Machine.planRun`. A plan
+        /// that doesn't parse is `error.BadPlan`, with the line and why in
+        /// `initExplained`'s `conflict`.
+        plan: ?[]const u8 = null,
         stdio: Stdio,
+
+        /// The plan these options describe (design/plan-format.md), as
+        /// its lines would give it. A token in `serve_token`, which a plan
+        /// names by its file, and an embedder's `.fd` connections are left
+        /// out, with a note. Allocations go in `arena`.
+        pub fn toSpec(o: Options, arena: std.mem.Allocator) error{OutOfMemory}!policy.Spec {
+            const env = try arena.alloc([]const u8, o.env.len);
+            for (o.env, env) |e, *out| out.* = try std.fmt.allocPrint(arena, "{s}={s}", .{ e.name, e.value });
+            const listen = try arena.alloc([]const u8, o.serve.len);
+            for (o.serve, listen) |l, *out| out.* = try std.fmt.allocPrint(arena, "{f}", .{l});
+            var notes: std.ArrayList([]const u8) = .empty;
+            if (o.serve_token != null) try notes.append(arena, "servetoken: the embedder's, which a plan names by its file (servetoken @FILE)");
+            return .{
+                .mounts = o.mounts,
+                .binds = o.binds,
+                .ns = o.ns,
+                .policy = o.policy,
+                .guest_tools = o.guest_tools,
+                .engine = std.meta.stringToEnum(policy.EngineChoice, @tagName(o.engine)).?,
+                .arch = o.arch orelse engine.host_arch,
+                .env = env,
+                .cwd = o.cwd,
+                .gfx = if (o.gfx) |g| .{
+                    .headless = g.screen == .headless,
+                    .clipboard = g.clipboard,
+                    .scale = if (g.screen == .headless or g.scale == 1) null else g.scale,
+                    .size = if (g.size) |sz| .{ sz.dx, sz.dy } else null,
+                } else null,
+                .serve = listen,
+                .serve_root = if (std.mem.eql(u8, o.serve_root, "/")) null else o.serve_root,
+                .serve_origins = o.serve_origins,
+                .serve_net = o.serve_net,
+                .notes = notes.items,
+            };
+        }
+
+        /// The plan's text: what `toSpec` gives, written as a plan file.
+        pub fn toPlan(o: Options, arena: std.mem.Allocator) error{OutOfMemory}![]const u8 {
+            return (try o.toSpec(arena)).text(arena);
+        }
+
+        /// These options with plan `text`'s lines in place of the fields
+        /// a plan covers (see `plan`), allocated in `arena`; the run line
+        /// is in `run`. `io` reads a `servetoken @FILE`.
+        pub fn withPlan(o: Options, arena: std.mem.Allocator, io: std.Io, text: []const u8, run_line: *?[]const []const u8, why: *[]const u8) error{ OutOfMemory, BadPlan }!Options {
+            var perr: policy.PlanError = .{};
+            const s = policy.parsePlan(arena, text, &perr) catch |e| {
+                if (e == error.OutOfMemory) return error.OutOfMemory;
+                why.* = try std.fmt.allocPrint(arena, "plan: line {d}: {s}", .{ perr.line, perr.msg });
+                return error.BadPlan;
+            };
+            var r = o;
+            r.plan = null;
+            var mounts: std.ArrayList(Mount) = .empty;
+            try mounts.appendSlice(arena, s.mounts);
+            for (o.mounts) |m| if (m.kind == .fd) try mounts.append(arena, m);
+            r.mounts = mounts.items;
+            // The root's `index=`, which the CLI takes from its mounts
+            // too.
+            r.root_index = null;
+            for (s.mounts) |m| if (m.kind == .url) if (m.stack()) |st| if (st[0] == .root) {
+                if (m.index) |ix| r.root_index = rootIndexOf(ix);
+                break;
+            };
+            r.binds = s.binds;
+            r.ns = s.ns;
+            r.policy = s.policy;
+            r.guest_tools = s.guest_tools;
+            if (s.engine) |e| r.engine = std.meta.stringToEnum(engine.Choice, @tagName(e)).?;
+            r.arch = s.arch orelse o.arch;
+            const env = try arena.alloc(EnvVar, s.env.len);
+            for (s.env, env) |e, *out| {
+                const eq = std.mem.indexOfScalar(u8, e, '=').?;
+                out.* = .{ .name = e[0..eq], .value = e[eq + 1 ..] };
+            }
+            r.env = env;
+            r.cwd = s.cwd;
+            r.gfx = if (s.gfx) |g| .{
+                .screen = if (g.headless) .headless else .window,
+                .clipboard = g.clipboard,
+                .scale = g.scale orelse 1,
+                .size = if (g.size) |sz| .{ .dx = sz[0], .dy = sz[1] } else null,
+            } else null;
+            const listen = try arena.alloc(Listen, s.serve.len);
+            for (s.serve, listen) |a, *out| out.* = Listen.parse(a) catch {
+                why.* = try std.fmt.allocPrint(arena, "plan: serve {s}: not an address h9 can listen on", .{a});
+                return error.BadPlan;
+            };
+            r.serve = listen;
+            r.serve_root = s.serve_root orelse "/";
+            if (s.serve_token) |f| {
+                const tok = std.Io.Dir.cwd().readFileAlloc(io, f[1..], arena, .limited(4096)) catch {
+                    why.* = try std.fmt.allocPrint(arena, "plan: servetoken {s}: can't read it", .{f});
+                    return error.BadPlan;
+                };
+                r.serve_token = std.mem.trim(u8, tok, " \t\r\n");
+            }
+            r.serve_origins = s.serve_origins;
+            r.serve_net = s.serve_net;
+            run_line.* = s.run;
+            return r;
+        }
     };
 
     /// Host-held pseudoterminals (src/hostpty.zig).
@@ -340,24 +459,12 @@ pub const Machine = struct {
         }
     };
 
-    pub const InitError = engine.CreateError || gfx.Error || error{PolicyConflict};
+    pub const InitError = engine.CreateError || gfx.Error || error{ PolicyConflict, BadPlan };
 
     /// Host streams behind the guest's console: reads from `in` (none means
-    /// EOF), writes to fd 1 go to `out` and to fd 2 to `err`.
-    pub const Stdio = struct {
-        in: ?*std.Io.Reader = null,
-        /// Makes a blocked read of `in` return, so a run can end while a
-        /// console read is pending. Without it such a run ends `stuck`.
-        in_cancel: ?consin.Cancel = null,
-        out: *std.Io.Writer,
-        err: *std.Io.Writer,
-        /// Called when the guest turns raw mode on or off (writing `rawon`
-        /// or `rawoff` to /dev/consctl, or closing its last consctl), and
-        /// echo (`echooff`, `echoon`). The CLI puts the host terminal in
-        /// raw mode or turns its echo off. The machine turns both back
-        /// when a run ends.
-        raw: ?Raw = null,
-    };
+    /// EOF), writes to fd 1 go to `out` and to fd 2 to `err`. They're the
+    /// machine's `Host` console (design/host-handles.md).
+    pub const Stdio = handles.Console;
 
     pub const Raw = kern.Console.Raw;
 
@@ -368,6 +475,10 @@ pub const Machine = struct {
     opts: Options,
     /// The compiled policy; allocated in `arena`.
     plan: policy.Plan,
+    /// The host the plan describes (design/host-handles.md), in `arena`:
+    /// the handles the kernel is to reach outside through. Built at init
+    /// and not yet used by any device, so nothing changes.
+    host: handles.Host,
     arena: *std.heap.ArenaAllocator,
     msg_buf: [256]u8 = undefined,
     err_buf: [256]u8 = undefined,
@@ -386,6 +497,8 @@ pub const Machine = struct {
     out_of_memory: bool = false,
     /// The machine's claim on the screen, with `Options.gfx`; in `arena`.
     gfx_claim: ?*gfx.Claim = null,
+    /// `Options.plan`'s run line, in `arena`.
+    plan_run: ?[]const []const u8 = null,
     /// The listeners' bound addresses, once a run has opened them; in
     /// `arena`.
     serve_addrs: []const []const u8 = &.{},
@@ -409,6 +522,10 @@ pub const Machine = struct {
     /// Compiles a policy for a machine with these options, as `init` does,
     /// without creating one (for `--print`).
     pub fn compilePlan(arena: std.mem.Allocator, opts: Options, err_msg: *[]const u8) policy.CompileError!policy.Plan {
+        comptime {
+            // A plan's engine names are engine.Choice's.
+            for (std.meta.fieldNames(engine.Choice)) |f| std.debug.assert(@hasField(policy.EngineChoice, f));
+        }
         const arch = opts.arch orelse engine.host_arch orelse .arm64;
         var in: policy.Inputs = .{ .mounts = opts.mounts, .binds = opts.binds, .cwd = opts.cwd, .arch = arch, .guest_tools = opts.guest_tools, .nameservers = opts.nameservers };
         if (opts.serve.len > 0 or opts.serve_ports) {
@@ -514,6 +631,13 @@ pub const Machine = struct {
         const DUPLICATE_SAME_ACCESS: w.DWORD = 2;
     };
 
+    /// The run line of the plan the machine was made from
+    /// (design/plan-format.md), or null: `m.run(.{ .guest = argv[0] },
+    /// argv)` runs it.
+    pub fn planRun(m: *const Machine) ?[]const []const u8 {
+        return m.plan_run;
+    }
+
     /// Whether the options put a tree on `#L`.
     pub fn hasLinux(opts: Options) bool {
         for (opts.mounts) |mt| if (mt.stack()) |st| if (st[0] == .linux) return true;
@@ -526,8 +650,7 @@ pub const Machine = struct {
         return initExplained(gpa, io, opts, null);
     }
 
-    pub fn initExplained(gpa: std.mem.Allocator, io: std.Io, opts: Options, conflict: ?*[]const u8) InitError!Machine {
-        const arch = opts.arch orelse engine.host_arch orelse return error.WrongArch;
+    pub fn initExplained(gpa: std.mem.Allocator, io: std.Io, given: Options, conflict: ?*[]const u8) InitError!Machine {
         const arena = try gpa.create(std.heap.ArenaAllocator);
         arena.* = .init(gpa);
         errdefer {
@@ -535,6 +658,17 @@ pub const Machine = struct {
             gpa.destroy(arena);
         }
         var msg: []const u8 = "";
+        // A plan's lines in place of the fields it covers
+        // (design/plan-format.md).
+        var plan_run: ?[]const []const u8 = null;
+        const opts = if (given.plan) |text| given.withPlan(arena.allocator(), io, text, &plan_run, &msg) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.BadPlan => {
+                if (conflict) |c| c.* = msg;
+                return error.BadPlan;
+            },
+        } else given;
+        const arch = opts.arch orelse engine.host_arch orelse return error.WrongArch;
         const plan = compilePlan(arena.allocator(), opts, &msg) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Conflict => {
@@ -559,8 +693,14 @@ pub const Machine = struct {
             claim = &cl.claim;
         }
         errdefer if (claim) |cl| gfx.release(cl);
+        // The host's handles read the plan through a pointer, so they get
+        // a copy of it in the arena, which stays put when the Machine is
+        // moved; the plan isn't changed after it's compiled.
+        const plan_at = try arena.allocator().create(policy.Plan);
+        plan_at.* = plan;
+        const hst = try handles.fromPlan(arena.allocator(), io, plan_at, .{ .console = o.stdio, .gfx = o.gfx });
         const eng = try engine.create(gpa, io, opts.engine, .{ .arch = arch, .memory = plan.memory });
-        return .{ .gpa = gpa, .io = io, .opts = o, .arch = arch, .engine = eng, .plan = plan, .arena = arena, .gfx_claim = claim };
+        return .{ .gpa = gpa, .io = io, .opts = o, .arch = arch, .engine = eng, .plan = plan, .host = hst, .arena = arena, .gfx_claim = claim, .plan_run = plan_run };
     }
 
     /// What closing the window does: a hangup, as for a closed terminal.
@@ -598,6 +738,24 @@ pub const Machine = struct {
         const want = m.plan.cpus orelse host;
         const max = m.engine.maxVcpus() catch want;
         return @max(1, @min(want, max));
+    }
+
+    /// Starts the machine's resolver when its plan resolves for the guest
+    /// (design/linux-dns.md), forwarding to `Options.nameservers`. It's in
+    /// the arena, so a stuck process that still asks for it finds its
+    /// ports closed rather than freed memory.
+    fn startResolver(m: *Machine) ?*resolver.Resolver {
+        m.plan.dns = null;
+        if (!m.plan.resolves or !resolver.supported) return null;
+        const names = m.plan.names orelse return null;
+        const a = m.arena.allocator();
+        var servers: std.ArrayList(resolver.Server) = .empty;
+        for (m.opts.nameservers) |ns| if (resolver.parseServer(ns)) |s| servers.append(a, s) catch return null;
+        const r = a.create(resolver.Resolver) catch return null;
+        r.* = .{ .gpa = m.gpa, .patterns = m.plan.net_allow, .names = names, .servers = servers.items };
+        r.start() catch return null;
+        m.plan.dns = r;
+        return r;
     }
 
     /// Runs a program to completion. `argv[0]` is the program's name as it
@@ -667,6 +825,10 @@ pub const Machine = struct {
             break :blk s;
         } else null;
         defer if (srv) |s| s.close();
+        // The machine's resolver, while it runs (design/linux-dns.md).
+        // Without one, port 53 is refused.
+        const dns = m.startResolver();
+        defer if (dns) |r| r.stop();
         // Heap-allocated, with its own copy of the machine, so a stuck
         // process never refers to the caller's Machine.
         const job = try m.gpa.create(Job);
@@ -3128,7 +3290,7 @@ pub const Machine = struct {
         } else if (eq(u8, name, "hostname")) {
             w.writeAll("h9\n") catch {};
         } else if (eq(u8, name, "resolv.conf")) {
-            for (j.m.opts.nameservers) |ns| w.print("nameserver {s}\n", .{ns}) catch {};
+            for (j.m.opts.nameservers) |ns| w.print("nameserver {s}\n", .{resolver.serverHost(ns)}) catch {};
         } else if (eq(u8, name, "online") or eq(u8, name, "possible")) {
             if (ncpu <= 1) w.writeAll("0\n") catch {} else w.print("0-{d}\n", .{ncpu - 1}) catch {};
         } else return -1;
@@ -3811,13 +3973,25 @@ pub const Machine = struct {
         // server's `.fs/index`.
         var num: ?u32 = null;
         const first_root = is_root and !m.root_indexed;
+        // A pinned tree (design/plan-format.md, "Pinned roots") needs an
+        // index h9 checks: a static tree's, which serveStatic checked, or
+        // an `index=` one, which giveRootIndex checks. A server's own
+        // `.fs/index` is read in #ι, after the connection is made, so
+        // it's refused rather than taken unchecked.
+        if (r.b3 != null and !static) {
+            const given = if (first_root) m.opts.root_index != null else r.index == .given;
+            if (std.mem.startsWith(u8, b.to, "/srv/") or m.opts.index == .none or !given) {
+                kern.close(conn) catch {};
+                return m.fail("{s} {f}: b3=: pinned, but h9 checks only an index= index or a static tree's, and {s}", .{ what, shown, if (m.opts.index == .none) "this run is --index none" else "this has neither" });
+            }
+        }
         const fd = if (std.mem.startsWith(u8, b.to, "/srv/") or static) conn else if (first_root) blk: {
             m.root_indexed = true;
             break :blk try m.indexRoot(r, conn);
         } else switch (r.index) {
             // `index=` on a mount: the index it names, as the root's.
             .given => |g| blk: {
-                const got = m.giveRootIndex(what, r.addr, rootIndexOf(g.from)) catch |e| {
+                const got = m.giveRootIndex(what, r.addr, rootIndexOf(g.from), r.b3) catch |e| {
                     kern.close(conn) catch {};
                     return e;
                 };
@@ -4058,6 +4232,12 @@ pub const Machine = struct {
             else => null,
         }) orelse return m.fail(what ++ " {f}: no 9P server (the WebSocket handshake: {s}) and no static tree (/.fs/index: {s})", .{ shown, ws_said, why_buf[0..why_len] });
         defer gpa.free(text);
+        if (r.b3) |want| {
+            var got: [32]u8 = undefined;
+            std.crypto.hash.Blake3.hash(text, &got, .{});
+            if (!std.mem.eql(u8, &got, &want))
+                return m.fail(what ++ " {f}: b3=: its index has hash {x}…, not the pinned {x}…", .{ shown, got[0..8], want[0..8] });
+        }
         const tree = statictree.Tree.create(gpa, m.io, url, text, opts) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return m.fail(what ++ " {f}: static tree: /.fs/index: bad index", .{shown}),
@@ -4117,7 +4297,7 @@ pub const Machine = struct {
         if (m.opts.index == .none and !m.opts.verbose) return conn;
         var arg: [std.fs.max_path_bytes + 64]u8 = undefined;
         const ctl = if (m.opts.index == .none) "" else if (m.opts.root_index) |given| blk: {
-            const got = m.giveRootIndex("root", r.addr, given) catch |e| {
+            const got = m.giveRootIndex("root", r.addr, given, r.b3) catch |e| {
                 kern.close(conn) catch {};
                 return e;
             };
@@ -4133,18 +4313,25 @@ pub const Machine = struct {
 
     /// Reads, compiles, and hands `#ι` a 9P member's `index=` index (the
     /// root's, or a mount's), and returns its number; null when it's to be ignored. One that can't
-    /// be read fails the run, as an unreachable root does.
-    fn giveRootIndex(m: *Machine, what: []const u8, addr: []const u8, given: RootIndex) RunError!?u32 {
+    /// be read fails the run, as an unreachable root does. With `pin`,
+    /// `b3=`'s hash (design/plan-format.md, "Pinned roots"), the index's
+    /// text must have that BLAKE3 hash, and one that's ignored without a
+    /// pin fails the run, as one with another hash does.
+    fn giveRootIndex(m: *Machine, what: []const u8, addr: []const u8, given: RootIndex, pin: ?[32]u8) RunError!?u32 {
         const a = hidx.allocator;
         const from = switch (given) {
             inline else => |x| x,
         };
-        const cache: ?rootindex.cache.Cache = if (m.opts.index_cache) |d| .{ .gpa = a, .io = m.io, .dir = d } else null;
+        const pinned = "{s} {f}: b3=: its index ";
+        // The text is hashed, so it's fetched, not taken compiled from
+        // the cache.
+        const cache: ?rootindex.cache.Cache = if (pin != null) null else if (m.opts.index_cache) |d| .{ .gpa = a, .io = m.io, .dir = d } else null;
         var etag: ?[]u8 = null;
         defer if (etag) |e| a.free(e);
         const text: []u8 = switch (given) {
             .path => |path| std.Io.Dir.cwd().readFileAlloc(m.io, path, a, .limited(rootindex.max_text + 1)) catch |e| switch (e) {
                 error.StreamTooLong => {
+                    if (pin != null) return m.fail(pinned ++ "is larger than 256 MB", .{ what, ws.Url.elide(addr) });
                     m.indexNote("index: {s} is larger than 256 MB; ignored", .{path});
                     return null;
                 },
@@ -4156,13 +4343,20 @@ pub const Machine = struct {
                 .cache = if (cache) |*c| c else null,
             }, &m.msg_buf) catch |e| switch (e) {
                 error.TooBig => {
+                    if (pin != null) return m.fail(pinned ++ "is larger than 256 MB", .{ what, ws.Url.elide(addr) });
                     m.indexNote("index: {f} is larger than 256 MB; ignored", .{ws.Url.elide(url)});
                     return null;
                 },
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return m.fail("{s} {f}: index={f}: {s}", .{ what, ws.Url.elide(addr), ws.Url.elide(url), hstream.fetchError(e, &m.msg_buf) }),
             }) {
-                .compiled => |b| return m.giveCompiled(b, from, true),
+                .compiled => |b| {
+                    if (pin != null) {
+                        a.free(b);
+                        return m.fail(pinned ++ "came compiled, so its hash can't be checked", .{ what, ws.Url.elide(addr) });
+                    }
+                    return m.giveCompiled(b, from, true);
+                },
                 .text => |t| blk: {
                     etag = t.etag;
                     break :blk t.bytes;
@@ -4170,6 +4364,12 @@ pub const Machine = struct {
             },
         };
         defer a.free(text);
+        if (pin) |want| {
+            var got: [32]u8 = undefined;
+            std.crypto.hash.Blake3.hash(text, &got, .{});
+            if (!std.mem.eql(u8, &got, &want))
+                return m.fail(pinned ++ "has hash {x}…, not the pinned {x}…", .{ what, ws.Url.elide(addr), got[0..8], want[0..8] });
+        }
         var vbuf: [64]u8 = undefined;
         const version = rootindex.cache.textVersion(text, &vbuf);
         const hit = if (cache) |*c| c.lookup(rootindex.cache.text_key, version) else null;
@@ -4182,6 +4382,7 @@ pub const Machine = struct {
                     error.TooBig => m.indexNote("index: {f} is larger than 256 MB; ignored", .{ws.Url.elide(from)}),
                     error.BadIndex => m.indexNote("index: {f}: line {d}: {s}; ignored", .{ ws.Url.elide(from), diag.line, diag.msg }),
                 }
+                if (pin != null) return m.fail(pinned ++ "doesn't compile", .{ what, ws.Url.elide(addr) });
                 return null;
             };
             if (cache) |*c| c.store(rootindex.cache.text_key, version, b);

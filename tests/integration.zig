@@ -27,6 +27,7 @@ const builtin = @import("builtin");
 const Term = @import("term.zig").Term;
 const wsrelay = @import("wsrelay.zig");
 const deadline = @import("deadline.zig");
+const dnsstub = @import("dnsstub.zig");
 const design = @import("design");
 const test_paths = @import("test_paths");
 const DotlServer = @import("dotlserver.zig").DotlServer;
@@ -237,11 +238,29 @@ fn runInFor(e: Env, args: []const []const u8, stdin: ?[]const u8, ms: u32) !Resu
         if (first) |f| {
             defer r.deinit();
             errdefer std.debug.print("engine {s} differs from {s} for h9 {s}\n", .{ engine, firstEngine(e), args[0] });
-            try std.testing.expectEqualStrings(f.out, r.out);
+            // --print's plan names the engine it was run on
+            // (design/plan-format.md).
+            try std.testing.expectEqualStrings(try withoutEngine(f.out), try withoutEngine(r.out));
             try std.testing.expectEqual(f.code, r.code);
         } else first = r;
     }
     return first orelse error.SkipZigTest;
+}
+
+/// `out` without a plan's `engine` line, which is the one line of
+/// `--print` that differs from engine to engine; in the test allocator's
+/// arena of leaks, as the results are.
+fn withoutEngine(out: []const u8) ![]const u8 {
+    var b: std.ArrayList(u8) = .empty;
+    var it = std.mem.splitScalar(u8, out, '\n');
+    var first = true;
+    while (it.next()) |l| {
+        if (std.mem.startsWith(u8, l, "engine ")) continue;
+        if (!first) try b.append(std.heap.page_allocator, '\n');
+        first = false;
+        try b.appendSlice(std.heap.page_allocator, l);
+    }
+    return b.items;
 }
 
 fn firstEngine(e: Env) []const u8 {
@@ -533,6 +552,20 @@ test "the host cwd is the guest's cwd [baseline]" {
     const pwd = try run(e, &.{ "--cwd", p[0..n], "pwd" });
     defer pwd.deinit();
     try std.testing.expectEqualStrings("/mnt/term/cwd\n", pwd.out);
+}
+
+/// The namespace `--print` compiled, which its plan shows as comments
+/// (design/plan-format.md), as namespace lines `--ns` replays.
+fn printedNamespace(out: []const u8) ![]const u8 {
+    const start = (std.mem.indexOf(u8, out, "\n# namespace:\n") orelse return error.NoNamespace) + "\n# namespace:\n".len;
+    var b: std.ArrayList(u8) = .empty;
+    var it = std.mem.splitScalar(u8, out[start..], '\n');
+    while (it.next()) |l| {
+        if (!std.mem.startsWith(u8, l, "#   ")) break;
+        try b.appendSlice(std.heap.page_allocator, l["#".len..]);
+        try b.append(std.heap.page_allocator, '\n');
+    }
+    return b.items;
 }
 
 /// A scratch host directory, resolved, for cwd and policy tests.
@@ -1560,9 +1593,7 @@ test "--print output with overlays replays with --ns [ephemeral-writes]" {
     const p = try runEph(e, &s, &.{ "--print", "echo" });
     defer p.deinit();
     // The namespace section, as a file the guest reads from its cwd.
-    const start = (std.mem.indexOf(u8, p.out, "namespace:\n") orelse return error.NoNamespace) + "namespace:\n".len;
-    const end = std.mem.indexOfPos(u8, p.out, start, "access:\n") orelse p.out.len;
-    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = p.out[start..end] });
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = try printedNamespace(p.out) });
     // Under --write=none the replay's overlays make the cwd and /tmp writable.
     const r = try run(e, &.{ "--cwd", s.path, "--write=none", "--ns", s.ns(), "--rc", "echo x > f && echo y > /tmp/g && cat f /tmp/g" });
     defer r.deinit();
@@ -1734,9 +1765,7 @@ test "--print output with the root overlay replays with --ns [overlay]" {
     defer p.deinit();
     try std.testing.expect(std.mem.indexOf(u8, p.out, "  bind -c '#O' '#Oroot' ") != null);
     try std.testing.expect(std.mem.indexOf(u8, p.out, "writes to the root are kept in memory") != null);
-    const start = (std.mem.indexOf(u8, p.out, "namespace:\n") orelse return error.NoNamespace) + "namespace:\n".len;
-    const end = std.mem.indexOfPos(u8, p.out, start, "access:\n") orelse p.out.len;
-    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = p.out[start..end] });
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = try printedNamespace(p.out) });
     // Under --write=scope the root is read-only until the replay's overlay.
     const r = try run(e, &.{ "--cwd", s.path, "--write=scope", "--ns", s.ns(), "--rc", "echo x > /lib/h9-overlay-ns && cat /lib/h9-overlay-ns" });
     defer r.deinit();
@@ -3029,7 +3058,8 @@ test "--print shows net-allow patterns and caveats [net-policy]" {
     try std.testing.expectEqual(0, r.code);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "net.allow net.outbound") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "net=outbound") != null);
-    try std.testing.expect(std.mem.indexOf(u8, r.out, "net-allow:\n  tcp!*.example.com!443\n  udp!10.0.0.53!53\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "# net-allow:\n#   tcp!*.example.com!443\n#   udp!10.0.0.53!53\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "\nnetallow tcp!*.example.com!443\nnetallow udp!10.0.0.53!53\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "name patterns trust the host's resolver") != null);
     const d = try run(e, &.{ "--print", "echo" });
     defer d.deinit();
@@ -3672,7 +3702,9 @@ fn givesRoot(args: []const []const u8) bool {
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const a = args[i];
-        if (std.mem.eql(u8, a, "--builtin")) {
+        // A plan has its own mounts (design/plan-format.md), and a --dir
+        // the plan doesn't have would widen it.
+        if (std.mem.eql(u8, a, "--builtin") or std.mem.eql(u8, a, "--plan") or std.mem.startsWith(u8, a, "--plan=")) {
             return true;
         } else if (std.mem.startsWith(u8, a, "--builtin=")) {
             if (onRoot(a["--builtin=".len..], false)) return true;
@@ -4369,9 +4401,7 @@ test "--print output with a Linux tree and 9P settings replays with --ns [mounts
     defer p.deinit();
     try expectIn(p.out, "  mount -r 'tcp://");
     try expectIn(p.out, "'#Olinux' '' 'user=glenda' 9p");
-    const start = (std.mem.indexOf(u8, p.out, "namespace:\n") orelse return error.NoNamespace) + "namespace:\n".len;
-    const end = std.mem.indexOfPos(u8, p.out, start, "access:\n") orelse p.out.len;
-    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = p.out[start..end] });
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = try printedNamespace(p.out) });
     // Replayed without the flags, it mounts both, making /n/fs.
     const r = try run(e, &.{ "--net=enable", "--ns", s.ns(), "--rc", "cat '#L/etc/alpine-release' >/dev/null && echo linux; test -e /n/fs/lib/namespace && echo 9p" });
     defer r.deinit();
@@ -4487,9 +4517,7 @@ test "--print shows a 9P root, and its output replays with --ns [ninep-roots]" {
     defer sp.deinit();
     try std.testing.expect(std.mem.indexOf(u8, sp.out, "writes to the 9P root go to its server") != null);
     // The namespace section, replayed after the plan's own.
-    const start = (std.mem.indexOf(u8, p.out, "namespace:\n") orelse return error.NoNamespace) + "namespace:\n".len;
-    const end = std.mem.indexOfPos(u8, p.out, start, "\naccess:") orelse std.mem.indexOfPos(u8, p.out, start, "\ncaveats:") orelse return error.NoNamespace;
-    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = p.out[start .. end + 1] });
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = try printedNamespace(p.out) });
     try expectSameAsHost(e, srv.url(), &.{ "--cwd", s.path, "--ns", s.ns(), "/bin/ls", "/", "/bin/ls" });
 }
 
@@ -7030,9 +7058,7 @@ test "--print's #U!c bind replays with --ns [symlinks-in-root]" {
     var want: [std.Io.Dir.max_path_bytes + 16]u8 = undefined;
     var kb: [std.Io.Dir.max_path_bytes + 1]u8 = undefined;
     try std.testing.expect(std.mem.indexOf(u8, p.out, try std.fmt.bufPrint(&want, "  bind -r '#U!c{s}' '#Oroot'", .{kernPath(&kb, tree)})) != null);
-    const start = (std.mem.indexOf(u8, p.out, "namespace:\n") orelse return error.NoNamespace) + "namespace:\n".len;
-    const end = std.mem.indexOfPos(u8, p.out, start, "access:\n") orelse p.out.len;
-    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = p.out[start..end] });
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = try printedNamespace(p.out) });
     // Replayed over an uncontained root, the #U!c bind makes it contained
     // (--host-fs leaves #U unmasked, so the replay can attach it).
     const r = try runRoot(e, tree, &.{ "--cwd", s.path, "--host-fs", "--write=scope", "--ns", s.ns(), "cat", "/etc/hello" });
@@ -7105,6 +7131,11 @@ fn linuxEnv(comptime src: std.builtin.SourceLocation, le: *LinuxEnv) !void {
 /// Runs `h9 --dir <alpine>:#L [--dir <9front>] --cwd <fixtures> args...` on
 /// each engine, checking they agree, as `run` does.
 fn runLinux(le: *const LinuxEnv, with_nine: bool, args: []const []const u8) !Result {
+    return runLinuxEnv(le, with_nine, args, null);
+}
+
+/// runLinux, with the environment `environ` if it isn't null.
+fn runLinuxEnv(le: *const LinuxEnv, with_nine: bool, args: []const []const u8, environ: ?*const std.process.Environ.Map) !Result {
     if (with_nine and le.nine == null) return error.SkipZigTest;
     var first: ?Result = null;
     errdefer if (first) |f| f.deinit();
@@ -7116,7 +7147,7 @@ fn runLinux(le: *const LinuxEnv, with_nine: bool, args: []const []const u8) !Res
         if (with_nine) try argv.appendSlice(gpa, &.{ "--dir", le.nine.? });
         try argv.appendSlice(gpa, &.{ "--cwd", le.fixtures });
         try argv.appendSlice(gpa, args);
-        const p = try runProcessWith(argv.items, null, null, 120_000);
+        const p = try runProcessWith(argv.items, null, environ, 120_000);
         const code = switch (p.term) {
             .exited => |c| c,
             else => {
@@ -7130,7 +7161,9 @@ fn runLinux(le: *const LinuxEnv, with_nine: bool, args: []const []const u8) !Res
         if (first) |f| {
             defer r.deinit();
             errdefer std.debug.print("engine {s} differs for h9 {s}\n", .{ engine, args[0] });
-            try std.testing.expectEqualStrings(f.out, r.out);
+            // --print's plan names the engine it was run on
+            // (design/plan-format.md).
+            try std.testing.expectEqualStrings(try withoutEngine(f.out), try withoutEngine(r.out));
             try std.testing.expectEqual(f.code, r.code);
         } else first = r;
     }
@@ -7854,6 +7887,153 @@ test "a Linux root without resolv.conf gets the host's DNS servers, and a UDP cl
     defer r.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{r.err});
     try std.testing.expectEqualStrings("dns\nsize\netc\n1\nmade\n0\n", r.out);
+}
+
+// The machine's resolver (design/linux-dns.md): busybox's nc and nslookup
+// on the Alpine root, with the stub DNS server (tests/dnsstub.zig) in the
+// place of the host's, through H9_TEST_NAMESERVERS, and a service on the
+// host's loopback for nc to reach.
+
+const DnsCase = struct {
+    le: LinuxEnv,
+    stub: dnsstub.Stub,
+    svc: dnsstub.Service = .{},
+    pat_buf: [64]u8 = undefined,
+    cmd_buf: [512]u8 = undefined,
+
+    fn init(d: *DnsCase, comptime src: std.builtin.SourceLocation, records: []const dnsstub.Record, truncate: []const []const u8) !void {
+        if (!dnsstub.supported) return error.SkipZigTest;
+        try linuxEnv(src, &d.le);
+        d.stub = .{ .records = records, .truncate = truncate };
+        d.svc = .{};
+        try d.stub.start();
+        errdefer d.stub.stop();
+        try d.svc.start();
+    }
+
+    fn deinit(d: *DnsCase) void {
+        d.svc.stop();
+        d.stub.stop();
+    }
+
+    /// `tcp!NAME!PORT`, for the service's port.
+    fn allow(d: *DnsCase, name: []const u8) ![]const u8 {
+        return std.fmt.bufPrint(&d.pat_buf, "tcp!{s}!{d}", .{ name, d.svc.port });
+    }
+
+    /// A script with {port} in place of the service's port, through sh.
+    fn script(d: *DnsCase, comptime fmt: []const u8) ![]const u8 {
+        return std.fmt.bufPrint(&d.cmd_buf, fmt, .{ .port = d.svc.port });
+    }
+
+    fn run(d: *DnsCase, args: []const []const u8) !Result {
+        var environ = try std.testing.environ.createMap(gpa);
+        defer environ.deinit();
+        try environ.put("H9_TEST_NAMESERVERS", d.stub.nameserver());
+        return runLinuxEnv(&d.le, false, args, &environ);
+    }
+
+    fn expect(d: *DnsCase, args: []const []const u8, want: []const u8) !void {
+        const r = try d.run(args);
+        defer r.deinit();
+        errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+        try std.testing.expectEqualStrings(want, r.out);
+    }
+};
+
+const svc_records = [_]dnsstub.Record{.{ .name = "svc.test", .a = .{ 127, 0, 0, 1 } }};
+
+test "a Linux program's lookup of an allowed name connects [linux-dns]" {
+    var d: DnsCase = undefined;
+    try d.init(@src(), &svc_records, &.{});
+    defer d.deinit();
+    try d.expect(&.{ "--net-allow", try d.allow("svc.test"), "sh", "-c", try d.script("nc svc.test {[port]d}") }, "hello\n");
+    try std.testing.expect(d.svc.conns.load(.acquire) > 0);
+    try std.testing.expect(d.stub.queries() > 0);
+}
+
+test "a name outside --net-allow gets REFUSED, and isn't forwarded [linux-dns]" {
+    var d: DnsCase = undefined;
+    try d.init(@src(), &svc_records, &.{});
+    defer d.deinit();
+    try d.expect(&.{ "--net-allow", try d.allow("svc.test"), "sh", "-c", "nslookup other.test > /tmp/o 2>&1; grep -q REFUSED /tmp/o && echo refused; nc other.test 80 2>/dev/null || echo failed" }, "refused\nfailed\n");
+    try std.testing.expectEqual(0, d.stub.queries());
+}
+
+test "a connect by address without a lookup is refused [linux-dns]" {
+    var d: DnsCase = undefined;
+    try d.init(@src(), &svc_records, &.{});
+    defer d.deinit();
+    try d.expect(&.{ "--net-allow", try d.allow("svc.test"), "sh", "-c", try d.script("nc 127.0.0.1 {[port]d} 2>/dev/null || echo refused") }, "refused\n");
+    try std.testing.expectEqual(0, d.svc.conns.load(.acquire));
+}
+
+test "a CNAME's addresses are recorded under the question's name [linux-dns]" {
+    var d: DnsCase = undefined;
+    try d.init(@src(), &.{
+        .{ .name = "alias.test", .cname = "edge.cdn.test" },
+        .{ .name = "edge.cdn.test", .a = .{ 127, 0, 0, 1 } },
+    }, &.{});
+    defer d.deinit();
+    // Only the question's name has a pattern; the CDN's name has none.
+    try d.expect(&.{ "--net-allow", try d.allow("alias.test"), "sh", "-c", try d.script("nc alias.test {[port]d}") }, "hello\n");
+}
+
+test "a truncated answer retries over TCP through the resolver [linux-dns]" {
+    var d: DnsCase = undefined;
+    try d.init(@src(), &.{.{ .name = "big.test", .a = .{ 127, 0, 0, 1 } }}, &.{"big.test"});
+    defer d.deinit();
+    try d.expect(&.{ "--net-allow", try d.allow("big.test"), "sh", "-c", try d.script("nc big.test {[port]d}") }, "hello\n");
+    try std.testing.expect(d.stub.tcp_queries.load(.acquire) > 0);
+}
+
+test "a root's own resolv.conf server is redirected too [linux-dns]" {
+    var d: DnsCase = undefined;
+    try d.init(@src(), &svc_records, &.{});
+    defer d.deinit();
+    // 192.0.2.53 is a documentation address nothing answers at. The root
+    // gets it through a member on /etc, not by writing /etc/resolv.conf:
+    // Alpine's minirootfs has none, so the one there is #Letc's, which
+    // can't be written, and a failed write would leave the host's
+    // servers to answer.
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try writeTree(&s, &.{.{ "etc/resolv.conf", "nameserver 192.0.2.53\n" }});
+    var p: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+    try d.expect(&.{ "--dir", try std.fmt.bufPrint(&p, "{s}/etc:#L/etc", .{s.path}), "--net-allow", try d.allow("svc.test"), "sh", "-c", try d.script("grep -qx 'nameserver 192.0.2.53' /etc/resolv.conf && nc svc.test {[port]d}") }, "hello\n");
+    try std.testing.expect(d.stub.queries() > 0);
+}
+
+test "without name patterns, port 53 isn't redirected [linux-dns]" {
+    var d: DnsCase = undefined;
+    try d.init(@src(), &svc_records, &.{});
+    defer d.deinit();
+    var pat_buf: [64]u8 = undefined;
+    const by_addr = try std.fmt.bufPrint(&pat_buf, "tcp!127.0.0.1!{d}", .{d.svc.port});
+    // The query goes to port 53 on 127.0.0.1 itself, not to the stub.
+    for ([_][]const []const u8{ &.{ "--net-allow", "udp!127.0.0.1!53", "--net-allow", by_addr }, &.{} }) |pats| {
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(gpa);
+        try args.appendSlice(gpa, pats);
+        try args.appendSlice(gpa, &.{ "sh", "-c", "nslookup -timeout=1 -retry=0 svc.test 127.0.0.1 > /tmp/o 2>&1; grep -q 'Address: 127.0.0.1$' /tmp/o || echo direct" });
+        try d.expect(args.items, "direct\n");
+    }
+    try std.testing.expectEqual(0, d.stub.queries());
+}
+
+test "--print shows the resolver caveat [linux-dns]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    const caveat = "DNS queries to port 53 go to h9's resolver, which forwards names the allowlist covers to the host's DNS servers";
+    const r = try runLinux(&le, false, &.{ "--print", "--net-allow", "tcp!registry.npmjs.org!443", "sh" });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\n", .{r.out});
+    try std.testing.expect(std.mem.indexOf(u8, r.out, caveat) != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "link-local DNS server") == null);
+    const a = try runLinux(&le, false, &.{ "--print", "--net-allow", "tcp!10.0.0.0/8!443", "sh" });
+    defer a.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, a.out, caveat) == null);
 }
 
 // 32-bit x86 Linux programs (design/epoch-0/linux-i386.md): Alpine's x86 root
@@ -9988,9 +10168,7 @@ test "--ns replays a plan printed over the built-in root [builtin-root]" {
     defer s.deinit();
     const p = try runNoRoot(e, e.h9, &.{ "--builtin", "--cwd", s.path, "--print", "--rc", "echo" });
     defer p.deinit();
-    const start = (std.mem.indexOf(u8, p.out, "namespace:\n") orelse return error.NoNamespace) + "namespace:\n".len;
-    const end = std.mem.indexOfPos(u8, p.out, start, "access:\n") orelse p.out.len;
-    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = p.out[start..end] });
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = try printedNamespace(p.out) });
     // Replayed over the full tree, the plan adds the built-in root to the
     // stack, under the tree: the tree's ls, and the box's 9box.
     const r = try run(e, &.{ "--cwd", s.path, "--ns", s.ns(), "--rc", "test -d /sys && echo tree; cmp -s /bin/ls /bin/9box || echo own; test -x /bin/9box && echo builtin" });
@@ -11248,7 +11426,7 @@ test "--print lists listeners and elides the token [serve]" {
     const r = try run(e, &.{ "--print", "--serve", "ws://127.0.0.1:8080/9p", "--serve-token", tok, "--serve-origin", "http://a.example", "--serve", unix, "--write=none", "--rc", "echo" });
     defer r.deinit();
     try std.testing.expectEqual(0, r.code);
-    try expectIn(r.out, "\nserve:");
+    try expectIn(r.out, "\n# serve:");
     try expectIn(r.out, "ws://127.0.0.1:8080/9p");
     try expectIn(r.out, "kernel -R -r /   (token, origins: http://a.example)");
     try expectIn(r.out, unix);
@@ -12702,5 +12880,225 @@ inline fn rep(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
         for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
         const final = out;
         return &final;
+    }
+}
+
+// The plan as a file (design/plan-format.md).
+
+/// Writes `text` to the scratch file `name` and returns its host path.
+fn scratchFile(s: *Scratch, buf: []u8, name: []const u8, text: []const u8) ![]const u8 {
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = text });
+    return std.fmt.bufPrint(buf, "{s}/{s}", .{ s.path, name });
+}
+
+test "h9 --plan <(h9 --rc 'ls /bin | wc -l' --print) prints what h9 --rc 'ls /bin | wc -l' prints (demo) [plan-format]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    const direct = try run(e, &.{ "--rc", "ls /bin | wc -l" });
+    defer direct.deinit();
+    try std.testing.expectEqual(0, direct.code);
+    var it = std.mem.tokenizeScalar(u8, e.engines, ',');
+    while (it.next()) |engine| {
+        const p = try runOn(e, engine, &.{ "--rc", "ls /bin | wc -l", "--print" }, null);
+        defer p.deinit();
+        try std.testing.expectEqual(0, p.code);
+        // From a file, and from a pipe, as `<(...)` and `--plan -` give it.
+        var pb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const r = try runOn(e, engine, &.{ "--plan", try scratchFile(&s, &pb, "plan", p.out) }, null);
+        defer r.deinit();
+        try std.testing.expectEqualStrings(direct.out, r.out);
+        try std.testing.expectEqual(0, r.code);
+        const piped = try runOn(e, engine, &.{ "--plan", "-" }, p.out);
+        defer piped.deinit();
+        try std.testing.expectEqualStrings(direct.out, piped.out);
+    }
+}
+
+test "--print output round-trips through --plan for every policy case [plan-format]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.createDirPath(std.testing.io, "out");
+    try s.tmp.dir.createDirPath(std.testing.io, "data/secret");
+    var ob: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var db: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var xb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const out = try std.fmt.bufPrint(&ob, "{s}/out", .{s.path});
+    const data = try std.fmt.bufPrint(&db, "{s}/data", .{s.path});
+    const secret = try std.fmt.bufPrint(&xb, "{s}/data/secret", .{s.path});
+    const cases = [_][]const []const u8{
+        &.{},
+        &.{"--profile=tight"},
+        &.{"--write=none"},
+        &.{ "--write=scope", "--writable", out },
+        &.{ "--write=ephemeral", "--writable", out },
+        &.{"--net=disable"},
+        &.{ "--net=enable", "--net-allow", "tcp!*.example.com!443", "--net-allow", "udp!10.0.0.53!53" },
+        &.{ "--readable", data, "--read-deny", secret },
+        &.{ "--memory", "512m", "--pids", "32", "--cpus", "2", "--timeout", "90s" },
+        &.{ "--host-fs", "--no-guest-tools" },
+        &.{ "--sandbox", s.path },
+        &.{ "--gfx=headless", "--gfx-size", "640x480" },
+        &.{ "--serve", "tcp!127.0.0.1!0", "--serve-net" },
+        &.{ "--tmp", "/n/t", "--bind", "/n/t:/mnt/x:b", "--env", "A=two words", "--ns", "bind -a /mnt/x /n/t; mount -c '#s/none' /n/none" },
+    };
+    var it = std.mem.tokenizeScalar(u8, e.engines, ',');
+    while (it.next()) |engine| for (cases) |flags| {
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(gpa);
+        if (flags.len == 0 or !std.mem.eql(u8, flags[0], "--sandbox")) try args.appendSlice(gpa, &.{ "--cwd", s.path });
+        try args.appendSlice(gpa, flags);
+        try args.appendSlice(gpa, &.{ "--print", "echo" });
+        const p = try runOn(e, engine, args.items, null);
+        defer p.deinit();
+        errdefer std.debug.print("{s}\n{s}\n", .{ p.out, p.err });
+        try std.testing.expectEqual(0, p.code);
+        var pb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const r = try runOn(e, engine, &.{ "--plan", try scratchFile(&s, &pb, "plan", p.out), "--print" }, null);
+        defer r.deinit();
+        errdefer std.debug.print("{s}\n", .{r.err});
+        // The plan, and what it compiles to, are the same.
+        try std.testing.expectEqualStrings(p.out, r.out);
+        try std.testing.expectEqual(0, r.code);
+    };
+}
+
+test "a flag after --plan narrows, and a widening flag is exit 2 [plan-format]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.createDirPath(std.testing.io, "out");
+    var other: Scratch = undefined;
+    try other.init();
+    defer other.deinit();
+    var tb: [4096]u8 = undefined;
+    const text = try std.fmt.bufPrint(&tb,
+        \\dir {s}
+        \\cwd {s} rw
+        \\allow write {s}/out
+        \\memory 256M
+        \\net outbound
+        \\run /bin/rc -c 'echo x >/mnt/term/cwd/out/f && cat /mnt/term/cwd/out/f'
+        \\
+    , .{ e.root, s.path, s.path });
+    var pb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const plan = try scratchFile(&s, &pb, "plan", text);
+    var ob: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const out = try std.fmt.bufPrint(&ob, "{s}/out", .{s.path});
+
+    const ok = try run(e, &.{ "--plan", plan });
+    defer ok.deinit();
+    try std.testing.expectEqualStrings("x\n", ok.out);
+    try s.tmp.dir.deleteFile(std.testing.io, "out/f");
+
+    // Memory: lower, and not higher.
+    const low = try run(e, &.{ "--plan", plan, "--memory", "64m", "--print" });
+    defer low.deinit();
+    try std.testing.expectEqual(0, low.code);
+    try std.testing.expect(std.mem.indexOf(u8, low.out, "\nmemory 64M\n") != null);
+    const high = try run(e, &.{ "--plan", plan, "--memory", "1g", "--print" });
+    defer high.deinit();
+    try std.testing.expectEqual(2, high.code);
+    try std.testing.expect(std.mem.indexOf(u8, high.err, "memory 1G widens the plan's line 4: memory 256M") != null);
+
+    // A writable path: made read-only, and not a new one.
+    const ro = try run(e, &.{ "--plan", plan, "--readable", out });
+    defer ro.deinit();
+    try std.testing.expect(ro.code != 0);
+    try std.testing.expect(!s.exists("out/f"));
+    const wide = try run(e, &.{ "--plan", plan, "--writable", other.path, "--print" });
+    defer wide.deinit();
+    try std.testing.expectEqual(2, wide.code);
+    try std.testing.expect(std.mem.indexOf(u8, wide.err, "widens the plan") != null);
+
+    // The network: disabled, and not enabled.
+    const off = try run(e, &.{ "--plan", plan, "--net", "disable", "--rc", "test -e /net/tcp || echo no net" });
+    defer off.deinit();
+    try std.testing.expectEqualStrings("no net\n", off.out);
+    const on = try run(e, &.{ "--plan", plan, "--net", "enable", "--print" });
+    defer on.deinit();
+    try std.testing.expectEqual(2, on.code);
+    try std.testing.expect(std.mem.indexOf(u8, on.err, "net enable widens the plan's line 5: net outbound") != null);
+}
+
+test "--plan names the line it can't read, and exits 2 [plan-format]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    var tb: [4096]u8 = undefined;
+    const text = try std.fmt.bufPrint(&tb, "dir {s}\n# a comment; with a semicolon\nfrobnicate 3\n", .{e.root});
+    var pb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const r = try run(e, &.{ "--plan", try scratchFile(&s, &pb, "plan", text), "echo" });
+    defer r.deinit();
+    try std.testing.expectEqual(2, r.code);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "line 3: unknown line 'frobnicate'") != null);
+}
+
+test "a pinned root with a different index is refused [plan-format]" {
+    // design/plan-format.md, "Pinned roots": b3= is the BLAKE3 hash of the
+    // root's index. The index it pins runs, and an index with another
+    // hash, or a server's own .fs/index, which h9 can't check before the
+    // tree is used, is refused with exit 125.
+    const e = try env(@src());
+    var x: IndexRig = undefined;
+    try x.start(e, false);
+    defer x.stop();
+    try x.index(e);
+    const text = try x.mkindex(e);
+    defer gpa.free(text);
+    try x.write("x.h9index", text);
+    const file = try std.fs.path.join(gpa, &.{ x.s.path, "x.h9index" });
+    defer gpa.free(file);
+    var h: [32]u8 = undefined;
+    std.crypto.hash.Blake3.hash(text, &h, .{});
+    const right = std.fmt.bytesToHex(h, .lower);
+    var wrong = right;
+    wrong[0] = if (wrong[0] == '0') '1' else '0';
+    var ib: [std.Io.Dir.max_path_bytes + 160]u8 = undefined;
+
+    const ok = try x.run_(e, &.{ try std.fmt.bufPrint(&ib, "index={s},b3={s}", .{ file, &right }), "--rc", "ls /lib/x" });
+    defer ok.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{ok.err});
+    try std.testing.expectEqual(0, ok.code);
+    try std.testing.expectEqualStrings(x_listing, ok.out);
+
+    const bad = try x.run_(e, &.{ try std.fmt.bufPrint(&ib, "index={s},b3={s}", .{ file, &wrong }), "--rc", "ls /lib/x" });
+    defer bad.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{bad.err});
+    try std.testing.expectEqual(125, bad.code);
+    try std.testing.expectEqualStrings("", bad.out);
+    var wb: [200]u8 = undefined;
+    try expectIn(bad.err, try std.fmt.bufPrint(&wb, "b3=: its index has hash {s}…, not the pinned {s}…", .{ right[0..16], wrong[0..16] }));
+
+    // The server's .fs/index is the same text, but h9 reads it only once
+    // the tree is in use.
+    var ub: [std.Io.Dir.max_path_bytes + 200]u8 = undefined;
+    var db: [64]u8 = undefined;
+    const srv = try run(e, &.{ "--url", try std.fmt.bufPrint(&ub, "{s}:/:b3={s}", .{ dialUrl(&db, x.relay.dial()), &right }), "--rc", "ls /lib/x" });
+    defer srv.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{srv.err});
+    try std.testing.expectEqual(125, srv.code);
+    try std.testing.expectEqualStrings("", srv.out);
+    try expectIn(srv.err, "b3=: pinned, but h9 checks only");
+
+    // And from a plan, as --print writes it, on the engine it names.
+    const pin = try std.fmt.bufPrint(&ub, "{s}:/:index={s},b3={s}", .{ dialUrl(&db, x.relay.dial()), file, &wrong });
+    var it = std.mem.tokenizeScalar(u8, e.engines, ',');
+    while (it.next()) |engine| {
+        const p = try runOn(e, engine, &.{ "--url", pin, "--print", "true" }, null);
+        defer p.deinit();
+        try std.testing.expectEqual(0, p.code);
+        try expectIn(p.out, "pinned b3=");
+        var pb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const from_plan = try runOn(e, engine, &.{ "--plan", try scratchFile(&x.s, &pb, "plan", p.out) }, null);
+        defer from_plan.deinit();
+        errdefer std.debug.print("plan:\n{s}\nstderr: {s}\n", .{ p.out, from_plan.err });
+        try std.testing.expectEqual(125, from_plan.code);
+        try expectIn(from_plan.err, "not the pinned");
     }
 }

@@ -118,12 +118,16 @@ h9_tsleepinit(void)
 
 /*
  * Sleeps on r until fn(arg) is true or ms milliseconds have passed, as
- * 9front's tsleep. Like sleep, it raises "interrupted" if a note arrives.
+ * 9front's tsleep, and returns 0; or returns -1, with "interrupted" as the
+ * error string, if a note arrives. It's built on h9_sleepintr, the Zig
+ * sleep's (src/kern/sync.zig) form that returns instead of raising, so the
+ * Zig queues (src/kern/qio.zig) can wait in it.
  */
-void
-tsleep(Rendez *r, int (*fn)(void*), void *arg, ulong ms)
+int
+h9_tsleepintr(Rendez *r, int (*fn)(void*), void *arg, ulong ms)
 {
 	Timer t;
+	int rv;
 
 	memset(&t, 0, sizeof t);
 	t.when = h9_tnow() + (uvlong)ms*1000000ULL;
@@ -131,13 +135,17 @@ tsleep(Rendez *r, int (*fn)(void*), void *arg, ulong ms)
 	t.fn = fn;
 	t.arg = arg;
 	tadd(&t);
-	if(waserror()){
-		tdel(&t);
-		nexterror();
-	}
-	sleep(r, tfn, &t);
+	rv = h9_sleepintr(r, tfn, &t);
 	tdel(&t);
-	poperror();
+	return rv;
+}
+
+/* tsleep for C: like sleep, it raises "interrupted" if a note arrives. */
+void
+tsleep(Rendez *r, int (*fn)(void*), void *arg, ulong ms)
+{
+	if(h9_tsleepintr(r, fn, arg, ms) < 0)
+		nexterror();
 }
 
 /*

@@ -6,7 +6,7 @@ created: 2026-11-21
 authors: [progrium]
 depends: [baseline-1, namespace-kernel, kernel-serve]
 areas: [kern, build, tests]
-branch: []
+branch: [dev]
 ---
 
 # Proposal: Port the kernel core to Zig, as an instance
@@ -96,7 +96,7 @@ No new reach for a guest. Real address checks close a class of bug where a guest
 
 - [ ] `zig build test`, `zig build integration` on every engine, `zig build integration -Dweb`, and `zig build web-test` pass with no case removed or newly skipped.
 - [ ] [namespace-kernel](epoch-0/namespace-kernel.md)'s cases pass against the ported core.
-- [ ] `zig build conformance` runs a script of namespace operations (binds, unions, mounts, `..` across mounts, creates in unions, `ORCLOSE`, and flush) on h9 and on a 9front kernel under QEMU, and the transcripts match.
+- [x] `zig build conformance` runs a script of namespace operations (binds, unions, mounts, `..` across mounts, creates in unions, `ORCLOSE`, and flush) on h9 and on a 9front kernel under QEMU, and the transcripts match.
 - [ ] `git grep -l waserror src/` finds nothing, and the build compiles none of `chan.c`, `pgrp.c`, `dev.c`, `devmnt.c`, `qio.c`, `devpipe.c`, `devroot.c`, or `sysfile.c` from `third_party/drawterm/kern/`.
 - [ ] `test "two machines don't share /srv [kernel-port]"` and `test "two machines don't share devcmd conversations [kernel-port]"` pass with two machines in one process.
 - [ ] `test "a bad guest pointer is a fault, not a host crash [kernel-port]"` passes for read, write, and stat buffers.
@@ -120,3 +120,23 @@ No new reach for a guest. Real address checks close a class of bug where a guest
 
 - Whether the C devices h9 wrote (devoverlay, devdotl, devlinux, and the rest) are ported under this proposal or after it. As written, they're adapted through the shim in step 3 and ported later without a proposal, as internal refactors.
 - Whether the 9front oracle runs in CI or only by hand. It needs QEMU and a 9front image, which `zig build mkroot` already uses.
+
+## Updates
+
+**2026-11-26, the conformance check.** `zig build conformance` runs [tests/conformance/ns.rc](../tests/conformance/ns.rc) on h9 and compares it with a transcript recorded on 9front, [tests/conformance/9front.out](../tests/conformance/9front.out), so it runs in CI and anywhere else with no QEMU, which settles the second open issue. `zig build conformance -- --oracle` records the transcript again: it boots the arm64 image that `zig build mkroot` boots, under QEMU (TCG is fine, and takes under a minute), and runs the script there. The script compiles a small C helper in the guest for `ORCLOSE`, which rc can't ask for, and tests flush by interrupting a read blocked in exportfs, through `srvfs`. Today's C kernel matches 9front's transcript on sud and hcpu, with no differences to note.
+
+**2026-11-26, qio and sync.** `src/kern/qio.zig` (from `qio.c` and `allocb.c`) and `src/kern/sync.zig` (from `qlock.c`, `rwlock.c`, and `sleep.c`) are built in place of the C, under `src/kern/port.zig`, the root of the kernel's Zig, which the kern library and the namespace kernel compile. Some things the port found:
+
+- **The C kernel's types come from translate-c.** `src/kern/port.h` is translated with the kernel's own `-D` flags, so `Lock` (a pthread mutex with `PTHREAD`), `Proc`, and `Label` have the C compiler's layout on every target. It reads `char Eintr[]` as a pointer, so error.c's strings are declared by hand, and on the web it needs `__wasm_exception_handling__` defined for wasi-libc's `setjmp.h`.
+- **`lib.h` renames `sleep` and `wakeup`** to `ksleep` and `kwakeup`, which are the symbols C calls, and a `Proc`'s `sleep` field is `ksleep` too.
+- **drawterm's `malloc` clears** (`kern/alloc.c`), so a `Queue` starts zeroed, locks included; the port allocates it with `mallocz(n, 1)`.
+- **`tsleep` gains a form that returns.** qio's interruptible reader and writer locks wait in `tsleep`, so `src/kern/tsleep.c` has `h9_tsleepintr`, which returns -1 on a note, built on `h9_sleepintr`, the Zig sleep's form for C that returns, and `tsleep` raises from it. That removes a `waserror` from tsleep.c.
+- **The `waserror` around `qread`'s and `qwrite`'s copies goes**: in 9front it catches a fault on a user buffer, and h9 copies guest memory outside the kernel.
+- **Kick and bypass functions mustn't raise**, since they're called from the Zig. No caller in h9 sets either.
+- **The blocking points** are `park` and `unpark` in `sync.zig` (posix.c's `procsleep` and `procwakeup`): qlock's queue, sleep, and so `qwait`, `qflow`, and `qlockintr` in qio, which each wait in one small function. [scheduler](scheduler.md) changes those two.
+
+**2026-11-26, dev and the device switch.** `src/kern/dev.zig` is `dev.c`: the helpers, exported under their C names, and the switch the Zig calls devices through. Devices stay C `Dev`s in h9's own tables (`src/kern/devtab.c` and `nstab.c`, which stand for drawterm's `devtab.c`), so the switch calls a C device, or a C `Devgen` handed to `devwalk` and the rest, through `src/kern/devshim.c`: one small C function per `Dev` member, which runs the call under `waserror` and returns -1 with the error string on the process. Those are the only `waserror`s the Zig runs under. Some things the port found:
+
+- **drawterm's `long` is `int`.** `lib.h` defines it so, and its `ulong` is `unsigned int`, so `qio.zig` had `qread`'s, `qbwrite`'s, and `readblist`'s counts as 64 bits where C passes 32; a C caller's count reached `readblist` with its upper half undefined. They're `c_int` now, and so is every `long` in the Zig.
+- **`lib.h` renames `clone`** to `libclone`, so a `Walkqid`'s clone is `libclone` in the Zig.
+- **`devwalk` raises only before its walk**: `isdir` comes before its `waserror`, so a walk from a file is an error, and a walk that fails at its first name is nil with the error string set. The Zig returns `Error!?*Walkqid` to say both.

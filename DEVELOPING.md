@@ -91,10 +91,13 @@ in that runs here), and the Go cases run on sud when it's among them.
 ```sh
 zig build          # builds and ad-hoc signs zig-out/bin/h9 with h9.entitlements
 zig build test     # unit tests, and the engine tests on every engine built in (not the integration cases)
-zig build kern     # compiles drawterm's kern and the libraries it uses
+zig build kern     # compiles drawterm's kern and the libraries it uses, with the parts ported to Zig (src/kern/port.zig)
+zig build kern-test  # the ported kernel's own cases (src/kern/*.zig), on the native namespace kernel; zig build test runs them too
+zig build sched-test  # the scheduler's kernel stacks and park and resume (src/kern/sched/), with no kernel or engine; compiled only for a -Dtarget the host can't run, and for wasm32 run through Asyncify under Node if Binaryen's wasm-opt is on PATH; zig build test runs them too
 zig build embed    # builds docs/embedding/embed.zig, the embedding guide's example, as zig-out/bin/embed
 zig build integration  # real 9front binaries from the root tree through the h9 CLI
 zig build proposal -Dp=baseline  # one proposal's demos, web cases, and integration cases, by slug
+zig build conformance            # tests/conformance/ns.rc on h9, against 9front's transcript; -- --oracle records that under QEMU
 zig build design -- check        # validate design/, the test tags, and links to design/ (also list, ready, new, propose, log, sign, archive)
 zig build mkroot -- --src        # build the root tree from the pinned image (also --force, --arch arm64,386,amd64)
 zig build slim     # 9box, 9front's commands as one multi-call binary, and a slim root around it in .local/9front/slim-<release>-<arch>
@@ -304,6 +307,29 @@ doesn't build it. "Linux v9fs
 mounts --serve over a unix socket" runs only on Linux with the kernel's
 9p, as root or with `sudo -n`, as in the `linux-kvm` VM.
 
+### Namespace conformance
+
+[tests/conformance/ns.rc](tests/conformance/ns.rc) is a script of
+namespace operations (binds, unions, mounts, `..` across mounts, creates
+in unions, `ORCLOSE`, and flush) that prints what each one showed, and
+[tests/conformance/9front.out](tests/conformance/9front.out) is what it
+printed on 9front's own kernel ([kernel-port](design/kernel-port.md)).
+`zig build conformance` runs it on h9, on each engine `-Dengines` picks,
+with the root tree (`-Droot`, and `-Darch`), and fails on any difference,
+showing the first one; each engine's transcript is left in
+`zig-out/conformance`. It skips without a root tree, and needs no QEMU.
+When the script changes, record the transcript again on 9front:
+
+```sh
+zig build conformance -- --oracle   # boots the pinned arm64 image under QEMU (scripts/fetch.sh image), as mkroot does
+```
+
+It runs the script there with rc and writes `9front.out`
+([tools/conformance.zig](tools/conformance.zig)). On TCG, with no
+hypervisor for arm64, that takes well under a minute. A difference that
+is a bug in h9's kernel is noted in kernel-port's Updates, not hidden by
+changing the script.
+
 ### Workloads
 
 The workloads in [tests/workloads](tests/workloads) run real programs on
@@ -382,7 +408,7 @@ development builds report `git describe` (`-Dversion=V` overrides it).
 | `src/machine.zig` | one machine: builds its namespace, runs a process, and serves its syscalls |
 | `src/consin.zig` | a machine run's console input: the reader thread a guest's console read waits on, so notes can interrupt it |
 | `src/policy.zig` | the sandbox policy: profiles, the compiled plan, `--print`, and the access rules devfs checks |
-| `src/kern.zig`, `src/kern/` | the Zig/C seam into drawterm's kern; boot and spawn (`glue.c`), process records and notes (`proc.c`), our device table, the machine console `#y`, devenv, and devproc ported from 9front, the copy-on-write overlay device `#O` (`devoverlay.c`), h9's guest commands `#H` (`devhtools.c`), and the devfs policy hooks (`fscheck.c`) |
+| `src/kern.zig`, `src/kern/` | the Zig/C seam into drawterm's kern; the parts of drawterm's kern ported to Zig ([kernel-port](design/kernel-port.md): `port.zig`, with queues and blocks in `qio.zig`, locks and sleep in `sync.zig`, and the device helpers and switch in `dev.zig`, which calls C devices through `devshim.c`); boot and spawn (`glue.c`), process records and notes (`proc.c`), our device table, the machine console `#y`, devenv, and devproc ported from 9front, the copy-on-write overlay device `#O` (`devoverlay.c`), h9's guest commands `#H` (`devhtools.c`), and the devfs policy hooks (`fscheck.c`) |
 | `src/guest/` | h9's own guest commands (rc scripts), as the guest sees them under `#H`; embedded by the build through `tools/guesttree.zig`. |
 | `src/abi/plan9/syscall.zig`, `src/guestmem.zig` | the 9front syscall table, and checked access to guest memory |
 | `src/abi/plan9/loader.zig` | loads an a.out into an address space, builds the stack and Tos |

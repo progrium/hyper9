@@ -1,0 +1,279 @@
+#!/bin/rc
+# The namespace conformance script (design/kernel-port.md): binds,
+# unions, mounts, .. across mounts, creates in unions, ORCLOSE, and
+# flush, each printed as a step and what it showed. zig build
+# conformance runs it on h9 and compares what it prints with
+# tests/conformance/9front.out, which tools/conformance.zig --oracle
+# records by running it on 9front under QEMU.
+#
+# Everything happens under /tmp/conf, a ramfs, so the paths and error
+# strings it prints are the same on any root. Nothing it prints may
+# depend on the architecture, a pid, a qid, a device number, or time.
+
+rfork ens
+fn step {
+	echo
+	echo '--' $*
+}
+# run CMD...: CMD's output and errors, then whether it failed.
+fn run {
+	echo '%' $*
+	$* >[2=1]
+	if(! ~ $status '')
+		echo '!' failed
+}
+# names DIR...: a directory's entries in the order the kernel reads them.
+fn names {
+	echo '%' ls $*
+	ls -np $* >[2=1]
+	if(! ~ $status '')
+		echo '!' failed
+}
+
+mkdir -p /tmp/conf
+ramfs -m /tmp/conf
+cd /tmp/conf
+mkdir a b c m p e src
+echo a >a/f
+echo b >b/f
+echo b >b/g
+echo c >c/h
+switch($cputype){
+case amd64
+	O=6
+case arm64
+	O=7
+case 386
+	O=8
+}
+
+# The helper for what rc can't do: opens with ORCLOSE.
+cat >src/orclose.c <<'EOF'
+#include <u.h>
+#include <libc.h>
+
+static void
+exists(char *name)
+{
+	print("%s %s\n", name, access(name, AEXIST) == 0 ? "exists" : "is gone");
+}
+
+/* orclose create NAME | open NAME | dup NAME */
+void
+main(int argc, char **argv)
+{
+	int fd, fd2;
+
+	if(argc != 3)
+		sysfatal("usage: orclose create|open|dup name");
+	if(strcmp(argv[1], "create") == 0)
+		fd = create(argv[2], ORDWR|ORCLOSE, 0666);
+	else
+		fd = open(argv[2], ORDWR|ORCLOSE);
+	if(fd < 0){
+		print("open %s: %r\n", argv[2]);
+		exits("open");
+	}
+	if(write(fd, "orclose\n", 8) != 8)
+		print("write: %r\n");
+	exists(argv[2]);
+	if(strcmp(argv[1], "dup") == 0){
+		fd2 = dup(fd, -1);
+		close(fd);
+		print("closed one of two\n");
+		exists(argv[2]);
+		fd = fd2;
+	}
+	close(fd);
+	print("closed\n");
+	exists(argv[2]);
+	exits(nil);
+}
+EOF
+$O^c -o src/orclose.$O src/orclose.c && $O^l -o src/orclose src/orclose.$O || echo cannot build orclose
+
+step bind replaces a directory
+names c
+run bind a c
+names c
+run cat c/f
+run unmount c
+names c
+
+step bind -b puts the new directory first
+run bind -b a b
+names b
+run cat b/f
+run unmount a b
+names b
+
+step bind -a puts it last
+run bind -a a b
+names b
+run cat b/f
+run cat b/g
+run unmount a b
+
+step a three-way union, and unmounting its middle
+run bind -a a b
+run bind -a c b
+names b
+run unmount a b
+names b
+run unmount b
+names b
+
+step creates in a union without -c
+run bind -a a b
+run touch b/n1
+run mkdir b/d1
+run unmount a b
+names a b
+
+step creates in a union go to the first member with -c
+run bind -ac a b
+run touch b/n2
+names a b
+run unmount a b
+run bind -bc a b
+run touch b/n3
+run unmount a b
+run bind -b a b
+run touch b/n4
+run unmount a b
+names a b
+
+step removes in a union take the first member
+run bind -b a b
+run rm b/f
+names b
+run cat b/f
+run unmount a b
+names a b
+echo a >a/f
+
+step a mount of ramfs over 9P
+run ramfs -S confram
+run mount -c /srv/confram m
+run mkdir m/d m/d/dd
+echo x >m/x
+names m
+run mount -a /srv/confram c
+names c
+run unmount /srv/confram c
+run unmount c
+run unmount c
+
+step .. across mounts and binds
+run cd m/d/dd
+run pwd
+run cd ..
+run pwd
+run cd ..
+run pwd
+run cd ..
+run pwd
+run cat m/d/../x
+run bind a m/d
+run cd m/d
+run pwd
+run cd ..
+run pwd
+cd /tmp/conf
+run cat m/d/../x
+run cat m/d/f
+run ls m/d/..
+run unmount m/d
+run bind -a c b
+run cd b/..
+run pwd
+cd /tmp/conf
+run unmount c b
+run touch b/n5
+run unmount b
+run touch b/n5
+names b
+run cd /
+run cd ..
+run pwd
+cd /tmp/conf
+run cat b/../a/f
+
+step a mount in a union, and a file bound on a file
+run mount -b /srv/confram b
+names b
+run cat b/x
+run unmount b
+run bind a/f b/g
+run cat b/g
+run rm b/g
+names a b
+run unmount b/g
+echo a >a/f
+names b
+
+step removing a mount point
+run bind a c
+run rm c
+names c
+run unmount c
+run rm c/h
+run mkdir c/sub
+run bind a c/sub
+run rm c/sub
+names c
+run unmount c/sub
+run rm c/sub
+names c
+echo c >c/h
+
+step errors
+run bind nonexistent b
+run bind a/f b
+run bind a b/f
+run unmount a c
+run mount /tmp/conf/a/f c
+run cat b/../nonexistent
+
+step ORCLOSE on a create
+run src/orclose create m/oc
+names m
+
+step ORCLOSE on an open in a union
+echo u >b/u
+run bind -b a b
+run src/orclose open b/u
+names a b
+run unmount a b
+
+step ORCLOSE with the fd duplicated
+echo v >m/v
+run src/orclose dup m/v
+
+step ORCLOSE on a create in a union with -c
+run bind -bc a b
+run src/orclose create b/oc2
+names a b
+run unmount a b
+
+step flush of a blocked 9P read
+run bind '#|' p
+run srvfs confp /tmp/conf/p
+run mount /srv/confp e
+names e
+cat e/data1 >/dev/null >[2]/dev/null &
+reader=$apid
+for(i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30){
+	if(! grep -s Pread /proc/$reader/status >[2]/dev/null)
+		sleep 1
+}
+echo interrupt >/proc/$reader/note
+wait $reader
+echo reader interrupted
+echo after >p/data
+run read -c 6 <e/data1
+run unmount e
+rm -f /srv/confp /srv/confram
+
+echo
+echo '--' end

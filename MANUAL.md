@@ -653,35 +653,61 @@ running anything:
 ```text
 % exit
 host$ h9 --print rc
-profile:  default
-enforces: env.scrub fs.read.scope fs.write.overlay fs.write.scope ipc.restrict kernel.isolation net.outbound
-limits:   write=overlay net=outbound
-devmask:  #C #U #b #i #m
-namespace:
-  bind '#U/Users/me/src/hyper9/.local/9front/root-11952' / ro
-  bind -c '#O' /                                         eph  # /Users/me/src/hyper9/.local/9front/root-11952
-  bind '#c' /dev
-  bind -b '#y<id>' /dev
-  bind -c '#e' /env
-  bind '#d' /fd
-  bind '#p' /proc
-  bind -c '#s' /srv
-  bind '#I' /net
-  bind -a '#ℏ' /net  # WebSockets, under --net
-  bind '/arm64/bin' /bin
-  bind -a '/rc/bin' /bin
-  bind -a '#H/bin' /bin  # h9's commands
-  bind -c '#O' /tmp                                      eph  # /Users/me/src/hyper9/.local/9front/root-11952/tmp
-  bind -c '#U/Users/me/tour' /mnt/term/cwd               rw
-access:
-  eph  /Users/me/src/hyper9/.local/9front/root-11952
-  rw   /Users/me/tour
-caveats:
-  ...
+# h9 plan (design/plan-format.md): h9 --plan FILE runs it
+
+# namespace
+dir /Users/me/src/hyper9/.local/9front/root-11952:/
+
+# policy
+profile default
+write overlay
+net outbound
+devices guest-tools
+
+# limits and the run
+# memory: the engine's default
+# pids: unlimited
+# cpus: as many as the engine runs
+# timeout: none
+engine auto
+arch arm64
+cwd /Users/me/tour rw
+run rc
+
+# What h9 builds from these lines (comments, not read back):
+# profile:  default
+# enforces: env.scrub fs.read.scope fs.write.overlay fs.write.scope ipc.restrict kernel.isolation net.outbound
+# limits:   write=overlay net=outbound
+# devmask:  #C #U #b #i #m
+# namespace:
+#   bind '#U/Users/me/src/hyper9/.local/9front/root-11952' / ro
+#   bind -c '#O' /                                         eph  # /Users/me/src/hyper9/.local/9front/root-11952
+#   bind '#c' /dev
+#   bind -b '#y<id>' /dev
+#   bind -c '#e' /env
+#   bind '#d' /fd
+#   bind '#p' /proc
+#   bind -c '#s' /srv
+#   bind '#I' /net
+#   bind -a '#ℏ' /net  # WebSockets, under --net
+#   bind '/arm64/bin' /bin
+#   bind -a '/rc/bin' /bin
+#   bind -a '#H/bin' /bin  # h9's commands
+#   bind -c '#O' /tmp                                      eph  # /Users/me/src/hyper9/.local/9front/root-11952/tmp
+#   bind -c '#U/Users/me/tour' /mnt/term/cwd               rw
+# access:
+#   eph  /Users/me/src/hyper9/.local/9front/root-11952
+#   rw   /Users/me/tour
+# caveats:
+#   ...
 ```
 
-The namespace section is the list of `bind` commands that built the file
-tree you just explored. `#U` is the host's file system, `#c` the console, `#e`
+The first part is a *plan*: the machine as lines of text, with every default
+spelled out. Save it, and `h9 --plan FILE` runs the same machine; chapter 23
+says more. The comments after it are what h9 builds from those lines.
+
+The namespace in those comments is the list of `bind` commands that built
+the file tree you just explored. `#U` is the host's file system, `#c` the console, `#e`
 the environment, `#p` the processes, `#s` the service registry, `#I` the
 network, `#ℏ` WebSockets, `#H` h9's own commands, and `#O` an overlay in
 memory, over the root and over `/tmp`, that keeps your changes off the host. Each `#`
@@ -854,8 +880,9 @@ You can change the namespace two ways:
 - **At startup**, with `--ns FILE`: h9 replays a namespace file after
   building its own namespace and before looking up the program (chapter 25).
 
-Because `--print`'s namespace section is in namespace-file syntax, you can
-save it, edit it, and replay it with `--ns`.
+Because the namespace `--print` shows (in the comments after `# namespace:`)
+is in namespace-file syntax, you can save it without the `#`s, edit it, and
+replay it with `--ns`. A plan takes the same lines, after its mounts.
 
 h9's `bind` also takes `-r` ([mounts](design/epoch-0/mounts.md)): `bind -r new
 old` merges `new` with `old` at every depth, not only at the top, so a
@@ -1440,9 +1467,22 @@ connect to other machines, and `9fs` mounts remote file servers.
   pattern allows it, so connect by name, through `cs`, rather than by
   address.
 
+  Name patterns work for Linux programs too, which look names up with
+  their own DNS clients. With any name pattern, h9 answers the machine's
+  DNS itself: every query to port 53, to whatever server the program
+  names, goes to a resolver h9 runs for the machine. It answers a name no
+  pattern covers with `REFUSED`, without sending it anywhere, forwards
+  the rest to the host's DNS servers, and remembers the addresses in each
+  answer, so a connect to one of them is allowed as it is after `cs`.
+  The DNS servers need no patterns of their own, and a pattern for one
+  (`udp!10.0.0.53!53`) doesn't take its queries out of the resolver.
+  DNS over TLS or HTTPS isn't seen, so it's refused unless a pattern
+  covers the server.
+
   ```sh
   host$ h9 --net-allow 'tcp!*.github.com!443' --net-allow 'udp!10.0.0.53!53' ./client
   host$ h9 --net-allow 'tcp!10.0.0.0/8!564' --rc 'srv tcp!fileserver!564 fs && mount /srv/fs /tmp/fs'
+  host$ h9 --dir alpine:#L --net-allow 'tcp!registry.npmjs.org!443' npm install
   ```
 
   `--net-allow` with `--net=disable`, or a malformed pattern, is a usage
@@ -2208,8 +2248,10 @@ as `NAME=value`, plus `USER`, `LOGNAME`, `HOME`, and a default `PATH`;
 **Network.** A socket is a `/net` connection underneath, so `--net`,
 `--net-allow`, and listening only under `--net=enable` apply to Linux
 programs exactly as to 9front ones. DNS is the program's own, through the
-`/etc/resolv.conf` above, so under `--net-allow` a pattern has to cover
-those servers (`udp!8.8.8.8!53`). Unix-domain sockets, `socketpair`,
+`/etc/resolv.conf` above. Without name patterns, a `--net-allow` pattern
+has to cover those servers (`udp!8.8.8.8!53`); with one, h9 answers DNS
+for the machine and the name patterns work as they do through `cs` (see
+`--net-allow` in chapter 15). Unix-domain sockets, `socketpair`,
 `epoll`, `eventfd`, passing file descriptors, and passing credentials
 (`SO_PASSCRED`) work between the processes of one machine, and
 `SOCK_SEQPACKET` keeps each message whole. `memfd_create`, and a file
@@ -2289,6 +2331,7 @@ Silicon Mac, runs only on the emulator, and much more slowly.
 h9 [flags] [--] program [args...]
 h9 [flags] --rc 'command' [args...]
 h9 [flags] --rc
+h9 --plan FILE|- [narrowing flags] [program [args...]]
 h9 [--engine B] [mount flags] [--memory SIZE] --check
 h9 --version
 h9 --help          (or -h alone)
@@ -2339,6 +2382,7 @@ Machine:
 | `--env name=value` | Set a guest environment variable; repeatable. The host environment is never imported. |
 | `--rc 'command'` | Run an rc command line instead of a program. It's always 9front's rc, even with a Linux root. |
 | `--rc` (last) | Run a login rc: the root's default command from `/rc/lib/rcmain.local`, then an interactive rc on a terminal, or commands from stdin otherwise |
+| `--plan FILE\|-` | Run a plan, a file of the lines flags compile to (chapter 23), or standard input with `-`. Flags after it can only narrow it (lower limits, a path made read-only, less network), and one that would widen it is exit 2, naming the plan's line. A program after it replaces the plan's `run` line. A line h9 can't read is exit 2 with its number. |
 | `--ns 'LINE; LINE'\|@FILE` | Replay namespace lines before running the program (chapter 25): inline, with `;` between lines, or `@FILE` for a host file, read before the machine starts. Repeatable, replayed in order, after the mounts and `--bind`s. A bare file name is exit 125 with a hint to add `@`. |
 
 Mounts (chapter 25). Each is `SRC[:DST[:OPTS]]` and repeatable, applied
@@ -2397,7 +2441,7 @@ Files and sandbox (chapters 22 and 23):
 | `--serve-net` | Export `/net` too |
 | `--host-fs` | Show the whole host file system, read-only, at `/mnt/term` |
 | `--no-guest-tools` | Leave h9's own commands (`#H/bin`) off `/bin`, and mask `#H` |
-| `--print` | Print the compiled sandbox plan and exit without running |
+| `--print` | Print the plan the flags compile to, and as comments what h9 builds from it, and exit without running (chapter 23) |
 
 Limits (chapter 24):
 
@@ -2652,44 +2696,70 @@ tight with a network.
 | `res.cpu` | Running vCPUs capped | `--cpus` |
 | `proc.timeout` | A deadline for the machine | `--timeout`, `tight` |
 
-**Reading `--print`.** `--print` compiles the policy and prints it without
-running anything:
+**Reading `--print`.** `--print` compiles the flags and prints the plan they
+make without running anything: first the plan's lines, then, as comments,
+what h9 builds from them:
 
 ```text
 host$ cd ~/src/proj
 host$ h9 --print --profile=tight --writable ./out --memory 512m --timeout 1m mk
-profile:  tight
-enforces: env.scrub fs.read.scope fs.write.overlay fs.write.scope ipc.restrict kernel.isolation net.disable proc.timeout res.memory
-limits:   write=overlay net=disable memory=512M timeout=1m
-devmask:  #C #I #ℏ #U #b #i #m
-namespace:
-  bind '#U/Users/me/src/hyper9/.local/9front/root-11952' / ro
-  bind -c '#O' /                                         eph  # /Users/me/src/hyper9/.local/9front/root-11952
-  bind '#c' /dev
-  bind -b '#y<id>' /dev
-  bind -c '#e' /env
-  bind '#d' /fd
-  bind '#p' /proc
-  bind -c '#s' /srv
-  bind '/arm64/bin' /bin
-  bind -a '/rc/bin' /bin
-  bind -a '#H/bin' /bin  # h9's commands
-  bind -c '#O' /tmp                                      eph  # /Users/me/src/hyper9/.local/9front/root-11952/tmp
-  bind '#U/Users/me/src/proj' /mnt/term/cwd              ro
-  bind -c '#U/Users/me/src/proj/out' /mnt/term/cwd/out   rw
-access:
-  eph  /Users/me/src/hyper9/.local/9front/root-11952
-  ro   /Users/me/src/proj
-  rw   /Users/me/src/proj/out
-caveats:
-  - writes to the root are kept in memory, count against --memory, and are lost when the machine ends; when memory runs out they fail with "file system full"
-  - a file opened for writing is copied into memory whole the first time
-  - hardlinks under writable paths can modify host files outside them
-  - writes to writable paths are not capped (no res.disk)
-  - paths are checked after resolving symlinks, so a host process renaming paths concurrently can race the check
-  - /proc/n/ns shows the host paths of bound host trees
-  - the h9 process itself is not host-sandboxed
+# h9 plan (design/plan-format.md): h9 --plan FILE runs it
+
+# namespace
+dir /Users/me/src/hyper9/.local/9front/root-11952:/
+
+# policy
+profile tight
+write overlay
+net disable
+allow write /Users/me/src/proj/out
+devices guest-tools
+
+# limits and the run
+memory 512M
+# pids: unlimited
+# cpus: as many as the engine runs
+timeout 1m
+engine auto
+arch arm64
+cwd /Users/me/src/proj ro
+run mk
+
+# What h9 builds from these lines (comments, not read back):
+# profile:  tight
+# enforces: env.scrub fs.read.scope fs.write.overlay fs.write.scope ipc.restrict kernel.isolation net.disable proc.timeout res.memory
+# limits:   write=overlay net=disable memory=512M timeout=1m
+# devmask:  #C #I #ℏ #U #b #i #m
+# namespace:
+#   bind '#U/Users/me/src/hyper9/.local/9front/root-11952' / ro
+#   bind -c '#O' /                                         eph  # /Users/me/src/hyper9/.local/9front/root-11952
+#   bind '#c' /dev
+#   bind -b '#y<id>' /dev
+#   bind -c '#e' /env
+#   bind '#d' /fd
+#   bind '#p' /proc
+#   bind -c '#s' /srv
+#   bind '/arm64/bin' /bin
+#   bind -a '/rc/bin' /bin
+#   bind -a '#H/bin' /bin  # h9's commands
+#   bind -c '#O' /tmp                                      eph  # /Users/me/src/hyper9/.local/9front/root-11952/tmp
+#   bind '#U/Users/me/src/proj' /mnt/term/cwd              ro
+#   bind -c '#U/Users/me/src/proj/out' /mnt/term/cwd/out   rw
+# access:
+#   eph  /Users/me/src/hyper9/.local/9front/root-11952
+#   ro   /Users/me/src/proj
+#   rw   /Users/me/src/proj/out
+# caveats:
+#   - writes to the root are kept in memory, count against --memory, and are lost when the machine ends; when memory runs out they fail with "file system full"
+#   - a file opened for writing is copied into memory whole the first time
+#   - hardlinks under writable paths can modify host files outside them
+#   - writes to writable paths are not capped (no res.disk)
+#   - paths are checked after resolving symlinks, so a host process renaming paths concurrently can race the check
+#   - /proc/n/ns shows the host paths of bound host trees
+#   - the h9 process itself is not host-sandboxed
 ```
+
+The comments' sections:
 
 | Section | What it says |
 | --- | --- |
@@ -2697,12 +2767,69 @@ caveats:
 | `enforces:` | The capabilities in force |
 | `limits:` | The write and network modes, and any memory, timeout, process, and CPU caps |
 | `devmask:` | Devices a program can't attach by name after startup |
-| `net-allow:` | Shown only with `--net-allow`: the patterns |
+| `net-allow:` | Shown only with `--net-allow`: the patterns, which the plan has as `netallow` lines |
 | `namespace:` | The namespace, in namespace-file syntax, with each host tree's access (`ro`, `rw`, `eph`, `up`, `9p`) at the end of its line; `<id>` stands for the machine's console number |
 | `access:` | The rules the host file system device checks: allowed read-only, read-write, ephemeral, or denied, by host path |
 | `caveats:` | What the sandbox doesn't cover in this configuration |
 
+**Plans: a sandbox in a file.** The plan's lines are a format h9 reads back
+([plan-format](design/plan-format.md)), so a sandbox you've worked out can be
+checked in, diffed, reviewed, and handed to someone:
+
+```sh
+host$ h9 --print --profile=tight --writable ./out --memory 512m mk > build.plan
+host$ h9 --plan build.plan                 # the same machine
+host$ h9 --plan build.plan --memory 256m   # narrower: fine
+host$ h9 --plan build.plan --net=enable
+h9: --plan build.plan: net enable widens the plan's line 9: net disable
+host$ echo $?
+2
+```
+
+A plan file needs only the lines that differ from the defaults, and a `#`
+starts a comment:
+
+```text
+# The CI job: tight, with a writable ./out, and no more.
+profile tight
+allow write /Users/me/src/proj/out
+memory 512M
+timeout 10m
+run mk test
+```
+
+| Line | Flag |
+| --- | --- |
+| `dir`, `url`, `archive`, `builtin`, `tmp` VALUE | `--dir`, `--url`, `--archive`, `--builtin`, `--tmp`, with the same value |
+| `bind SRC:DST[:OPTS]` | `--bind` |
+| `bind`, `mount`, `unmount`, `cd`, `clear` with namespace-file arguments | `--ns` |
+| `profile`, `write`, `net`, `netallow` | `--profile`, `--write`, `--net`, `--net-allow` |
+| `allow read PATH`, `allow write PATH`, `deny read PATH` | `--readable`, `--writable`, `--read-deny` |
+| `devices [host-fs] [guest-tools]` | `--host-fs`, and the absence of `--no-guest-tools` |
+| `memory`, `pids`, `cpus`, `timeout`, `engine`, `arch`, `env NAME=VALUE` | The flags of the same names |
+| `cwd PATH rw\|ro` | `--cwd`, and whether it's writable |
+| `gfx window [noclip] [scale=N]`, `gfx headless [WxH]` | `--gfx`, `--gfx-scale`, `--gfx=headless`, `--gfx-size` |
+| `serve`, `serveroot`, `servetoken @FILE`, `serveorigin`, `servenet` | The `--serve` flags |
+| `run PROG ARGS...` | The program, or `--rc` |
+
+Flags after `--plan` can only narrow it: a lower limit, a path made
+read-only, a network rule removed, a path denied. To widen a plan, edit it.
+`--trace`, `-v`, `--index`, and `--cred` aren't plan lines, since they're
+about the run rather than the machine, and go beside it. A plan holds no
+secrets: `--print` writes a URL's query and a header's value as `…`, and
+`--plan` refuses a line with `…`, so name them in a file (`header=@FILE`,
+`servetoken @FILE`). A `url` line can pin its tree with `b3=`, the BLAKE3
+hash of its index (`index=FILE` or a static tree's), and h9 refuses a tree
+whose index has another hash with exit 125.
+
+Programs embedding h9 take the same text: `Machine.Options.plan` in Zig
+(`Options.toPlan` gives a struct's plan) and `createMachine({ plan })` on a web
+page.
+
 **Recipes**
+
+Each of these is also a plan: `--print` writes it, and
+[docs/recipes.md](docs/recipes.md) has them as plan files.
 
 ```sh
 # Run an untrusted script against your project, keeping every change in memory:
@@ -2777,7 +2904,7 @@ is in the root tree. A file elsewhere on the host has to be shared first.
 **Workflow**
 
 ```sh
-host$ h9 --print rc | sed -n '/^namespace:/,/^access:/p' | sed '1d;$d' > ns
+host$ h9 --print rc | sed -n '/^# namespace:/,/^# access:/p' | sed '1d;$d;s/^#//' > ns
 host$ cat ns
   bind '#U/Users/me/src/hyper9/.local/9front/root-11952' / ro
   ...
@@ -2789,7 +2916,9 @@ host$ h9 --ns ns rc
 Replaying a namespace doesn't widen the sandbox: `#U` is already masked when
 the file runs, so a line binding `'#U/...'` fails and is skipped, and the
 bind h9 already made stays. That's why replaying `--print` output is
-harmless: only the lines you add, or that differ, change anything. A
+harmless: only the lines you add, or that differ, change anything. A plan
+(chapter 23) takes these lines too, after its mounts, so a namespace file can
+become part of one. A
 `bind -c '#O'` line, on the other hand, does take effect: it puts a fresh
 overlay in memory over its target, so the target becomes writable for the
 run, even under `--write=none`. An `#O` line whose target is a bind or

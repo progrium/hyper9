@@ -5,6 +5,8 @@
  */
 
 void	tsleep(Rendez*, int (*)(void*), void*, ulong);
+int	h9_tsleepintr(Rendez*, int (*)(void*), void*, ulong);	/* -1 if interrupted, in place of raising */
+int	h9_sleepintr(Rendez*, int (*)(void*), void*);		/* sleep's, from src/kern/sync.zig */
 void	h9_tsleepinit(void);
 
 void	h9_tinit(void);

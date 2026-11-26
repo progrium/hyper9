@@ -240,6 +240,39 @@ try {
     if (!stLog.includes('RANGE /big') || stLog.includes('GET /big')) throw new Error(`static tree requests: ${stLog.join(', ')}`);
   });
 
+  // design/plan-format.md: a plan's text, with its archives by URL, its
+  // own run line, and a lower memory limit given beside it. A plan with
+  // no mount lines gets root.h9a, and a flag that widens is exit 2.
+  await test('createMachine({ plan }) runs rc [plan-format]', async () => {
+    const r = await page.evaluate(async () => {
+      const { createMachine } = await import('./h9-web.js');
+      const once = async (opts, argv = []) => {
+        const out = [];
+        const terminal = { write: (b) => out.push(new TextDecoder().decode(b)), setRaw() {} };
+        const m = await createMachine({ ...opts, terminal });
+        const code = await m.run(argv);
+        return { code, out: out.join('').replace(/^h9: warning: .*\n/gm, '') };
+      };
+      const plan = [
+        '# a plan the page wrote',
+        'archive root.h9a',
+        'archive stack.h9a:/',
+        'memory 512M',
+        "env GREETING='from a plan'",
+        "run /bin/rc -c 'echo $GREETING; cat /lib/stacked'",
+        '',
+      ].join('\n');
+      return {
+        ran: await once({ plan, memory: '256M' }),
+        root: await once({ plan: 'net disable\n' }, ['/bin/rc', '-c', 'test -x /bin/rc && echo rc']),
+        wide: await once({ plan, memory: '1G' }),
+      };
+    });
+    const want = { ran: { code: 0, out: 'from a plan\nstacked\n' }, root: { code: 0, out: 'rc\n' } };
+    if (JSON.stringify({ ran: r.ran, root: r.root }) !== JSON.stringify(want)) throw new Error(`plan: ${JSON.stringify(r)}`);
+    if (r.wide.code !== 2 || !r.wide.out.includes("widens the plan's line 4: memory 512M")) throw new Error(`plan, widened: ${JSON.stringify(r.wide)}`);
+  });
+
   // design/epoch-0/port-streams.md: the page makes a channel between a Worker that
   // serves the static tree at /st over 9P (statictree.js's Session) and a
   // machine, which mounts it as its root; the page stays out of the data path.

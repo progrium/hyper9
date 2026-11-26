@@ -5356,6 +5356,12 @@ fn sockName(p: *Process, fd: i32, va: u64, lenp: u64, peer: bool) Err!i64 {
     var rb: [128]u8 = undefined;
     const t = convRead(so.conv, if (peer) "remote" else "local", &rb) orelse return -E.IO;
     var a = parseAddrText(t);
+    // A conversation redirected to the machine's resolver gives the
+    // address it was dialled with (design/linux-dns.md).
+    if (peer and so.conv & conv_remote == 0 and isV4(&a.ip) and a.ip[12] == 127) {
+        var lb: [128]u8 = undefined;
+        if (convRead(so.conv, "local", &lb)) |lt| _ = kern.dnsPeer(if (protoOf(so.conv) == ip_udp) .udp else .tcp, parseAddrText(lt).port, &a.ip, &a.port);
+    }
     // A stream socket bound but not yet listening or connected hasn't
     // announced, so its conversation has no local address: answer with
     // the one bind kept, as Kestrel reads it back between bind and listen.

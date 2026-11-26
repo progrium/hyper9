@@ -1,0 +1,173 @@
+/*
+ * The device switch's shim (design/kernel-port.md): the Zig kernel calls
+ * a C device's functions, and a C Devgen, through these, which catch the
+ * device's error() and return -1, with the error string on the process
+ * as error() left it, or 0 with the function's result in *r. They're
+ * the only waserror the Zig kernel runs under, and src/kern/dev.zig's
+ * switch is their one caller.
+ */
+#include "u.h"
+#include "lib.h"
+#include "dat.h"
+#include "fns.h"
+#include "error.h"
+
+int
+h9_dev_reset(Dev *d)
+{
+	if(waserror())
+		return -1;
+	d->reset();
+	poperror();
+	return 0;
+}
+
+int
+h9_dev_init(Dev *d)
+{
+	if(waserror())
+		return -1;
+	d->init();
+	poperror();
+	return 0;
+}
+
+int
+h9_dev_shutdown(Dev *d)
+{
+	if(waserror())
+		return -1;
+	d->shutdown();
+	poperror();
+	return 0;
+}
+
+int
+h9_dev_attach(Dev *d, char *spec, Chan **r)
+{
+	if(waserror())
+		return -1;
+	*r = d->attach(spec);
+	poperror();
+	return 0;
+}
+
+int
+h9_dev_walk(Dev *d, Chan *c, Chan *nc, char **name, int nname, Walkqid **r)
+{
+	if(waserror())
+		return -1;
+	*r = d->walk(c, nc, name, nname);
+	poperror();
+	return 0;
+}
+
+int
+h9_dev_stat(Dev *d, Chan *c, uchar *db, int n, int *r)
+{
+	if(waserror())
+		return -1;
+	*r = d->stat(c, db, n);
+	poperror();
+	return 0;
+}
+
+int
+h9_dev_open(Dev *d, Chan *c, int omode, Chan **r)
+{
+	if(waserror())
+		return -1;
+	*r = d->open(c, omode);
+	poperror();
+	return 0;
+}
+
+int
+h9_dev_create(Dev *d, Chan *c, char *name, int omode, ulong perm, Chan **r)
+{
+	if(waserror())
+		return -1;
+	*r = d->create(c, name, omode, perm);
+	poperror();
+	return 0;
+}
+
+int
+h9_dev_close(Dev *d, Chan *c)
+{
+	if(waserror())
+		return -1;
+	d->close(c);
+	poperror();
+	return 0;
+}
+
+int
+h9_dev_read(Dev *d, Chan *c, void *a, long n, vlong off, long *r)
+{
+	if(waserror())
+		return -1;
+	*r = d->read(c, a, n, off);
+	poperror();
+	return 0;
+}
+
+int
+h9_dev_bread(Dev *d, Chan *c, long n, ulong off, Block **r)
+{
+	if(waserror())
+		return -1;
+	*r = d->bread(c, n, off);
+	poperror();
+	return 0;
+}
+
+int
+h9_dev_write(Dev *d, Chan *c, void *a, long n, vlong off, long *r)
+{
+	if(waserror())
+		return -1;
+	*r = d->write(c, a, n, off);
+	poperror();
+	return 0;
+}
+
+int
+h9_dev_bwrite(Dev *d, Chan *c, Block *b, ulong off, long *r)
+{
+	if(waserror())
+		return -1;
+	*r = d->bwrite(c, b, off);
+	poperror();
+	return 0;
+}
+
+int
+h9_dev_remove(Dev *d, Chan *c)
+{
+	if(waserror())
+		return -1;
+	d->remove(c);
+	poperror();
+	return 0;
+}
+
+int
+h9_dev_wstat(Dev *d, Chan *c, uchar *db, int n, int *r)
+{
+	if(waserror())
+		return -1;
+	*r = d->wstat(c, db, n);
+	poperror();
+	return 0;
+}
+
+int
+h9_dev_gen(Devgen *gen, Chan *c, char *name, Dirtab *tab, int ntab, int i, Dir *dp, int *r)
+{
+	if(waserror())
+		return -1;
+	*r = gen(c, name, tab, ntab, i, dp);
+	poperror();
+	return 0;
+}
