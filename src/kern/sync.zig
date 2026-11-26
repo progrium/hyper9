@@ -6,12 +6,18 @@
 //! error(Eintr) an error union.
 //!
 //! Every place a process waits is `park`, and every place one is let go
-//! is `unpark`, so a scheduler that parks a process instead of blocking
-//! its host thread (design/scheduler.md) changes those two and nothing
-//! else here.
+//! is `unpark`. A process the scheduler runs (design/scheduler.md) has a
+//! kernel continuation (`Proc.cont`), and runs its kernel calls on it:
+//! `park` saves the continuation and returns the host thread to its
+//! executor, and `unpark` makes it runnable, for any executor to resume.
+//! A process with no continuation (a kproc, or one on a host thread of
+//! its own) waits in posix.c's procsleep as before. Which a process is
+//! is fixed for its life, so a wakeup never takes the wrong path.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const port = @import("port.zig");
+pub const sched = @import("sched/sched.zig");
 const c = port.c;
 const up = port.up;
 const Error = port.Error;
@@ -19,16 +25,75 @@ const Error = port.Error;
 /// A sleep condition, as C's int (*)(void*).
 pub const Cond = *const fn (?*anyopaque) callconv(.c) c_int;
 
+/// Whether processes can park on continuations on this host. Not yet on
+/// the web host, whose continuations need Asyncify run on h9.wasm
+/// (design/scheduler.md, step 6); there every process waits in os-wasm.c.
+pub const can_park = !builtin.cpu.arch.isWasm();
+
+/// p's kernel continuation, if the scheduler runs it.
+pub fn contOf(p: *c.Proc) ?*sched.Cont {
+    if (!can_park) return null;
+    return @ptrCast(@alignCast(p.cont));
+}
+
 /// The process waits until another unparks it. Callers have taken
 /// themselves off whatever lock they queued on.
 pub fn park() void {
+    if (can_park) {
+        const p = up();
+        if (contOf(p)) |k| {
+            if (sched.cont.self() != k) port.kpanic("park: not on its continuation", .{});
+            sched.park();
+            // It may go on on another executor's host thread, whose `up`
+            // is that executor's: it's this process again from here.
+            c._setproc(p);
+            return;
+        }
+    }
     c.procsleep();
 }
 
 /// Lets a parked process (or one about to park) go on.
 pub fn unpark(p: *c.Proc) void {
+    if (can_park) if (contOf(p)) |k| return sched.unpark(k);
     c.procwakeup(p);
 }
+
+/// Runs processes' kernel calls on continuations, on the calling host
+/// thread (design/scheduler.md): `call` starts one, `resumeProc` goes on
+/// with one an unpark made runnable (its continuation's `ready` hook).
+/// Each sets `up` to the process for as long as its call runs, and back
+/// to `home` (the host thread's own process, or none) when it returns or
+/// parks.
+pub const Kexec = struct {
+    ex: sched.Executor,
+    home: ?*c.Proc,
+
+    pub fn init(pool: *sched.Pool, home: ?*c.Proc) Kexec {
+        return .{ .ex = .init(pool), .home = home };
+    }
+
+    pub fn deinit(e: *Kexec) void {
+        e.ex.deinit();
+    }
+
+    /// Runs f(arg) as p's kernel call, until it returns or parks. p must
+    /// have a continuation, with no call in progress.
+    pub fn call(e: *Kexec, p: *c.Proc, f: *const fn (?*anyopaque) void, arg: ?*anyopaque) sched.stack.Error!sched.Outcome {
+        const k = contOf(p).?;
+        c._setproc(p);
+        defer c._setproc(e.home);
+        return e.ex.call(k, f, arg);
+    }
+
+    /// Goes on with p's parked call, once an unpark made it runnable.
+    pub fn resumeProc(e: *Kexec, p: *c.Proc) sched.Outcome {
+        const k = contOf(p).?;
+        c._setproc(p);
+        defer c._setproc(e.home);
+        return e.ex.@"resume"(k);
+    }
+};
 
 // qlock.c
 
@@ -532,4 +597,164 @@ test "tsleep times out, and an interrupted one is -1 to C [kernel-port]" {
     procinterrupt(t.proc());
     t.join();
     try testing.expectEqual(-1, rv);
+}
+
+/// For the cases here and in qio.zig and devmnt.zig: processes the
+/// scheduler runs, on continuations, with a run queue that their `ready`
+/// hooks fill and an executor that drains it.
+pub const ktest = struct {
+    pub const Sproc = struct {
+        k: sched.Cont = .{ .ready = ready },
+        p: *c.Proc,
+        rq: *sched.RunQueue,
+        /// What its call left, for the case to check.
+        err: ?anyerror = null,
+        done: std.atomic.Value(bool) = .init(false),
+
+        fn ready(k: *sched.Cont) void {
+            const s: *Sproc = @fieldParentPtr("k", k);
+            s.rq.push(k);
+        }
+
+        /// A new process, with no groups, whose calls run on its
+        /// continuation.
+        pub fn init(s: *Sproc, rq: *sched.RunQueue) void {
+            s.* = .{ .p = c.newproc(), .rq = rq };
+            s.p.cont = &s.k;
+        }
+
+        /// Starts f(args) as its call on e, and reports whether it
+        /// parked; a failing f's error is kept in err.
+        pub fn call(s: *Sproc, e: *Kexec, comptime f: anytype, args: anytype) !sched.Outcome {
+            const Frame = struct {
+                s: *Sproc,
+                args: @TypeOf(args),
+                fn run(v: ?*anyopaque) void {
+                    const fr: *@This() = @ptrCast(@alignCast(v.?));
+                    const sp = fr.s;
+                    const r = @call(.auto, f, fr.args);
+                    std.heap.page_allocator.destroy(fr);
+                    if (@typeInfo(@TypeOf(r)) == .error_union) {
+                        _ = r catch |err| {
+                            sp.err = err;
+                        };
+                    }
+                    sp.done.store(true, .release);
+                }
+            };
+            // On the heap: it must outlive this call if f parks.
+            const fr = try std.heap.page_allocator.create(Frame);
+            fr.* = .{ .s = s, .args = args };
+            s.done.store(false, .release);
+            s.err = null;
+            return e.call(s.p, Frame.run, fr);
+        }
+
+        pub fn isDone(s: *Sproc) bool {
+            return s.done.load(.acquire);
+        }
+    };
+
+    /// Resumes what's runnable on e until done(arg) holds, waiting up to
+    /// a few seconds for unparks from other threads.
+    pub fn runUntil(e: *Kexec, rq: *sched.RunQueue, comptime done: anytype, arg: anytype) !void {
+        var idle: usize = 0;
+        while (!done(arg)) {
+            if (rq.pop()) |k| {
+                const s: *Sproc = @fieldParentPtr("k", k);
+                _ = e.resumeProc(s.p);
+                idle = 0;
+            } else {
+                idle += 1;
+                if (idle > 5000) return error.Timeout;
+                c.osmsleep(1);
+            }
+        }
+    }
+};
+
+const Queued = struct {
+    q: c.QLock = std.mem.zeroes(c.QLock),
+    order: [100]u16 = undefined,
+    n: usize = 0,
+    rs: [100]c.Rendez = std.mem.zeroes([100]c.Rendez),
+
+    fn never(_: ?*anyopaque) callconv(.c) c_int {
+        return 0;
+    }
+
+    fn body(l: *Queued, id: u16) Error!void {
+        qlock(&l.q);
+        l.order[l.n] = id;
+        l.n += 1;
+        qunlock(&l.q);
+        // The timer kproc, on its own host thread, ends it.
+        try tsleep(&l.rs[id], never, null, 2);
+    }
+
+    fn allDone(ps: []ktest.Sproc) bool {
+        for (ps) |*s| if (!s.isDone()) return false;
+        return true;
+    }
+};
+
+test "a hundred processes wait in qlock and tsleep on one host thread [scheduler]" {
+    const me = try kt.begin();
+    var pool: sched.Pool = .{ .size = 64 * 1024 };
+    defer pool.deinit();
+    var rq: sched.RunQueue = .{};
+    var e: Kexec = .init(&pool, me);
+    defer e.deinit();
+    var l: Queued = .{};
+    var ps: [100]ktest.Sproc = undefined;
+    for (&ps) |*s| s.init(&rq);
+
+    qlock(&l.q);
+    for (&ps, 0..) |*s, i| {
+        try testing.expectEqual(sched.Outcome.parked, try s.call(&e, Queued.body, .{ &l, @as(u16, @intCast(i)) }));
+        try testing.expect(up() == me);
+    }
+    // Each holds a stack, and this thread went on: none has run past qlock.
+    try testing.expectEqual(@as(usize, 100), pool.mapped);
+    try testing.expectEqual(@as(usize, 100), waiters(&l.q));
+    try testing.expectEqual(@as(usize, 0), l.n);
+    qunlock(&l.q);
+    try ktest.runUntil(&e, &rq, Queued.allDone, @as([]ktest.Sproc, &ps));
+    try testing.expectEqual(@as(usize, 100), l.n);
+    for (l.order, 0..) |id, i| try testing.expectEqual(@as(u16, @intCast(i)), id);
+    for (&ps) |*s| try testing.expectEqual(null, s.err);
+    try testing.expect(up() == me);
+}
+
+test "a note or a wakeup ends a sleep parked on a continuation, and it runs as its own process [scheduler]" {
+    const me = try kt.begin();
+    var pool: sched.Pool = .{ .size = 64 * 1024 };
+    defer pool.deinit();
+    var rq: sched.RunQueue = .{};
+    var e: Kexec = .init(&pool, me);
+    defer e.deinit();
+    var s: ktest.Sproc = undefined;
+    s.init(&rq);
+    var f: Flag = .{};
+
+    try testing.expectEqual(sched.Outcome.parked, try s.call(&e, Flag.sleeper, .{&f}));
+    try testing.expect(f.r.p == s.p);
+    try testing.expect(s.k.isParked());
+    try testing.expectEqual(0, postnote(s.p, 0, null, 0));
+    try ktest.runUntil(&e, &rq, ktest.Sproc.isDone, &s);
+    try testing.expectEqual(error.Interrupted, f.result.?);
+    // The error string was the parked process's, not this thread's.
+    try testing.expectEqualStrings("interrupted", std.mem.sliceTo(&f.errstr, 0));
+    try testing.expectEqualStrings("interrupted", std.mem.sliceTo(s.p.errstr, 0));
+    try testing.expect(up() == me);
+
+    try testing.expectEqual(sched.Outcome.parked, try s.call(&e, Flag.sleeper, .{&f}));
+    f.set.store(1, .release);
+    try testing.expect(wakeup(&f.r) == s.p);
+    try ktest.runUntil(&e, &rq, ktest.Sproc.isDone, &s);
+    try testing.expectEqual(null, f.result);
+    // With nothing to wait for, a call doesn't park, and its stack stays
+    // with the executor.
+    try testing.expectEqual(sched.Outcome.returned, try s.call(&e, Flag.sleeper, .{&f}));
+    try testing.expect(e.ex.spare != null);
 }

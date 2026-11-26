@@ -1483,6 +1483,52 @@ test "a 9P server's files are mounted, walked, read, and stated through devmnt [
     try testing.expect(Server.hungup());
 }
 
+const OnOne = struct {
+    sc: ?*Chan = null,
+    cfd: c_int = -1,
+
+    /// The client's first call: a namespace of its own, and a pipe whose
+    /// far end is the server's.
+    fn setup(o: *OnOne) !void {
+        try kt.namespaceOf(up());
+        var fds: [2]c_int = undefined;
+        _ = try sysfile.pipe(&fds);
+        o.sc = try sysfile.fdtochan(fds[1], -1, false, true);
+        _ = try sysfile.close(fds[1]);
+        o.cfd = fds[0];
+    }
+
+    fn both(ps: [2]*sync.ktest.Sproc) bool {
+        return ps[0].isDone() and ps[1].isDone();
+    }
+};
+
+test "a 9P client and its server, parked in devmnt and qio, take turns on one host thread [scheduler]" {
+    const me = try kt.begin();
+    var pool: sync.sched.Pool = .{ .size = 256 * 1024 };
+    defer pool.deinit();
+    var rq: sync.sched.RunQueue = .{};
+    var e: sync.Kexec = .init(&pool, me);
+    defer e.deinit();
+    var client: sync.ktest.Sproc = undefined;
+    var server: sync.ktest.Sproc = undefined;
+    client.init(&rq);
+    server.init(&rq);
+    var o: OnOne = .{};
+
+    try testing.expectEqual(sync.sched.Outcome.returned, try client.call(&e, OnOne.setup, .{&o}));
+    try testing.expectEqual(null, client.err);
+    Server.done.store(false, .release);
+    // The server waits for its first message, and the client for each
+    // reply: neither holds the thread while it waits.
+    try testing.expectEqual(sync.sched.Outcome.parked, try server.call(&e, Server.run, .{o.sc.?}));
+    try testing.expectEqual(sync.sched.Outcome.parked, try client.call(&e, mountcase, .{o.cfd}));
+    try sync.ktest.runUntil(&e, &rq, OnOne.both, [2]*sync.ktest.Sproc{ &client, &server });
+    try testing.expectEqual(null, client.err);
+    try testing.expect(Server.done.load(.acquire));
+    try testing.expect(up() == me);
+}
+
 pub fn mountcase(cfd: c_int) !void {
     const fds = [_]c_int{cfd};
 
