@@ -11967,7 +11967,16 @@ test "a 9front ls sees the same Dir as before [file-interface]" {
     defer r.deinit();
     errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
     try std.testing.expectEqual(0, r.code);
-    try std.testing.expectEqualStrings(
+    // The fixture's files are uid 1000. Where the host's uid is 1000 too
+    // (always on Windows, where the machine's user is uid 1000), the
+    // translator names them as the machine's user instead, so the owner
+    // and group columns are left out of the comparison there.
+    const uid: u32 = if (builtin.os.tag == .windows) 1000 else std.c.getuid();
+    const got = if (uid == 1000) try withoutOwners(r.out) else r.out;
+    try std.testing.expectEqualStrings(if (uid == 1000) try withoutOwners(ls_dir_before) else ls_dir_before, got);
+}
+
+const ls_dir_before =
         \\(0000000000000002 0 80) d-rwxr-xr-x M 2 1000 1000 0 Jan  1  1970 /n/l/etc
         \\(0000000000000006 0 80) d-rwxr-xr-x M 2 1000 1000 0 Jan  1  1970 /n/l/lib
         \\(0000000000000005 0 80) d-rwxr-xr-x M 2 1000 1000 0 Jan  1  1970 /n/l/usr
@@ -11979,7 +11988,33 @@ test "a 9front ls sees the same Dir as before [file-interface]" {
         \\(0000000000000007 0 00) --rw-r--r-- M 2 1000 1000  8 Jan  1  1970 /n/l/lib/notes
         \\d-rwxr-xr-x M 2 1000 1000 0 Jan  1  1970 /n/l/lib
         \\
-    , r.out);
+;
+
+/// ls -l output with its owner and group columns (the two after the
+/// device type and number) replaced by "-".
+fn withoutOwners(out: []const u8) ![]const u8 {
+    var b: std.ArrayList(u8) = .empty;
+    const a = std.heap.page_allocator;
+    var it = std.mem.splitScalar(u8, out, '\n');
+    var first = true;
+    while (it.next()) |l| {
+        if (!first) try b.append(a, '\n');
+        first = false;
+        // Mode, type, and dev come after an optional "(qid) " prefix.
+        const at = if (std.mem.startsWith(u8, l, "(")) (std.mem.indexOfScalar(u8, l, ')') orelse 0) + 2 else 0;
+        if (at > l.len) {
+            try b.appendSlice(a, l);
+            continue;
+        }
+        try b.appendSlice(a, l[0..at]);
+        var f = std.mem.tokenizeScalar(u8, l[at..], ' ');
+        var i: usize = 0;
+        while (f.next()) |w| : (i += 1) {
+            if (i > 0) try b.append(a, ' ');
+            try b.appendSlice(a, if (i == 3 or i == 4) "-" else w);
+        }
+    }
+    return b.items;
 }
 
 test "Rlerror errnos from the in-memory .L server become 9front error strings [dotl]" {
