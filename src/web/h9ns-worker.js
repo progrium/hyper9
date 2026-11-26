@@ -1,4 +1,4 @@
-// The namespace kernel's Worker (design/epoch-0/namespace-kernel.md, The JS API):
+// The namespace kernel's Worker (design/namespace-kernel.md, The JS API):
 // runs h9ns.wasm on the browser host's coroutines, with an empty tree for
 // WASI and no console. h9ns.js's createNamespaceKernel is the page's side.
 // It runs as a browser Worker or a Node worker_threads Worker.

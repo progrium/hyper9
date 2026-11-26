@@ -1,4 +1,4 @@
-//! The namespace kernel's cases (design/epoch-0/namespace-kernel.md), through its
+//! The namespace kernel's cases (design/namespace-kernel.md), through its
 //! native library: each connection is a socketpair, one end served with
 //! h9ns_serve, the other a 9P2000 client (tests/ninep.zig), as a host
 //! would talk to it.

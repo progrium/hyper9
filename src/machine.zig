@@ -3568,7 +3568,7 @@ pub const Machine = struct {
         var name_buf: [std.fs.max_path_bytes]u8 = undefined;
         var link_buf: [std.fs.max_path_bytes]u8 = undefined;
         // Entries std.tar has no kind for land in diag: a FIFO in a layer
-        // (design/epoch-0/upper-layers.md) is made as one, and a device skipped.
+        // (design/upper-layers.md) is made as one, and a device skipped.
         var diag: std.tar.Diagnostics = .{ .allocator = m.gpa };
         defer {
             for (diag.errors.items) |e| switch (e) {
@@ -3806,7 +3806,7 @@ pub const Machine = struct {
         var specb: [256]u8 = undefined;
         const spec = std.fmt.bufPrintSentinel(&specb, "{s}", .{b.spec}, 0) catch return m.fail("{s} {f}: spec too long", .{ what, shown });
         if (b.upper) {
-            // The server is the layer (design/epoch-0/upper-layers.md).
+            // The server is the layer (design/upper-layers.md).
             const up: kern.UnionFlags = .{ .up = true, .create = true };
             if (stackName(b.to)) |sn| {
                 var at: [std.fs.max_path_bytes + 1]u8 = undefined;
@@ -4400,7 +4400,7 @@ pub const Machine = struct {
         };
     }
 
-    /// `bind -u from to` (design/epoch-0/upper-layers.md): `from` becomes the up
+    /// `bind -u from to` (design/upper-layers.md): `from` becomes the up
     /// member of the stack `to` names, or anywhere else, a union of
     /// `from` as the layer over what `to` is now, bound there.
     fn bindUpper(from: [:0]const u8, to: [:0]const u8) kern.Error!void {

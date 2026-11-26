@@ -110,7 +110,7 @@ pub fn main(init: std.process.Init) !u8 {
     }
     // --gfx: on macOS AppKit needs the main thread, so the run goes on
     // another (design/epoch-0/gfx.md). Elsewhere this runs it directly,
-    // and the headless screen (design/epoch-0/headless-screen.md) needs no AppKit.
+    // and the headless screen (design/headless-screen.md) needs no AppKit.
     if (cfg.gfx != null and cfg.gfx.?.screen == .window) {
         var ctx: GfxRun = .{ .init = init, .cfg = cfg };
         h9.gfx.main(GfxRun.work, &ctx);

@@ -1,5 +1,5 @@
 /*
- * The headless screen (design/epoch-0/headless-screen.md, design/epoch-0/gfx.md): a
+ * The headless screen (design/headless-screen.md, design/epoch-0/gfx.md): a
  * screen in memory. It implements drawterm's screen interface as the
  * window-system backends do, without a window: flushes go nowhere and the
  * "host clipboard" is a buffer in the h9 process.

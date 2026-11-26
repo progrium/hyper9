@@ -1,4 +1,4 @@
-// The namespace kernel's cases on the web host (design/epoch-0/namespace-kernel.md),
+// The namespace kernel's cases on the web host (design/namespace-kernel.md),
 // under Node 24 or later: h9ns.js starts h9ns.wasm in a worker_threads
 // Worker, and the cases speak 9P2000 to it over MessagePorts with
 // tests/web/ninep.mjs. The argument is zig-out/nskernel.

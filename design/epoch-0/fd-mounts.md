@@ -40,7 +40,7 @@ fd: ?std.posix.fd_t = null,
 fd_write: ?std.posix.fd_t = null,
 ```
 
-`std.posix.fd_t` is an `i32` on POSIX hosts and a `HANDLE` on Windows. An `.fd` mount needs `fd`, and `fd_write` is only for `.fd`; either mistake is a usage error (`PolicyConflict`, with `conflict` naming the field). Everything else about the mount is as for `.url`: any destination, `/srv/NAME` to post without mounting, `spec`, `user`, `auth`, `index`, the access options, and the stacks' rules for `/` and `#L`. With `up` on `/` or `#L`, the embedder's server holds the machine's writable layer ([upper-layers](upper-layers.md)), as a page's `MessagePort` does on the browser host ([port-streams](port-streams.md)), so an embedder can keep a machine's changes in its own store.
+`std.posix.fd_t` is an `i32` on POSIX hosts and a `HANDLE` on Windows. An `.fd` mount needs `fd`, and `fd_write` is only for `.fd`; either mistake is a usage error (`PolicyConflict`, with `conflict` naming the field). Everything else about the mount is as for `.url`: any destination, `/srv/NAME` to post without mounting, `spec`, `user`, `auth`, `index`, the access options, and the stacks' rules for `/` and `#L`. With `up` on `/` or `#L`, the embedder's server holds the machine's writable layer ([upper-layers](../upper-layers.md)), as a page's `MessagePort` does on the browser host ([port-streams](port-streams.md)), so an embedder can keep a machine's changes in its own store.
 
 ```zig
 var sv: [2]std.posix.fd_t = undefined;

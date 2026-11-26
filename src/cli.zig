@@ -323,7 +323,7 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
         }
     }
     // --gfx and --gfx=noclip are a window, --gfx=headless a screen in
-    // memory (design/epoch-0/headless-screen.md); --gfx-scale and noclip are the
+    // memory (design/headless-screen.md); --gfx-scale and noclip are the
     // window's, and --gfx-size the headless screen's.
     if (gfx_headless) {
         if (gfx_window or gfx_noclip or gfx_scale != null) return error.Usage;
@@ -595,7 +595,7 @@ fn signalStatus(s: Signal) Exit {
 /// overlay are discarded (design/epoch-0/overlay.md): the changed top-level
 /// directories, and how to keep them. A 9P root keeps writes under
 /// `--write=scope`, since its server decides; otherwise a layer keeps
-/// them in a directory of the user's (design/epoch-0/upper-layers.md).
+/// them in a directory of the user's (design/upper-layers.md).
 pub fn discardNotice(buf: []u8, c: *const RootChanges, ninep: bool) []const u8 {
     var w: std.Io.Writer = .fixed(buf);
     noticeTo(&w, c, ninep) catch {};

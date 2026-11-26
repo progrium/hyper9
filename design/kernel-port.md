@@ -23,11 +23,11 @@ Borrowing drawterm's kernel was the fastest way to get exact Plan 9 namespace se
 
 - **`waserror` at the seam.** The kernel's error model is `setjmp` and `longjmp`, which can't unwind through Zig frames. [spec/kernel.md](../spec/kernel.md) has seven rules for the seam between the two, calls into Zig from C are leaves only, and every system call goes through a `sys*` wrapper layer that exists to catch errors on the C side.
 - **Two process records.** drawterm's Proc has no parent, notes, segments, or environment group, because drawterm is a terminal. h9 keeps a second record (`src/kern/proc.c`, 1,800 lines) in step with it by hand, and notes live on h9's side because drawterm's `postnote` drops them.
-- **One kernel per host process.** Every machine in a process shares one booted kernel. devsrv, the console, the clock, and the locks table each needed a per-machine table hung off `Hmach` to keep machines apart, and [host-cmd](host-cmd.md) found devcmd's conversation table shared between them. [child-machines](child-machines.md) and [namespace-kernel](epoch-0/namespace-kernel.md) each design around it.
+- **One kernel per host process.** Every machine in a process shares one booted kernel. devsrv, the console, the clock, and the locks table each needed a per-machine table hung off `Hmach` to keep machines apart, and [host-cmd](host-cmd.md) found devcmd's conversation table shared between them. [child-machines](child-machines.md) and [namespace-kernel](namespace-kernel.md) each design around it.
 - **No address checks, and a 32-bit `long`.** drawterm's `validaddr` does nothing, and offsets and counts pass through `long` in places where a guest's are 64 bits.
 - **Patches to vendored code.** h9's changes to `third_party/drawterm/kern/` (policy hooks, the `#λ` exemption in `chan.c`, the readiness hook and the interruptible reader and writer locks in `qio.c`) have to be carried across every merge from upstream.
 
-[namespace-kernel](epoch-0/namespace-kernel.md) and [kernel-serve](epoch-0/kernel-serve.md) come first because they make the kernel stand alone: a build with no engine, loaders, system call tables, or devproc, driven only over 9P. That build is the line this port works behind, and its suite is a second check on it.
+[namespace-kernel](namespace-kernel.md) and [kernel-serve](epoch-0/kernel-serve.md) come first because they make the kernel stand alone: a build with no engine, loaders, system call tables, or devproc, driven only over 9P. That build is the line this port works behind, and its suite is a second check on it.
 
 ## Proposal
 
@@ -86,7 +86,7 @@ devdraw, libmemdraw, libmemlayer, the GUI backends, libsec, libauthsrv, and devt
 - **`Machine` API.** `Machine.init` makes a kernel; there's no separate boot. Embedders that ran several machines in a process see no change except that they no longer share `#s` through a table.
 - **Error strings.** The same strings, from the same places.
 - **`third_party/`.** drawterm's ported files are no longer compiled or patched. They stay in the tree for reference and for merges.
-- **[namespace-kernel](epoch-0/namespace-kernel.md)'s C API and `h9ns.js`.** Unchanged; the library behind them is Zig.
+- **[namespace-kernel](namespace-kernel.md)'s C API and `h9ns.js`.** Unchanged; the library behind them is Zig.
 
 ## Security
 
@@ -95,7 +95,7 @@ No new reach for a guest. Real address checks close a class of bug where a guest
 ## Done criteria
 
 - [ ] `zig build test`, `zig build integration` on every engine, `zig build integration -Dweb`, and `zig build web-test` pass with no case removed or newly skipped.
-- [ ] [namespace-kernel](epoch-0/namespace-kernel.md)'s cases pass against the ported core.
+- [ ] [namespace-kernel](namespace-kernel.md)'s cases pass against the ported core.
 - [ ] `zig build conformance` runs a script of namespace operations (binds, unions, mounts, `..` across mounts, creates in unions, `ORCLOSE`, and flush) on h9 and on a 9front kernel under QEMU, and the transcripts match.
 - [ ] `git grep -l waserror src/` finds nothing, and the build compiles none of `chan.c`, `pgrp.c`, `dev.c`, `devmnt.c`, `qio.c`, `devpipe.c`, `devroot.c`, or `sysfile.c` from `third_party/drawterm/kern/`.
 - [ ] `test "two machines don't share /srv [kernel-port]"` and `test "two machines don't share devcmd conversations [kernel-port]"` pass with two machines in one process.

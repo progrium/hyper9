@@ -1,6 +1,6 @@
 /*
  * The namespace kernel's device table and the stubs for what it leaves
- * out (design/epoch-0/namespace-kernel.md, What's in the build). The build
+ * out (design/namespace-kernel.md, What's in the build). The build
  * compiles this in place of devtab.c, devcons.c, and the files the stubs
  * stand for.
  */

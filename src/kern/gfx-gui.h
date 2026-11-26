@@ -7,7 +7,7 @@
  *   attachscreen, flushmemscreen, screensize, getcolor, setcolor,
  *   setcursor, mouseset, clipread and clipwrite) is renamed h9_gui_*, so
  *   src/kern/gfx.c can wrap it, and the headless screen
- *   (src/kern/gfx-headless.c, design/epoch-0/headless-screen.md) can link beside
+ *   (src/kern/gfx-headless.c, design/headless-screen.md) can link beside
  *   it: gfx.c calls one or the other, by the screen the machine asked for.
  *   It wraps screeninit to start the backend's kprocs outside the guest's
  *   namespace and keep kernel prints on the host terminal, and the

@@ -1,7 +1,7 @@
 #!/bin/rc
 # bind [-abcCru] new old: 9front's bind(1), where -r makes a union of new
 # and old through #O's clone (design/epoch-0/mounts.md, "Union instances"), and
-# -u makes new a writable layer over old (design/epoch-0/upper-layers.md). h9
+# -u makes new a writable layer over old (design/upper-layers.md). h9
 # binds it before /bin.
 rfork e
 fn usage { echo 'usage: bind [-b|-a|-c|-bc|-ac] [-r] new old, or bind -u new old' >[1=2]; exit usage }

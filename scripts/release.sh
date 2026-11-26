@@ -85,7 +85,7 @@ cp "$src/LICENSE" "$work/$name/LICENSE"
 cp "$src/third_party/drawterm/LICENSE" "$work/$name/LICENSE.drawterm"
 archive "$work/$name" "$name"
 
-# The namespace kernel (design/epoch-0/namespace-kernel.md): the web files once,
+# The namespace kernel (design/namespace-kernel.md): the web files once,
 # and the native library for each target but Windows.
 for t in $H9_TARGETS; do
 	case $t in *windows*) continue ;; esac

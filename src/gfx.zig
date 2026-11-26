@@ -1,6 +1,6 @@
 //! Graphics: one screen per process, a host window drawn by drawterm's GUI
 //! backends (design/epoch-0/gfx.md) or a screen in memory, the headless
-//! screen (design/epoch-0/headless-screen.md). A machine with `Options.gfx` claims
+//! screen (design/headless-screen.md). A machine with `Options.gfx` claims
 //! the screen, and its namespace gets `#i`, `#m` and `#b` on /dev; every
 //! other machine has them masked. The window backend is chosen at build
 //! time (`-Dgfx`); every native build with graphics has the headless
@@ -31,7 +31,7 @@ pub const has_window = built and backend != .headless;
 /// Whether this build has the headless screen: `Options.screen = .headless`.
 pub const has_headless = built and backend != .web;
 
-/// Which screen a machine gets (design/epoch-0/headless-screen.md).
+/// Which screen a machine gets (design/headless-screen.md).
 pub const Screen = enum {
     /// A host window, or the page's canvas on the browser host.
     window,
@@ -276,7 +276,7 @@ fn fatal(msg: []const u8) noreturn {
 }
 
 /// The headless screen's hooks (src/kern/gfx-headless.c), in any build
-/// with it (design/epoch-0/headless-screen.md): what a window system would do to
+/// with it (design/headless-screen.md): what a window system would do to
 /// a window, acting on the machine whose screen is headless. They may be
 /// called from any thread.
 pub const headless = struct {

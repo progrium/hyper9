@@ -1,4 +1,4 @@
-//! A small synchronous 9P2000 client for tests (design/epoch-0/namespace-kernel.md):
+//! A small synchronous 9P2000 client for tests (design/namespace-kernel.md):
 //! one request at a time over a host descriptor, enough to walk, open,
 //! create, read, write, stat, and clunk.
 

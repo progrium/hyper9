@@ -37,7 +37,7 @@ void (*h9_gfx_onclose)(void);
 static int screenready;
 
 /*
- * Which screen the machine with --gfx asked for (design/epoch-0/headless-screen.md),
+ * Which screen the machine with --gfx asked for (design/headless-screen.md),
  * set by src/gfx.zig when it claims the screen: the headless screen
  * (src/kern/gfx-headless.c, h9_hl_*) or the window backend (renamed h9_gui_*
  * by gfx-gui.h). H9_GFX_HEADLESS means the headless screen is linked in,
@@ -345,7 +345,7 @@ lazyattach(char *spec)
 }
 
 /*
- * /dev/screen (design/epoch-0/headless-screen.md): #i's top directory gains a
+ * /dev/screen (design/headless-screen.md): #i's top directory gains a
  * third file beside draw and winname, the screen as an uncompressed
  * image(6) file, as 9front's /dev/screen is. Each open takes a copy of
  * the screen under drawlock, so a read sees one consistent frame, and
@@ -657,7 +657,7 @@ enum {
 	Qkbdin = 0x10,	/* ours */
 };
 
-/* devkbd's directory, with kbdin added (design/epoch-0/headless-screen.md). */
+/* devkbd's directory, with kbdin added (design/headless-screen.md). */
 static Dirtab h9kbddir[] = {
 	".",	{Qkbddir, 0, QTDIR},	0,	DMDIR|0555,
 	"kbd",	{Qkbd},	0,	0444,
@@ -933,7 +933,7 @@ Dev h9kbddevtab = {
 };
 
 /*
- * /dev/mousein (design/epoch-0/headless-screen.md), beside devmouse's files, as
+ * /dev/mousein (design/headless-screen.md), beside devmouse's files, as
  * 9front's devmouse serves it: each write is one event in /dev/mouse's
  * format, 'A' then x, y, buttons and msec for the pointer at x, y, 'a'
  * for x and y scaled from 0 to 2^31 across the screen, and any other

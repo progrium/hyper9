@@ -1,6 +1,6 @@
 /*
  * Namespace copying, shared by h9 machines (proc.c's rfork) and the
- * namespace kernel (devns.c, design/epoch-0/namespace-kernel.md): 9front's
+ * namespace kernel (devns.c, design/namespace-kernel.md): 9front's
  * pgrpcpy (port/pgrp.c) at the pinned release.
  */
 

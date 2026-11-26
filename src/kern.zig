@@ -950,7 +950,7 @@ pub const UnionFlags = packed struct(c_int) {
     after: bool = false,
     /// Creates may go to it.
     create: bool = false,
-    /// The union's writable layer, on top (design/epoch-0/upper-layers.md).
+    /// The union's writable layer, on top (design/upper-layers.md).
     up: bool = false,
     _: u29 = 0,
 };
@@ -1162,7 +1162,7 @@ pub const Kserve = opaque {
         _ = try check(c.h9_kserve_conn(s, fd));
     }
 
-    /// Serves named namespaces (design/epoch-0/namespace-kernel.md, Serving): each
+    /// Serves named namespaces (design/namespace-kernel.md, Serving): each
     /// attach takes `lookup(aname)`'s namespace, a Kns from
     /// h9_kserve_kns, or fails for null.
     pub fn newNamed(lookup: *const fn ([*:0]const u8) callconv(.c) ?*anyopaque, ended: ?*const fn (?*anyopaque) callconv(.c) void, arg: ?*anyopaque) Error!*Kserve {
@@ -1354,7 +1354,7 @@ fn console(id: c_ulong) ?*Console {
 
 // Leaves called from devhcons.c. They never raise kernel errors.
 
-/// Whether this is the namespace kernel's build (design/epoch-0/namespace-kernel.md),
+/// Whether this is the namespace kernel's build (design/namespace-kernel.md),
 /// which has no console, policy, guest tools, or built-in root: it
 /// exports only the leaves its devices call.
 pub const nskernel = @hasDecl(build_options, "nskernel") and build_options.nskernel;

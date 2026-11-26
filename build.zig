@@ -725,7 +725,7 @@ fn addWeb(b: *std.Build, optimize: std.lang.Optimize, parts: ModuleParts, gfx: G
     return .{ .exe = exe, .install = all };
 }
 
-// The namespace kernel (design/epoch-0/namespace-kernel.md): drawterm's channels,
+// The namespace kernel (design/namespace-kernel.md): drawterm's channels,
 // mount tables, devmnt and these devices, and nothing for running
 // programs. src/kern/nstab.c is its device table and stands in for what
 // the left-out files would define.
@@ -881,7 +881,7 @@ pub const Gfx = enum {
     /// No screen: src/kern/nogfx.c, and --gfx fails with GfxNotBuilt.
     none,
     /// Only the screen in memory (src/kern/gfx-headless.c,
-    /// design/epoch-0/headless-screen.md): --gfx=headless, and no window. The
+    /// design/headless-screen.md): --gfx=headless, and no window. The
     /// window backends below link it too.
     headless,
     /// drawterm's gui-x11, against a glibc target and the system's libX11.
@@ -900,7 +900,7 @@ pub const Gfx = enum {
             .windows => .win32,
             .wasi => .web,
             // Static Linux builds can't have a window, but can have the
-            // headless screen (design/epoch-0/headless-screen.md).
+            // headless screen (design/headless-screen.md).
             else => .headless,
         };
     }
@@ -1012,7 +1012,7 @@ fn addGfxSources(b: *std.Build, kern: *std.Build.Step.Compile, gfx: Gfx, flags: 
         return;
     }
     m.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"gfx.c"}, .flags = flags });
-    // The headless screen (design/epoch-0/headless-screen.md) is linked into every
+    // The headless screen (design/headless-screen.md) is linked into every
     // native build with graphics, beside the window backend if there is
     // one; src/kern/gfx.c calls one or the other per machine.
     if (gfx != .web) {
@@ -1165,7 +1165,7 @@ pub fn build(b: *std.Build) void {
     const mod = addH9Module(b, parts, gfx, true);
     kern_step.dependOn(&mod.kern.step);
     // The tests' module, with the headless screen for the [gfx] cases:
-    // the -Dgfx build's own when it has one (design/epoch-0/headless-screen.md),
+    // the -Dgfx build's own when it has one (design/headless-screen.md),
     // so a window backend's build runs them beside its window.
     const test_mod = if (gfx != .none and gfx != .web) mod else addH9Module(b, parts, .headless, false);
 
@@ -1239,10 +1239,10 @@ pub fn build(b: *std.Build) void {
     const web_test_step = b.step("web-test", "Run the browser host's demo page, its canvas cases, and the namespace kernel's machine cases in Chromium with Playwright (needs a 386 root for root.h9a)");
     web_test_step.dependOn(&web_test.step);
 
-    // The namespace kernel (design/epoch-0/namespace-kernel.md): h9ns.wasm and its
+    // The namespace kernel (design/namespace-kernel.md): h9ns.wasm and its
     // JS host, and libh9ns.a with h9ns.h, in zig-out/nskernel.
     const ns_hostfs = b.option(bool, "nskernel-hostfs", "Keep devfs (#U) in the native namespace kernel, for embedders that lend host directories") orelse false;
-    const ns_step = b.step("nskernel", "Build the namespace kernel into zig-out/nskernel (design/epoch-0/namespace-kernel.md)");
+    const ns_step = b.step("nskernel", "Build the namespace kernel into zig-out/nskernel (design/namespace-kernel.md)");
     const ns_dir: std.Build.InstallDir = .{ .custom = "nskernel" };
     const ns_web = addNsKernel(b, webTarget(b, false), optimize, true, false).artifact;
     ns_step.dependOn(&b.addInstallArtifact(ns_web, .{ .dest_dir = .{ .override = ns_dir } }).step);
@@ -1255,7 +1255,7 @@ pub fn build(b: *std.Build) void {
     ns_step.dependOn(&b.addInstallFileWithDir(b.path("src/nskernel/h9ns.h"), ns_dir, "h9ns.h").step);
     // Its cases: tests/nskernel.zig through the native library, and
     // tests/web/nskernel.mjs through h9ns.wasm under Node.
-    const ns_test_step = b.step("nskernel-test", "Run the namespace kernel's cases, natively and under Node (design/epoch-0/namespace-kernel.md)");
+    const ns_test_step = b.step("nskernel-test", "Run the namespace kernel's cases, natively and under Node (design/namespace-kernel.md)");
     const ns_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("tests/nskernel.zig"),
         .target = target,

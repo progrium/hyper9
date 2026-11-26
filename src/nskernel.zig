@@ -1,4 +1,4 @@
-//! The namespace kernel (design/epoch-0/namespace-kernel.md): h9's kernel with
+//! The namespace kernel (design/namespace-kernel.md): h9's kernel with
 //! nothing for running programs, holding namespaces that `#N`
 //! (src/kern/devns.c) makes and composes, served over 9P2000 by kserve
 //! with each attach name a namespace's id.
@@ -114,7 +114,7 @@ const Fds = struct {
 
 const DialError = kern.Error || error{Dial};
 
-/// Opens a mount's dial (design/epoch-0/namespace-kernel.md, Composing) and
+/// Opens a mount's dial (design/namespace-kernel.md, Composing) and
 /// returns an fd on its 9P connection. `why` holds the error for
 /// `error.Dial`; `error.Kern` leaves it in the kernel's error string.
 fn rawDial(d: []const u8, why: *[]const u8) DialError!u31 {
@@ -237,7 +237,7 @@ fn bindOp(b: anytype, from: [:0]const u8, to: [:0]const u8) kern.Error!void {
     const fresh = std.mem.eql(u8, from, "#O");
     var num: [16]u8 = undefined;
     if (b.flag.upper) {
-        // `bind -u` (design/epoch-0/upper-layers.md): from is a writable layer
+        // `bind -u` (design/upper-layers.md): from is a writable layer
         // over what to is now; a bare #O is a fresh one in memory.
         const id = try kern.unionAdd("", to, "", .{ .after = true });
         errdefer kern.overlayDrop(id);
@@ -294,7 +294,7 @@ fn runOp(ns: ?*anyopaque, arena: std.mem.Allocator, op: newns.Op, why: *[]const 
     }
 }
 
-/// Runs one ctl line (design/epoch-0/namespace-kernel.md, Composing) in the
+/// Runs one ctl line (design/namespace-kernel.md, Composing) in the
 /// calling process's namespace, which devns.c has set to namespace `ns`'s.
 /// Returns 0, or -1 with the error in `err` (ERRMAX bytes); the line's
 /// operations before a failed one stand.

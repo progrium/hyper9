@@ -1,4 +1,4 @@
-// The namespace kernel's page side (design/epoch-0/namespace-kernel.md, The JS
+// The namespace kernel's page side (design/namespace-kernel.md, The JS
 // API): starts h9ns.wasm in a Worker (h9ns-worker.js) and hands it ports.
 // Everything else, making and composing namespaces, is 9P2000 on a
 // connection to namespace 0.

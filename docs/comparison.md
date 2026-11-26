@@ -112,7 +112,7 @@ different direction:
   composes layers with Plan 9 binds and a copy-on-write overlay. The overlay
   is the default ([overlay](../design/epoch-0/overlay.md)): writes to the root
   succeed and vanish at exit. Keeping a run's changes as an OCI layer on disk is a
-  draft ([upper-layers](../design/epoch-0/upper-layers.md), *planned*). See
+  draft ([upper-layers](../design/upper-layers.md), *planned*). See
   [userland.md](userland.md) for building your own root.
 - **Namespaces.** Linux bolted namespaces on; in Plan 9 every process already
   has its own, and the guest can rearrange it with `bind` and `mount` without

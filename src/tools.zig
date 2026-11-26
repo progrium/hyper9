@@ -32,7 +32,7 @@ pub fn version(w: *std.Io.Writer) std.Io.Writer.Error!void {
     if (!any) try w.writeAll(" none");
     try w.writeAll("\n");
     // Every native build with graphics has the headless screen beside its
-    // window backend (design/epoch-0/headless-screen.md).
+    // window backend (design/headless-screen.md).
     const g = build_options.gfx;
     if (std.mem.eql(u8, g, "none") or std.mem.eql(u8, g, "web") or std.mem.eql(u8, g, "headless"))
         try w.print("gfx: {s}\n", .{g})

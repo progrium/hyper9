@@ -19,7 +19,7 @@ Nov 25, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially direct
 
 ## Background
 
-[gfx](gfx.md) added `--gfx` and a headless backend, `src/kern/gfx-headless.c`, for its own tests. The headless backend is a build-time choice (`-Dgfx=headless`), and its hooks (inject a key or a mouse event, read the clipboard, copy the pixels, close the window) are reachable only through `h9.gfx.headless` in Zig. The test module is always built with it, so the `[gfx]` cases in `tests/backends.zig` run everywhere, but the `h9` binary can't use it.
+[gfx](epoch-0/gfx.md) added `--gfx` and a headless backend, `src/kern/gfx-headless.c`, for its own tests. The headless backend is a build-time choice (`-Dgfx=headless`), and its hooks (inject a key or a mouse event, read the clipboard, copy the pixels, close the window) are reachable only through `h9.gfx.headless` in Zig. The test module is always built with it, so the `[gfx]` cases in `tests/backends.zig` run everywhere, but the `h9` binary can't use it.
 
 That leaves anyone testing a 9front GUI program on h9 with two choices:
 
@@ -35,7 +35,7 @@ Inside a machine, nothing can read the screen or fake input. drawterm's devdraw,
 - `--gfx=headless` gives the machine a screen in memory, as `-Dgfx=headless` does today: `#i`, `#m`, and `#b` on `/dev`, a 1024×768 XRGB32 screen, flushes that go nowhere, and a clipboard that's a buffer in the h9 process (so `/dev/snarf` is always private, as with `--gfx=noclip`). It never opens a window and never touches the host's clipboard, display, or window system.
 - `--gfx-size WxH` sets the headless screen's size, `1024x768` by default. Given without `--gfx=headless`, it's a usage error (exit 2, as h9's other usage errors are).
 - `--gfx-scale` and `--gfx=noclip` don't apply to the headless screen; giving either with it, or `--gfx` with it, is a usage error.
-- The rest of [gfx](gfx.md) holds: the screen opens lazily, one machine per process has it (`GfxInUse` for a second), and `#i`, `#m`, and `#b` stay masked without `--gfx`.
+- The rest of [gfx](epoch-0/gfx.md) holds: the screen opens lazily, one machine per process has it (`GfxInUse` for a second), and `#i`, `#m`, and `#b` stay masked without `--gfx`.
 - There's no close button. The run ends when its program does, or when the host terminal closes, as without `--gfx`. `h9.gfx.headless.close()` stays for embedders that want a test to close the screen as a window's close button would.
 - `--print`'s `gfx:` line says `headless WxH`, with no clipboard caveat.
 
@@ -57,7 +57,7 @@ A GUI test is then an ordinary run:
 host$ h9 --gfx=headless rio -i 'window -r 0 0 800 600 test.rc'
 ```
 
-where `test.rc` types and clicks through `/dev/kbdin` and `/dev/mousein`, checks `/dev/snarf` or the files a program writes, and saves `topng </dev/screen >/mnt/term/cwd/shot.png` when something fails. A host-side client that wants the same files mounts them over [serve](serve.md): `/dev` is bound in the plan's namespace, so `--serve` exports them.
+where `test.rc` types and clicks through `/dev/kbdin` and `/dev/mousein`, checks `/dev/snarf` or the files a program writes, and saves `topng </dev/screen >/mnt/term/cwd/shot.png` when something fails. A host-side client that wants the same files mounts them over [serve](epoch-0/serve.md): `/dev` is bound in the plan's namespace, so `--serve` exports them.
 
 ### The build
 

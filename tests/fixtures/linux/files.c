@@ -951,7 +951,7 @@ static void proc_fd_dir(void) {
 }
 
 /* A directory fd opened while the directory is only below an up layer
- * (design/epoch-0/upper-layers.md) still names it once a create through it has
+ * (design/upper-layers.md) still names it once a create through it has
  * made the directory in the layer, as apk's cache fd does: renameat and
  * fstatat from it work, and the directory keeps its inode, as on
  * overlayfs. Run by name, with /etc/apk below a layer. */

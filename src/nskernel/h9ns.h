@@ -1,5 +1,5 @@
 /*
- * The namespace kernel's native API (design/epoch-0/namespace-kernel.md, The
+ * The namespace kernel's native API (design/namespace-kernel.md, The
  * native API): libh9ns.a, h9's kernel with nothing for running programs,
  * holding namespaces composed through /ns and served over 9P2000.
  *

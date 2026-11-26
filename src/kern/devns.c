@@ -1,5 +1,5 @@
 /*
- * #N: the namespace kernel's namespaces (design/epoch-0/namespace-kernel.md).
+ * #N: the namespace kernel's namespaces (design/namespace-kernel.md).
  *
  *	/ns/clone	open: a new namespace, empty, whose ctl the fid is
  *	/ns/N/ctl	write: newns lines run in N; read: N's id
@@ -319,7 +319,7 @@ mountdev(char *dev, char *path, int flag)
 }
 
 /*
- * Makes namespace 0, the control namespace (design/epoch-0/namespace-kernel.md):
+ * Makes namespace 0, the control namespace (design/namespace-kernel.md):
  * a bare #O with the namespaces at /ns, the host's board at /srv, and a
  * fresh #O at /tmp. Called once, by the namespace kernel's first process,
  * whose record ctlproc's processes share. Returns 0, or -1 with the

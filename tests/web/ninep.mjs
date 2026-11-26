@@ -1,6 +1,6 @@
 // A small 9P2000 client and server over MessagePorts, one 9P message per
 // message (design/epoch-0/port-streams.md), for the namespace kernel's
-// cases (design/epoch-0/namespace-kernel.md, The JS API).
+// cases (design/namespace-kernel.md, The JS API).
 
 export const NOFID = 0xffffffff;
 export const OREAD = 0, OWRITE = 1, ORDWR = 2, OTRUNC = 0x10;

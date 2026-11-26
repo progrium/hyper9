@@ -1,5 +1,5 @@
 // The namespace kernel with an h9 machine in Chromium
-// (design/epoch-0/namespace-kernel.md): the page starts h9ns.wasm in one Worker
+// (design/namespace-kernel.md): the page starts h9ns.wasm in one Worker
 // and an h9 machine in another, whose root is a namespace the kernel
 // serves over a MessagePort. The namespace's tree is root.h9a's 9front
 // root, served to the kernel by a JS 9P server on the page
