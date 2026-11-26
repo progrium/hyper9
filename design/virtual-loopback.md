@@ -1,7 +1,8 @@
 ---
+issue: 315
 slug: virtual-loopback
 title: A loopback network per machine
-status: draft
+status: proposed
 created: 2026-11-24
 authors: [progrium]
 depends: []
