@@ -480,9 +480,14 @@ test "a host #! script runs by its guest path [host-scripts]" {
     defer out.deinit();
     try std.testing.expectEqual(126, out.code);
     try std.testing.expect(std.mem.indexOf(u8, out.err, "--readable") != null);
-    // With the directory shared, it runs from /mnt/term at its host path.
-    var want_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const want = try std.fmt.bufPrint(&want_buf, "/mnt/term{s}/away\n", .{other_real});
+    // With the directory shared, it runs from /mnt/term at its host path:
+    // on Windows, /mnt/term/C:/... with / for each \.
+    var want_buf: [std.Io.Dir.max_path_bytes + 16]u8 = undefined;
+    const want = if (builtin.os.tag == .windows) blk: {
+        const w = try std.fmt.bufPrint(&want_buf, "/mnt/term/{s}/away\n", .{other_real});
+        std.mem.replaceScalar(u8, w, '\\', '/');
+        break :blk w;
+    } else try std.fmt.bufPrint(&want_buf, "/mnt/term{s}/away\n", .{other_real});
     const shared = try runBare(e, cwd, &.{ "--dir", e.root, "--readable", other_real, away }, &.{});
     defer shared.deinit();
     try std.testing.expectEqualStrings(want, shared.out);
