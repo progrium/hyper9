@@ -3727,7 +3727,11 @@ fn execve(p: *Process, dirfd: i32, path_va: u64, argv_va: u64, envp_va: u64, fla
         const d = std.mem.sliceTo(&pathbuf, 0);
         break :blk std.fmt.bufPrint(&p.name2_buf, "{s}/{s}", .{ d, raw }) catch return ret(-E.NAMETOOLONG);
     } else raw;
-    const owned = p.gpa.dupeSentinel(u8, path, 0) catch return error.NoMem;
+    // /proc/self/exe is a link to the program: exec it, not the entry
+    // (os/exec of os.Executable, re-exec through /proc/self/exe).
+    var exe_buf: [256 + 1]u8 = undefined;
+    const target: []const u8 = if (path[0] == '/') procExe(p, path, &exe_buf) orelse path else path;
+    const owned = p.gpa.dupeSentinel(u8, target, 0) catch return error.NoMem;
     errdefer p.gpa.free(owned);
     const argv = try strings(p, argv_va);
     errdefer freeStrings(p.gpa, argv);
