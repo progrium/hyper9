@@ -12,10 +12,10 @@ const drawterm = "third_party/drawterm";
 // chan.c, dev.c, devmnt.c, devpipe.c, devroot.c, pgrp.c, qio.c, qlock.c,
 // rwlock.c, sleep.c, and sysfile.c. Plus the OS files below.
 const kern_sources = [_][]const u8{
-    "alloc.c",    "data.c",     "devaudio.c", "devaudio-none.c",
-    "devcons.c",  "devdraw.c",  "devip.c",    "devkbd.c",
-    "devmouse.c", "devssl.c",   "devtls.c",   "error.c",
-    "parse.c",    "stub.c",     "term.c",     "waserror.c",
+    "alloc.c",    "data.c",    "devaudio.c", "devaudio-none.c",
+    "devcons.c",  "devdraw.c", "devip.c",    "devkbd.c",
+    "devmouse.c", "devssl.c",  "devtls.c",   "error.c",
+    "parse.c",    "stub.c",    "term.c",     "waserror.c",
 };
 // OS=posix (Make.unix), and OS=win32 with FS=fs-win32 (Make.win64).
 const kern_posix = [_][]const u8{ "devfs-posix.c", "devip-posix.c", "devlfd-posix.c", "posix.c" };
@@ -611,7 +611,7 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.O
     });
     kern.root_module.addCSourceFiles(.{
         .root = b.path("src/kern"),
-        .files = &.{ "glue.c", "proc.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "devproc.c", "devoverlay.c", "devsrv.c", "devhtools.c", "fscheck.c", "netcheck.c", "consx.c", "tsleep.c", "devshim.c", "werrstr.c", "sema.c", "rootdial.c", "devhstream.c", "devdotl.c", "devhidx.c", "kserve.c", "ns.c" },
+        .files = &.{ "glue.c", "proc.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "devproc.c", "devoverlay.c", "devsrv.c", "devhtools.c", "fscheck.c", "netcheck.c", "consx.c", "tsleep.c", "devshim.c", "werrstr.c", "sema.c", "rootdial.c", "devhstream.c", "devdotl.c", "devhidx.c", "kserve.c" },
         .flags = flags,
     });
     // The Linux ABI (design/epoch-0/linux-personality.md) and its host
@@ -754,8 +754,9 @@ const nskern_sources = [_][]const u8{
     "alloc.c", "data.c", "error.c", "parse.c", "stub.c", "waserror.c",
 };
 const nskern_h9 = [_][]const u8{
-    "glue.c",       "proc.c",    "ns.c",     "devns.c",  "nstab.c",   "devoverlay.c", "devsrv.c",
-    "devhstream.c", "devdotl.c", "kserve.c", "tsleep.c", "devshim.c", "werrstr.c",    "rootdial.c",
+    "glue.c",       "proc.c",    "devns.c",  "nstab.c",  "devoverlay.c", "devsrv.c",
+    "devhstream.c", "devdotl.c", "kserve.c", "tsleep.c", "devshim.c",    "werrstr.c",
+    "rootdial.c",
 };
 // libc's files the kernel subset uses, from kern_libs' list.
 const nskern_libc_skip = [_][]const u8{ "pushssl.c", "pushtls.c", "crypt.c", "dial.c" };
