@@ -440,11 +440,11 @@ fn h9_linux_await(buf: [*]u8, n: c_int, block: c_int, want: c_int, peek: c_int) 
     return await_(buf, n, block != 0, want, peek != 0) catch syserr();
 }
 
-/// The calling process's parent's pid, or 1 for a machine's first
-/// process.
+/// The calling process's parent's pid, or 0 for a machine's first
+/// process, as for Linux's init or a container's first process.
 fn h9_linux_ppid() callconv(.c) c_uint {
-    const h = port.uphproc() catch return 1;
-    return if (h.ppid != 0) h.ppid else 1;
+    const h = port.uphproc() catch return 0;
+    return h.ppid;
 }
 
 /// The calling process's working directory as a path in its view.
