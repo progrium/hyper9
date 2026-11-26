@@ -21,10 +21,10 @@ Four of h9's names no longer say what they name. A personality becomes an ABI. T
 
 Each name was right when it was chosen, and h9 has since grown past it.
 
-- **Personality.** [linux-personality](epoch-0/linux-personality.md) added Linux as a guest inside a Plan 9 runner, and "personality" fit: one native system and a mask. Linux is now the larger consumer of the kernel, and what's picked at exec is a binary format, a system call table, a signal or note frame, and a default view of the namespace. That's an ABI, and the spec already says so: [spec/abi-plan9.md](../spec/abi-plan9.md) and [spec/abi-linux.md](../spec/abi-linux.md) are named for it, while their text, 124 identifiers and comments under `src/`, and the proposal checklist in [README.md](README.md) still say personality.
-- **`vmm` and backend.** `src/vmm.zig` began as a wrapper over three hypervisor APIs. Of the five implementations behind it now, three are hypervisors (HVF, KVM, and WHP). The others are stub processes on Syscall User Dispatch and h9's own interpreter and JIT, and [spec/engines.md](../spec/engines.md) is already named for what they have in common. "Backend" also names drawterm's GUI backends (`--gfx`), so "the backend" needs a qualifier every time.
-- **`native`.** [native-backend](epoch-0/native-backend.md) named it for running guest code on the host CPU. Every hypervisor does that too, so the name doesn't tell it apart, and `hvf`, `kvm`, and `whp` are each named for the host feature they're built on. This one is built on Syscall User Dispatch.
-- **`emu`, hcpu, and `v86`.** The CLI says `--backend emu`, the code says hcpu, and `v86` is still accepted. Since [retire-unicorn](epoch-0/retire-unicorn.md), `emu` means hcpu and nothing else, in every build.
+- **Personality.** [linux-personality](linux-personality.md) added Linux as a guest inside a Plan 9 runner, and "personality" fit: one native system and a mask. Linux is now the larger consumer of the kernel, and what's picked at exec is a binary format, a system call table, a signal or note frame, and a default view of the namespace. That's an ABI, and the spec already says so: [spec/abi-plan9.md](../../spec/abi-plan9.md) and [spec/abi-linux.md](../../spec/abi-linux.md) are named for it, while their text, 124 identifiers and comments under `src/`, and the proposal checklist in [README.md](../README.md) still say personality.
+- **`vmm` and backend.** `src/vmm.zig` began as a wrapper over three hypervisor APIs. Of the five implementations behind it now, three are hypervisors (HVF, KVM, and WHP). The others are stub processes on Syscall User Dispatch and h9's own interpreter and JIT, and [spec/engines.md](../../spec/engines.md) is already named for what they have in common. "Backend" also names drawterm's GUI backends (`--gfx`), so "the backend" needs a qualifier every time.
+- **`native`.** [native-backend](native-backend.md) named it for running guest code on the host CPU. Every hypervisor does that too, so the name doesn't tell it apart, and `hvf`, `kvm`, and `whp` are each named for the host feature they're built on. This one is built on Syscall User Dispatch.
+- **`emu`, hcpu, and `v86`.** The CLI says `--backend emu`, the code says hcpu, and `v86` is still accepted. Since [retire-unicorn](retire-unicorn.md), `emu` means hcpu and nothing else, in every build.
 
 The names appear in these places today:
 
@@ -54,14 +54,14 @@ Machine, kernel, root, plan, policy, shim, and the device names don't change.
 ### CLI
 
 - `--engine auto|hvf|kvm|whp|sud|hcpu` replaces `--backend`.
-- `--backend` is accepted as an alias of `--engine`, and `native`, `emu`, and `v86` as aliases of `sud`, `hcpu`, and `hcpu`, for one release. The usage text and the manual don't mention them. After that release each is a usage error, as [hcpu](epoch-0/hcpu.md) already says of `v86`.
+- `--backend` is accepted as an alias of `--engine`, and `native`, `emu`, and `v86` as aliases of `sud`, `hcpu`, and `hcpu`, for one release. The usage text and the manual don't mention them. After that release each is a usage error, as [hcpu](hcpu.md) already says of `v86`.
 - `--check` and `--version` say "engines" where they say "backends", and name them `sud` and `hcpu`.
 - `--print` and exit codes don't change.
 
 ### The `Machine` API, the build, and the environment
 
 - `Machine.Options.backend` becomes `Machine.Options.engine`. The `vmm` module becomes `engine`, with `engine.Choice` for `vmm.BackendKind`, `engine.Engine` for `vmm.Backend`, `engine.Kind`'s fields `sud` and `hcpu`, and `error.EngineNotBuilt`. There are no aliases: the Zig API isn't stable yet, and a compile error names the fix.
-- `-Dbackends` becomes `-Dengines`, with the new values. It still only picks the engines `zig build integration` runs its cases on; which engines are built doesn't change. `scripts/workloads.sh`'s `H9_WL_BACKEND` becomes `H9_WL_ENGINE`, and its `--backend` becomes `--engine`. There's no `-Demu` to rename: [retire-unicorn](epoch-0/retire-unicorn.md) removed it.
+- `-Dbackends` becomes `-Dengines`, with the new values. It still only picks the engines `zig build integration` runs its cases on; which engines are built doesn't change. `scripts/workloads.sh`'s `H9_WL_BACKEND` becomes `H9_WL_ENGINE`, and its `--backend` becomes `--engine`. There's no `-Demu` to rename: [retire-unicorn](retire-unicorn.md) removed it.
 - `H9_EMU_TIER`, `H9_EMU_DETERMINISTIC`, `H9_EMU_NO_CODEGEN`, and `H9_EMU_CACHE` become `H9_HCPU_TIER`, `H9_HCPU_DETERMINISTIC`, `H9_HCPU_NO_CODEGEN`, and `H9_HCPU_CACHE`, with no aliases. They're for tests and debugging.
 - The page's `createMachine` doesn't take an engine, and doesn't change.
 
@@ -87,9 +87,9 @@ Identifiers and comments follow: `Backend` types and `backend` fields that mean 
 ### The spec and the docs
 
 - SPEC.md, `spec/`, README.md, MANUAL.md, DEVELOPING.md, AGENTS.md, `docs/`, and the site use the new names. SPEC.md's title, "Plan 9 executables on host hypervisors", stays until `baseline-1` restates what h9 is.
-- [spec/cli.md](../spec/cli.md) documents `--engine` and its aliases. `spec/host-js.md` becomes `spec/host-web.md`, and SPEC.md's index follows. The namespace kernel's part of it, which covers the native `libh9ns.a` and `h9ns.h` as well as the web build, moves to a file of its own, `spec/nskernel.md`, so the web host's file describes only the web host.
-- [README.md](README.md)'s list of what needs a proposal says "the engine interface" and "new engines, ABIs, devices, or root types".
-- [README.md](README.md) gains a short table of old names, so a reader of an epoch-0 proposal can find what "the native backend" or "the Linux personality" is called now.
+- [spec/cli.md](../../spec/cli.md) documents `--engine` and its aliases. `spec/host-js.md` becomes `spec/host-web.md`, and SPEC.md's index follows. The namespace kernel's part of it, which covers the native `libh9ns.a` and `h9ns.h` as well as the web build, moves to a file of its own, `spec/nskernel.md`, so the web host's file describes only the web host.
+- [README.md](../README.md)'s list of what needs a proposal says "the engine interface" and "new engines, ABIs, devices, or root types".
+- [README.md](../README.md) gains a short table of old names, so a reader of an epoch-0 proposal can find what "the native backend" or "the Linux personality" is called now.
 
 ### What doesn't change
 
@@ -120,7 +120,7 @@ Identifiers and comments follow: `Backend` types and `backend` fields that mean 
 
 - **CLI.** `--engine` is new. `--backend`, `native`, `emu`, and `v86` keep working for one release and are then usage errors (exit 2). The `--check` and `--version` text changes, which matters to anything that parses it.
 - **Exit codes, `--print`, sandbox defaults, and the root tree.** Unchanged.
-- **`Machine.Options` and the Zig API.** `backend` becomes `engine`, and the `vmm` module becomes `engine`, with no aliases. [docs/embedding.md](../docs/embedding.md) is updated.
+- **`Machine.Options` and the Zig API.** `backend` becomes `engine`, and the `vmm` module becomes `engine`, with no aliases. [docs/embedding.md](../../docs/embedding.md) is updated.
 - **Build.** `-Dbackends` becomes `-Dengines`. The `H9_EMU_*` variables become `H9_HCPU_*`, and `H9_WL_BACKEND` becomes `H9_WL_ENGINE`.
 - **Open branches.** Every branch that touches `src/vmm/`, `src/linux/`, or the loaders needs a rebase. Git follows the renames, so the conflicts are in lines that say backend or personality.
 - **Links.** `spec/host-js.md` moves, and is split, and `check` doesn't cover links to `spec/`, so the PR that moves it greps for them.
@@ -140,19 +140,19 @@ None. No code path changes, and the guest can reach nothing new. The sud engine 
 - [x] `zig build test`, `zig build integration`, `zig build integration -Dweb`, and `zig build web-test` pass with the same cases as before the rename, and none newly skipped.
 - [x] `git grep -il personalit` finds only `design/`, `third_party/`, and the Linux ABI's `personality(2)`.
 - [x] `git grep -wl vmm` finds only `design/` and `third_party/`.
-- [x] SPEC.md, `spec/`, README.md, MANUAL.md, DEVELOPING.md, AGENTS.md, and `docs/` use the new names, and [README.md](README.md) has the table of old names.
+- [x] SPEC.md, `spec/`, README.md, MANUAL.md, DEVELOPING.md, AGENTS.md, and `docs/` use the new names, and [README.md](../README.md) has the table of old names.
 - [x] `zig build design -- check` passes.
 
 ## Implementation
 
 Each step is one PR that changes names and nothing else, so its diff can be reviewed as a rename. The steps are ordered to keep each one small, and each leaves main passing.
 
-1. Wait for [hcpu](epoch-0/hcpu.md) to be implemented, and for the branches open at the time to land or agree to rebase.
+1. Wait for [hcpu](hcpu.md) to be implemented, and for the branches open at the time to land or agree to rebase.
 2. `native` to `sud`: the three files, `engine.Kind`'s field, the CLI value with its alias, and the prose.
 3. `emu` and `v86` to `hcpu`: the CLI values with their aliases, the `H9_EMU_*` variables, and the prose.
 4. `vmm` and backend to engine: `src/vmm.zig` and `src/vmm/` move, the hcpu files gather under `src/engine/hcpu/`, `--engine` arrives with `--backend` as its alias, and `Machine.Options.backend`, `-Dbackends`, and the identifiers follow.
 5. Personality to ABI: `src/abi/plan9/` and `src/abi/linux/`, the identifiers and comments, and the prose.
-6. The docs: `spec/host-js.md` to `spec/host-web.md`, with the namespace kernel split out to `spec/nskernel.md`, "web host" throughout, the process list and the table of old names in [README.md](README.md), and the `areas` tag.
+6. The docs: `spec/host-js.md` to `spec/host-web.md`, with the namespace kernel split out to `spec/nskernel.md`, "web host" throughout, the process list and the table of old names in [README.md](../README.md), and the `areas` tag.
 7. Check off Done criteria, and set `status: implemented` and `branch: [main]`.
 8. A release later, make `--backend`, `native`, `emu`, and `v86` usage errors.
 
@@ -169,5 +169,5 @@ Each step is one PR that changes names and nothing else, so its diff can be revi
 - **Where the hcpu files went.** `src/hcpu.zig`, the root of the `hcpu` module, is `src/engine/hcpu/hcpu.zig`, and `src/vmm/hcpu.zig`, the engine, is `src/engine/hcpu/engine.zig`, since the two can't share a name in one directory. `src/jit/check/vmm.zig`, `-Djit-check`'s hook in the engine's run loop, is `jit/check/engine.zig`. `src/vmm/x86.zig` stays in `src/engine/`, beside `pt_amd64.zig`: it's the amd64 CPU state that KVM and WHP set, not hcpu's. `arena.zig` stays there too.
 - **Tests.** `tests/backends.zig` is `tests/engines.zig`, `install-tests` installs it as `engine-tests`, and the build hands the integration cases `H9_TEST_ENGINES` and `H9_TEST_GO_ENGINE` for `H9_TEST_BACKENDS` and `H9_TEST_GO_BACKEND`. The `[native-backend]` case that `auto` never picks the engine stays, beside the new `[renames]` case that checks both names.
 - **What keeps "backend".** The plan's `gfx` field, which `--print` shows, names the GUI backend, so it keeps its name, as do `h9.gfx.backend` and the `-Dgfx` help. The page's `createMachine` keeps its `backend` option and the demo page its `?backend=` parameter; they pass the value as `--engine`, where the old values parse for the release the aliases last.
-- **The greps.** `git grep -il personalit` also finds the `linux-personality` slug, in links and test tags, which slugs keep. It and `git grep -wl vmm` also find SPEC.md's table of sections from before the split, which names them as they were. [README.md](README.md) has the table of old names, under Old names.
+- **The greps.** `git grep -il personalit` also finds the `linux-personality` slug, in links and test tags, which slugs keep. It and `git grep -wl vmm` also find SPEC.md's table of sections from before the split, which names them as they were. [README.md](../README.md) has the table of old names, under Old names.
 - **Order.** `engine.Kind` keeps its order, `hcpu` before `sud`, so `--version` lists the engines as before.

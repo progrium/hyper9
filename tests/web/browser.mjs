@@ -182,7 +182,7 @@ try {
     if (r.code !== 0 || r.out !== want) throw new Error(`mounts: ${JSON.stringify(r)}`);
   });
 
-  // design/upper-layers.md: up on a mount the page names, here a layer
+  // design/epoch-0/upper-layers.md: up on a mount the page names, here a layer
   // in memory over /n/l, which the machine makes.
   await test('createMachine takes up: true as the up option [upper-layers]', async () => {
     const r = await page.evaluate(async () => {
@@ -197,7 +197,7 @@ try {
     if (r.code !== 0 || r.out !== 'x\n1\n') throw new Error(`up: ${JSON.stringify(r)}`);
   });
 
-  // design/upper-layers.md: a layer the page keeps, here a writable 9P
+  // design/epoch-0/upper-layers.md: a layer the page keeps, here a writable 9P
   // tree in memory (memtree.js) that the page serves on a port. One machine
   // writes through it as the up member of /, over stack.h9a; the tree then
   // holds only the changes, whiteout and all, and a second machine mounts

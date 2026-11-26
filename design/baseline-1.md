@@ -27,7 +27,7 @@ A reader today has to go through those proposals in order to learn why h9 is the
 
 The baseline is cut once these are implemented:
 
-- **[renames](renames.md),** so the baseline, the spec, and epoch 1 say ABI, engine, `sud`, and `hcpu`. It depends on [hcpu](epoch-0/hcpu.md).
+- **[renames](epoch-0/renames.md),** so the baseline, the spec, and epoch 1 say ABI, engine, `sud`, and `hcpu`. It depends on [hcpu](epoch-0/hcpu.md).
 - **[cow-fork](epoch-0/cow-fork.md),** which is partly built and which [memory-model](memory-model.md) builds on.
 - **[retire-unicorn](epoch-0/retire-unicorn.md),** so the baseline describes one emulator.
 
@@ -58,9 +58,9 @@ The PR that cuts the baseline is the last of epoch 0. Before it, `zig build desi
 
 **Why wait for renames, cow-fork, and retire-unicorn.** A baseline written before the renames would describe h9 in words the next proposal abandons. cow-fork is half merged, and a baseline that says "partly" is a poor foundation for [memory-model](memory-model.md). Unicorn is the difference between "the emulator" being one thing and two.
 
-**Why not wait for more.** [namespace-kernel](namespace-kernel.md), [kernel-serve](epoch-0/kernel-serve.md), [mounts](epoch-0/mounts.md), and [child-machines](child-machines.md) are designs that epoch 1 builds on, and none is far enough along to hold a baseline for. Waiting for them would put the baseline after the work it's meant to orient.
+**Why not wait for more.** [namespace-kernel](epoch-0/namespace-kernel.md), [kernel-serve](epoch-0/kernel-serve.md), [mounts](epoch-0/mounts.md), and [child-machines](child-machines.md) are designs that epoch 1 builds on, and none is far enough along to hold a baseline for. Waiting for them would put the baseline after the work it's meant to orient.
 
-**Why retitle SPEC.md here.** The title is the claim about what h9 is, and the baseline is where that claim is restated on purpose. [renames](renames.md) leaves it alone for that reason.
+**Why retitle SPEC.md here.** The title is the claim about what h9 is, and the baseline is where that claim is restated on purpose. [renames](epoch-0/renames.md) leaves it alone for that reason.
 
 ## Compatibility
 
@@ -72,7 +72,7 @@ None. It's a record.
 
 ## Done criteria
 
-- [ ] [renames](renames.md), [cow-fork](epoch-0/cow-fork.md), and [retire-unicorn](epoch-0/retire-unicorn.md) are implemented.
+- [ ] [renames](epoch-0/renames.md), [cow-fork](epoch-0/cow-fork.md), and [retire-unicorn](epoch-0/retire-unicorn.md) are implemented.
 - [ ] `zig build design -- archive --dry-run` reports nothing to archive, with the current epoch still 0.
 - [ ] This file has the commit, the statement of what h9 is, the table of epoch 0's proposals with every proposal in `design/epoch-0/` on a line, and the carried-over list.
 - [ ] SPEC.md has the new title and overview, its decisions table matches what's built, and it's signed by the person who reviewed it as a whole.

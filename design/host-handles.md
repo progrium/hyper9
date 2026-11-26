@@ -79,7 +79,7 @@ devfs, devip, the console, the clock, and the GUI glue are rewritten to take the
 
 **Names, not host paths, in `/proc/n/ns`.** A guest reading its own namespace learned the host's layout, the open question [hide-host-paths](epoch-0/hide-host-paths.md) was written for. Its options were to hide host binds, which breaks `--ns` replay and `ns` output a person reads to debug, or to show a placeholder, which `--ns` can't replay. Once devices reach the host only through named handles, the name is what the kernel holds, so showing it costs nothing and still replays. Hiding it only under `--profile=tight`, as hide-host-paths asked, would leave two formats for no benefit.
 
-**Why an embedder interface.** Tests want a kernel with no host at all, and [namespace-kernel](namespace-kernel.md) is already a kernel whose whole outside is handed to it.
+**Why an embedder interface.** Tests want a kernel with no host at all, and [namespace-kernel](epoch-0/namespace-kernel.md) is already a kernel whose whole outside is handed to it.
 
 ## Compatibility
 

@@ -756,7 +756,7 @@ export class GfxHost {
 /**
  * A mount for createMachine (design/epoch-0/mounts.md): { kind, src, dst, opts },
  * from a flag's string or an object. An object's `up: true` is the `up`
- * option (design/upper-layers.md). A `port` source (design/epoch-0/port-streams.md)
+ * option (design/epoch-0/upper-layers.md). A `port` source (design/epoch-0/port-streams.md)
  * is a port's name or a MessagePort, which is added to `ports` (an object
  * from names to ports) under the next free `mountN`; either way it's
  * `--url port://NAME`.
@@ -794,7 +794,7 @@ export function mountOf(m, ports = {}) {
   const src = kind === 'builtin' || kind === 'tmp' ? '' : String(m[kind]);
   const list = Array.isArray(m.opts) ? [...m.opts] : m.opts ? [m.opts] : [];
   // `up: true` makes it the writable layer over what's beneath it
-  // (design/upper-layers.md), as the `up` option does.
+  // (design/epoch-0/upper-layers.md), as the `up` option does.
   if (m.up && !list.some((o) => /(^|,)(up|upper)(,|$)/.test(o))) list.push('up');
   return { kind, src, dst: m.dst ?? '', opts: list.join(',') };
 }

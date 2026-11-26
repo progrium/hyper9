@@ -49,7 +49,7 @@ Once [hcpu](hcpu.md) is implemented, h9's own CPUs run every guest on every host
 - **Build.** `-Demu` and `-Dunicorn` are removed, and passing either is an error that says hcpu is built in.
 - **Releases.** No `h9-emu` assets, which [hcpu](hcpu.md) already decided. The source tarball for it goes too.
 - **Licences.** h9 is MIT with no GPLv2 build. LICENSE and README.md drop the paragraph about it.
-- **[renames](../renames.md).** It says a `-Demu=unicorn` build's emulator is the `unicorn` engine, and that `-Demu` keeps its name. If this lands first, neither exists and renames needs no `unicorn` value. It's a draft and can say so.
+- **[renames](renames.md).** It says a `-Demu=unicorn` build's emulator is the `unicorn` engine, and that `-Demu` keeps its name. If this lands first, neither exists and renames needs no `unicorn` value. It's a draft and can say so.
 - **`third_party/`.** `third_party/unicorn/` is removed.
 
 ## Security
@@ -76,7 +76,7 @@ None. Guests reach nothing new, and one engine's worth of code leaves the truste
 ## Open issues
 
 - Whether to remove the oracle too. It would take another independent 386 implementation to check h86 against, such as QEMU's user mode run as a separate process, and lockstep by instruction over a process boundary is slow. As written, the oracle stays.
-- Whether this lands before or after [renames](../renames.md). Before is less work for renames.
+- Whether this lands before or after [renames](renames.md). Before is less work for renames.
 
 ## Updates
 

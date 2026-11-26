@@ -1509,7 +1509,7 @@ h9_kserve_kns(Pgrp *pg, Chan *slash, void (*put)(void*), void *arg)
 }
 
 /*
- * Starts a server of named namespaces (design/namespace-kernel.md,
+ * Starts a server of named namespaces (design/epoch-0/namespace-kernel.md,
  * Serving): each Tattach gets lookup(aname)'s Kns (h9_kserve_kns), or
  * fails with "no such namespace" for nil. Otherwise as h9_kserve_new.
  */
@@ -1549,7 +1549,7 @@ h9_kserve_conn(void *v, int fd)
 
 /*
  * As h9_kserve_conn, with every attach on the connection to aname
- * (design/namespace-kernel.md, Security): a Tattach naming another fails.
+ * (design/epoch-0/namespace-kernel.md, Security): a Tattach naming another fails.
  */
 int
 h9_kserve_connas(void *v, int fd, char *aname)

@@ -190,4 +190,4 @@ Demo: `h9 --export-changes out.tar --rc 'cd /sys/src/cmd && mk cat.install && rm
 
 ## Updates
 
-- 2026-11-22: Superseded by [upper-layers](../upper-layers.md). A writable layer on the host, with overlayfs's copy up and OCI's whiteouts, covers the uses here without a memory ceiling or an export step, and `tar` makes it an archive.
+- 2026-11-22: Superseded by [upper-layers](upper-layers.md). A writable layer on the host, with overlayfs's copy up and OCI's whiteouts, covers the uses here without a memory ceiling or an export step, and `tar` makes it an archive.
