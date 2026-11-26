@@ -7857,9 +7857,17 @@ test "a root's own resolv.conf server is redirected too [linux-dns]" {
     var d: DnsCase = undefined;
     try d.init(@src(), &svc_records, &.{});
     defer d.deinit();
-    // 192.0.2.53 is a documentation address nothing answers at; the
-    // root's write goes to its overlay.
-    try d.expect(&.{ "--net-allow", try d.allow("svc.test"), "sh", "-c", try d.script("echo nameserver 192.0.2.53 > /etc/resolv.conf; nc svc.test {[port]d}") }, "hello\n");
+    // 192.0.2.53 is a documentation address nothing answers at. The root
+    // gets it through a member on /etc, not by writing /etc/resolv.conf:
+    // Alpine's minirootfs has none, so the one there is #Letc's, which
+    // can't be written, and a failed write would leave the host's
+    // servers to answer.
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try writeTree(&s, &.{.{ "etc/resolv.conf", "nameserver 192.0.2.53\n" }});
+    var p: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+    try d.expect(&.{ "--dir", try std.fmt.bufPrint(&p, "{s}/etc:#L/etc", .{s.path}), "--net-allow", try d.allow("svc.test"), "sh", "-c", try d.script("grep -qx 'nameserver 192.0.2.53' /etc/resolv.conf && nc svc.test {[port]d}") }, "hello\n");
     try std.testing.expect(d.stub.queries() > 0);
 }
 
