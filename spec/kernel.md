@@ -30,7 +30,7 @@ Each CLI invocation is one machine: one host process with one VM. Each Plan 9 pr
 | `segbrk` / `segfree` / `segflush` | Grow or shrink an attached segment's mapping; drop its pages (a `shared` segment's are zeroed in place); check the span and tell the engine the code changed |
 | `notify` / `noted` | Push a Ureg and the note string onto the user stack and point the PC at the handler; `noted` restores or kills the process |
 | `/proc/n/ctl` `stop` / `start` / `hang` | Park the process on its own thread at its next stop point (syscall entry, note delivery, a breakpoint exit, or before the first instruction after `exec` with `hang`), with its Ureg and Extra copied to its record ([self-host](../design/epoch-0/self-host.md)) |
-| `rendezvous` / `semacquire` / `tsemacquire` / `semrelease` | Host kernel primitives built on drawterm's sleep/wakeup (`src/kern/sema.c`): 9front's `rendezvous` on drawterm's rendezvous group, and 9front's semaphores, with the wait lists in a kernel-wide table keyed by the host address of the guest word; `tsemacquire` waits with `tsleep` ([semaphores](../design/epoch-0/semaphores.md)) |
+| `rendezvous` / `semacquire` / `tsemacquire` / `semrelease` | Host kernel primitives built on drawterm's sleep/wakeup (`src/kern/sema.zig`): 9front's `rendezvous` on drawterm's rendezvous group, and 9front's semaphores, with the wait lists in a kernel-wide table keyed by the host address of the guest word; `tsemacquire` waits with `tsleep` ([semaphores](../design/epoch-0/semaphores.md)) |
 
 ### Threads
 
@@ -44,7 +44,7 @@ Every process's memory, 9front's and Linux's, is an `Mm` (`src/kern/mm.zig`, [me
 
 A 9front process's address space (`segment.Space`, `src/segment.zig`) is two Mms in one engine address space: one holding text, data, bss, the heap, and segattach's segments, which `RFMEM` siblings share and which is mapped into each of their address spaces, and the process's own stack. `rfork` without `RFMEM` forks both, so what `RFMEM` siblings share is still copy-on-write for a plain fork child, as on 9front. Text and the initialized part of data are private mappings of the a.out, filled from a copy of its bytes on first touch; bss, the heap, and the stack (its whole 16 MiB) are anonymous; and a `shared` segment is a shared mapping with its own pages, so fork shares them even in a chunk that private mappings also use. Each mapping carries its segment's class and slot as a label, which `/proc/n/segment`, `segbrk`, and `segdetach` go by. `segment.zig` keeps only what's Plan 9's own: segment names and classes, segattach's placement, and the `seg*` calls and `/proc/n/segment` as calls on the Mms.
 
-The boot also starts one kernel thread of its own, the timer kproc (`src/kern/tsleep.c`), which idles on a host condition variable until the earliest `tsleep` deadline.
+The boot also starts one kernel thread of its own, the timer kproc (`src/kern/tsleep.zig`), which idles on a host condition variable until the earliest `tsleep` deadline.
 
 ### Several machines per host process
 
@@ -86,7 +86,7 @@ We vendor 9front drawterm's `kern/`, its libraries (libc, libdraw, libmemdraw, l
 
 These are reused, as-is or as close translations in Zig (the chan, dev, and mount machinery, devroot, devmnt, and devpipe, below): chan/dev/mount machinery, devroot, devcons (for everything but `cons` itself), devmnt (the 9P client), devlfd (`#φ`, for unix socket servers and embedders' descriptors), devfs-posix, and devfs-win32 (the host filesystem, with h9's sandbox hook calls), devpipe (with a FIFO mode for the Linux ABI's named pipes: one queue that every open reads and writes, with opens counted by mode), devip (with h9's network hook calls), devtls, devssl, devdraw, devmouse, devaudio, and the auth code.
 
-We compile drawterm's `.c` files but not its `kern/devtab.c` or `kern/devenv.c`, whose own copies live in `src/kern/`, or the files [kernel-port](../design/kernel-port.md) has ported to Zig (see Ported to Zig). The vendored tree's few changes are small and marked: the sandbox hooks (see Sandbox policy) and `Chan.srvname`, which `kern/chan.c`'s `chanfree` frees, as on 9front.
+We compile drawterm's `.c` files but not its `kern/devtab.c` or `kern/devenv.c`, whose own versions are `src/kern/devtab.c` and `src/kern/dev/env.zig`, or the files [kernel-port](../design/kernel-port.md) has ported to Zig (see Ported to Zig). The vendored tree's few changes are small and marked: the sandbox hooks (see Sandbox policy) and `Chan.srvname`, which `kern/chan.c`'s `chanfree` frees, as on 9front.
 
 ### Added by us
 
@@ -100,11 +100,11 @@ drawterm only ever ran its own kprocs. A process is one record, `Proc`, defined 
 
 The device table, listing drawterm's devices plus ours.
 
-#### Per-machine console device `#y` (`src/kern/devhcons.c`)
+#### Per-machine console device `#y` (`src/kern/dev/hcons.zig`)
 
-drawterm's `#c/cons` reads and writes the host's fds 0 and 1 directly. `#y<id>` serves machine `id`'s `Stdio` through leaf calls into Zig, and is bound before `#c` on `/dev`, so `/dev/cons` is ours and the rest of `#c` stays visible. It also has `/dev/stderr`, which the guest's fd 2 is opened on, so fd 2 reaches the host's stderr.
+drawterm's `#c/cons` reads and writes the host's fds 0 and 1 directly. `#y<id>`, a native device ([kernel-port](../design/kernel-port.md)), serves machine `id`'s `Stdio` through calls into `src/kern.zig` that return -1 rather than fail, and is bound before `#c` on `/dev`, so `/dev/cons` is ours and the rest of `#c` stays visible. It also has `/dev/stderr`, which the guest's fd 2 is opened on, so fd 2 reaches the host's stderr.
 
-#### devenv `#e`, from 9front (`src/kern/devenv.c`)
+#### devenv `#e`, from 9front (`src/kern/dev/env.zig`)
 
 drawterm's has one machine-wide environment and imports the host process's environment on first attach, which breaks `env.scrub`. 9front's keeps one environment per Egrp, which `RFENVG` needs anyway. drawterm's Proc has no `egrp`, so h9's (`src/kern/h9proc.h`) has one. `#ec` isn't supported.
 
@@ -148,7 +148,7 @@ drawterm's `pgrp.c` is `src/kern/pgrp.zig` (mount tables, and file descriptor an
 
 drawterm's `devmnt.c` is `src/kern/devmnt.zig`, the 9P client and the first native device: the switch calls its walk, open, read, and the rest directly, and `mntdevtab`, which the device tables name, holds the C wrappers. `mntversion`, `mntauth`, `mntattach`, and `muxclose` are exported for the C that calls them (`devoverlay.c`, and `glue.zig` calls `mntauth`). A process waiting for its reply sleeps in `sync.zig`, and a note that interrupts it sends `Tflush` as before. The reply parser (`mntrpcread`) and the check of a directory read from a server (`mntdirsfix`) are fuzzed in `zig build kern-test`.
 
-drawterm's `devpipe.c` and `devroot.c` are `src/kern/dev/pipe.zig` and `src/kern/dev/root.zig`, native devices too. The pipe keeps h9's Linux FIFOs (one queue that every open reads and writes, `h9_fifopipe` and `h9_fiforefs` for `src/kern/fifo.c`) and `h9_pipeq` for Linux poll, and a write on a pipe whose reader closed still posts the note through `h9_postnote`, unless the pipe carries a mount's 9P. A native device's own `Devgen` is Zig that doesn't raise, so the switch calls it directly. Of drawterm's `kern/`, the build now compiles no file the proposal ports.
+drawterm's `devpipe.c` and `devroot.c` are `src/kern/dev/pipe.zig` and `src/kern/dev/root.zig`, native devices too. The pipe keeps h9's Linux FIFOs (one queue that every open reads and writes, `fifopipe` and `fiforefs` for `src/kern/fifo.zig`) and `h9_pipeq` for Linux poll, and a write on a pipe whose reader closed still posts the note through `h9_postnote`, unless the pipe carries a mount's 9P. A native device's own `Devgen` is Zig that doesn't raise, so the switch calls it directly. Of drawterm's `kern/`, the build now compiles no file the proposal ports.
 
 h9's own C is ported the same way, a file at a time. `src/kern/devpty.c` is `src/kern/dev/pty.zig`, a native device, with `h9_ptyq` and the `h9_pty_*` calls the Linux ABI makes exported for their callers. `src/kern/netcheck.c` is `src/kern/netcheck.zig`, and the kernel's half of `src/kern/fscheck.c` (FIFOs by path, through overlays and 9P2000.L mounts) is `src/kern/fscheck.zig`; the host's half, the policy checks on host paths, stays C, since it never sets an error label. The C they call that raises (devip's socket calls, and devoverlay's and devfs's FIFOs) goes through `devshim.c`. `src/kern/devns.c` is `src/kern/dev/ns.zig`, the namespace kernel's `#N`, native there only, with `pgrpcpy` and `h9_srvpost` called through `devshim.c`. `src/kern/linuxnet.c` is three files: `src/kern/linuxnet.zig`, readiness (`h9_poll` and its wake generation) and the Linux socket calls; `src/kern/dev/eventfd.zig`, `#ε`; and `src/kern/rconv.zig`, the read-ahead for remote conversations, kept apart since file-interface replaces it. The devices of `src/kern/gfx.c` (`#i` opening the screen lazily with `/dev/screen`, `#c`'s `/dev/snarf` limit, `#b`'s kbdfs format and `/dev/kbdin`, and `#m`'s `/dev/mousein`) are `src/kern/dev/gfx.zig`, native wrappers around drawterm's C devices, in builds with a screen; the screen interface the backends call and are called by stays C in `gfx.c`, since it never sets an error label, with the two calls that need the screen's image (`h9_gfx_screenshot` and `h9_gfx_mousein`) beside it. Files only one kernel has export their C names only there (`kern_options`, from the build).
 
@@ -176,13 +176,13 @@ An `Attr` has a mask of what it holds (`Amode`, `Anlink`, `Auid`, `Agid`, `Ardev
 | `#O` (`devoverlay.c`) | `readlink` and `symlink` (its own `Nlink` nodes, or the tree a name is in), `getattr` (its `Dir`, with what the lower tree's `getattr` adds), and `rename` (`h9_overlay_move`); `link` is the default copy |
 | devmnt | all six, as 9P2000.L requests, on a mount whose server is a `#ℓ` conversation translating to 9P2000.L (see [spec/ninep.md](ninep.md)); the defaults elsewhere |
 
-#### `tsleep` (`src/kern/tsleep.c`)
+#### `tsleep` (`src/kern/tsleep.zig`)
 
 drawterm's `sleep` has no timeout. `tsleep` has 9front's contract and uses only the kernel's public `sleep` and `wakeup`: it puts a timer on its own stack into a list sorted by host monotonic time, and the timer kproc wakes it at the deadline.
 
-The list is guarded by a host lock (`glue.zig`, `glue-win32.c`) that the kproc holds while it calls `wakeup`, and `tsleep` always takes its timer out under that lock before returning, so no Proc fields are needed. `h9_tsleepintr` is the same sleep for the Zig, returning -1 where `tsleep` raises; it sleeps through `h9_sleepintr`, `sync.zig`'s sleep for C callers that don't raise.
+The list is guarded by a host lock (`glue.zig`, `glue-win32.c`) that the kproc holds while it calls `wakeup`, and `tsleep` always takes its timer out under that lock before returning, so no Proc fields are needed. It's Zig, ported from h9's C under [kernel-port](../design/kernel-port.md): `tsleep.zig`'s `tsleep` returns `error.Interrupted` when a note arrives, and the `tsleep` it exports for C raises it.
 
-#### Semaphores and `rendezvous` (`src/kern/sema.c`)
+#### Semaphores and `rendezvous` (`src/kern/sema.zig`)
 
 drawterm has no semaphores. 9front's code is ported closely, with the wait lists in 64 hashed buckets keyed by the host address of the semaphore word rather than in the segment, since h9's segments are Zig objects; the word is changed with host atomics.
 
@@ -204,11 +204,11 @@ Posting sets the channel's `srvname` to its `/srv` path, which `/proc/n/ns` prin
 
 The machine's last process to release its groups (`h9_kern_release` in `src/kern/proc.zig`) closes every posted channel, as closing a lease does, while the machine is still there; the boards go with the machine.
 
-#### Host-stream device `#ℏ` (`src/kern/devhstream.c`, `src/hstream.zig`)
+#### Host-stream device `#ℏ` (`src/kern/dev/hstream.zig`, `src/hstream.zig`)
 
 WebSockets, for roots, namespace-file mounts, and the guest's `/net/ws` ([websocket-9p](../design/epoch-0/websocket-9p.md)).
 
-It follows devhcons's pattern: Zig does TCP, TLS (`std.crypto.tls`) and the framing (`src/ws.zig`) on a host reader thread per stream, the guest sleeps on a Rendez in the kernel until the stream has data, and a note interrupts it.
+It follows #y's pattern, and is a native device too ([kernel-port](../design/kernel-port.md)): Zig does TCP, TLS (`std.crypto.tls`) and the framing (`src/ws.zig`) on a host reader thread per stream, the guest sleeps on a Rendez in the kernel until the stream has data, and a note interrupts it.
 
 A host-made stream has no path: `h9_hstream_fd` makes its channel, which is posted as `#s/root` or mounted at once, so the guest can't reach it by name.
 
@@ -224,7 +224,7 @@ A guest `connect` asks the net policy as a TCP dial would, through the same `net
 
 devmnt and h9's own 9P server speak only 9P2000, and most 9P servers outside Plan 9 speak 9P2000.L ([dotl](../design/epoch-0/dotl.md)). A `#ℓ` conversation puts a translator between devmnt and a server connection, or between a client connection and the kernel's server (kserve).
 
-Attached with no spec, the device serves `dotl/clone` and `dotl/N/{ctl,data,status}`, which `bind -a '#ℓ' /net` puts at `/net/dotl`. `ctl` takes `fd N` (the caller's fd N is the server connection), `fd R W` (read the server from fd R and write it to fd W, for an embedder's pipe pair), `redial URL[,URL…]` before `fd N` (where a reconnect dials, a `ws://` or `wss://` URL made into a new host stream, with its credential helper, when h9 connects for itself with no plan), `user UID NAME` before `fd N` (the connection's user map, from `9P-Uid` and `9P-User`), `dial ADDR[,ADDR…]` (a `tcp!` address dialed through `#I` under the dialer's plan, or `unix!PATH` when h9 dials a root itself, with no plan), `version 9P2000.L` (don't offer `.L.Z`), and `serve N` (the server side, for a client on fd N); `data` is 9P2000; `status` reads the dialect, `Hungup` and why, and `reconnects N` once the connection has been resumed. A host descriptor through devlfd can't be interrupted in its read, so a conversation whose server is one waits for it to be readable first, in a wait the last close wakes (`h9_hostwait` in `src/kern/rootdial.c`: `poll` with a pipe beside it on POSIX, and on Windows a `PeekNamedPipe` loop that sleeps up to 8 ms when there's nothing), and its reader ends with the conversation rather than when the server writes or closes.
+Attached with no spec, the device serves `dotl/clone` and `dotl/N/{ctl,data,status}`, which `bind -a '#ℓ' /net` puts at `/net/dotl`. `ctl` takes `fd N` (the caller's fd N is the server connection), `fd R W` (read the server from fd R and write it to fd W, for an embedder's pipe pair), `redial URL[,URL…]` before `fd N` (where a reconnect dials, a `ws://` or `wss://` URL made into a new host stream, with its credential helper, when h9 connects for itself with no plan), `user UID NAME` before `fd N` (the connection's user map, from `9P-Uid` and `9P-User`), `dial ADDR[,ADDR…]` (a `tcp!` address dialed through `#I` under the dialer's plan, or `unix!PATH` when h9 dials a root itself, with no plan), `version 9P2000.L` (don't offer `.L.Z`), and `serve N` (the server side, for a client on fd N); `data` is 9P2000; `status` reads the dialect, `Hungup` and why, and `reconnects N` once the connection has been resumed. A host descriptor through devlfd can't be interrupted in its read, so a conversation whose server is one waits for it to be readable first, in a wait the last close wakes (`h9_hostwait` in `src/kern/rootdial.zig`: `poll` with a pipe beside it on POSIX, and on Windows a `PeekNamedPipe` loop that sleeps up to 8 ms when there's nothing), and its reader ends with the conversation rather than when the server writes or closes.
 
 It follows devhstream's pattern and the seam rules: a kproc per conversation reads the server connection and feeds the translator, which is called through leaves in `src/dotl/kern.zig` that take and return bytes and never raise, under a QLock per conversation; a guest reading `data` sleeps on a Rendez until the translator has bytes for it, so a note interrupts it. The conversation ends when the last of its `ctl` and `data` is closed.
 
@@ -234,11 +234,11 @@ The translator is `src/dotl/`: `wire.zig` encodes and bounds-checks 9P2000, 9P20
 
 `--serve` needs a 9P server, and running exportfs as a guest process cost a process per connection and per blocking request, needed an exportfs binary, and can't run where there are no guest processes ([kernel-serve](../design/epoch-0/kernel-serve.md)). kserve serves a channel of 9P2000 messages from kernel channels directly: a fid holds a `Chan`, walks use chan.c's `walk()`, opens and creates cross mounts as namec does (with chan.c's `findmount` and `createdir`), and directory reads go through sysfile.c's `kread`, which h9 splits so it runs on a channel (`h9_chanread`, and `h9_chanstat` for `fstat`'s naming). Its reader and worker kprocs act for the process that started serving, through records of their own in its machine (`h9_kprocshare` in `src/kern/proc.zig`) and its thread-local plan and pages (`h9_kern_locals` in `src/kern.zig`), so the sandbox hooks and devices that look up the caller's machine see the server Proc's. It's C under `waserror`, since it sits between channels and devices; Zig hands it a connection through `kern.Kserve`. See [Serving](ninep.md#serving).
 
-#### Index device `#ι` (`src/kern/devhidx.c`, `src/rootindex/`)
+#### Index device `#ι` (`src/kern/dev/hidx.zig`, `src/rootindex/`)
 
 Puts a metadata index between devmnt and a 9P connection ([mount-index](../design/epoch-0/mount-index.md); see [Metadata indexes](ninep.md#metadata-indexes)). It's laid out as `#ℓ` is, `hidx/clone` and `hidx/N/{ctl,data,status}`, but isn't bound anywhere, and it's masked once the namespace file is replayed, since a guest's conversation could read and write the host's index cache. `ctl` takes `server KEY` (use the server's `.fs/index`, cached under KEY, the address and attach spec), `index N` (use the compiled index the machine handed over as number N), neither (pass everything through, counting requests), and then `fd N` (the server connection, which starts the conversation); `data` is the 9P2000 devmnt mounts; `status` reads the index's label, counts, and how long its check took, the requests devmnt sent and how many reached the server, and the notes `-v` prints. h9 reads `status` through a leaf (`h9_hidx_convstatus`) rather than a chan, since `#ι` is masked by the end of the run.
 
-The kproc, the leaves (`src/rootindex/kern.zig`), and the locking follow `#ℓ`, except that a write to `data` holds the server-write lock from queueing its requests to writing them, so they reach `#ℓ` in the writer's process, which tells the translator whether they're a Linux process's. A machine registers its cache directory with `kern.zig`, keyed by its `Hmach`, and hands over an `index=` index it compiled with `give`, which a conversation takes once by number.
+The kproc, the leaves (`src/rootindex/kern.zig`), and the locking follow `#ℓ`, except that a write to `data` holds the server-write lock from queueing its requests to writing them, so they reach `#ℓ` in the writer's process, which tells the translator whether they're a Linux process's. A machine registers its cache directory with `kern.zig`, keyed by its `Hmach`, and hands over an `index=` index it compiled with `give`, which a conversation takes once by number. It's a native device ([kernel-port](../design/kernel-port.md)), and its kproc ends by returning, as a kproc's trampoline then calls `pexit`.
 
 #### devcons hooks (`src/kern/consx.c`, `consx.h`)
 

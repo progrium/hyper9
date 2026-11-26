@@ -38,12 +38,6 @@ enum
 /* ns.c */
 extern void	pgrpcpy(Pgrp*, Pgrp*, int);
 
-/* devenv.c */
-extern void	*h9_egrpnew(void);
-extern void	*h9_egrpcopy(void*);
-extern void	h9_egrpincref(void*);
-extern void	h9_egrpclose(void*);
-
 /*
  * A machine: the C half of a Kernel (src/kern.zig), which makes it with
  * h9_kern_newmach, and the processes spawned into it and their

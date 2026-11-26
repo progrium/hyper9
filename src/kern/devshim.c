@@ -280,6 +280,19 @@ h9_shim_fs_mkfifo(Chan *c, char *name, ulong perm)
 	return 0;
 }
 
+/* And src/kern/fifo.zig's: the overlay's lower chan for a FIFO's key. */
+extern Chan *h9_overlay_lower(Chan*);
+
+int
+h9_shim_overlay_lower(Chan *c, Chan **r)
+{
+	if(waserror())
+		return -1;
+	*r = h9_overlay_lower(c);
+	poperror();
+	return 0;
+}
+
 /*
  * ns.c's pgrpcpy and devsrv.c's h9_srvpost, which raise, for
  * src/kern/dev/ns.zig.

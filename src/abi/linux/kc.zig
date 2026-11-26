@@ -485,7 +485,7 @@ pub fn isFifo(fd: i32) bool {
 
 /// Replaces fd, open on a FIFO's file, with an open of the FIFO's pipe
 /// in `mode` (Plan 9's OREAD, OWRITE, or ORDWR), from the machine-wide
-/// table (src/kern/fifo.c). A read or write open waits for the other
+/// table (src/kern/fifo.zig). A read or write open waits for the other
 /// end unless `nonblock`; a nonblocking write open with no reader fails
 /// with "no reader", and a note interrupts the wait.
 pub fn fifoJoin(fd: i32, mode: c_int, nonblock: bool) Error!void {

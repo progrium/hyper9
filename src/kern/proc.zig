@@ -31,9 +31,8 @@
 //! parent never touches freed memory. A parent that exits marks its
 //! record dead, and children's exits then leave no wait record.
 //!
-//! Two C calls that can raise are made through src/kern/procshim.c:
-//! devenv.c's h9_egrpnew and h9_egrpcopy, and the function
-//! h9_kern_isolated runs.
+//! One C call that can raise is made through src/kern/procshim.c: the
+//! function h9_kern_isolated runs.
 
 const std = @import("std");
 const port = @import("port.zig");
@@ -59,32 +58,35 @@ const decref = chan.decref;
 const lock = c.lock;
 const unlock = c.unlock;
 
-// devsrv.c, src/hstream.zig, and devenv.c.
+// devsrv.c and src/hstream.zig.
 extern fn h9_srvmachclose(m: *Hmach) void;
 extern fn h9_srvmachfree(m: *Hmach) void;
 extern fn h9_hstream_machend(m: ?*anyopaque) void;
-extern fn h9_egrpincref(e: ?*anyopaque) void;
-extern fn h9_egrpclose(e: ?*anyopaque) void;
-// src/kern/procshim.c: devenv.c's h9_egrpnew and h9_egrpcopy, and a
-// call of fn(arg), returning -1 if they raised, with the error string
-// on the process.
-extern fn h9_shim_egrpnew(r: *?*anyopaque) c_int;
-extern fn h9_shim_egrpcopy(from: ?*anyopaque, r: *?*anyopaque) c_int;
+// src/kern/procshim.c: a call of fn(arg), returning -1 if it raised,
+// with the error string on the process.
 extern fn h9_shim_call(f: *const fn (?*anyopaque) callconv(.c) void, arg: ?*anyopaque) c_int;
-extern fn h9_tsleepinit() void; // tsleep.c
-extern fn h9_semainit() void; // sema.c
 extern fn sysclose(fd: c_int) c_int; // sysfile.zig's, for C
 
+// dev/env.zig's environment groups, kept as void* on the record; the
+// namespace kernel has no environment, so its processes have none.
+const devenv = @import("dev/env.zig");
+
 fn egrpnew() Error!?*anyopaque {
-    var r: ?*anyopaque = null;
-    try dev.caught(h9_shim_egrpnew(&r));
-    return r;
+    if (port.options.nskernel) return null;
+    return try devenv.egrpnew();
 }
 
 fn egrpcopy(from: ?*anyopaque) Error!?*anyopaque {
-    var r: ?*anyopaque = null;
-    try dev.caught(h9_shim_egrpcopy(from, &r));
-    return r;
+    if (port.options.nskernel) return null;
+    return try devenv.egrpcopy(@ptrCast(@alignCast(from.?)));
+}
+
+fn h9_egrpincref(e: ?*anyopaque) void {
+    if (!port.options.nskernel) devenv.egrpincref(@ptrCast(@alignCast(e.?)));
+}
+
+fn h9_egrpclose(e: ?*anyopaque) void {
+    if (!port.options.nskernel) devenv.egrpclose(@ptrCast(@alignCast(e.?)));
 }
 
 fn kstrcpy(s: [*]u8, t: [*:0]const u8) void {
@@ -777,13 +779,12 @@ fn h9_kern_settextpath(path: ?[*:0]const u8) callconv(.c) void {
         chan.cclose(o);
 }
 
-/// The calling process's Egrp, for devenv; raises an error if it has
-/// none.
-fn h9_upegrp() callconv(.c) ?*anyopaque {
+/// The calling process's Egrp, for devenv; fails if it has none.
+pub fn upegrp() Error!*anyopaque {
     const h = self();
     if (h == null or h.?.egrp == null)
-        port.raise(port.kerror("no environment"));
-    return h.?.egrp;
+        return port.kerror("no environment");
+    return h.?.egrp.?;
 }
 
 /// drawterm's closefgrp frees the fd table without closing its channels
@@ -893,8 +894,8 @@ fn takespawn(v: ?*anyopaque) Spawn {
 /// lists.
 fn h9_proc_boot() callconv(.c) void {
     bootproc = up();
-    h9_semainit();
-    h9_tsleepinit();
+    @import("sema.zig").semainit();
+    @import("tsleep.zig").tsleepinit();
 }
 
 /// A new process's groups, as the boot Proc's: just #/, no fds, and its
@@ -1676,7 +1677,6 @@ pub fn exportC() void {
     @export(&h9_kern_killed, .{ .name = "h9_kern_killed" });
     @export(&h9_kern_exechang, .{ .name = "h9_kern_exechang" });
     @export(&h9_kern_settextpath, .{ .name = "h9_kern_settextpath" });
-    @export(&h9_upegrp, .{ .name = "h9_upegrp" });
     @export(&h9_fgrpclose, .{ .name = "h9_fgrpclose" });
     @export(&h9_kprocdetach, .{ .name = "h9_kprocdetach" });
     @export(&h9_proc_boot, .{ .name = "h9_proc_boot" });

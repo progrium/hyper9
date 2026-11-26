@@ -265,12 +265,9 @@ pub fn postnote(p: *c.Proc, x: c_int, msg: ?[*:0]const u8, flag: c_int) c_int {
     return 0;
 }
 
-/// h9's tsleep (src/kern/tsleep.c): sleep on r until f(arg) is true or
-/// ms milliseconds have passed, or a note interrupts it.
-pub fn tsleep(r: *c.Rendez, f: Cond, arg: ?*anyopaque, ms: c_uint) Error!void {
-    if (c.h9_tsleepintr(r, f, arg, ms) < 0)
-        return error.Interrupted;
-}
+/// h9's tsleep (src/kern/tsleep.zig): sleep on r until f(arg) is true
+/// or ms milliseconds have passed, or a note interrupts it.
+pub const tsleep = @import("tsleep.zig").tsleep;
 
 // The C kernel's names, with its semantics: sleep raises Eintr.
 
@@ -310,12 +307,6 @@ fn c_procinterrupt(p: *c.Proc) callconv(.c) void {
 fn c_postnote(p: *c.Proc, x: c_int, msg: ?[*:0]const u8, flag: c_int) callconv(.c) c_int {
     return postnote(p, x, msg, flag);
 }
-/// For tsleep.c: sleep, returning -1 with Eintr as the error string when
-/// a note interrupts it, in place of raising.
-fn c_h9_sleepintr(r: *c.Rendez, f: Cond, arg: ?*anyopaque) callconv(.c) c_int {
-    sleep(r, f, arg) catch return -1;
-    return 0;
-}
 
 pub fn exportC() void {
     @export(&c_qlock, .{ .name = "qlock" });
@@ -331,7 +322,6 @@ pub fn exportC() void {
     @export(&c_wakeup, .{ .name = "kwakeup" });
     @export(&c_procinterrupt, .{ .name = "procinterrupt" });
     @export(&c_postnote, .{ .name = "postnote" });
-    @export(&c_h9_sleepintr, .{ .name = "h9_sleepintr" });
 }
 
 // Cases (zig build kern-test).
@@ -517,7 +507,7 @@ extern fn h9_tflag_new() ?*anyopaque;
 extern fn h9_tflag_free(f: ?*anyopaque) void;
 extern fn h9_tflag_sleep(f: ?*anyopaque, ms: c_uint) c_int;
 
-test "tsleep times out, and C's tsleep raises Eintr through waserror [kernel-port]" {
+test "tsleep times out, and an interrupted one is -1 to C [kernel-port]" {
     _ = try kt.begin();
     var f: Flag = .{};
     var k: kt.Kproc = undefined;
@@ -526,8 +516,8 @@ test "tsleep times out, and C's tsleep raises Eintr through waserror [kernel-por
     try testing.expectEqual(null, f.result);
     try testing.expectEqual(0, f.set.load(.acquire));
 
-    // src/kern/tsleep.c's test flag sleeps in C's tsleep, under C's
-    // waserror: an interrupt comes back as its -1.
+    // src/kern/tsleep.zig's test flag for C: an interrupt comes back as
+    // its -1.
     const tflag = h9_tflag_new() orelse return error.OutOfMemory;
     defer h9_tflag_free(tflag);
     const T = struct {

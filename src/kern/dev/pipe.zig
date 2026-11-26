@@ -34,7 +34,7 @@ const Pipe = struct {
     path: c_uint = 0,
     q: [2]*Queue = undefined,
     qref: [2]c_int = .{ 0, 0 },
-    fifo: bool = false, // h9: a Linux FIFO's pipe (h9_fifopipe)
+    fifo: bool = false, // h9: a Linux FIFO's pipe (fifopipe)
     fref: [2]c_int = .{ 0, 0 }, // h9: a FIFO's opens for reading and for writing
 };
 
@@ -382,16 +382,16 @@ pub fn h9_pipeq(ch: *Chan, wr: c_int) callconv(.c) ?*Queue {
     };
 }
 
-/// h9: a new pipe for a Linux FIFO (src/kern/fifo.c), as its directory's
-/// chan, and opens of its data file (see fifoopen).
-pub fn h9_fifopipe() callconv(.c) *Chan {
-    const ch = pipeattach("") catch |e| port.raise(e);
+/// h9: a new pipe for a Linux FIFO (src/kern/fifo.zig), as its
+/// directory's chan, and opens of its data file (see fifoopen).
+pub fn fifopipe() Error!*Chan {
+    const ch = try pipeattach("");
     pipeof(ch).fifo = true;
     return ch;
 }
 
 /// h9: a FIFO's opens for reading (end 0) or writing (end 1), by its directory's chan.
-pub fn h9_fiforefs(dir: *Chan, end: c_int) callconv(.c) c_int {
+pub fn fiforefs(dir: *Chan, end: c_int) c_int {
     const p = pipeof(dir);
     sync.qlock(&p.lk);
     const n = p.fref[@intFromBool(end != 0)];
@@ -402,8 +402,6 @@ pub fn h9_fiforefs(dir: *Chan, end: c_int) callconv(.c) c_int {
 pub fn exportC() void {
     @export(&Device.dev, .{ .name = "pipedevtab" });
     @export(&h9_pipeq, .{ .name = "h9_pipeq" });
-    @export(&h9_fifopipe, .{ .name = "h9_fifopipe" });
-    @export(&h9_fiforefs, .{ .name = "h9_fiforefs" });
 }
 
 const testing = std.testing;
@@ -431,7 +429,7 @@ test "a write on a pipe whose reader closed fails, with a note unless it's a mou
 
 test "a FIFO's pipe is one queue, and reads EOF after its last writer however often [kernel-port]" {
     _ = try kt.namespace();
-    const dir = h9_fifopipe();
+    const dir = try fifopipe();
     defer chan.cclose(dir);
     const names = [_][*:0]const u8{"data"};
     var ends: [2]*Chan = undefined;
@@ -440,13 +438,13 @@ test "a FIFO's pipe is one queue, and reads EOF after its last writer however of
         defer c.free(wq);
         e.* = try dev.open(dev.of(wq.libclone), wq.libclone, mode);
     }
-    try testing.expectEqual(1, h9_fiforefs(dir, 0));
-    try testing.expectEqual(1, h9_fiforefs(dir, 1));
+    try testing.expectEqual(1, fiforefs(dir, 0));
+    try testing.expectEqual(1, fiforefs(dir, 1));
 
     // data1 isn't needed: the writer's data writes where the reader reads.
     try testing.expectEqual(3, try dev.write(dev.of(ends[1]), ends[1], "abc", 3, 0));
     chan.cclose(ends[1]);
-    try testing.expectEqual(0, h9_fiforefs(dir, 1));
+    try testing.expectEqual(0, fiforefs(dir, 1));
     var buf: [8]u8 = undefined;
     try testing.expectEqual(3, try dev.read(dev.of(ends[0]), ends[0], &buf, buf.len, 0));
     try testing.expectEqualStrings("abc", buf[0..3]);

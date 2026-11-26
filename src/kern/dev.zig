@@ -578,12 +578,16 @@ const natives = .{
     @import("dev/pipe.zig").Device,
     @import("dev/root.zig").Device,
     @import("dev/pty.zig").Device,
+    @import("dev/hstream.zig").Device,
 } ++ (if (port.options.nskernel) .{
     @import("dev/ns.zig").Device,
 } else .{
     // h9's own, which the namespace kernel doesn't build.
     @import("dev/proc.zig").Device,
     @import("dev/eventfd.zig").Device,
+    @import("dev/hcons.zig").Device,
+    @import("dev/env.zig").Device,
+    @import("dev/hidx.zig").Device,
 }) ++ (if (port.options.gfx) .{
     @import("dev/gfx.zig").Draw,
     @import("dev/gfx.zig").Cons,

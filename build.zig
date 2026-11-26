@@ -5,7 +5,7 @@ const guesttree = @import("tools/guesttree.zig");
 const drawterm = "third_party/drawterm";
 
 // drawterm's kern/Makefile OFILES with AUDIO=none, without devtab.c and
-// devenv.c (src/kern/ has our own), procinit.c (src/kern/proc.c has it,
+// devenv.c (src/kern/dev/env.zig is our own), procinit.c (src/kern/proc.c has it,
 // for the one process record), devcmd.c (host commands live on the
 // host-cmd branch while design/host-cmd.md rethinks them), or the files
 // ported to Zig (design/kernel-port.md, src/kern/port.zig): allocb.c,
@@ -614,12 +614,12 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.O
     });
     kern.root_module.addCSourceFiles(.{
         .root = b.path("src/kern"),
-        .files = &.{ "procshim.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "devoverlay.c", "devsrv.c", "devhtools.c", "fscheck.c", "consx.c", "tsleep.c", "devshim.c", "werrstr.c", "sema.c", "rootdial.c", "devhstream.c", "devdotl.c", "devhidx.c", "kserve.c" },
+        .files = &.{ "procshim.c", "devtab.c", "devdup.c", "devoverlay.c", "devsrv.c", "devhtools.c", "fscheck.c", "consx.c", "devshim.c", "werrstr.c", "devdotl.c", "kserve.c" },
         .flags = flags,
     });
     // The Linux ABI (design/epoch-0/linux-personality.md) and its host
     // sockets (design/epoch-0/linux-net.md).
-    kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{ "linux.c", "devlinux.c", "fifo.c" }, .flags = flags });
+    kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{ "linux.c", "devlinux.c" }, .flags = flags });
     if (web) {
         kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"hostsock-wasm.c"}, .flags = flags });
     } else if (os != .windows) kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{ "hostsock-posix.c", "hostif-posix.c" }, .flags = flags });
@@ -776,8 +776,7 @@ const nskern_sources = [_][]const u8{
 };
 const nskern_h9 = [_][]const u8{
     "procshim.c",   "nstab.c",   "devoverlay.c", "devsrv.c",
-    "devhstream.c", "devdotl.c", "kserve.c",     "tsleep.c",
-    "devshim.c",    "werrstr.c", "rootdial.c",
+    "devdotl.c",    "kserve.c",  "devshim.c",    "werrstr.c",
 };
 // libc's files the kernel subset uses, from kern_libs' list.
 const nskern_libc_skip = [_][]const u8{ "pushssl.c", "pushtls.c", "crypt.c", "dial.c" };
