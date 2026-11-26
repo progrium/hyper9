@@ -211,6 +211,15 @@ fn h9_dotl_status(t: *Tr, buf: [*]u8, n: c_int) callconv(.c) c_int {
     return @intCast(s.len);
 }
 
+/// Whether the client side translates to 9P2000.L, so it takes devmnt's
+/// wide requests (design/file-interface.md, src/kern/devmnt.zig).
+fn h9_dotl_translating(t: *Tr) callconv(.c) c_int {
+    return switch (t.side) {
+        .client => |*c| @intFromBool(c.wide()),
+        .server => 0,
+    };
+}
+
 /// Whether a dropped connection can be resumed (9P2000.L.Z).
 fn h9_dotl_canreconnect(t: *Tr) callconv(.c) c_int {
     return switch (t.side) {
@@ -253,6 +262,7 @@ comptime {
         @export(&h9_dotl_mountready, .{ .name = "h9_dotl_mountready" });
         @export(&h9_dotl_status, .{ .name = "h9_dotl_status" });
         @export(&h9_dotl_canreconnect, .{ .name = "h9_dotl_canreconnect" });
+        @export(&h9_dotl_translating, .{ .name = "h9_dotl_translating" });
         @export(&h9_dotl_wantreconnect, .{ .name = "h9_dotl_wantreconnect" });
         @export(&h9_dotl_reconnect, .{ .name = "h9_dotl_reconnect" });
     }

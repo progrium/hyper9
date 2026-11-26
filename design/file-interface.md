@@ -6,7 +6,7 @@ created: 2026-11-21
 authors: [progrium]
 depends: [kernel-port]
 areas: [kern, linux, ninep, tests]
-branch: []
+branch: [dev, file-interface]
 ---
 
 # Proposal: A wider file interface inside the kernel, with 9P2000 as a view
@@ -95,10 +95,10 @@ Part 1:
 
 Part 2:
 
-- [ ] `test "symlink through a bind, an overlay, and a .L mount [file-interface]"` passes.
-- [ ] `test "link makes a second name, not a copy [file-interface]"` passes on the host tree device and devdotl.
-- [ ] `test "rename across directories is atomic [file-interface]"` passes on the host tree device and devdotl.
-- [ ] `test "a 9front ls sees the same Dir as before [file-interface]"` passes.
+- [x] `test "symlink through a bind, an overlay, and a .L mount [file-interface]"` passes.
+- [x] `test "link makes a second name, not a copy [file-interface]"` passes on the host tree device and devdotl.
+- [x] `test "rename across directories is atomic [file-interface]"` passes on the host tree device and devdotl.
+- [x] `test "a 9front ls sees the same Dir as before [file-interface]"` passes.
 
 Part 3:
 
@@ -124,3 +124,15 @@ All parts:
 - Whether this should be three proposals. As written it's one, with Done criteria grouped by part, and it can be split if the parts finish far apart, as the process asks.
 - Whether a 9P2000 server can advertise readiness to devmnt, or whether Part 1 over 9P2000 is always "ready" with a blocking read. As written, only servers that say so support it, and how they say so isn't designed.
 - Whether extended attributes belong in Part 2.
+
+## Updates
+
+**2026-11-26, Part 2 on the file-interface branch.** The six operations are built, as [spec/kernel.md](../spec/kernel.md) describes: optional fields of a Zig device's `dev.Ops`, and a `Devx` table of C function pointers (`src/kern/devx.h`) for a C device, with the defaults in `dev.zig` and the calls on paths in `src/kern/syswide.zig`. Some things it found:
+
+- **devdotl's side is devmnt's.** The 9P2000.L server is behind a `#ℓ` conversation that devmnt mounts, so the operations are devmnt's, which sends `Tsymlink`, `Treadlink`, `Tlink`, `Trename`, `Tgetattr`, and `Tsetattr` with its own fids to a mount whose `#ℓ` translates to .L, and the translator maps them. Every other mount gets the defaults, so 9P2000 servers see only 9P2000. The `#ι` index passes them on, making the fids real. This also replaces the translator's `DMSYMLINK` create and its link-reads-as-target open, which were h9's own 9P2000 extensions, not anything a 9front program used.
+- **Deleted workarounds:** `fscheck.c`'s `h9_fs_readlinkpath`, `h9_fs_chanreadlink`, `mntreadlink`, `h9_fs_symlinkpath`, `h9_fs_mntsymlink`, and `h9_fs_renamepath`; `src/kern.zig`'s `renameAcross`; and the overlay's own symlink and rename calls into devfs. The per-process `h9_fs_nofollow` flag remains only for `O_NOFOLLOW` on open; `namecx`'s `nofollow` replaces it elsewhere.
+- **The overlay has no `link`**, so a hard link in an overlay, the root's `/tmp` and `/usr` included, is still the default copy, and so is one on Windows hosts, whose `#U` has none. A link count in the overlay is the lower tree's.
+- **The default rename across directories is still `EXDEV`**, not a copy and remove, since that's what dev did and `mv` copies on `EXDEV` anyway.
+- **`setattr` has no device of its own yet** but devmnt's `Tsetattr`: the host tree and the overlay take the default `wstat`. The Linux ABI doesn't call it yet; `chmod`, `truncate`, and `utimensat` still `wstat`.
+- **stat's owner is unchanged**: the Linux ABI takes the link count, ctime, and nanoseconds from `getattr`, and still reports the caller as every file's owner.
+- The new cases are tagged `[file-interface]`, and pending until the proposal is accepted; with `H9_TEST_PENDING=1` they pass on sud and hcpu. The "9front ls" case's expected output is what dev's h9 printed.
