@@ -1,4 +1,4 @@
-// Waits for os.Interrupt through os/signal, then prints what it got.
+// Waits for SIGINT through os/signal, then prints what it got.
 package main
 
 import (
