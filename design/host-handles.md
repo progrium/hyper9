@@ -6,7 +6,7 @@ created: 2026-11-21
 authors: [progrium]
 depends: [kernel-port]
 areas: [kern, sandbox, web, tests]
-branch: []
+branch: [dev, host-handles]
 ---
 
 # Proposal: Host access through handles
@@ -120,3 +120,12 @@ This is a security change. The guest can reach nothing new. What changes is how 
 
 - Whether `spawn` belongs here or stays with [host-cmd](host-cmd.md), which is still being built.
 - `--host-fs`, which binds the whole host tree. As written it's one read-write handle on `/`, which is what it means.
+
+## Updates
+
+**2026-11-26, the `Host` type.** `src/host/host.zig` defines `Host`, each handle an interface of a context and a function table, as `std.mem.Allocator` is, and `src/host/planned.zig` builds one from a compiled plan whose handles ask the plan, as devfs's and devip's hooks do now. `Machine` builds it at init, and no device uses it yet. Some things building it settled:
+
+- **Names come from the plan.** `root` is the first host directory on the root stack, `cwd` the host cwd, and `d1` on each other path an allow rule names, in rule order, once. A path that's both the root and the cwd has both names. `--host-fs`'s rule on `/` is one of the `d` handles. A handle is writable when the plan's verdict at its top is, so a tree under an overlay is read-only to it.
+- **Under `--net=outbound` there is a listener, and it refuses every guest address.** h9's own loopback listeners, such as [linux-dns](linux-dns.md)'s resolver, which takes the queries devip redirects to it, open through `listen` too, so only `--net=disable` leaves it out.
+- **The handles hold a pointer to the plan**, so `Machine` keeps a copy in its arena, which doesn't move when a `Machine` is returned by value. A `Kernel` that's a value will hold its `Host` the same way.
+- **`Machine.Stdio` is the host's `Console`**, which has the same fields.

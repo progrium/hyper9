@@ -18,6 +18,9 @@ pub const policy = @import("policy.zig");
 /// The machine's resolver for guest DNS (design/linux-dns.md).
 pub const resolver = @import("resolver.zig");
 pub const Policy = policy.Policy;
+/// What a machine reaches outside through (design/host-handles.md).
+pub const host = @import("host/host.zig");
+pub const Host = host.Host;
 pub const guestmem = @import("guestmem.zig");
 pub const syscall = @import("abi/plan9/syscall.zig");
 pub const newns = @import("newns.zig");
@@ -59,6 +62,7 @@ test {
     _ = guestmem;
     _ = syscall;
     _ = policy;
+    _ = host;
     _ = @import("mount.zig");
     _ = @import("resolver.zig");
     _ = newns;
