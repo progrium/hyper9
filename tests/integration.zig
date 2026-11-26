@@ -2567,6 +2567,88 @@ test "--memory caps segattach [segattach]" {
     try std.testing.expectEqual(0, m.code);
 }
 
+// One memory model under both ABIs (design/memory-model.md). The programs
+// are tests/fixtures/memmodel/mm.c, one per argument, and bigtext.c.
+
+/// Builds mm.c in `s` and runs `./mm test` there with h9 flags `flags`
+/// first, expecting `want` and status 0.
+fn expectMm(e: Env, flags: []const []const u8, cmd: []const u8, want: []const u8) !void {
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try buildC(e, &s, "mm", @embedFile("fixtures/memmodel/mm.c"));
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try argv.appendSlice(gpa, &.{ "--sandbox", s.path, "--timeout", "120s" });
+    try argv.appendSlice(gpa, flags);
+    try argv.appendSlice(gpa, &.{ "--rc", cmd });
+    const r = try run(e, argv.items);
+    defer r.deinit();
+    errdefer std.debug.print("{s}: {s}", .{ cmd, r.err });
+    try std.testing.expectEqualStrings(want, r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "rfork shares pages until a write (9front) [memory-model]" {
+    // Four copies of the 48 MB heap don't fit in 128 MB, so the children
+    // share the parent's pages until each writes its own. mm checks that
+    // each child sees only its own write, and the parent only its own.
+    try expectMm(try env(@src()), &.{ "--memory", "128m" }, "./mm cow", "ok 85\n");
+}
+
+test "rfork RFMEM still shares data and bss [memory-model]" {
+    // The RFMEM child's writes to data and bss reach the parent. Its plain
+    // rfork child gets a copy: it sees what was there at the fork, and its
+    // writes, and the RFMEM child's after the fork, stay on their side.
+    try expectMm(try env(@src()), &.{}, "./mm rfmem", "grandchild 2 3\nparent 6 3\n");
+}
+
+test "segattach, segbrk, segdetach, and segfree on Mm [memory-model]" {
+    // The text is what h9 printed before 9front moved onto Mm, on amd64.
+    const e = try env(@src());
+    if (e.arch == null or !std.mem.eql(u8, e.arch.?, "amd64")) return error.SkipZigTest;
+    const seg =
+        \\Stack     7ffffefff000 7ffffffff000    1
+        \\Text   R    200000   209000    1
+        \\Data        400000   402000    1
+        \\
+    ;
+    const grown = seg ++ "Bss       10000000 10008000    1\n";
+    const shared = "Shared    7ffffeffe000 7ffffefff000    1\n";
+    try expectMm(e, &.{}, "./mm seg", "attached:\n" ++ seg ++ "Bss       10000000 10002000    1\n" ++ shared ++
+        "grown:\n" ++ grown ++ shared ++ "freed:\n" ++ grown ++ shared ++ "detached:\n" ++ grown);
+}
+
+test "a.out text is filled on touch [memory-model]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    // A few thousand functions of a few hundred bytes each, none of which
+    // main calls: most of a megabyte of text that never runs.
+    var src: std.ArrayList(u8) = .empty;
+    defer src.deinit(gpa);
+    try src.appendSlice(gpa, "#include <u.h>\n#include <libc.h>\n\n");
+    for (0..3072) |i| try src.print(gpa, "int f{d}(int x){{ {s}return x + {d}; }}\n", .{ i, rep("x = x*3 + 1; x ^= x>>7; ", 16), i });
+    try src.appendSlice(gpa, @embedFile("fixtures/memmodel/bigtext.c"));
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "bigtext.c", .data = src.items });
+    // The emulator takes most of 30 s to compile it.
+    const c = archChar(e);
+    var cmd_buf: [64]u8 = undefined;
+    const cmd = try std.fmt.bufPrint(&cmd_buf, "{c}c bigtext.c && {c}l -o bigtext bigtext.{c}", .{ c, c, c });
+    const b = try runInFor(e, &.{ "--sandbox", s.path, "--rc", cmd }, null, 180_000);
+    defer b.deinit();
+    errdefer std.debug.print("{s}: {s}{s}", .{ cmd, b.out, b.err });
+    try std.testing.expectEqual(0, b.code);
+    // bigtext compares its resident bytes with its text size itself, since
+    // the bytes can differ between engines.
+    const r = try run(e, &.{ "--sandbox", s.path, "--timeout", "60s", "--rc", "./bigtext" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("less\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
 // rendezvous and semaphores (design/epoch-0/semaphores.md). The programs are
 // tests/fixtures/sema/sema.c, one per argument, built inside the guest
 // with the architecture's compiler and loader (7c and 7l on arm64) into
@@ -2581,13 +2663,20 @@ fn buildSema(e: Env, s: *Scratch) !void {
 /// the compiler for the case's architecture.
 fn buildC(e: Env, s: *Scratch, comptime name: []const u8, src: []const u8) !void {
     try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = name ++ ".c", .data = src });
-    const c: u8 = if (e.arch) |a| (if (std.mem.eql(u8, a, "386")) '8' else if (std.mem.eql(u8, a, "amd64")) '6' else '7') else '7';
+    const c = archChar(e);
     var buf: [128]u8 = undefined;
     const cmd = try std.fmt.bufPrint(&buf, "{c}c {s}.c && {c}l -o {s} {s}.{c}", .{ c, name, c, name, name, c });
     const r = try run(e, &.{ "--sandbox", s.path, "--rc", cmd });
     defer r.deinit();
     errdefer std.debug.print("{s}: {s}{s}", .{ cmd, r.out, r.err });
     try std.testing.expectEqual(0, r.code);
+}
+
+/// The letter of the case's architecture's compiler and loader: 7c and 7l,
+/// 6c and 6l, or 8c and 8l.
+fn archChar(e: Env) u8 {
+    const a = e.arch orelse return '7';
+    return if (std.mem.eql(u8, a, "386")) '8' else if (std.mem.eql(u8, a, "amd64")) '6' else '7';
 }
 
 /// Runs `./sema test` in `s`, with h9 flags `flags` first.
@@ -3290,14 +3379,25 @@ test "os/exec runs a child and gets its exit status [go-compat]" {
     var g: GoEnv = undefined;
     try goEnv(@src(), &g);
     defer g.deinit();
-    // rfork copies the parent's memory, and Go reserves several hundred
-    // MB of brk at start, so two of them need more than the default 1 GB.
-    const r = try runGo(&g, &.{ "--memory", "4G" }, "exec", &.{"/mnt/term/cwd/exec"});
+    const r = try runGo(&g, &.{}, "exec", &.{"/mnt/term/cwd/exec"});
     defer r.deinit();
     try expectGoOk(r);
     errdefer std.debug.print("stdout: {s}\n", .{r.out});
     try std.testing.expect(std.mem.startsWith(u8, r.out, "child ok\nstatus 1 'exec "));
     try std.testing.expect(std.mem.endsWith(u8, r.out, ": 7'\n"));
+}
+
+test "a Go program runs os/exec 100 times under --memory 512M [memory-model]" {
+    var g: GoEnv = undefined;
+    try goEnv(@src(), &g);
+    defer g.deinit();
+    // rfork shares the parent's heap copy-on-write, so each child costs
+    // only what it writes. When rfork copied it, this needed about 4 GB.
+    // A later --timeout replaces goArgv's 60 s, which the emulator can need.
+    const r = try runGo(&g, &.{ "--memory", "512M", "--timeout", "300s" }, "execloop", &.{ "/mnt/term/cwd/execloop", "100" });
+    defer r.deinit();
+    try expectGoOk(r);
+    try std.testing.expectEqualStrings("100 ran\n", r.out);
 }
 
 test "a nil dereference becomes a panic that recover catches [go-compat]" {
