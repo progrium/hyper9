@@ -134,3 +134,9 @@ No new reach for a guest. Real address checks close a class of bug where a guest
 - **The `waserror` around `qread`'s and `qwrite`'s copies goes**: in 9front it catches a fault on a user buffer, and h9 copies guest memory outside the kernel.
 - **Kick and bypass functions mustn't raise**, since they're called from the Zig. No caller in h9 sets either.
 - **The blocking points** are `park` and `unpark` in `sync.zig` (posix.c's `procsleep` and `procwakeup`): qlock's queue, sleep, and so `qwait`, `qflow`, and `qlockintr` in qio, which each wait in one small function. [scheduler](scheduler.md) changes those two.
+
+**2026-11-26, dev and the device switch.** `src/kern/dev.zig` is `dev.c`: the helpers, exported under their C names, and the switch the Zig calls devices through. Devices stay C `Dev`s in h9's own tables (`src/kern/devtab.c` and `nstab.c`, which stand for drawterm's `devtab.c`), so the switch calls a C device, or a C `Devgen` handed to `devwalk` and the rest, through `src/kern/devshim.c`: one small C function per `Dev` member, which runs the call under `waserror` and returns -1 with the error string on the process. Those are the only `waserror`s the Zig runs under. Some things the port found:
+
+- **drawterm's `long` is `int`.** `lib.h` defines it so, and its `ulong` is `unsigned int`, so `qio.zig` had `qread`'s, `qbwrite`'s, and `readblist`'s counts as 64 bits where C passes 32; a C caller's count reached `readblist` with its upper half undefined. They're `c_int` now, and so is every `long` in the Zig.
+- **`lib.h` renames `clone`** to `libclone`, so a `Walkqid`'s clone is `libclone` in the Zig.
+- **`devwalk` raises only before its walk**: `isdir` comes before its `waserror`, so a walk from a file is an error, and a walk that fails at its first name is nil with the error string set. The Zig returns `Error!?*Walkqid` to say both.

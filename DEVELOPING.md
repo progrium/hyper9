@@ -92,7 +92,7 @@ in that runs here), and the Go cases run on sud when it's among them.
 zig build          # builds and ad-hoc signs zig-out/bin/h9 with h9.entitlements
 zig build test     # unit tests, and the engine tests on every engine built in (not the integration cases)
 zig build kern     # compiles drawterm's kern and the libraries it uses, with the parts ported to Zig (src/kern/port.zig)
-zig build kern-test  # the ported kernel's own cases (src/kern/qio.zig and sync.zig), on the native namespace kernel; zig build test runs them too
+zig build kern-test  # the ported kernel's own cases (src/kern/*.zig), on the native namespace kernel; zig build test runs them too
 zig build embed    # builds docs/embedding/embed.zig, the embedding guide's example, as zig-out/bin/embed
 zig build integration  # real 9front binaries from the root tree through the h9 CLI
 zig build proposal -Dp=baseline  # one proposal's demos, web cases, and integration cases, by slug
@@ -407,7 +407,7 @@ development builds report `git describe` (`-Dversion=V` overrides it).
 | `src/machine.zig` | one machine: builds its namespace, runs a process, and serves its syscalls |
 | `src/consin.zig` | a machine run's console input: the reader thread a guest's console read waits on, so notes can interrupt it |
 | `src/policy.zig` | the sandbox policy: profiles, the compiled plan, `--print`, and the access rules devfs checks |
-| `src/kern.zig`, `src/kern/` | the Zig/C seam into drawterm's kern; the parts of drawterm's kern ported to Zig ([kernel-port](design/kernel-port.md): `port.zig`, with queues and blocks in `qio.zig`, and locks and sleep in `sync.zig`); boot and spawn (`glue.c`), process records and notes (`proc.c`), our device table, the machine console `#y`, devenv, and devproc ported from 9front, the copy-on-write overlay device `#O` (`devoverlay.c`), h9's guest commands `#H` (`devhtools.c`), and the devfs policy hooks (`fscheck.c`) |
+| `src/kern.zig`, `src/kern/` | the Zig/C seam into drawterm's kern; the parts of drawterm's kern ported to Zig ([kernel-port](design/kernel-port.md): `port.zig`, with queues and blocks in `qio.zig`, locks and sleep in `sync.zig`, and the device helpers and switch in `dev.zig`, which calls C devices through `devshim.c`); boot and spawn (`glue.c`), process records and notes (`proc.c`), our device table, the machine console `#y`, devenv, and devproc ported from 9front, the copy-on-write overlay device `#O` (`devoverlay.c`), h9's guest commands `#H` (`devhtools.c`), and the devfs policy hooks (`fscheck.c`) |
 | `src/guest/` | h9's own guest commands (rc scripts), as the guest sees them under `#H`; embedded by the build through `tools/guesttree.zig`. |
 | `src/abi/plan9/syscall.zig`, `src/guestmem.zig` | the 9front syscall table, and checked access to guest memory |
 | `src/abi/plan9/loader.zig` | loads an a.out into an address space, builds the stack and Tos |

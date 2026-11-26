@@ -241,7 +241,7 @@ pub fn blocklen(bp_: ?*Block) c_int {
 /// Copy the contents of a string of blocks into memory from an offset.
 /// The block list is kept unchanged. Return the number of bytes copied.
 /// (o is drawterm's ulong, which is 32 bits.)
-pub fn readblist(b_: ?*Block, p_: [*]u8, n_: c_long, o_: c_uint) c_long {
+pub fn readblist(b_: ?*Block, p_: [*]u8, n_: c_int, o_: c_uint) c_int {
     var b = b_;
     var p = p_;
     var n = n_;
@@ -893,7 +893,7 @@ pub fn qbread(q: *Queue, len: c_int) Error!?*Block {
 }
 
 /// Read a queue. If no data is queued, wait for some.
-pub fn qread(q: *Queue, vp: [*]u8, len: c_int) Error!c_long {
+pub fn qread(q: *Queue, vp: [*]u8, len: c_int) Error!c_int {
     assert(len >= 0);
 
     try qlockintr(&q.rlock);
@@ -995,7 +995,7 @@ fn qflow(f: *Flow) Error!void {
 }
 
 /// Add a block to a queue, obeying flow control.
-pub fn qbwrite(q: *Queue, b: *Block) Error!c_long {
+pub fn qbwrite(q: *Queue, b: *Block) Error!c_int {
     if (q.bypass) |bypass| {
         const len = blocklen(b);
         bypass(q.arg, b);
@@ -1259,7 +1259,7 @@ fn c_freeblist(b: ?*Block) callconv(.c) void {
 fn c_blocklen(b: ?*Block) callconv(.c) c_int {
     return blocklen(b);
 }
-fn c_readblist(b: ?*Block, p: [*]u8, n: c_long, o: c_uint) callconv(.c) c_long {
+fn c_readblist(b: ?*Block, p: [*]u8, n: c_int, o: c_uint) callconv(.c) c_int {
     return readblist(b, p, n, o);
 }
 fn c_concatblock(b: *Block) callconv(.c) ?*Block {
@@ -1325,10 +1325,10 @@ fn c_qbypass(bypass: Bypass, arg: ?*anyopaque) callconv(.c) ?*Queue {
 fn c_qbread(q: *Queue, len: c_int) callconv(.c) ?*Block {
     return qbread(q, len) catch |e| port.raise(e);
 }
-fn c_qread(q: *Queue, vp: [*]u8, len: c_int) callconv(.c) c_long {
+fn c_qread(q: *Queue, vp: [*]u8, len: c_int) callconv(.c) c_int {
     return qread(q, vp, len) catch |e| port.raise(e);
 }
-fn c_qbwrite(q: *Queue, b: *Block) callconv(.c) c_long {
+fn c_qbwrite(q: *Queue, b: *Block) callconv(.c) c_int {
     return qbwrite(q, b) catch |e| port.raise(e);
 }
 fn c_qwrite(q: *Queue, vp: [*]const u8, len: c_int) callconv(.c) c_int {
@@ -1628,7 +1628,7 @@ test "a closed queue reads 0 three times, then its error; a hangup's message is 
 
 const Reader = struct {
     q: *Queue,
-    n: c_long = 0,
+    n: c_int = 0,
     result: ?Error = null,
     errstr: [port.ERRMAX]u8 = undefined,
     buf: [32]u8 = undefined,
