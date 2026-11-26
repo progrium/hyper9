@@ -2,7 +2,7 @@
 //! ABI (design/epoch-0/linux-personality.md): the per-process root swap
 //! at exec, walks relative to a directory fd, fd flags, await without
 //! blocking, chroot, and futexes. A close translation: the same functions
-//! in the same order, with error unions in place of waserror. The kern
+//! in the same order, with error unions in place of C's error labels. The kern
 //! library's only: the namespace kernel has no Linux processes, and
 //! src/kern/nstab.c stands in for the hooks chan.zig calls.
 //!
@@ -279,7 +279,7 @@ fn h9_linux_chanput(v: *anyopaque) callconv(.c) void {
 
 // devfs's syncs (src/kern/fscheck.h), which raise the host's error.
 // They're called as a C Devgen is, through dev.zig's callgen and so the
-// shim's waserror (src/kern/devshim.c), which leaves the error on the
+// shim's error label (src/kern/devshim.c), which leaves the error on the
 // process.
 extern fn h9_fs_syncfs(ch: *Chan) void;
 extern fn h9_fs_sync() void;

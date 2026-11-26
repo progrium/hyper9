@@ -1,7 +1,7 @@
 //! h9's devlinux.c (design/kernel-port.md), `#L`: the Linux view's root
 //! (design/epoch-0/linux-personality.md, "The Linux view"). A close
 //! translation: the same functions in the same order, with error unions
-//! in place of waserror. A native device (dev.zig's `Native`), in the
+//! in place of C's error labels. A native device (dev.zig's `Native`), in the
 //! kern library only: the namespace kernel has no Linux view.
 //!
 //! Its root directory holds 9, tmp and mnt/term as mount points, and it

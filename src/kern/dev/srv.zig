@@ -1,7 +1,7 @@
 //! h9's devsrv.c (design/kernel-port.md), `#s`: the service registry
 //! (design/epoch-0/devsrv.md), ported from 9front's port/devsrv.c at the
 //! pinned release. A close translation: the same functions in the same
-//! order, with error unions in place of waserror. A native device
+//! order, with error unions in place of C's error labels. A native device
 //! (dev.zig's `Native`).
 //!
 //! A file server posts a channel by creating a name here and writing the

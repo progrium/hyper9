@@ -1,6 +1,6 @@
 //! h9's kserve.c (design/kernel-port.md): h9's 9P2000 server in the
 //! kernel (design/epoch-0/kernel-serve.md). A close translation: the same
-//! functions in the same order, with error unions in place of waserror.
+//! functions in the same order, with error unions in place of C's error labels.
 //! serve's per-connection path (src/machine.zig) hands it a channel that
 //! reads and writes whole 9P2000 messages, a #ℓ conversation's data, and
 //! it answers them from kernel channels directly, in place of an exportfs
