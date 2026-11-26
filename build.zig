@@ -800,7 +800,8 @@ fn addNsKernel(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.la
     m.addIncludePath(b.path(drawterm ++ "/include"));
     m.addIncludePath(b.path(drawterm ++ "/kern"));
     m.addIncludePath(b.path("src/kern"));
-    const base: []const []const u8 = if (web) &kern_flags_web else &kern_flags;
+    const windows = !web and target.result.os.tag == .windows;
+    const base: []const []const u8 = if (web) &kern_flags_web else if (windows) &kern_flags_win32 else &kern_flags;
     const extra: []const []const u8 = if (hostfs and !web) &.{ "-DH9_NSKERNEL", "-DH9_NSKERNEL_HOSTFS" } else &.{"-DH9_NSKERNEL"};
     const flags = std.mem.concat(b.allocator, []const u8, &.{ base, extra }) catch @panic("OOM");
     // The kernel's Zig (src/kern/port.zig), which src/nskernel.zig
@@ -839,6 +840,19 @@ fn addNsKernel(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.la
         });
         for ([_][]const u8{ "wasi-emulated-signal", "wasi-emulated-process-clocks", "wasi-emulated-mman", "wasi-emulated-getpid" }) |l|
             m.linkSystemLibrary(l, .{});
+    } else if (windows) {
+        // As the kern library builds for Windows (addKern): drawterm's
+        // win32.c and h9's host lock and timers in glue-win32.c, with no
+        // host sockets (src/nskernel.zig has h9so_errstr).
+        m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/kern"), .files = &.{ "win32.c", "devlfd-win32.c" }, .flags = flags });
+        m.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"glue-win32.c"}, .flags = flags });
+        if (hostfs) {
+            m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/kern"), .files = &.{"devfs-win32.c"}, .flags = flags });
+            m.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"fscheck.c"}, .flags = flags });
+        }
+        m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/posix-port"), .files = &kern_port, .flags = flags });
+        m.linkSystemLibrary("ws2_32", .{});
+        m.linkSystemLibrary("advapi32", .{});
     } else {
         m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/kern"), .files = &.{ "posix.c", "devlfd-posix.c" }, .flags = flags });
         if (hostfs) {

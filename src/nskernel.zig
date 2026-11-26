@@ -17,6 +17,10 @@ const kern = @import("kern.zig");
 const hstream = @import("hstream.zig");
 const newns = @import("newns.zig");
 const web = @import("web.zig");
+/// Host descriptors (fd! dials, h9ns_serve, h9ns_addfd) are POSIX's: not
+/// on the web, or on Windows, where the namespace kernel builds only for
+/// the kernel's own cases (zig build kern-test).
+const nofds = web.enabled or builtin.os.tag == .windows;
 const dotl = @import("dotl/kern.zig");
 
 comptime {
@@ -59,8 +63,26 @@ fn putErr(err: [*]u8, msg: []const u8) void {
 /// The kernel's messages (panic, pprint), on the host's standard error.
 export fn h9_ns_log(buf: [*]const u8, n: c_int) c_int {
     if (n <= 0) return 0;
-    _ = std.c.write(2, buf, @intCast(n));
+    if (comptime builtin.os.tag == .windows)
+        _ = _write(2, buf, @intCast(n))
+    else
+        _ = std.c.write(2, buf, @intCast(n));
     return n;
+}
+
+/// The C runtime's write on Windows, where std.c.write takes a HANDLE.
+extern "c" fn _write(fd: c_int, buf: [*]const u8, n: c_uint) c_int;
+
+/// drawterm's win32.c asks src/kern/hostsock-win32.c for a Winsock
+/// error's text, and the namespace kernel has no host sockets: Windows's
+/// own text it is.
+fn h9so_errstr(e: c_int) callconv(.c) ?[*:0]const u8 {
+    _ = e;
+    return null;
+}
+
+comptime {
+    if (builtin.os.tag == .windows) @export(&h9so_errstr, .{ .name = "h9so_errstr" });
 }
 
 // Mounts' dials.
@@ -147,8 +169,8 @@ fn rawDial(d: []const u8, why: *[]const u8) DialError!u31 {
         return try kern.hstreamFd(id);
     }
     if (std.mem.startsWith(u8, d, "fd!")) {
-        if (comptime web.enabled) {
-            why.* = "host descriptors need a native host";
+        if (comptime nofds) {
+            why.* = if (web.enabled) "host descriptors need a native host" else "host descriptors need a POSIX host";
             return error.Dial;
         }
         const fd = Fds.dup(d["fd!".len..]) orelse {
@@ -408,7 +430,7 @@ fn serveOne(kind: c_int, arg: c_long, aname: []const u8) void {
             defer hstream.release(id);
             break :blk kern.hstreamFd(id) catch return;
         },
-        .fd => if (comptime web.enabled) return else blk: {
+        .fd => if (comptime nofds) return else blk: {
             const fds = kern.hostFdDial(@intCast(arg), @intCast(arg)) catch return;
             break :blk fds[0];
         },
@@ -501,7 +523,7 @@ export fn h9ns_error() [*:0]const u8 {
 /// namespace `aname` (its id; "" or null is 0), until the far end hangs
 /// up. The kernel takes `fd`. Returns 0 once serving has started, or -1.
 export fn h9ns_serve(fd: c_int, aname: ?[*:0]const u8) c_int {
-    if (comptime web.enabled) return -1;
+    if (comptime nofds) return -1;
     if (bootOnce() < 0) return -1;
     if (fd < 0) return -1;
     if (h9_ns_post(@intFromEnum(Post.fd), fd, aname orelse "") < 0) return -1;
@@ -512,7 +534,7 @@ export fn h9ns_serve(fd: c_int, aname: ?[*:0]const u8) c_int {
 /// `fd!NAME`. Each mount dials a duplicate; the kernel keeps `fd` and
 /// closes it if the name is given again. Returns 0, or -1.
 export fn h9ns_addfd(name: ?[*:0]const u8, fd: c_int) c_int {
-    if (comptime web.enabled) return -1;
+    if (comptime nofds) return -1;
     const n = std.mem.span(name orelse return -1);
     for (n) |ch| if (!(std.ascii.isAlphanumeric(ch) or ch == '-' or ch == '_' or ch == '.')) return -1;
     return if (Fds.add(n, fd)) 0 else -1;
