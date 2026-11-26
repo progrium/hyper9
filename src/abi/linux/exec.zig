@@ -57,28 +57,28 @@ fn baseHwcap(arch: engine.Arch) u64 {
 }
 
 pub fn build(gpa: std.mem.Allocator, eng: engine.Engine, a: Args) Error!Program {
-    const m = try mm.Mm.create(gpa, eng, .of(a.arch));
+    const m = try mm.Mm.create(gpa, eng, a.arch);
     errdefer m.put();
     // The stack: 8 MiB below the top, growing down within it.
-    try m.insert(.{ .start = m.lay.stack_top - m.lay.stack_size, .end = m.lay.stack_top, .prot = .rw, .kind = .stack });
+    try m.insert(.{ .start = mm.layout(m).stack_top - mm.layout(m).stack_size, .end = mm.layout(m).stack_top, .prot = .rw, .kind = .stack });
     // The vDSO: on arm64, it holds __kernel_rt_sigreturn; on amd64, the
     // clock (vclock.zig), after its clock page, where the engine can
     // give it one.
     var vdso: u64 = 0;
     if (a.arch == .arm64) {
-        vdso = m.findFree(engine.page_size) orelse return error.NoSpace;
+        vdso = mm.findFree(m, engine.page_size) orelse return error.NoSpace;
         try m.insert(.{ .start = vdso, .end = vdso + engine.page_size, .prot = .{ .read = true, .exec = true }, .kind = .vdso });
         const img = elf.vdsoImage();
         try m.hostWrite(vdso, &img);
     } else if (a.arch == .amd64 and vclock.supported(eng)) {
-        const vvar = m.findFree(2 * engine.page_size) orelse return error.NoSpace;
+        const vvar = mm.findFree(m, 2 * engine.page_size) orelse return error.NoSpace;
         try m.insertFile(.{ .start = vvar, .end = vvar + engine.page_size, .prot = .{ .read = true }, .kind = .file, .shared = true, .name = .init("[vvar]") }, eng, vclock.pagesFor);
         vdso = vvar + engine.page_size;
         try m.insert(.{ .start = vdso, .end = vdso + engine.page_size, .prot = .{ .read = true, .exec = true }, .kind = .vdso });
         const img = vclock.image();
         try m.hostWrite(vdso, &img);
     }
-    const base: ?u64 = if (a.exe.ehdr.type == 3) m.lay.pie_base else null;
+    const base: ?u64 = if (a.exe.ehdr.type == 3) mm.layout(m).pie_base else null;
     const exe = try elf.load(m, a.exe, base, a.path, a.exe_src);
     m.brk_start = std.mem.alignForward(u64, exe.end, engine.page_size);
     // A little randomness-free gap, as Linux leaves one, so a heap that
