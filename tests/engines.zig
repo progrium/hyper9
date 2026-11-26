@@ -3127,3 +3127,78 @@ test "--print writes an .fd mount as a comment, and the rest replays [fd-mounts]
     errdefer std.debug.print("err: {s}\n", .{r.err});
     try std.testing.expectEqualStrings("exited ", r.status);
 }
+
+test "Machine.init from a plan equals Machine.init from Options [plan-format]" {
+    // design/plan-format.md: Options.toPlan's text, given as `plan`, is
+    // the same machine. The compiled plans print the same, and a program
+    // runs the same in both.
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "out");
+    try tmp.dir.createDirPath(io, "data/secret");
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var kb: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const dir = try a.dupe(u8, kernPath(&kb, buf[0..try tmp.dir.realPath(io, &buf)]));
+    const out = try std.fmt.allocPrint(a, "{s}/out", .{dir});
+    const data = try std.fmt.allocPrint(a, "{s}/data", .{dir});
+    const secret = try std.fmt.allocPrint(a, "{s}/data/secret", .{dir});
+    const bytes = try image(gpa, .amd64, &hello.amd64_text);
+    defer gpa.free(bytes);
+    const Case = struct {
+        mounts: []const h9.Machine.Mount = &.{},
+        policy: h9.Policy = .{},
+        env: []const h9.EnvVar = &.{},
+        cwd: ?[]const u8 = null,
+    };
+    const cases = [_]Case{
+        .{},
+        .{ .mounts = &.{ .{ .kind = .tmp, .dst = "/" }, .{ .kind = .dir, .src = dir, .dst = "/n/d", .access = .ro } }, .cwd = dir },
+        .{ .policy = .{ .write = .scope, .writable = &.{out}, .readable = &.{data}, .read_deny = &.{secret} }, .cwd = dir },
+        .{ .policy = .{ .net = .enable, .net_allow = &.{"tcp!*.example.com!443"}, .memory = 256 << 20, .pids = 32, .timeout_ns = 90 * std.time.ns_per_s } },
+        .{ .policy = .{ .net = .disable, .write = .none }, .env = &.{.{ .name = "A", .value = "two words" }} },
+    };
+    var ran = false;
+    for ([_]engine.Choice{ .hcpu, .sud, .kvm, .hvf, .whp }) |kind| for (cases) |c| {
+        var got: [2]struct { plan: []const u8, out: []const u8 } = undefined;
+        var text: []const u8 = "";
+        for (&got, 0..) |*g, i| {
+            var o: std.Io.Writer.Allocating = .init(a);
+            var e: std.Io.Writer.Allocating = .init(a);
+            const opts: h9.Machine.Options = .{
+                .engine = kind,
+                .arch = .amd64,
+                .mounts = c.mounts,
+                .policy = c.policy,
+                .env = c.env,
+                .cwd = c.cwd,
+                .stdio = .{ .out = &o.writer, .err = &e.writer },
+            };
+            if (i == 0) text = try opts.toPlan(a);
+            var why: []const u8 = "";
+            var m = h9.Machine.initExplained(gpa, io, if (i == 0) opts else .{ .plan = text, .stdio = opts.stdio }, &why) catch |err| switch (err) {
+                error.HypervisorUnavailable, error.EngineNotBuilt, error.WrongArch => break,
+                else => {
+                    std.debug.print("{s}\n{s}\n", .{ text, why });
+                    return err;
+                },
+            };
+            defer m.deinit();
+            var pw: std.Io.Writer.Allocating = .init(a);
+            try m.plan.print(&pw.writer);
+            _ = try m.run(.{ .bytes = bytes }, &.{"hello"});
+            g.* = .{ .plan = pw.written(), .out = o.written() };
+        } else {
+            errdefer std.debug.print("engine {t}, plan:\n{s}\n", .{ kind, text });
+            try std.testing.expectEqualStrings(got[0].plan, got[1].plan);
+            try std.testing.expectEqualStrings(got[0].out, got[1].out);
+            try std.testing.expectEqualStrings(hello.msg, got[1].out);
+            ran = true;
+        }
+    };
+    if (!ran) return error.SkipZigTest;
+}
