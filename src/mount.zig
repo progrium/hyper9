@@ -93,6 +93,10 @@ pub const Mount = struct {
     /// `header=` values as given: `Name: value`, or `@FILE`.
     headers: []const []const u8 = &.{},
     ca: ?[]const u8 = null,
+    /// `b3=`: the BLAKE3 hash, in hex, of the tree's index, which pins
+    /// the tree (design/plan-format.md, "Pinned roots"): h9 refuses a
+    /// tree whose index hashes to anything else, or that has none.
+    b3: ?[]const u8 = null,
 
     /// The stack this mount joins, and the path under the stack's top it's
     /// rooted at ("" for the top), or null for any other destination.
@@ -119,6 +123,79 @@ pub const Mount = struct {
         try w.print("{s} {s}", .{ m.kind.flag(), m.src });
         if (m.src.len > 0) try w.writeAll(":");
         try w.writeAll(m.dst);
+    }
+
+    /// Writes the mount's flag value, as `parse` reads it back: the short
+    /// form `SRC:DST[:OPTS]` (bare for `--builtin` at the bottom of `/`),
+    /// or the long form `src=…,dst=…,…` when a value has a `:` or `,` the
+    /// short form would split on. Plans write each mount so
+    /// (design/plan-format.md).
+    pub fn writeArg(m: Mount, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        // `--builtin` alone is the bottom of `/`.
+        if (m.kind == .builtin and std.mem.eql(u8, m.dst, "/") and m.order == .after and m.access == null and !m.create and !m.recursive) return;
+        var opts: [16][]const u8 = undefined;
+        var n: usize = 0;
+        if (m.access) |a| {
+            opts[n] = @tagName(a);
+            n += 1;
+        }
+        if (m.order) |o| {
+            opts[n] = if (o == .before) "b" else "a";
+            n += 1;
+        }
+        for ([_]struct { bool, []const u8 }{ .{ m.create, "c" }, .{ m.recursive, "r" }, .{ m.contained, "contained" } }) |f| if (f[0]) {
+            opts[n] = f[1];
+            n += 1;
+        };
+        var long_form = std.mem.indexOfAny(u8, m.dst, ":,\"") != null;
+        const Set = struct { []const u8, ?[]const u8 };
+        const sets = [_]Set{ .{ "spec", m.spec }, .{ "user", m.user }, .{ "auth", m.auth }, .{ "index", m.index }, .{ "ca", m.ca }, .{ "b3", m.b3 } };
+        for (sets) |st| if (st[1]) |v| if (std.mem.indexOfAny(u8, v, ":,\"") != null) {
+            long_form = true;
+        };
+        for (m.headers) |h| if (std.mem.indexOfAny(u8, h, ":,\"") != null) {
+            long_form = true;
+        };
+        const has_src = m.kind != .builtin and m.kind != .tmp;
+        if (long_form) {
+            if (has_src) {
+                try w.writeAll("src=");
+                try csvField(w, m.src);
+                try w.writeAll(",");
+            }
+            try w.writeAll("dst=");
+            try csvField(w, m.dst);
+            for (opts[0..n]) |o| try w.print(",{s}", .{o});
+            for (sets[0..5]) |st| if (st[1]) |v| {
+                try w.writeAll(",");
+                try csvField2(w, st[0], v);
+            };
+            for (m.headers) |h| {
+                try w.writeAll(",");
+                try csvField2(w, "header", h);
+            }
+            if (m.b3) |v| {
+                try w.writeAll(",");
+                try csvField2(w, "b3", v);
+            }
+            return;
+        }
+        if (has_src) try w.print("{s}:", .{m.src});
+        try w.writeAll(m.dst);
+        var sep: []const u8 = ":";
+        for (opts[0..n]) |o| {
+            try w.print("{s}{s}", .{ sep, o });
+            sep = ",";
+        }
+        for (sets[0..5]) |st| if (st[1]) |v| {
+            try w.print("{s}{s}={s}", .{ sep, st[0], v });
+            sep = ",";
+        };
+        for (m.headers) |h| {
+            try w.print("{s}header={s}", .{ sep, h });
+            sep = ",";
+        }
+        if (m.b3) |v| try w.print("{s}b3={s}", .{ sep, v });
     }
 
     /// Parses a mount flag's value. `--builtin` and `--tmp` take no SRC:
@@ -220,6 +297,8 @@ pub const Mount = struct {
             &m.index
         else if (std.mem.eql(u8, key, "ca"))
             &m.ca
+        else if (std.mem.eql(u8, key, "b3"))
+            &m.b3
         else
             return conflict(why, try std.fmt.allocPrint(arena, "unknown setting '{s}='", .{key}));
         slot.* = val;
@@ -240,6 +319,10 @@ pub const Mount = struct {
             if (!web_scheme) return conflict(why, "header= and ca= are for ws, wss, http, and https URLs");
             if (m.ca != null and s != null and !eqAny(s.?, &.{ "wss", "https" })) return conflict(why, "ca= is for wss and https URLs");
         }
+        if (m.b3) |h| {
+            if (m.kind != .url) return conflict(why, "b3= is for --url: only a server's or a static tree's index can pin a tree");
+            if (pinHash(h) == null) return conflict(why, "b3= is the index's BLAKE3 hash, 64 hex digits");
+        }
         if (m.srvName() == null and std.mem.startsWith(u8, m.dst, "/srv/") and m.kind == .url) return conflict(why, "a /srv destination is /srv/NAME");
         if (m.kind == .url) {
             if (scheme(m.src)) |s| {
@@ -252,6 +335,15 @@ pub const Mount = struct {
 };
 
 pub const ParseError = error{ Usage, OutOfMemory };
+
+/// A `b3=` value as the hash's 32 bytes, or null if it isn't 64 hex
+/// digits.
+pub fn pinHash(hex: []const u8) ?[32]u8 {
+    if (hex.len != 64) return null;
+    var out: [32]u8 = undefined;
+    _ = std.fmt.hexToBytes(&out, hex) catch return null;
+    return out;
+}
 
 fn conflict(why: *[]const u8, msg: []const u8) ParseError {
     why.* = msg;
@@ -289,6 +381,23 @@ pub fn dstStart(arg: []const u8) ?usize {
     return null;
 }
 
+/// A long-form field, in double quotes if it has a comma or a quote.
+fn csvField(w: *std.Io.Writer, v: []const u8) std.Io.Writer.Error!void {
+    return csvField2(w, "", v);
+}
+
+/// `key=value` as one long-form field.
+fn csvField2(w: *std.Io.Writer, key: []const u8, v: []const u8) std.Io.Writer.Error!void {
+    const quote = std.mem.indexOfAny(u8, v, ",\"") != null or std.mem.indexOfAny(u8, key, ",\"") != null;
+    if (quote) try w.writeAll("\"");
+    if (key.len > 0) try w.print("{s}=", .{key});
+    for (v) |c| {
+        if (c == '"') try w.writeAll("\"");
+        try w.writeByte(c);
+    }
+    if (quote) try w.writeAll("\"");
+}
+
 /// Splits the long form's comma-separated fields, honouring double quotes
 /// (`""` inside quotes is a quote), as CSV does.
 fn csv(arena: std.mem.Allocator, s: []const u8) error{OutOfMemory}![]const []const u8 {
@@ -320,6 +429,21 @@ pub const Bind = struct {
     order: ?Order = null,
     create: bool = false,
     recursive: bool = false,
+
+    /// Writes the bind as `--bind` takes it, `SRC:DST[:OPTS]`.
+    pub fn writeArg(b: Bind, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        try w.print("{s}:{s}", .{ b.src, b.dst });
+        var sep: []const u8 = ":";
+        if (b.order) |o| {
+            try w.print("{s}{s}", .{ sep, if (o == .before) "b" else "a" });
+            sep = ",";
+        }
+        if (b.create) {
+            try w.print("{s}c", .{sep});
+            sep = ",";
+        }
+        if (b.recursive) try w.print("{s}r", .{sep});
+    }
 
     pub fn parse(arg: []const u8, why: *[]const u8) ParseError!Bind {
         const i = dstStart(arg) orelse return conflict(why, "--bind needs SRC:DST");
