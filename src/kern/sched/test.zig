@@ -365,3 +365,39 @@ test "continuations move between executors on host threads [scheduler]" {
     try expect(s.migrated.load(.acquire) > 0);
     try expectEqual(pool.mapped, pool.nfree);
 }
+
+const Yielder = struct {
+    k: Cont = .{ .ready = noready },
+    steps: u32 = 0,
+
+    fn noready(_: *Cont) void {}
+
+    fn run(arg: ?*anyopaque) void {
+        const y: *Yielder = @ptrCast(@alignCast(arg.?));
+        var mark: u32 = 77;
+        while (y.steps < 3) {
+            y.steps += 1;
+            cont.yield();
+        }
+        if (mark != 77) y.steps = 1000;
+        mark += 1;
+        cont.exit();
+    }
+};
+
+test "a yield leaves a continuation runnable, and exit ends its call [scheduler]" {
+    if (is_wasm) return error.SkipZigTest;
+    var pool: Pool = .{ .size = 32 * 1024 };
+    defer pool.deinit();
+    var ex: Executor = .init(&pool);
+    defer ex.deinit();
+    var y: Yielder = .{};
+    try expectEqual(cont.Outcome.yielded, try ex.call(&y.k, Yielder.run, &y));
+    try expect(!y.k.isParked());
+    try expectEqual(cont.Outcome.yielded, ex.@"resume"(&y.k));
+    try expectEqual(cont.Outcome.yielded, ex.@"resume"(&y.k));
+    try expectEqual(cont.Outcome.returned, ex.@"resume"(&y.k));
+    try expectEqual(@as(u32, 3), y.steps);
+    try expect(y.k.stack == null);
+    try expect(ex.spare != null);
+}

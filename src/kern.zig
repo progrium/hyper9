@@ -15,7 +15,8 @@ const policy = @import("policy.zig");
 const resolver = @import("resolver.zig");
 const consin = @import("consin.zig");
 const web = @import("web.zig");
-const Host = @import("host/host.zig").Host;
+const host_api = @import("host/host.zig");
+const Host = host_api.Host;
 const host_dirs = @import("host/dirs.zig");
 const dotl_kern = @import("dotl/kern.zig");
 const hidx_kern = @import("rootindex/kern.zig");
@@ -53,6 +54,7 @@ const c_stub = struct {
     fn h9_kern_newmach(_: ?*anyopaque) ?*anyopaque {
         return null;
     }
+    fn h9_kern_setsched(_: ?*anyopaque, _: ?*anyopaque, _: *const fn (?*anyopaque, ?*anyopaque) callconv(.c) c_int) void {}
     fn h9_kern_machkernel(_: ?*anyopaque) ?*anyopaque {
         return null;
     }
@@ -296,6 +298,12 @@ const c_stub = struct {
     }
     fn h9_kern_setuser(_: [*:0]const u8) void {}
     fn h9_hstream_wake(_: c_ulong) void {}
+    fn h9_child_wake(_: c_ulong) void {}
+    fn h9_child_dropsrc(_: ?*anyopaque) void {}
+    fn h9_child_nserved(_: c_ulong) c_int {
+        return 0;
+    }
+    fn h9_child_unserve(_: c_ulong) void {}
     fn h9_hstream_fd(_: c_ulong) c_int {
         return -1;
     }
@@ -322,6 +330,7 @@ const c_real = struct {
     extern fn h9_kern_park() noreturn;
     extern fn h9_kern_spawn(mach: ?*anyopaque, name: [*:0]const u8, func: *const fn (?*anyopaque) callconv(.c) void, arg: ?*anyopaque) c_int;
     extern fn h9_kern_newmach(kernel: ?*anyopaque) ?*anyopaque;
+    extern fn h9_kern_setsched(mach: ?*anyopaque, sched: ?*anyopaque, start: *const fn (?*anyopaque, ?*anyopaque) callconv(.c) c_int) void;
     extern fn h9_kern_machkernel(mach: ?*anyopaque) ?*anyopaque;
     extern fn h9_kern_machdetach(mach: ?*anyopaque) void;
     extern fn h9_kern_kprocdetached(name: [*:0]const u8, func: *const fn (?*anyopaque) callconv(.c) void, arg: ?*anyopaque) c_int;
@@ -431,6 +440,10 @@ const c_real = struct {
     extern fn h9_kern_upuser() [*:0]const u8;
     extern fn h9_kern_setuser(name: [*:0]const u8) void;
     extern fn h9_hstream_wake(id: c_ulong) void;
+    extern fn h9_child_wake(id: c_ulong) void;
+    extern fn h9_child_dropsrc(ch: ?*anyopaque) void;
+    extern fn h9_child_nserved(id: c_ulong) c_int;
+    extern fn h9_child_unserve(id: c_ulong) void;
     extern fn h9_hstream_fd(id: c_ulong) c_int;
     extern fn h9_hstream_wait(id: c_ulong) c_int;
     extern fn h9_kserve_new(readonly: c_int, root: [*:0]const u8, ended: ?*const fn (?*anyopaque) callconv(.c) void, arg: ?*anyopaque) ?*anyopaque;
@@ -523,6 +536,14 @@ pub const Kernel = struct {
         return @ptrCast(@alignCast(c.h9_kern_machkernel(m)));
     }
 
+    /// Has the processes this kernel starts from now on run on a
+    /// scheduler's executors (design/scheduler.md): `start(ctx, proc)`
+    /// takes each, or returns -1 to have it get a host thread of its own.
+    pub fn setScheduler(k: *Kernel, ctx: *anyopaque, start: *const fn (?*anyopaque, ?*anyopaque) callconv(.c) c_int) void {
+        if (!available) return;
+        c.h9_kern_setsched(k.mach, ctx, start);
+    }
+
     pub fn lockSettings(k: *Kernel) void {
         while (!k.lock.tryLock()) std.atomic.spinLoopHint();
     }
@@ -577,6 +598,9 @@ pub const RF = struct {
     pub const NOWAIT = 1 << 6;
     /// Not 9front's: a Linux thread, whose children are its group leader's (hproc.h).
     pub const LXTHREAD = 1 << 30;
+    /// Not 9front's: the child keeps a host thread of its own where the
+    /// machine has a scheduler (hproc.h).
+    pub const HOSTTHREAD = 1 << 29;
     pub const CNAMEG = 1 << 10;
     pub const CENVG = 1 << 11;
     pub const CFDG = 1 << 12;
@@ -985,7 +1009,7 @@ pub fn semrelease(addr: *i32, count: i32) Error!i32 {
 }
 
 /// The sandbox plan devfs and devip check for the calling thread's
-/// process (see src/kern/fscheck.c and src/kern/netcheck.h). Each guest
+/// process (see src/host/fscheck.c and src/kern/netcheck.h). Each guest
 /// process runs on its own thread, so the
 /// plan is per thread; kernel threads without one aren't restricted.
 threadlocal var fs_plan: ?*const policy.Plan = null;
@@ -1334,6 +1358,31 @@ pub fn hstreamWake(id: u32) void {
     c.h9_hstream_wake(id);
 }
 
+/// Wakes guest reads waiting on child machine conversation `id`
+/// (src/kern/dev/machine.zig, design/child-machines.md). Called from
+/// any thread.
+pub fn childWake(id: u32) void {
+    c.h9_child_wake(id);
+}
+
+/// Closes a channel the machine device walked for a child machine's
+/// namespace. On a kernel process.
+pub fn childDropSource(ch: *anyopaque) void {
+    c.h9_child_dropsrc(ch);
+}
+
+/// The servers of its caller's paths that child machine conversation
+/// `id` still has (src/kern/dev/machine.zig's source).
+pub fn childServed(id: u32) u32 {
+    return @intCast(c.h9_child_nserved(id));
+}
+
+/// Ends the connections of child machine conversation `id`'s servers
+/// of its caller's paths; they then end as childServed counts.
+pub fn childUnserve(id: u32) void {
+    c.h9_child_unserve(id);
+}
+
 /// Sleeps in the kernel until host stream `id` has connected or failed;
 /// a note interrupts it.
 pub fn hstreamWait(id: u32) Error!void {
@@ -1564,6 +1613,18 @@ pub const nskernel = @hasDecl(build_options, "nskernel") and build_options.nsker
 comptime {
     // src/kern/dev/hstream.zig's leaves.
     _ = @import("hstream.zig");
+    if (available) {
+        // Handle names in the namespace (src/kern/chan.zig).
+        @export(&h9_host_nsname, .{ .name = "h9_host_nsname" });
+        @export(&h9_host_nspath, .{ .name = "h9_host_nspath" });
+        // An embedder's trees in memory (src/host/devtree.zig).
+        @export(&h9_tree_path, .{ .name = "h9_tree_path" });
+        @export(&h9_tree_get, .{ .name = "h9_tree_get" });
+        @export(&h9_tree_entry, .{ .name = "h9_tree_entry" });
+        @export(&h9_tree_child, .{ .name = "h9_tree_child" });
+        @export(&h9_tree_parent, .{ .name = "h9_tree_parent" });
+        @export(&h9_tree_read, .{ .name = "h9_tree_read" });
+    }
     if (available and nskernel) {
         if (host_dirs.supported) @export(&h9_host_dir, .{ .name = "h9_host_dir" });
         @export(&h9_plan_get, .{ .name = "h9_plan_get" });
@@ -1803,6 +1864,100 @@ fn h9_overlay_changed(track: ?*anyopaque, path: [*:0]const u8) callconv(.c) void
 
 fn h9_policy_active() callconv(.c) c_int {
     return @intFromBool(fs_plan != null);
+}
+
+/// src/kern/chan.zig's, for handle names in the namespace
+/// (design/host-handles.md): host path `path` as the name of the calling
+/// thread's machine's directory handle that holds it, the deepest, and
+/// the path relative to it, `name` or `name/rel`, into `out`. Its length,
+/// or -1 if no handle holds it or `out` is too short.
+fn h9_host_nsname(path: [*]const u8, len: c_int, out: [*]u8, n: c_int) callconv(.c) c_int {
+    const p = fs_plan orelse return -1;
+    const h = p.host orelse return -1;
+    const d = h.dirs orelse return -1;
+    const held = d.holding(path[0..@intCast(@max(len, 0))]) orelse return -1;
+    var w: std.Io.Writer = .fixed(out[0..@intCast(@max(n, 0))]);
+    w.writeAll(held.dir.name) catch return -1;
+    if (held.rel.len > 0) w.print("/{s}", .{held.rel}) catch return -1;
+    return @intCast(w.end);
+}
+
+/// The other way: the host path of the calling thread's machine's
+/// directory handle named `name`, into `out`. Its length, or -1 if there's
+/// no such handle or `out` is too short.
+fn h9_host_nspath(name: [*]const u8, len: c_int, out: [*]u8, n: c_int) callconv(.c) c_int {
+    const p = fs_plan orelse return -1;
+    const h = p.host orelse return -1;
+    const d = h.dirs orelse return -1;
+    const dir = d.get(name[0..@intCast(@max(len, 0))]) orelse return -1;
+    if (dir.path.len > @as(usize, @intCast(@max(n, 0)))) return -1;
+    @memcpy(out[0..dir.path.len], dir.path);
+    return @intCast(dir.path.len);
+}
+
+/// For host path `path` held by one of the calling thread's machine's
+/// trees in memory (a `Dir` with a `tree`), the tree's name and the path
+/// relative to it, `name` or `name/rel`, into `out`: its length, or -1 if
+/// no such tree holds it (a host directory does, or nothing) or `out` is
+/// too short. namec walks such a path on `#ū` rather than `#U`.
+fn h9_tree_path(path: [*]const u8, len: c_int, out: [*]u8, n: c_int) callconv(.c) c_int {
+    const p = fs_plan orelse return -1;
+    const h = p.host orelse return -1;
+    const d = h.dirs orelse return -1;
+    const held = d.holding(path[0..@intCast(@max(len, 0))]) orelse return -1;
+    if (held.dir.tree == null) return -1;
+    var w: std.Io.Writer = .fixed(out[0..@intCast(@max(n, 0))]);
+    w.writeAll(held.dir.name) catch return -1;
+    if (held.rel.len > 0) w.print("/{s}", .{held.rel}) catch return -1;
+    return @intCast(w.end);
+}
+
+/// The tree in memory of the calling thread's machine's handle named
+/// `name`, if it has one and the plan doesn't hide its path.
+fn h9_tree_get(name: [*]const u8, len: c_int) callconv(.c) ?*const anyopaque {
+    const p = fs_plan orelse return null;
+    const h = p.host orelse return null;
+    const d = h.dirs orelse return null;
+    const dir = d.get(name[0..@intCast(@max(len, 0))]) orelse return null;
+    if (p.check(dir.path, .read) == .hidden) return null;
+    if (dir.tree) |*t| return t;
+    return null;
+}
+
+/// A `host.Tree.Entry`, for src/host/devtree.zig.
+const TreeEntry = extern struct {
+    id: u64,
+    len: u64,
+    name: [*:0]const u8,
+    dir: u8,
+    exec: u8,
+};
+
+fn treeEntry(e: ?host_api.Tree.Entry, out: *TreeEntry) c_int {
+    const x = e orelse return -1;
+    out.* = .{ .id = x.id, .len = x.len, .name = x.name.ptr, .dir = @intFromBool(x.dir), .exec = @intFromBool(x.exec) };
+    return 0;
+}
+
+fn treeOf(t: *const anyopaque) *const host_api.Tree {
+    return @ptrCast(@alignCast(t));
+}
+
+fn h9_tree_entry(t: *const anyopaque, id: u64, out: *TreeEntry) callconv(.c) c_int {
+    return treeEntry(treeOf(t).entry(id), out);
+}
+
+fn h9_tree_child(t: *const anyopaque, id: u64, i: c_int, out: *TreeEntry) callconv(.c) c_int {
+    if (i < 0) return -1;
+    return treeEntry(treeOf(t).child(id, @intCast(i)), out);
+}
+
+fn h9_tree_parent(t: *const anyopaque, id: u64) callconv(.c) u64 {
+    return treeOf(t).parent(id);
+}
+
+fn h9_tree_read(t: *const anyopaque, id: u64, off: u64, buf: [*]u8, n: c_int) callconv(.c) c_int {
+    return @intCast(treeOf(t).read(id, off, buf[0..@intCast(@max(n, 0))]));
 }
 
 /// src/host/dirs.c's: the calling thread's machine's directory handle that

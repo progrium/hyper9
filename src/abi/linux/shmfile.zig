@@ -84,9 +84,7 @@ fn lock() void {
 }
 
 fn engineId(b: engine.Engine) usize {
-    return switch (b) {
-        inline else => |p| @intFromPtr(p),
-    };
+    return b.id();
 }
 
 pub const Error = error{ OutOfMemory, NoSpace, Io };

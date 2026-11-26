@@ -11,21 +11,22 @@ const drawterm_glue = "third_party/drawterm-glue";
 // for the one process record), devcmd.c (host commands live on the
 // host-cmd branch while design/host-cmd.md rethinks them), or the files
 // ported to Zig (design/kernel-port.md, src/kern/port.zig): allocb.c,
-// chan.c, dev.c, devmnt.c, devpipe.c, devroot.c, pgrp.c, qio.c, qlock.c,
-// rwlock.c, sleep.c, and sysfile.c. Plus the OS files below.
+// chan.c, dev.c, devcons.c, devmnt.c, devpipe.c, devroot.c, pgrp.c, qio.c, qlock.c,
+// rwlock.c, sleep.c, and sysfile.c, nor the host's devices, devfs and
+// devip, which are src/host's (design/host-handles.md). Plus the OS files
+// below.
 const kern_sources = [_][]const u8{
-    "alloc.c",    "data.c",    "devaudio.c", "devaudio-none.c",
-    "devcons.c",  "devdraw.c", "devip.c",    "devkbd.c",
-    "devmouse.c", "devssl.c",  "devtls.c",   "error.c",
-    "parse.c",    "stub.c",    "term.c",     "waserror.c",
+    "alloc.c",    "data.c",     "devaudio.c", "devaudio-none.c",
+    "devdraw.c",  "devkbd.c",   "devmouse.c",
+    "devssl.c",   "devtls.c",   "error.c",    "parse.c",
+    "stub.c",     "term.c",     "waserror.c",
 };
-// OS=posix (Make.unix), and OS=win32 with FS=fs-win32 (Make.win64).
-const kern_posix = [_][]const u8{ "devfs-posix.c", "devip-posix.c", "devlfd-posix.c", "posix.c" };
-const kern_win32 = [_][]const u8{ "devfs-win32.c", "devip-win32.c", "devlfd-win32.c", "win32.c" };
-// The web host (design/epoch-0/browser-host.md): devfs and devlfd build
-// against wasi-libc; posix.c and devip-posix.c are replaced by
-// src/kern/os-wasm.c and devip-wasm.c.
-const kern_web = [_][]const u8{ "devfs-posix.c", "devlfd-posix.c" };
+// OS=posix (Make.unix), and OS=win32 (Make.win64), without devlfd,
+// which is src/host's. The web host (design/epoch-0/browser-host.md)
+// builds none: posix.c is replaced by src/kern/os-wasm.c.
+const kern_posix = [_][]const u8{"posix.c"};
+const kern_win32 = [_][]const u8{"win32.c"};
+const kern_web = [_][]const u8{};
 
 /// The drawterm libraries kern needs, with each Makefile's OFILES. The GUI,
 /// exportfs, libauth and drawterm's own main/cpu code are left out.
@@ -607,7 +608,8 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.O
     kern.root_module.addIncludePath(b.path(drawterm));
     kern.root_module.addIncludePath(b.path(drawterm ++ "/include"));
     kern.root_module.addIncludePath(b.path(drawterm ++ "/kern"));
-    kern.root_module.addIncludePath(b.path("src/kern")); // fscheck.h and netcheck.h, for devfs and devip
+    kern.root_module.addIncludePath(b.path("src/kern")); // netcheck.h, for devip
+    kern.root_module.addIncludePath(b.path("src/host")); // the host's C (design/host-handles.md)
     kern.root_module.addCSourceFiles(.{
         .root = b.path(drawterm ++ "/kern"),
         .files = &kern_sources,
@@ -620,9 +622,11 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.O
     });
     kern.root_module.addCSourceFiles(.{
         .root = b.path("src/kern"),
-        .files = &.{ "devtab.c", "devdup.c", "devhtools.c", "fscheck.c", "consx.c", "werrstr.c" },
+        .files = &.{ "devtab.c", "devdup.c", "devhtools.c", "consx.c", "consprint.c", "werrstr.c" },
         .flags = flags,
     });
+    // The host's half of the policy's file checks.
+    kern.root_module.addCSourceFiles(.{ .root = b.path("src/host"), .files = &.{"fscheck.c"}, .flags = flags });
     // The one label the Zig calls drawterm's raising C under.
     kern.root_module.addCSourceFiles(.{ .root = b.path(drawterm_glue), .files = &.{"catch.c"}, .flags = flags });
     // devfs's opens beneath the host's directory handles (design/host-handles.md).
@@ -630,8 +634,8 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.O
     // The Linux ABI (design/epoch-0/linux-personality.md) and its host
     // sockets (design/epoch-0/linux-net.md).
     if (web) {
-        kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"hostsock-wasm.c"}, .flags = flags });
-    } else if (os != .windows) kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{ "hostsock-posix.c", "hostif-posix.c" }, .flags = flags });
+        kern.root_module.addCSourceFiles(.{ .root = b.path("src/host"), .files = &.{ "hostsock-wasm.c", "ipsock-wasm.c" }, .flags = flags });
+    } else if (os != .windows) kern.root_module.addCSourceFiles(.{ .root = b.path("src/host"), .files = &.{ "hostsock-posix.c", "hostif-posix.c", "ipsock-posix.c" }, .flags = flags });
     addGfxSources(b, kern, gfx, flags);
     for (kern_libs) |l| kern.root_module.addCSourceFiles(.{
         .root = b.path(b.pathJoin(&.{ drawterm, l.dir })),
@@ -644,7 +648,7 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.O
         kern.root_module.addCMacro("memccpy", "h9_memccpy");
     }
     if (os == .windows) {
-        kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{ "glue-win32.c", "hostsock-win32.c" }, .flags = flags });
+        kern.root_module.addCSourceFiles(.{ .root = b.path("src/host"), .files = &.{ "glue-win32.c", "hostsock-win32.c", "ipsock-win32.c" }, .flags = flags });
         kern.root_module.linkSystemLibrary("ws2_32", .{});
         kern.root_module.linkSystemLibrary("advapi32", .{});
         kern.root_module.linkSystemLibrary("ntdll", .{}); // NtCreateFile, src/host/dirs.c
@@ -653,7 +657,7 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.O
     if (web) {
         // No __builtin_return_address on wasm: os-wasm.c has getcallerpc.
         kern.root_module.addCSourceFiles(.{ .root = b.path(drawterm ++ "/posix-port"), .files = &.{"tas.c"}, .flags = flags });
-        kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{ "os-wasm.c", "devip-wasm.c" }, .flags = flags });
+        kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"os-wasm.c"}, .flags = flags });
         kern.root_module.addCSourceFiles(.{ .root = b.path("src/web"), .files = &.{"coro.c"}, .flags = flags });
         kern.root_module.addAssemblyFile(b.path("src/web/stack.S"));
         kern.root_module.addAssemblyFile(b.path("src/web/sjlj_tag.S"));
@@ -687,6 +691,7 @@ fn kernPort(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.
     tc.addIncludePath(b.path(drawterm ++ "/include"));
     tc.addIncludePath(b.path(drawterm ++ "/kern"));
     tc.addIncludePath(b.path("src/kern"));
+    tc.addIncludePath(b.path("src/host"));
     for (flags) |f| if (std.mem.startsWith(u8, f, "-D")) tc.defineCMacroRaw(f[2..]);
     if (target.result.os.tag == .macos) if (b.graph.environ_map.get("SDKROOT")) |sdk|
         tc.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr/include" }) });
@@ -705,7 +710,7 @@ fn kernPort(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.
     options.addOption(bool, "hostfs", hostfs or !nskernel);
     // A screen (src/kern/gfx.c and src/kern/dev/gfx.zig), not nogfx.c.
     options.addOption(bool, "gfx", gfx);
-    return b.createModule(.{
+    const port = b.createModule(.{
         .root_source_file = b.path("src/kern/port.zig"),
         .target = target,
         .optimize = optimize,
@@ -715,6 +720,22 @@ fn kernPort(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.
             .{ .name = "kern_options", .module = options.createModule() },
         },
     });
+    // The host's devices (design/host-handles.md): src/host's Zig, which
+    // the kernel's Zig names and which calls back into it, with the host
+    // C library through translate-c (src/host/libc.h).
+    const libc = b.addTranslateC(.{ .root_source_file = b.path("src/host/libc.h"), .target = target, .optimize = optimize });
+    const devices = b.createModule(.{
+        .root_source_file = b.path("src/host/devices.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "kern", .module = port },
+            .{ .name = "host_libc", .module = libc.createModule() },
+        },
+    });
+    port.addImport("host_dev", devices);
+    return port;
 }
 
 /// The web target. kern alone turns on wasm exception handling, for
@@ -818,6 +839,7 @@ fn addNsKernel(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.la
     m.addIncludePath(b.path(drawterm ++ "/include"));
     m.addIncludePath(b.path(drawterm ++ "/kern"));
     m.addIncludePath(b.path("src/kern"));
+    m.addIncludePath(b.path("src/host"));
     const windows = !web and target.result.os.tag == .windows;
     const base: []const []const u8 = if (web) &kern_flags_web else if (windows) &kern_flags_win32 else &kern_flags;
     const extra: []const []const u8 = if (hostfs and !web) &.{ "-DH9_NSKERNEL", "-DH9_NSKERNEL_HOSTFS" } else &.{"-DH9_NSKERNEL"};
@@ -858,23 +880,19 @@ fn addNsKernel(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.la
         // As the kern library builds for Windows (addKern): drawterm's
         // win32.c and h9's host lock and timers in glue-win32.c, with no
         // host sockets (src/nskernel.zig has h9so_errstr).
-        m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/kern"), .files = &.{ "win32.c", "devlfd-win32.c" }, .flags = flags });
-        m.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"glue-win32.c"}, .flags = flags });
+        m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/kern"), .files = &.{"win32.c"}, .flags = flags });
+        m.addCSourceFiles(.{ .root = b.path("src/host"), .files = &.{"glue-win32.c"}, .flags = flags });
         if (hostfs) {
-            m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/kern"), .files = &.{"devfs-win32.c"}, .flags = flags });
-            m.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"fscheck.c"}, .flags = flags });
-            m.addCSourceFiles(.{ .root = b.path("src/host"), .files = &.{"dirs.c"}, .flags = flags });
+            m.addCSourceFiles(.{ .root = b.path("src/host"), .files = &.{ "fscheck.c", "dirs.c" }, .flags = flags });
         }
         m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/posix-port"), .files = &kern_port, .flags = flags });
         m.linkSystemLibrary("ws2_32", .{});
         m.linkSystemLibrary("advapi32", .{});
         if (hostfs) m.linkSystemLibrary("ntdll", .{});
     } else {
-        m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/kern"), .files = &.{ "posix.c", "devlfd-posix.c" }, .flags = flags });
+        m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/kern"), .files = &.{"posix.c"}, .flags = flags });
         if (hostfs) {
-            m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/kern"), .files = &.{"devfs-posix.c"}, .flags = flags });
-            m.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"fscheck.c"}, .flags = flags });
-            m.addCSourceFiles(.{ .root = b.path("src/host"), .files = &.{"dirs.c"}, .flags = flags });
+            m.addCSourceFiles(.{ .root = b.path("src/host"), .files = &.{ "fscheck.c", "dirs.c" }, .flags = flags });
         }
         m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/posix-port"), .files = &kern_port, .flags = flags });
         if (target.result.os.tag == .macos) addSdkPaths(b, m);
@@ -944,7 +962,7 @@ fn pin(pins: []const u8, comptime name: []const u8) []const u8 {
 pub const Gfx = enum {
     /// No screen: src/kern/nogfx.c, and --gfx fails with GfxNotBuilt.
     none,
-    /// Only the screen in memory (src/kern/gfx-headless.c,
+    /// Only the screen in memory (src/host/gfx-headless.c,
     /// design/epoch-0/headless-screen.md): --gfx=headless, and no window. The
     /// window backends below link it too.
     headless,
@@ -954,7 +972,7 @@ pub const Gfx = enum {
     win32,
     /// drawterm's gui-cocoa, built with the macOS SDK.
     cocoa,
-    /// A page's canvas, on the web host (src/kern/gfx-web.c,
+    /// A page's canvas, on the web host (src/host/gfx-web.c,
     /// design/epoch-0/browser-gfx.md).
     web,
 
@@ -1065,8 +1083,8 @@ fn addH9Module(b: *std.Build, p: ModuleParts, gfx: Gfx, exported: bool) H9Module
 }
 
 /// The screen for kern: src/kern/nogfx.c, or src/kern/gfx.c with a
-/// backend. drawterm's backends compile unmodified, with
-/// src/kern/gfx-gui.h included first to rename what gfx.c wraps and to
+/// backend (src/host's, or drawterm's). drawterm's backends compile
+/// unmodified, with src/host/gfx-gui.h included first to rename what gfx.c wraps and to
 /// send their exits through the machine's hangup path.
 fn addGfxSources(b: *std.Build, kern: *std.Build.Step.Compile, gfx: Gfx, flags: []const []const u8) void {
     const m = kern.root_module;
@@ -1081,15 +1099,15 @@ fn addGfxSources(b: *std.Build, kern: *std.Build.Step.Compile, gfx: Gfx, flags: 
     // one; src/kern/gfx.c calls one or the other per machine.
     if (gfx != .web) {
         m.addCMacro("H9_GFX_HEADLESS", "1");
-        m.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"gfx-headless.c"}, .flags = flags });
+        m.addCSourceFiles(.{ .root = b.path("src/host"), .files = &.{"gfx-headless.c"}, .flags = flags });
     }
     if (gfx != .web and gfx != .headless) m.addCMacro("H9_GFX_WINDOW", "1");
-    const gui = std.mem.concat(b.allocator, []const u8, &.{ flags, &.{ "-include", pathFromRoot(b, "src/kern/gfx-gui.h") } }) catch @panic("OOM");
+    const gui = std.mem.concat(b.allocator, []const u8, &.{ flags, &.{ "-include", pathFromRoot(b, "src/host/gfx-gui.h") } }) catch @panic("OOM");
     const gui_exit = std.mem.concat(b.allocator, []const u8, &.{ gui, &.{"-DH9_GUI_EXIT"} }) catch @panic("OOM");
     switch (gfx) {
         .none => unreachable,
         .headless => {},
-        .web => m.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"gfx-web.c"}, .flags = flags }),
+        .web => m.addCSourceFiles(.{ .root = b.path("src/host"), .files = &.{"gfx-web.c"}, .flags = flags }),
         .x11 => {
             m.addCMacro("H9_GFX_X11", "1");
             m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/gui-x11"), .files = &.{"x11.c"}, .flags = gui_exit });
@@ -1104,7 +1122,7 @@ fn addGfxSources(b: *std.Build, kern: *std.Build.Step.Compile, gfx: Gfx, flags: 
         .cocoa => {
             const objc = std.mem.concat(b.allocator, []const u8, &.{ gui, &.{"-fobjc-arc"} }) catch @panic("OOM");
             m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/gui-cocoa"), .files = &.{"screen.m"}, .flags = objc, .language = .objective_c });
-            m.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"gfx-cocoa.m"}, .flags = &.{"-fobjc-arc"}, .language = .objective_c });
+            m.addCSourceFiles(.{ .root = b.path("src/host"), .files = &.{"gfx-cocoa.m"}, .flags = &.{"-fobjc-arc"}, .language = .objective_c });
             m.linkFramework("Cocoa", .{});
             m.linkFramework("Metal", .{});
             m.linkFramework("QuartzCore", .{});
@@ -2064,7 +2082,10 @@ pub fn build(b: *std.Build) void {
         run_c.addFileArg(host_hello);
         run_c.addArgs(&.{ "--engine", "hcpu" });
         run_c.addCheck(.{ .expect_stdout_match = "engine hcpu, arch " });
-        run_c.addCheck(.{ .expect_stdout_match = "hello\nexited \"\"\n" });
+        // The guest's line arrives as it wrote it, but hello.c's printf
+        // goes through the C runtime, whose stdout is in text mode on
+        // Windows and ends each line with \r\n.
+        run_c.addCheck(.{ .expect_stdout_match = if (os == .windows) "hello\nexited \"\"\r\n" else "hello\nexited \"\"\n" });
         run_c.addCheck(.{ .expect_term = .{ .exited = 0 } });
         test_step.dependOn(&run_c.step);
     }

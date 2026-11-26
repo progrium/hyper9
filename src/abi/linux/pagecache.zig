@@ -67,9 +67,7 @@ fn lock() void {
 }
 
 fn engineId(b: engine.Engine) usize {
-    return switch (b) {
-        inline else => |p| @intFromPtr(p),
-    };
+    return b.id();
 }
 
 /// A chunk's shared pages, with a reference for the caller, and how many

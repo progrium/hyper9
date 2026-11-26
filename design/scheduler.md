@@ -82,12 +82,12 @@ None for the guest's reach. The scheduler is new code in the trusted base, and a
 ## Done criteria
 
 - [ ] `h9 --rc 'for(i in `{seq 1 500}) sleep 5 & wait'` runs 500 processes at once on HVF and KVM, with no pool and no slowdown past the 56th.
-- [ ] `test "1000 blocked processes use 8 host threads [scheduler]"` passes.
+- [x] `test "1000 blocked processes use 8 host threads [scheduler]"` passes.
 - [ ] `test "processes keep their own registers across executor switches [scheduler]"` passes on every engine.
 - [ ] `zig build integration`, `zig build integration -Dweb`, and `zig build web-test` pass, with the web host on one executor and no coroutine layer.
 - [ ] `zig build bench` shows a system call round trip no slower than before, and a `fork` and `exit` loop faster.
 - [ ] `src/cpupool.zig`, `src/web/coro.zig`, `src/web/coro.c`, and `src/kern/os-wasm.c`'s thread emulation are deleted.
-- [ ] [spec/kernel.md](../spec/kernel.md)'s process model describes executors, parking, and slices.
+- [x] [spec/kernel.md](../spec/kernel.md)'s process model describes executors, parking, and slices.
 
 ## Implementation
 
@@ -115,3 +115,13 @@ None for the guest's reach. The scheduler is new code in the trusted base, and a
 - **Thread-locals.** A continuation can resume on another host thread, so `up` can't be a host thread's: step 2 has to set it from the continuation on every switch in.
 
 **2026-11-26, the kernel's blocking points park.** sync.zig's `park` and `unpark` are the only places a process waits and is let go, and qio, devmnt, tsleep, rendezvous, and the semaphores all wait through them, so step 2 is those two. A process with a continuation in `Proc.cont` parks on it, and one without (a kproc, or a process on a host thread of its own) waits in posix.c's procsleep, as before; which a process is is fixed for its life, so a wakeup can't take the wrong path. `park` sets `up` again when it's resumed, and `sync.Kexec` runs calls on an executor with `up` set to the process for the call and back to the thread's own afterwards. kern-test runs a hundred processes in qlock and tsleep on one host thread, a read that one thread readies and another resumes, and a 9P client and its server, both parked in devmnt and qio, on one thread. The web host keeps os-wasm.c's waits until step 6 runs Asyncify on h9.wasm. The kernel's own threadlocals (`fs_plan`, `fs_pages`, and `cons_ncpu` in src/kern.zig) are per host thread, and step 3 must move them to the process or set them on each switch in.
+
+**2026-11-26, executors on every native engine.** Steps 3 to 5 are in: `src/executor.zig` gives a machine `--cpus` executors, each a host thread with a vCPU, with a run queue each, a machine-wide queue, and stealing, and `h9_kern_spawn` and `rfork` hand new processes to them instead of starting threads. Some things building it found:
+
+- **The pool's lease is the process's state for now.** cpupool's `Lease` already kept a process's Ureg, FP state, and address space apart from its vCPU, so an executor loads them from it when another process ran on its vCPU last, and step 7 moves it into the executor.
+- **sud processes keep a vCPU of their own.** A sud vCPU is a thread in the stub process, and its FP state is wider than `Extra` (AVX's upper halves), so each process keeps its stub thread and an executor runs it. The 1000 blocked processes use no more than 8 of h9's host threads on sud, as on hcpu, but the stub has a thread for each.
+- **The helper pool is the executors.** Rather than route each blocking host call to helpers, the monitor thread that kicks runs past their slice also hands off an executor that has been in one kernel call for 20 ms: it starts another executor in its place, and the blocked one retires when its call returns, as Go's runtime does with a thread in a syscall. Nothing has to know which host calls block, and the loops that poll (`#y` and `#ℏ` taking turns, the kernel's `sleep`) park with `sync.msleep` instead.
+- **Some processes keep host threads.** h9's own 9P and pty servers are forked with `RFHOSTTHREAD`, since they block in host reads with the machine's executors possibly all busy, as does every process on the web host until step 6. The kernel's threadlocals are set once on each executor's thread, since an executor serves one machine.
+- **CPU time is the process's.** `getrusage` and `/proc/n/status` count a thread's time across executors, through `cputime.task_hook`.
+
+Steps 6 and 7 are left. The web build needs Binaryen's `wasm-opt` for Asyncify, and the pool, the per-process threads, and the coroutines go only once the web host runs on an executor.

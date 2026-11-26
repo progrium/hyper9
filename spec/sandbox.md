@@ -6,13 +6,15 @@ This describes, as built, h9's security stance and the sandbox policy: what a gu
 
 - [Security stance](#security-stance)
 - [Sandbox policy](#sandbox-policy)
-  - [Vendor hooks](#vendor-hooks)
+  - [The machine's host](#the-machines-host)
+  - [Device hooks](#device-hooks)
   - [Network rules](#network-rules)
     - [Route probes](#route-probes)
   - [The machine's resolver](#the-machines-resolver)
   - [Access rules](#access-rules)
   - [Path resolution](#path-resolution)
   - [Files beneath a handle](#files-beneath-a-handle)
+  - [Handle names in the namespace](#handle-names-in-the-namespace)
   - [Contained trees](#contained-trees)
   - [Linux symlinks](#linux-symlinks)
   - [Default profile](#default-profile)
@@ -46,14 +48,32 @@ Sandboxing is a `Policy` in `Machine.Options`: a set of capabilities, host paths
 | `net.outbound` | devip refuses `announce`, TCP and UDP, so the guest can dial out but not serve; `/net/ws` only connects |
 | `net.allow` | devip checks each `connect` against dial-string patterns (`tcp!10.0.0.0/8!564`, `tcp!*.example.com!443`), and devip's `cs` refuses to resolve names no pattern covers; an egress allowlist isobox can't offer |
 | `res.memory` | A cap on the guest-physical page allocator; exact, not a watchdog |
+| `proc.children` | `#μ` is bound on `/dev` and left out of the device mask, so the machine can start child machines; under `--children`, and never under `tight`. A child shares the machine's kernel ([child-machines](../design/child-machines.md)) |
 | `proc.timeout` | A machine deadline: a `hangup` note to every process, then a hard teardown after a 2 s grace period |
 | `res.pids`, `res.cpu` | A cap on live processes in `rfork`; a cap on vCPUs running guest code at once |
 
-### Vendor hooks
+### The machine's host
 
-The policy lives in Zig. drawterm's devfs and devip call it through leaf functions, which return a status and never raise.
+A machine reaches outside only through its host ([host-handles](../design/host-handles.md), `src/host/host.zig`): a table of handles, each an interface of a context and a function table, as `std.mem.Allocator` is. A handle that's null is a capability the machine doesn't have, so `Host{}` reaches nothing.
 
-devfs-posix and devfs-win32 call `h9_fs_check(path, op)` (in `src/kern/fscheck.c`) before each walk, open, create, remove, wstat, and directory entry. It resolves the host path and asks the Zig leaf `h9_policy_check` for a verdict: allowed, hidden (the walk fails, or the entry is left out of the listing) or read-only ("permission denied").
+| Handle | Gives | Native | Web |
+| --- | --- | --- | --- |
+| `dirs` | The host trees, by name (`root`, `cwd`, and `d1` on), each read-only or read-write, with its read-deny paths | A directory fd or `HANDLE`, opened when the machine is made | A WASI preopen, described and not opened |
+| `dial` | Outbound connections, and the names that may be resolved for them | Sockets (`src/host/net.zig`) | The checks; the guest's devip has no sockets there |
+| `listen` | Listening addresses | Sockets | None: a page can't listen |
+| `clock` | Wall and monotonic time | The OS's | WASI's, which is JavaScript's |
+| `console` | The terminal | The run's `Machine.Stdio` | The page's terminal |
+| `random` | Entropy | The machine's `std.Io` | WASI's, which is `crypto.getRandomValues` |
+| `window` | The `--gfx` window, or the headless screen | drawterm's GUI backend | The canvas |
+| `spawn` | Host commands ([host-cmd](../design/host-cmd.md)) | None yet: `#C` is masked | None |
+
+`Machine.init` builds the host the compiled plan describes (`src/host/planned.zig`), on every host: its handles ask the plan, so what's allowed is the plan's, and `--net=disable` is no `dial` and no `listen`. An embedder can give its own in `Machine.Options.host`: the policy is still compiled beside it, and devfs still checks the plan's verdicts, so a file needs both a handle and the plan's leave, while devip asks the embedder's dialer and listener alone. The embedder's directory handles stay its own to close, and its console, when it has one, replaces `Options.stdio`'s. With `.host = .{}`, a 9front root mounted from the host is unreachable (`test "a kernel with an empty Host can reach nothing outside [host-handles]"`). A directory handle can be a tree with no host directory, `Dir.tree` (a `host.Tree`, such as a `host.MemTree` built from a list of files): namec walks a `#U` path such a handle holds on the tree device, `#ū<name>`, instead (`src/host/devtree.zig`), which serves it read-only, so a mount of the handle's path reaches it, a root's under an overlay among them (`test "an embedder's in-memory dirs handle serves a root [host-handles]"`). The plan's rules still name the tree by its path, which nothing on the host need hold; the device asks the plan's verdict on that path at attach, and `#ū` is masked wherever `#U` is. A machine whose host has no clock, and a kernel thread with no machine, read the OS's clock.
+
+### Device hooks
+
+The policy lives in Zig. The host's devices, devfs and devip (`src/host/`, see [spec/kernel.md](kernel.md), "The host's devices"), call it through leaf functions, which return a status and never raise.
+
+devfs, on POSIX and on Windows, calls `h9_fs_check(path, op)` (in `src/host/fscheck.c`) before each walk, open, create, remove, wstat, and directory entry. It resolves the host path and asks the Zig leaf `h9_policy_check` for a verdict: allowed, hidden (the walk fails, or the entry is left out of the listing) or read-only ("permission denied").
 
 devip calls `h9_net_check(op, proto, addr, port)` (declared in `src/kern/netcheck.h`) when a ctl file's `connect` or `announce` is parsed, before a port is bound or the host is dialed, and raises "permission denied" on a refusal. It asks the machine's host ([host-handles](../design/host-handles.md), `src/host/host.zig`): a `connect` its dialer (`Dial.allows`, then `Dial.probe`), an `announce` its listener (`Listen.allows`), and a host without one refuses. The host a plan describes (`src/host/planned.zig`) answers with the plan's verdicts, so what's allowed is unchanged.
 
@@ -100,7 +120,7 @@ The plan's rules are the root, the cwd, each `--readable` and `--writable` path,
 
 ### Path resolution
 
-For a 9front program, devfs-posix follows symlinks with `stat`, so a symlink inside a bound tree can point anywhere on the host. A Linux program's walks don't follow them ([Linux symlinks](#linux-symlinks)).
+For a 9front program, devfs on POSIX hosts follows symlinks with `stat`, so a symlink inside a bound tree can point anywhere on the host. A Linux program's walks don't follow them ([Linux symlinks](#linux-symlinks)).
 
 Every devfs path is resolved and the resolved path is checked against the access rules, on every host. On Linux a clean absolute path is first looked up with one `openat2` with `RESOLVE_NO_SYMLINKS`; if it holds no link it is already canonical, and otherwise it's resolved by an `O_PATH` open and its `/proc/self/fd` name, so a check costs a constant number of calls however deep the path is (`realpath` reads every element with a `readlink`, so a walk down a tree cost the square of its depth). Linux without `openat2` or `/proc`, macOS, and the web host use `realpath`, and Windows the final path of an opened handle, which follows symlinks and junctions and refuses UNC and device paths.
 
@@ -115,8 +135,13 @@ Each tree the plan allows is a directory handle ([host-handles](../design/host-h
 - **Linux.** One `openat2` with `RESOLVE_BENEATH` and `RESOLVE_NO_MAGICLINKS` (`RESOLVE_IN_ROOT` for a contained tree, and `RESOLVE_NO_SYMLINKS` too for a Linux process's walk), retried on `EAGAIN`, which a rename racing the lookup gives. A `stat` is an `O_PATH` open and `fstat`.
 - **macOS, the BSDs, and Linux without `openat2`.** A walk of one name at a time from the handle: each name is looked at with `fstatat` (`AT_SYMLINK_NOFOLLOW`) and opened with `O_NOFOLLOW|O_DIRECTORY`, so a link swapped in fails the open; a link is read with `readlinkat` and walked in place if relative, and an absolute one, or a `..` above the top, is an escape (for a contained tree, back to the top). At most 40 links.
 - **Windows.** `NtCreateFile` relative to the handle, a name at a time, each with `FILE_OPEN_REPARSE_POINT`; a symbolic link or junction met on the way (a name surrogate reparse point) is an escape. Opens and directory creation go this way; deletes, renames, attributes, and `FindFirstFile` are still by path, with the checks above.
+- **The web host.** No handles are opened: each tree is a WASI preopen, and wasi-libc resolves every path beneath the preopen that holds it, so the runtime keeps the result inside it. devfs opens by path there, with the checks above.
 
 A 9front program's walks follow links anywhere ([Path resolution](#path-resolution)), so an open whose links leave its handle is made again by the path it resolves to (its `/proc/self/fd` name, `F_GETPATH`, or on Windows its final path), beneath the handle that holds that, if one does, with no link followed; otherwise it fails as a hidden file does. A path no handle holds is an ancestor of one, listed for `/mnt/term/<path>`, or hidden: only directories are opened there, read-only, by path, and devfs's checks of what it opened decide. A thread with no host (a kernel thread, or a plan built without one) opens by path. `test "a symlink swapped in mid-walk can't escape a handle [host-handles]"` swaps a directory and a link to outside the tree under each kind of open.
+
+### Handle names in the namespace
+
+`/proc/n/ns` names a host tree by its handle ([host-handles](../design/host-handles.md)), not its host path: `#U<name>` for a handle's top and `#U<name>/<path>` beneath it, so the cwd is `bind -c '#Ucwd' /mnt/term/cwd` and another tree `bind '#Ud1' <target>`. `chan.nsname` rewrites each `#U` path that `/proc/n/ns` and `#O`'s union lines print, asking the machine's host which handle holds it (`h9_host_nsname`, the deepest). The namespace's own names are unchanged: a tree's channels are still named by resolved host paths, which devfs opens and checks. A walk of `#U<name>` goes the other way (`h9_host_nspath`), so a `bind`, a `mount`, and `--ns` take the names `/proc/n/ns` prints, and its output replays in a machine with the same handles (`test "--ns replays /proc/n/ns output in a machine with the same handles [host-handles]"`). A path no handle holds, an ancestor that `/mnt/term` lists, is printed as before. The guest paths of `--readable` and `--writable` trees outside the cwd are still `/mnt/term/<host path>`, as drawterm's are.
 
 ### Contained trees
 
@@ -124,7 +149,7 @@ A bind from `#U!c/path` ([symlinks-in-root](../design/epoch-0/symlinks-in-root.m
 
 The tree's top is where namec's walk from the `#U!c` attach ends (`h9_fs_anchor`, called from `namec` in `src/kern/chan.zig`), canonicalised.
 
-Each later walk looks names up one at a time with `lstat` (`h9_fs_resolvein` in `src/kern/fscheck.c`; on Windows `h9_fs_resolveinw`, which reads symlinks and junctions with `FSCTL_GET_REPARSE_POINT` and refuses other reparse points and UNC targets): a link's target is read, an absolute one starts again at the top (on Windows, with its drive dropped), a relative one from the link's directory, `..` at the top stays there, and more than 40 links in one walk is "too many symbolic links".
+Each later walk looks names up one at a time with `lstat` (`h9_fs_resolvein` in `src/host/fscheck.c`; on Windows `h9_fs_resolveinw`, which reads symlinks and junctions with `FSCTL_GET_REPARSE_POINT` and refuses other reparse points and UNC targets): a link's target is read, an absolute one starts again at the top (on Windows, with its drive dropped), a relative one from the link's directory, `..` at the top stays there, and more than 40 links in one walk is "too many symbolic links".
 
 The resolved path, which holds no links, is checked against the access rules as any other path is, so `--read-deny` and partly allowed trees still apply, and kept on the chan with the link's own path beside it: stat shows the link's name, remove and rename act on the link, and open, read, and wstat on its target.
 
@@ -246,7 +271,7 @@ run mk
 # profile:  tight
 # enforces: env.scrub fs.read.scope fs.write.overlay fs.write.scope ipc.restrict kernel.isolation net.disable proc.timeout res.memory
 # limits:   write=overlay net=disable memory=512M timeout=1m
-# devmask:  #C #I #ℏ #U #ι #b #i #m
+# devmask:  #C #I #ℏ #U #ū #ι #b #i #m #μ
 # namespace:
 #   bind '#/' /  # the kernel's names: bin dev env fd net proc root srv
 #   bind -r '#U/Users/me/h9root' '#Oroot' ro
@@ -278,7 +303,6 @@ run mk
 #   - hardlinks under writable paths can modify host files outside them
 #   - writes to writable paths are not capped (no res.disk)
 #   - paths are checked after resolving symlinks, so a host process renaming paths concurrently can race the check
-#   - /proc/n/ns shows the host paths of bound host trees
 #   - the h9 process itself is not host-sandboxed
 ```
 

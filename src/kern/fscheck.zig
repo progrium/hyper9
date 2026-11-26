@@ -1,4 +1,4 @@
-//! The kernel's half of src/kern/fscheck.c in Zig (design/kernel-port.md):
+//! The kernel's half of src/host/fscheck.c in Zig (design/kernel-port.md):
 //! the Linux ABI's FIFOs by paths in the caller's namespace, through #U,
 //! overlays, and 9P2000.L mounts (fscheck.h). A close translation of the
 //! same functions, in the same order, with error unions for the C's error
@@ -24,12 +24,10 @@ const Chan = c.Chan;
 const H9_DMFIFO: c_uint = 0x00200000;
 
 const overlay = @import("dev/overlay.zig");
-// devfs's, which doesn't raise.
-extern fn h9_fs_isfifo(ch: *Chan) c_int;
+// devfs's FIFOs (src/host/devfs.zig).
+const hostfs = @import("host_dev").fs;
 // devhidx.c
 extern fn h9_hidx_dotl(ch: *Chan) c_int;
-// devfs's, which raises, through dev.zig's `raising`.
-extern fn h9_fs_mkfifo(ch: [*c]Chan, name: [*c]u8, perm: c_uint) void;
 
 
 /// A call that failed: its error string becomes the process's
@@ -93,7 +91,7 @@ fn mkfifopath(path: [*:0]const u8, perm: c_uint) Error!void {
         'O' => return overlay.mkfifo(ch, nn.name, perm),
         'U' => {
             defer chan.cclose(ch);
-            try dev.raising(&h9_fs_mkfifo, .{ ch, @constCast(nn.name), perm });
+            try hostfs.mkfifo(ch, nn.name, perm);
         },
         // A 9P2000.L server's: devdotl's translator makes a create with H9_DMFIFO a Tmknod.
         'M' => if (dotlmount(ch)) {
@@ -122,7 +120,7 @@ fn h9_fs_mkfifopath(path: [*:0]const u8, perm: c_uint) callconv(.c) c_int {
 pub fn chanisfifo(ch: *Chan) Error!bool {
     switch (dev.of(ch).dc) {
         'O' => return overlay.isfifo(ch),
-        'U' => return h9_fs_isfifo(ch) != 0,
+        'U' => return hostfs.isfifo(ch),
         'M' => {
             if (!dotlmount(ch))
                 return false;

@@ -2,7 +2,7 @@
  * h9's side of drawterm's screen interface when a GUI backend is built in
  * (design/epoch-0/gfx.md): what drawterm's main.c and cpu.c would define, and
  * wrappers around the backend's screeninit and clipboard. The backend's
- * own source is compiled unmodified, with src/kern/gfx-gui.h renaming the
+ * own source is compiled unmodified, with src/host/gfx-gui.h renaming the
  * entry points wrapped here. src/kern/nogfx.c replaces this file and the
  * backend with -Dgfx=none.
  *
@@ -44,7 +44,7 @@ static int screenready;
 /*
  * Which screen the machine with --gfx asked for (design/epoch-0/headless-screen.md),
  * set by src/gfx.zig when it claims the screen: the headless screen
- * (src/kern/gfx-headless.c, h9_hl_*) or the window backend (renamed h9_gui_*
+ * (src/host/gfx-headless.c, h9_hl_*) or the window backend (renamed h9_gui_*
  * by gfx-gui.h). H9_GFX_HEADLESS means the headless screen is linked in,
  * H9_GFX_WINDOW that a window backend is; the web host's canvas
  * (gfx-web.c) is neither, and defines the rest of the interface itself.

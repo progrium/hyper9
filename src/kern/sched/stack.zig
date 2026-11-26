@@ -31,10 +31,12 @@ const is_wasm = builtin.cpu.arch.isWasm();
 const is_windows = builtin.os.tag == .windows;
 const page_size = std.heap.page_size_min;
 
-/// Bytes a stack is, by default, not counting the guard page. 256 KiB is
-/// less than a host thread's stack, and only what's touched is resident.
+/// Bytes a stack is, by default, not counting the guard page. A process's
+/// whole exit loop runs on it, so natively it's a host thread's 8 MiB: a
+/// Debug build's Linux clone alone takes 170 KiB, and the debug allocator
+/// unwinds the stack on each allocation. Only what's touched is resident.
 /// On wasm it's the size of today's coroutine stacks (src/web/coro.zig).
-pub const default_size: usize = if (is_wasm) 320 * 1024 else 256 * 1024;
+pub const default_size: usize = if (is_wasm) 320 * 1024 else 8 * 1024 * 1024;
 
 /// The inaccessible region below a native stack.
 pub const guard_size: usize = if (is_wasm) 0 else page_size;

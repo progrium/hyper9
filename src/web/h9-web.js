@@ -607,7 +607,7 @@ function wsImports(memory, str, credentials, ports) {
   };
 }
 
-// Graphics (design/epoch-0/browser-gfx.md). src/kern/gfx-web.c's imports:
+// Graphics (design/epoch-0/browser-gfx.md). src/host/gfx-web.c's imports:
 // the screen is in wasm memory, and the host copies changed rectangles
 // onto an OffscreenCanvas once a frame; the page's input waits in a queue
 // for gfxinput, a kernel process, to take with gfx_wait.

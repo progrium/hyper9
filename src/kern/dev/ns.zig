@@ -531,7 +531,7 @@ fn nstextin(n: *Ns, buf: []u8) bool {
         if (dev.of(to).dc == 'M') {
             var dial: [*c]u8 = dialof(n, to) orelse null;
             if (dial == null)
-                dial = if (to.mchan.*.srvname != null) to.mchan.*.srvname else @constCast(chan.chanpath(to.mchan));
+                dial = chan.srvname(to.mchan) orelse @constCast(chan.chanpath(to.mchan));
             const spec: [*c]u8 = m.spec();
             if (spec[0] != 0)
                 k = c.snprint(out, nl, @constCast("mount %s %q %q %q\n"), &flag, dial, from, spec)

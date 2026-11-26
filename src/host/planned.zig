@@ -5,6 +5,13 @@
 //! `h9_net_check` do; its sockets are the host's (src/host/net.zig); the
 //! clock is the OS's, entropy the machine's `std.Io`, and the window the
 //! GUI backend's claim.
+//!
+//! The web host's is the same table (design/epoch-0/browser-host.md): its
+//! trees are WASI preopens, described here and not opened, since
+//! wasi-libc already resolves every path beneath one; its clock and
+//! entropy are WASI's, which are JavaScript's; its console is the page's
+//! terminal; its window is the canvas; and it has no listener, since a
+//! page can't listen.
 
 const std = @import("std");
 const policy = @import("../policy.zig");
@@ -42,7 +49,7 @@ pub fn fromPlan(arena: std.mem.Allocator, io: std.Io, plan: *const policy.Plan, 
         // does now: h9's own loopback listeners, such as the machine's
         // resolver (design/linux-dns.md), are opened through it.
         .dial = if (plan.net == .disable) null else .{ .ctx = ctx, .vtable = &dial_vt },
-        .listen = if (plan.net == .disable) null else .{ .ctx = ctx, .vtable = &listen_vt },
+        .listen = if (plan.net == .disable or !net.supported) null else .{ .ctx = ctx, .vtable = &listen_vt },
         .clock = .{ .vtable = &clock_vt },
         .console = extra.console,
         .random = .{ .ctx = rnd, .vtable = &random_vt },
