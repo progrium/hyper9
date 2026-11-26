@@ -690,7 +690,7 @@ extern fn h9_shim_fs_anchor(*Chan) c_int;
 // h9: Linux symlinks (design/epoch-0/linux-symlinks.md, src/kern/fscheck.h)
 extern fn h9_fs_linkwalk() c_int;
 extern fn h9_fs_nofollowing() c_int;
-extern fn h9_fs_atroot(*Chan) c_int; // h9: src/kern/linux.c
+extern fn h9_fs_atroot(*Chan) c_int; // h9: src/kern/linux.zig
 const Qtsymlink = 0x02; // H9_QTSYMLINK
 const Maxlinks = 40; // H9_MAXLINKS
 const Linkbuf = 4096;
@@ -1288,7 +1288,7 @@ pub fn namecx(aname_: [*:0]const u8, amode: c_int, omode: c_int, perm: c_uint, n
                 return port.kerror(&port.Enoattach);
 
             ch = try dev.attach(dev.table()[@intCast(t)].?, @ptrCast(&p.genbuf[n]));
-            // h9: #L, the Linux view's root (src/kern/devlinux.c), is a
+            // h9: #L, the Linux view's root (src/kern/dev/linux.zig), is a
             // union with the Linux root tree bound after it, so a walk
             // from it crosses mounts, as one from / does.
             if (r == 'L')

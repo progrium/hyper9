@@ -18,6 +18,12 @@
 //!   link, rename, getattr, and setattr (design/file-interface.md).
 //! - `devmnt.zig`: devmnt.c, the 9P client.
 //! - `dev/pipe.zig` and `dev/root.zig`: devpipe.c and devroot.c.
+//! - `dev/srv.zig`: h9's devsrv.c, the service registry.
+//! - `dev/linux.zig`: h9's devlinux.c, the Linux view's root (the kern
+//!   library's only: the namespace kernel has no Linux view).
+//! - `linux.zig`: h9's linux.c, the Linux ABI's kernel helpers (the kern
+//!   library's only, too).
+//! - `kserve.zig`: h9's kserve.c, the kernel's 9P2000 server.
 //! - `dev/pty.zig`: h9's src/kern/devpty.c, the Linux ABI's ptys.
 //! - `netcheck.zig`: h9's src/kern/netcheck.c, devip's sandbox hooks.
 //! - `dev/ns.zig`: h9's src/kern/devns.c, the namespace kernel's #N.
@@ -69,6 +75,10 @@ pub const syswide = @import("syswide.zig");
 pub const devmnt = @import("devmnt.zig");
 pub const devpipe = @import("dev/pipe.zig");
 pub const devroot = @import("dev/root.zig");
+pub const devsrv = @import("dev/srv.zig");
+pub const devlinux = @import("dev/linux.zig");
+pub const linux = @import("linux.zig");
+pub const kserve = @import("kserve.zig");
 pub const devpty = @import("dev/pty.zig");
 pub const netcheck = @import("netcheck.zig");
 pub const fscheck = @import("fscheck.zig");
@@ -125,6 +135,12 @@ comptime {
     if (!nskernel) devenv.exportC();
     devhstream.exportC();
     if (!nskernel) devhidx.exportC();
+    devsrv.exportC();
+    kserve.exportC();
+    if (!nskernel) {
+        devlinux.exportC();
+        linux.exportC();
+    }
 }
 
 test {
@@ -141,6 +157,7 @@ test {
     _ = devmnt;
     _ = devpipe;
     _ = devroot;
+    _ = devsrv;
     _ = devpty;
     _ = netcheck;
     _ = fscheck;
@@ -169,6 +186,15 @@ pub const Error = error{ Kernel, Interrupted };
 /// The current process, drawterm's `up`.
 pub inline fn up() *c.Proc {
     return c._getproc();
+}
+
+/// proc.c's h9_uphproc for Zig: the current process, if it's a guest
+/// process (it has a machine), and otherwise an error.
+pub fn uphproc() error{Kernel}!*c.Proc {
+    const p: *c.Proc = c._getproc() orelse return error.Kernel;
+    if (p.mach == null)
+        return kerror("not an h9 process");
+    return p;
 }
 
 pub const ERRMAX = c.ERRMAX;

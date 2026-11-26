@@ -1299,7 +1299,7 @@ pub fn hstreamWait(id: u32) Error!void {
     _ = try check(c.h9_hstream_wait(id));
 }
 
-/// The kernel's 9P2000 server (src/kern/kserve.c, design/epoch-0/kernel-serve.md),
+/// The kernel's 9P2000 server (src/kern/kserve.zig, design/epoch-0/kernel-serve.md),
 /// serving the calling process's namespace.
 pub const Kserve = opaque {
     /// Serves from `root`, a path in the caller's namespace, with ..
@@ -1614,7 +1614,7 @@ comptime {
 }
 
 /// Also h9_kern_locals, everywhere: a kernel thread that acts for a
-/// machine (kserve.c's workers) takes its starter's plan, pages and CPUs.
+/// machine (kserve.zig's workers) takes its starter's plan, pages and CPUs.
 fn h9_web_locals(save: c_int, slots: *[4]usize) callconv(.c) void {
     if (save != 0) {
         slots[0] = @intFromPtr(fs_plan);

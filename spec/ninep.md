@@ -151,7 +151,7 @@ Translating, it allocates the server's fids and tags, since one .L request can t
 
 After the plan's namespace is built and before the program runs, the first Proc forks the server Proc with `RFNAMEG|RFFDG|RFENVG|RFNOTEG|RFNOWAIT`: its own copy of the plan's namespace, so binds the program makes later aren't served, and its own note group, so an interrupt from the console doesn't reach the server. Without `--serve-net` it unmounts `/net`. It runs no guest code.
 
-It starts the kernel's 9P2000 server ([kernel-serve](../design/epoch-0/kernel-serve.md), `src/kern/kserve.c`) on its namespace, with `--serve-root` as the attach root and read-only under `--write=none`, then takes each ready connection from `serve.Server.next`, opens its stream as an fd, puts it through a `#ℓ` conversation's server side, and hands the conversation's `data` to the server (`kern.Kserve.conn`). When a connection hangs up, its fids are clunked and its slot is freed. At the end of the run the server Proc ends every connection and waits for them before it exits. If the attach root can't be walked, each connection is hung up.
+It starts the kernel's 9P2000 server ([kernel-serve](../design/epoch-0/kernel-serve.md), `src/kern/kserve.zig`) on its namespace, with `--serve-root` as the attach root and read-only under `--write=none`, then takes each ready connection from `serve.Server.next`, opens its stream as an fd, puts it through a `#ℓ` conversation's server side, and hands the conversation's `data` to the server (`kern.Kserve.conn`). When a connection hangs up, its fids are clunked and its slot is freed. At the end of the run the server Proc ends every connection and waits for them before it exits. If the attach root can't be walked, each connection is hung up.
 
 #### kserve
 

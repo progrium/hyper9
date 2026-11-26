@@ -196,3 +196,12 @@ No new reach for a guest. Real address checks close a class of bug where a guest
 - **Zig has no thread fence**, so sema.c's `coherence()` calls are comments: what they ordered (the semaphore word, `Sema.waiting`, and in `rendezvous` the process's state and `notepending`) is read and written as sequentially consistent atomics.
 - **A kproc ends by returning**: every host's trampoline (`posix.c`, `win32.c`, and `os-wasm.c`) calls `pexit` after its function, so #ι's reader doesn't call it from Zig frames.
 - **`dev.Native` takes the device's character as a `c_int`**, `Dev.dc`'s type: ℏ and ι don't fit a byte.
+
+
+**2026-11-26, devsrv, devlinux, linux.c, and kserve.** `src/kern/dev/srv.zig`, `src/kern/dev/linux.zig`, `src/kern/linux.zig`, and `src/kern/kserve.zig` are built in place of `devsrv.c`, `devlinux.c`, `linux.c`, and `kserve.c`, so none of h9's four uses `waserror`. devsrv and devlinux are native devices; kserve is built in both kernels, and devlinux and linux.zig only in the kern library (`port.nskernel` says which), since the namespace kernel has no Linux view and `src/kern/nstab.c` stands in for linux.c's hooks there. Some things the port found:
+
+- **A native device's Devgen can fail.** srvgen checks permission when a walk steps into a board, and devlinux's Devgen finds the caller's machine, which fails for a process that isn't h9's (`h9_uphproc` raised). `dev.zig`'s `Ops` has `egens`, Devgens whose Zig returns an error union, which `callgen` calls directly; their C form raises. `port.uphproc` is `h9_uphproc` for Zig, and `port.h` includes `hproc.h`, so the Zig sees `Hmach`.
+- **devfs's syncs still raise** (`h9_fs_syncfs` and `h9_fs_sync`), so `h9_linux_syncfs` and `h9_linux_sync` call them as a C Devgen is called, through `callgen` and the shim's `waserror`, until devfs is ported.
+- **The Linux ABI declared drawterm's `long`s as 64 bits.** `src/abi/linux/kc.zig` had `h9_linux_ppid`'s result, `h9_linux_chanpread`'s count and result, `h9_linux_await`'s `want`, and `h9_linux_setcputime`'s arguments as `c_long` and `c_ulong`, where C has 32 bits; they're `c_int` and `c_uint` now. Its `Gen`, devlinux's text hook, still takes the pid as `c_ulong`.
+- **kserve leaked a channel on two error paths**: a failed clone after `Tcreate`'s create, and a failed `cunique` in `Tremove`. The Zig closes it.
+- **Not yet per kernel**: the futex queues, as before.

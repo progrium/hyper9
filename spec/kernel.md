@@ -134,7 +134,7 @@ A process takes its record's `debug` lock to swap its fd group, namespace, or do
 
 Serves `/fd/N`.
 
-#### The Linux view `#L` (`src/kern/devlinux.c`, `#λ` before [mounts](../design/epoch-0/mounts.md)), eventfds `#ε` (`src/kern/dev/eventfd.zig`), and ptys `#τ` (`src/kern/dev/pty.zig`)
+#### The Linux view `#L` (`src/kern/dev/linux.zig`, `#λ` before [mounts](../design/epoch-0/mounts.md)), eventfds `#ε` (`src/kern/dev/eventfd.zig`), and ptys `#τ` (`src/kern/dev/pty.zig`)
 
 A Linux process's `/`, its eventfd, epoll, and signalfd instances, and its pseudoterminals (see Linux ABI).
 
@@ -194,7 +194,7 @@ drawterm has no semaphores. 9front's code is ported closely, with the wait lists
 
 The C side of the policy checks devfs and devip call; see Sandbox policy, "Vendor hooks".
 
-#### devsrv `#s`, from 9front (`src/kern/devsrv.c`), per machine
+#### devsrv `#s`, from 9front (`src/kern/dev/srv.zig`), per machine
 
 Guest file servers post themselves in `/srv` (lib9p's `postsrv`, `srvfs`, factotum, plumber), and clients open the posted channel and mount it. 9front's code is ported closely, but each machine has its own root board, hung off its `Hmach` and made on first attach, with its own lock, so machines in one host process can't see each other's services; `clone` boards hang off the machine's root, so `#s/id` addressing works within a machine.
 
@@ -230,9 +230,9 @@ It follows devhstream's pattern and the seam rules: a kproc per conversation rea
 
 The translator is `src/dotl/`: `wire.zig` encodes and bounds-checks 9P2000, 9P2000.L, and ZeroFS's 9P2000.L.Z; `attr.zig` maps `Dir` and Linux `stat`, error strings and errno, mode bits, and the user map; `client.zig` and `server.zig` are the two sides, each a state machine over bytes with no I/O of its own, tested against `testserver.zig`, a .L server in memory, and fuzzed. A create with `DMNAMEDPIPE` is a `Tmknod` of a FIFO, and a server's FIFO lists with `DMNAMEDPIPE` and opens without a server open, reading empty. A machine registers its user and `--user-map` with `kern.zig`, keyed by its `Hmach`.
 
-#### 9P2000 server (`src/kern/kserve.c`)
+#### 9P2000 server (`src/kern/kserve.zig`)
 
-`--serve` needs a 9P server, and running exportfs as a guest process cost a process per connection and per blocking request, needed an exportfs binary, and can't run where there are no guest processes ([kernel-serve](../design/epoch-0/kernel-serve.md)). kserve serves a channel of 9P2000 messages from kernel channels directly: a fid holds a `Chan`, walks use chan.c's `walk()`, opens and creates cross mounts as namec does (with chan.c's `findmount` and `createdir`), and directory reads go through sysfile.c's `kread`, which h9 splits so it runs on a channel (`h9_chanread`, and `h9_chanstat` for `fstat`'s naming). Its reader and worker kprocs act for the process that started serving, through records of their own in its machine (`h9_kprocshare` in `src/kern/proc.zig`) and its thread-local plan and pages (`h9_kern_locals` in `src/kern.zig`), so the sandbox hooks and devices that look up the caller's machine see the server Proc's. It's C under `waserror`, since it sits between channels and devices; Zig hands it a connection through `kern.Kserve`. See [Serving](ninep.md#serving).
+`--serve` needs a 9P server, and running exportfs as a guest process cost a process per connection and per blocking request, needed an exportfs binary, and can't run where there are no guest processes ([kernel-serve](../design/epoch-0/kernel-serve.md)). kserve serves a channel of 9P2000 messages from kernel channels directly: a fid holds a `Chan`, walks use chan.zig's `walk()`, opens and creates cross mounts as namec does (with chan.zig's `findmount` and `createdir`), and directory reads go through sysfile.zig's `chanread`, kread's work on a channel (and `chanstat`, for `fstat`'s naming). Its reader and worker kprocs act for the process that started serving, through records of their own in its machine (`h9_kprocshare` in `src/kern/proc.zig`) and its thread-local plan and pages (`h9_kern_locals` in `src/kern.zig`), so the sandbox hooks and devices that look up the caller's machine see the server Proc's. It's the kernel's Zig ([kernel-port](../design/kernel-port.md)), with error unions, and a request's error is its `Rerror`; Zig hands it a connection through `kern.Kserve`. See [Serving](ninep.md#serving).
 
 #### Index device `#ι` (`src/kern/dev/hidx.zig`, `src/rootindex/`)
 

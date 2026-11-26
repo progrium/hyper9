@@ -3220,7 +3220,7 @@ pub const Machine = struct {
         }
     }
 
-    /// devlinux's text files (src/kern/devlinux.c): /proc and /sys files
+    /// devlinux's text files (src/kern/dev/linux.zig): /proc and /sys files
     /// made from the machine's state. `aux` is the process, for /proc/n
     /// files; the machine is the reader's. Runs on the reading thread,
     /// with the process's note lock held, so it doesn't block.

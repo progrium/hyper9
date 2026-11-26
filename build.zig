@@ -614,12 +614,11 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.O
     });
     kern.root_module.addCSourceFiles(.{
         .root = b.path("src/kern"),
-        .files = &.{ "procshim.c", "devtab.c", "devdup.c", "devoverlay.c", "devsrv.c", "devhtools.c", "fscheck.c", "consx.c", "devshim.c", "werrstr.c", "devdotl.c", "kserve.c" },
+        .files = &.{ "procshim.c", "devtab.c", "devdup.c", "devoverlay.c", "devhtools.c", "fscheck.c", "consx.c", "devshim.c", "werrstr.c", "devdotl.c" },
         .flags = flags,
     });
     // The Linux ABI (design/epoch-0/linux-personality.md) and its host
     // sockets (design/epoch-0/linux-net.md).
-    kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{ "linux.c", "devlinux.c" }, .flags = flags });
     if (web) {
         kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"hostsock-wasm.c"}, .flags = flags });
     } else if (os != .windows) kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{ "hostsock-posix.c", "hostif-posix.c" }, .flags = flags });
@@ -775,8 +774,8 @@ const nskern_sources = [_][]const u8{
     "alloc.c", "data.c", "error.c", "parse.c", "stub.c", "waserror.c",
 };
 const nskern_h9 = [_][]const u8{
-    "procshim.c",   "nstab.c",   "devoverlay.c", "devsrv.c",
-    "devdotl.c",    "kserve.c",  "devshim.c",    "werrstr.c",
+    "procshim.c", "nstab.c",   "devoverlay.c",
+    "devdotl.c",  "devshim.c", "werrstr.c",
 };
 // libc's files the kernel subset uses, from kern_libs' list.
 const nskern_libc_skip = [_][]const u8{ "pushssl.c", "pushtls.c", "crypt.c", "dial.c" };

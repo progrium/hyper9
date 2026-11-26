@@ -50,6 +50,7 @@ const dev = @import("../dev.zig");
 const chan = @import("../chan.zig");
 const pgrp = @import("../pgrp.zig");
 const sysfile = @import("../sysfile.zig");
+const devsrv = @import("srv.zig");
 const c = port.c;
 const up = port.up;
 const Error = port.Error;
@@ -71,13 +72,12 @@ extern fn h9_fgrpclose(f: *c.Fgrp) void;
 extern fn h9_overlay_new(ch: ?*Chan) c_int;
 extern fn h9_overlay_drop(id: c_int) void;
 extern fn h9_overlay_nsunion(ch: *Chan, old: [*:0]const u8, buf: [*]u8, nbuf: c_int) c_int;
-// kserve.c
+// kserve.zig
 extern fn h9_kserve_kns(pg: *Pgrp, slash: *Chan, put: *const fn (?*anyopaque) callconv(.c) void, arg: ?*anyopaque) ?*anyopaque;
 // src/nskernel.zig: runs one bind, mount, unmount or cd line in the calling process's namespace.
 extern fn h9_ns_ctl(ns: ?*anyopaque, line: [*]const u8, n: c_long, err: [*]u8) c_int;
-// src/kern/devshim.c: ns.c's pgrpcpy and devsrv.c's h9_srvpost, which raise.
+// src/kern/devshim.c: ns.c's pgrpcpy, which raises.
 extern fn h9_shim_pgrpcpy(to: *Pgrp, from: *Pgrp, flag: c_int) c_int;
-extern fn h9_shim_srvpost(board: ?*anyopaque, name: [*:0]const u8, ch: *Chan, perm: c_uint) c_int;
 
 const Qtop = 0;
 const Qclone = 1;
@@ -675,7 +675,7 @@ fn srvpost(n: *Ns, name: [*:0]const u8, fd: c_int) Error!void {
     defer chan.cclose(b);
     // The board takes ch, whatever happens.
     posted = true;
-    try dev.caught(h9_shim_srvpost(dev.aux(b).*, name, ch, 0o666));
+    try devsrv.srvpost(dev.aux(b).*.?, name, ch, 0o666);
 }
 
 /// 0, or -1 with the error string set.
