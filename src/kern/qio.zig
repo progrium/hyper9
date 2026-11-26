@@ -1740,3 +1740,44 @@ test "a writer past the limit waits for a reader to drain the queue, and a note 
     qsetlimit(q, 1024);
     try testing.expectEqual(0, qfull(q));
 }
+
+const Wrote = struct {
+    fn run(q: *Queue) void {
+        _ = qwrite(q, "wake", 4) catch {};
+    }
+
+    /// An executor of its own, on a host thread that's no process: it
+    /// resumes the reader there.
+    fn resumer(rq: *sync.sched.RunQueue, pool: *sync.sched.Pool, s: *sync.ktest.Sproc, ok: *bool) void {
+        var e: sync.Kexec = .init(pool, null);
+        defer e.deinit();
+        ok.* = if (sync.ktest.runUntil(&e, rq, sync.ktest.Sproc.isDone, s)) |_| true else |_| false;
+    }
+};
+
+test "a read parks on a continuation, a writer on another thread readies it, and a third resumes it [scheduler]" {
+    const me = try kt.begin();
+    const q = qopen(1024, 0, null, null).?;
+    defer qfree(q);
+    var pool: sync.sched.Pool = .{ .size = 64 * 1024 };
+    defer pool.deinit();
+    var rq: sync.sched.RunQueue = .{};
+    var e: sync.Kexec = .init(&pool, me);
+    defer e.deinit();
+    var s: sync.ktest.Sproc = undefined;
+    s.init(&rq);
+    var r: Reader = .{ .q = q };
+
+    try testing.expectEqual(sync.sched.Outcome.parked, try s.call(&e, Reader.run, .{&r}));
+    try testing.expect(q.rr.p == s.p);
+    var w: kt.Kproc = undefined;
+    try w.start(Wrote.run, .{q});
+    w.join();
+    var ok = false;
+    const t = try std.Thread.spawn(.{}, Wrote.resumer, .{ &rq, &pool, &s, &ok });
+    t.join();
+    try testing.expect(ok);
+    try testing.expectEqual(null, r.result);
+    try testing.expectEqualStrings("wake", r.buf[0..@intCast(r.n)]);
+    try testing.expect(up() == me);
+}
