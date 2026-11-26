@@ -39,7 +39,7 @@ fn unlockfgrp(f: *Fgrp) void {
     c.unlock(&f.ref.lk);
     // h9: not for a Linux process, whose fd 2 is its own stderr: Linux
     // prints nothing past 100 fds, and zig build fails a compile that
-    // writes anything there (design/0018-linux-personality.md).
+    // writes anything there (design/epoch-0/linux-personality.md).
     if (ex != 0 and h9_linux_inview() == 0)
         _ = c.pprint(@constCast("warning: process exceeds %d file descriptors\n"), ex);
 }
@@ -591,7 +591,7 @@ fn restat(nc: *Chan, buf: *?[*]u8, nbuf: *c_int, name: [*]const u8, nname: c_int
 }
 
 /// h9: kread's work on a channel, for kserve (src/kern/kserve.c,
-/// design/kernel-serve.md), so its directory reads of unions and mount
+/// design/epoch-0/kernel-serve.md), so its directory reads of unions and mount
 /// points are sysread's.
 pub fn chanread(ch: *Chan, p: [*]u8, n: c_int, offp: ?*i64) Error!c_int {
     // The offset is passed through on directories, normally. Sysseek

@@ -687,7 +687,7 @@ extern fn h9_overlay_lowerdev(c_int, c_int, Qid, *c_int, *c_int) c_int;
 // h9: devfs-posix.c and devfs-win32.c (src/kern/fscheck.h), through
 // src/kern/devshim.c, since they raise.
 extern fn h9_shim_fs_anchor(*Chan) c_int;
-// h9: Linux symlinks (design/linux-symlinks.md, src/kern/fscheck.h)
+// h9: Linux symlinks (design/epoch-0/linux-symlinks.md, src/kern/fscheck.h)
 extern fn h9_fs_linkwalk() c_int;
 extern fn h9_fs_nofollowing() c_int;
 extern fn h9_shim_fs_chanreadlink(*Chan, [*]u8, c_int, *c_int) c_int;
@@ -788,7 +788,7 @@ pub fn walk(cp: **Chan, names: [*]const [*:0]const u8, nnames: c_int, nomount: b
 }
 
 /// h9: the link a Linux process's walk stopped at
-/// (design/linux-symlinks.md). c is the directory the walk had reached,
+/// (design/epoch-0/linux-symlinks.md). c is the directory the walk had reached,
 /// path its name; the device's walk of the k names from names (k > 0)
 /// ended on a link, the last of them, and rest more names follow it.
 /// Walks the link's target and then the rest: an absolute target from
@@ -933,7 +933,7 @@ fn walkl(cp: **Chan, names: [*]const [*:0]const u8, nnames: c_int, nomount: bool
         }
 
         // h9: .. at a Linux process's chroot stays there, as on Linux
-        // (design/linux-chroot.md).
+        // (design/epoch-0/linux-chroot.md).
         if (dotdot and h9_fs_atroot(ch) != 0) {
             n = 1;
             continue;
@@ -979,7 +979,7 @@ fn walkl(cp: **Chan, names: [*]const [*:0]const u8, nnames: c_int, nomount: bool
 
         // h9: a Linux process's walk that stopped at a link, with names
         // left or at a last name it follows, starts again at the link's
-        // target (design/linux-symlinks.md), unless a mount point comes
+        // target (design/epoch-0/linux-symlinks.md), unless a mount point comes
         // before the link: the walk crosses that first.
         if (!dotdot and wq.nqid > 0 and (wqid[@intCast(wq.nqid - 1)].type & Qtsymlink) != 0 and
             (nhave + wq.nqid < nnames or follow) and h9_fs_linkwalk() != 0)
@@ -1568,7 +1568,7 @@ fn open(cp: **Chan, nomount: bool, amode: c_int, omode: c_int) Error!void {
             saveregisters();
 
             // h9: a link a Linux open didn't follow
-            // (design/linux-symlinks.md)
+            // (design/epoch-0/linux-symlinks.md)
             if ((cp.*.qid.type & Qtsymlink) != 0 and h9_fs_linkwalk() != 0)
                 return port.kerror("too many symbolic links");
             cp.* = try dev.open(dev.of(cp.*), cp.*, omode & ~@as(c_int, c.OCEXEC));
