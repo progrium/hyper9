@@ -6,7 +6,7 @@
 //! "Kernel: drawterm kern/ and the Zig seam".
 //!
 //! A close translation of the C, with error unions in place of
-//! waserror. Each function is exported under its C name.
+//! the C's error labels. Each function is exported under its C name.
 
 const std = @import("std");
 const builtin = @import("builtin");

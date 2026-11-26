@@ -25,6 +25,7 @@
 //!   calls into it.
 //! - `proc.zig`: proc.c, the process record, notes, rfork, and wait
 //!   records, with drawterm's procinit.c.
+//! - `dev/proc.zig`: devproc.c, #p.
 //!
 //! This file is the root the kernel builds compile (build.zig's addKern,
 //! and src/nskernel.zig), and holds what the ported files share: the C
@@ -47,6 +48,12 @@ pub const devpipe = @import("dev/pipe.zig");
 pub const devroot = @import("dev/root.zig");
 pub const glue = @import("glue.zig");
 pub const process = @import("proc.zig");
+pub const devproc = @import("dev/proc.zig");
+
+/// Whether this is the namespace kernel (src/nskernel.zig,
+/// design/epoch-0/namespace-kernel.md), which builds with H9_NSKERNEL and
+/// has none of h9's devices for running programs (#y, for one).
+pub const nskernel = @hasDecl(c, "H9_NSKERNEL");
 
 comptime {
     qio.exportC();
@@ -61,6 +68,7 @@ comptime {
     devroot.exportC();
     glue.exportC();
     process.exportC();
+    if (!nskernel) devproc.exportC();
 }
 
 test {
@@ -79,6 +87,7 @@ test {
     _ = devroot;
     _ = glue;
     _ = process;
+    _ = devproc;
 }
 
 /// A kernel error. The Plan 9 error string is on the process, in

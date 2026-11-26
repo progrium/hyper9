@@ -11,7 +11,7 @@
 //! and popnote, port/proc.c).
 //!
 //! A close translation of the C: the same functions in the same order,
-//! with error unions in place of waserror, each exported under its C
+//! with error unions in place of error labels, each exported under its C
 //! name with the C's contract (a function that returned -1 with the
 //! error string set still does, and one that raised still raises).
 //!

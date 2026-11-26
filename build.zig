@@ -611,7 +611,7 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.O
     });
     kern.root_module.addCSourceFiles(.{
         .root = b.path("src/kern"),
-        .files = &.{ "procshim.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "devproc.c", "devoverlay.c", "devsrv.c", "devhtools.c", "fscheck.c", "netcheck.c", "consx.c", "tsleep.c", "devshim.c", "werrstr.c", "sema.c", "rootdial.c", "devhstream.c", "devdotl.c", "devhidx.c", "kserve.c" },
+        .files = &.{ "procshim.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "devoverlay.c", "devsrv.c", "devhtools.c", "fscheck.c", "netcheck.c", "consx.c", "tsleep.c", "devshim.c", "werrstr.c", "sema.c", "rootdial.c", "devhstream.c", "devdotl.c", "devhidx.c", "kserve.c" },
         .flags = flags,
     });
     // The Linux ABI (design/epoch-0/linux-personality.md) and its host
