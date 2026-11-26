@@ -293,7 +293,7 @@ The root's overlay is printed as `bind -c '#O' /` with `eph` and, over a host tr
 
 `--write=ephemeral` binds each path `scope` would make writable (the cwd, in the tight profile too, and each `--writable` path) as a `#O` overlay over its `#U` tree, printed as `bind -c '#O' <target>` with `eph` and the host path in a comment. Reads come from the host tree; creates, writes, removes, and renames land in memory. The root is an overlay too, `--writable` or not.
 
-The overlay device (`src/kern/devoverlay.c`) keeps a tree in memory over a lower chan: a walk looks in memory first and falls through to the lower device, so devfs's checks (`--read-deny`, hidden paths, symlink resolution) apply to every lower lookup.
+The overlay device (`src/kern/dev/overlay.zig`) keeps a tree in memory over a lower chan: a walk looks in memory first and falls through to the lower device, so devfs's checks (`--read-deny`, hidden paths, symlink resolution) apply to every lower lookup.
 
 A memory node is a copy (a file or directory with its own data), a whiteout (a removed lower name), a directory marker (a lower directory with changed children) or a symbolic link a Linux program made (see Linux ABI).
 

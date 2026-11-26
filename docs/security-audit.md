@@ -338,7 +338,7 @@ devtls, devssl, devdraw, devmouse, devaudio, and qio. h9 adds devices in
 | `#p` proc | `devproc.c` (from 9front) | Looks every pid up in the caller's machine |
 | `#d` dup | `devdup.c` | `/fd/N` |
 | `#s` srv | `devsrv.c` (from 9front) | One board per machine |
-| `#O` overlay and unions | `devoverlay.c` (about 6,000 lines) | Attaching checks the instance belongs to the caller's machine; memory from the guest-physical allocator; union walk cache keyed by the caller's access rules |
+| `#O` overlay and unions | `dev/overlay.zig` (about 5,000 lines) | Attaching checks the instance belongs to the caller's machine; memory from the guest-physical allocator; union walk cache keyed by the caller's access rules |
 | `#L` Linux view | `devlinux.c`, `linux.c` | The Linux root, `/proc`, `/sys`, `/dev`, chroot |
 | `#ε` eventfd/epoll | `dev/eventfd.zig` | Readiness |
 | `#τ` pty | `dev/pty.zig` | Per machine numbering |
@@ -714,7 +714,7 @@ In rough order of expected value:
    replay, oversized fields.
 4. **devfs path checks** (`src/kern/fscheck.c`), as A1 and A5 together:
    links, `..`, contained trees, Windows path aliases, renames, and the
-   overlay's copy-up and whiteout paths in `devoverlay.c`.
+   overlay's copy-up and whiteout paths in `dev/overlay.zig`.
 5. **The shims and CPU state** on KVM and HVF: what user mode can reach in
    the kernel half, exception paths with a malicious Ureg, the kick races.
 6. **The emulator's JIT** memory checks and invalidation, since the emulator
@@ -868,7 +868,7 @@ section 2 with the cases that test it.
 - **Manual review**, in the order of section 11: `GuestBuf` and every caller
   that bypasses it; `src/abi/linux/mm.zig`'s chunk reference counts, copy-on-write
   and shootdown ordering; `src/abi/linux/signal.zig`'s frames and
-  `rt_sigreturn`; `src/kern/devoverlay.c`'s allocator and node lifetimes;
+  `rt_sigreturn`; `src/kern/dev/overlay.zig`'s allocator and node lifetimes;
   devproc's `mem` and `regs` against a running target; and the
   `src/cpupool.zig` handoff.
 - **The shims and CPU state.** On KVM and HVF, write user-mode probes that

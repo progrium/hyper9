@@ -41,8 +41,7 @@ const Error = port.Error;
 
 const Chan = c.Chan;
 
-// src/kern/devshim.c's, since devoverlay.c's h9_overlay_lower can raise.
-extern fn h9_shim_overlay_lower(ch: *Chan, r: *?*Chan) c_int;
+const overlay = @import("dev/overlay.zig");
 
 const Fifo = struct {
     next: ?*Fifo,
@@ -71,8 +70,7 @@ const Key = struct { dc: c_int, dev: c_uint, path: u64 };
 /// overlay.
 fn fifokey(ch_: *Chan) Error!Key {
     var ch = ch_;
-    var l: ?*Chan = null;
-    try dev.caught(h9_shim_overlay_lower(ch, &l));
+    const l = try overlay.lowerof(ch);
     if (l) |lc|
         ch = lc;
     const dc: c_int = dev.of(ch).dc;

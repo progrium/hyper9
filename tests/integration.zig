@@ -10114,7 +10114,7 @@ test "names looked up again after a change in the layer see the change [upper-la
         try s.tmp.dir.createDirPath(std.testing.io, "up");
         var p: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
         // A stack with a layer keeps what its walks found (the walk cache in
-        // devoverlay.c): each name is looked up before and after it changes,
+        // src/kern/dev/overlay.zig): each name is looked up before and after it changes,
         // within the second an entry is kept, from the root and from a
         // working directory, with a directory's names removed and renamed.
         const r = try runLinux(&le, false, &.{ "--dir", try std.fmt.bufPrint(&p, "{s}/up:#L:up", .{s.path}), "/bin/sh", "-c",

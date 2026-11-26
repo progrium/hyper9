@@ -19,6 +19,7 @@
 //! - `devmnt.zig`: devmnt.c, the 9P client.
 //! - `dev/pipe.zig` and `dev/root.zig`: devpipe.c and devroot.c.
 //! - `dev/srv.zig`: h9's devsrv.c, the service registry.
+//! - `dev/overlay.zig`: h9's devoverlay.c, `#O`'s overlays and unions.
 //! - `dev/linux.zig`: h9's devlinux.c, the Linux view's root (the kern
 //!   library's only: the namespace kernel has no Linux view).
 //! - `linux.zig`: h9's linux.c, the Linux ABI's kernel helpers (the kern
@@ -76,6 +77,7 @@ pub const devmnt = @import("devmnt.zig");
 pub const devpipe = @import("dev/pipe.zig");
 pub const devroot = @import("dev/root.zig");
 pub const devsrv = @import("dev/srv.zig");
+pub const devoverlay = @import("dev/overlay.zig");
 pub const devlinux = @import("dev/linux.zig");
 pub const linux = @import("linux.zig");
 pub const kserve = @import("kserve.zig");
@@ -136,6 +138,7 @@ comptime {
     devhstream.exportC();
     if (!nskernel) devhidx.exportC();
     devsrv.exportC();
+    devoverlay.exportC();
     kserve.exportC();
     if (!nskernel) {
         devlinux.exportC();
@@ -158,6 +161,7 @@ test {
     _ = devpipe;
     _ = devroot;
     _ = devsrv;
+    _ = devoverlay;
     _ = devpty;
     _ = netcheck;
     _ = fscheck;

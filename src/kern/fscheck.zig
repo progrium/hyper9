@@ -8,8 +8,8 @@
 //!
 //! h9_fs_mkfifopath returns -1 with the error in errstr, as the sys*
 //! wrappers do; h9_fs_chanisfifo raises for the C that calls it.
-//! devoverlay's and devfs's calls that raise go through
-//! src/kern/devshim.c.
+//! The overlay is called directly (src/kern/dev/overlay.zig); devfs's
+//! calls that raise go through src/kern/devshim.c.
 
 const std = @import("std");
 const port = @import("port.zig");
@@ -23,13 +23,12 @@ const Chan = c.Chan;
 
 const H9_DMFIFO: c_uint = 0x00200000;
 
-// devoverlay.c's and devfs's, which don't raise.
-extern fn h9_overlay_isfifo(ch: *Chan) c_int;
+const overlay = @import("dev/overlay.zig");
+// devfs's, which doesn't raise.
 extern fn h9_fs_isfifo(ch: *Chan) c_int;
 // devhidx.c
 extern fn h9_hidx_dotl(ch: *Chan) c_int;
 // src/kern/devshim.c: those that raise.
-extern fn h9_shim_overlay_mkfifo(ch: *Chan, name: [*:0]const u8, perm: c_uint) c_int;
 extern fn h9_shim_fs_mkfifo(ch: *Chan, name: [*:0]const u8, perm: c_uint) c_int;
 
 
@@ -91,7 +90,7 @@ fn mkfifopath(path: [*:0]const u8, perm: c_uint) Error!void {
     var ch = nn.ch;
     switch (dev.of(ch).dc) {
         // The overlay takes the chan, whatever happens.
-        'O' => return dev.caught(h9_shim_overlay_mkfifo(ch, nn.name, perm)),
+        'O' => return overlay.mkfifo(ch, nn.name, perm),
         'U' => {
             defer chan.cclose(ch);
             try dev.caught(h9_shim_fs_mkfifo(ch, nn.name, perm));
@@ -122,7 +121,7 @@ fn h9_fs_mkfifopath(path: [*:0]const u8, perm: c_uint) callconv(.c) c_int {
 /// server, whose Dir has H9_DMFIFO.
 pub fn chanisfifo(ch: *Chan) Error!bool {
     switch (dev.of(ch).dc) {
-        'O' => return h9_overlay_isfifo(ch) != 0,
+        'O' => return overlay.isfifo(ch),
         'U' => return h9_fs_isfifo(ch) != 0,
         'M' => {
             if (!dotlmount(ch))

@@ -254,21 +254,10 @@ h9_shim_fs_anchor(Chan *c)
 }
 
 /*
- * What src/kern/fscheck.zig calls that raises: devoverlay's FIFOs, and
- * devfs's (or nstab.c's stand-ins for them).
+ * What src/kern/fscheck.zig and src/kern/dev/overlay.zig call that raises:
+ * devfs's FIFOs (or nstab.c's stand-in for them).
  */
-extern void h9_overlay_mkfifo(Chan*, char*, ulong);
 extern void h9_fs_mkfifo(Chan*, char*, ulong);
-
-int
-h9_shim_overlay_mkfifo(Chan *c, char *name, ulong perm)
-{
-	if(waserror())
-		return -1;
-	h9_overlay_mkfifo(c, name, perm);
-	poperror();
-	return 0;
-}
 
 int
 h9_shim_fs_mkfifo(Chan *c, char *name, ulong perm)
@@ -276,19 +265,6 @@ h9_shim_fs_mkfifo(Chan *c, char *name, ulong perm)
 	if(waserror())
 		return -1;
 	h9_fs_mkfifo(c, name, perm);
-	poperror();
-	return 0;
-}
-
-/* And src/kern/fifo.zig's: the overlay's lower chan for a FIFO's key. */
-extern Chan *h9_overlay_lower(Chan*);
-
-int
-h9_shim_overlay_lower(Chan *c, Chan **r)
-{
-	if(waserror())
-		return -1;
-	*r = h9_overlay_lower(c);
 	poperror();
 	return 0;
 }

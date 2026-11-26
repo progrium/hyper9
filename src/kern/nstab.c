@@ -45,13 +45,11 @@ Dev *devtab[] = {
 };
 
 /* Their optional operations (design/file-interface.md, src/kern/devx.h). */
-extern Devx overlaydevx;
 #ifdef H9_NSKERNEL_HOSTFS
 extern Devx fsdevx;
 #endif
 
 Devx *devxtab[] = {
-	&overlaydevx,
 #ifdef H9_NSKERNEL_HOSTFS
 	&fsdevx,
 #endif
