@@ -6,7 +6,7 @@ created: 2026-11-21
 authors: [progrium]
 depends: [baseline-1, namespace-kernel, kernel-serve]
 areas: [kern, build, tests]
-branch: []
+branch: [dev]
 ---
 
 # Proposal: Port the kernel core to Zig, as an instance
@@ -96,7 +96,7 @@ No new reach for a guest. Real address checks close a class of bug where a guest
 
 - [ ] `zig build test`, `zig build integration` on every engine, `zig build integration -Dweb`, and `zig build web-test` pass with no case removed or newly skipped.
 - [ ] [namespace-kernel](epoch-0/namespace-kernel.md)'s cases pass against the ported core.
-- [ ] `zig build conformance` runs a script of namespace operations (binds, unions, mounts, `..` across mounts, creates in unions, `ORCLOSE`, and flush) on h9 and on a 9front kernel under QEMU, and the transcripts match.
+- [x] `zig build conformance` runs a script of namespace operations (binds, unions, mounts, `..` across mounts, creates in unions, `ORCLOSE`, and flush) on h9 and on a 9front kernel under QEMU, and the transcripts match.
 - [ ] `git grep -l waserror src/` finds nothing, and the build compiles none of `chan.c`, `pgrp.c`, `dev.c`, `devmnt.c`, `qio.c`, `devpipe.c`, `devroot.c`, or `sysfile.c` from `third_party/drawterm/kern/`.
 - [ ] `test "two machines don't share /srv [kernel-port]"` and `test "two machines don't share devcmd conversations [kernel-port]"` pass with two machines in one process.
 - [ ] `test "a bad guest pointer is a fault, not a host crash [kernel-port]"` passes for read, write, and stat buffers.
@@ -120,3 +120,7 @@ No new reach for a guest. Real address checks close a class of bug where a guest
 
 - Whether the C devices h9 wrote (devoverlay, devdotl, devlinux, and the rest) are ported under this proposal or after it. As written, they're adapted through the shim in step 3 and ported later without a proposal, as internal refactors.
 - Whether the 9front oracle runs in CI or only by hand. It needs QEMU and a 9front image, which `zig build mkroot` already uses.
+
+## Updates
+
+**2026-11-26, the conformance check.** `zig build conformance` runs [tests/conformance/ns.rc](../tests/conformance/ns.rc) on h9 and compares it with a transcript recorded on 9front, [tests/conformance/9front.out](../tests/conformance/9front.out), so it runs in CI and anywhere else with no QEMU, which settles the second open issue. `zig build conformance -- --oracle` records the transcript again: it boots the arm64 image that `zig build mkroot` boots, under QEMU (TCG is fine, and takes under a minute), and runs the script there. The script compiles a small C helper in the guest for `ORCLOSE`, which rc can't ask for, and tests flush by interrupting a read blocked in exportfs, through `srvfs`. Today's C kernel matches 9front's transcript on sud and hcpu, with no differences to note.
