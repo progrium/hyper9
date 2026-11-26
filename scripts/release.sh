@@ -11,6 +11,10 @@
 #                                         JS files they import)
 #   h9ns-<version>-<target>.tar.gz        MIT: the namespace kernel as a
 #                                         static library (libh9ns.a, h9ns.h)
+#   libh9-<version>-<target>.tar.gz|zip   MIT: h9's C ABI as a shared
+#                                         library (libh9.so, libh9.dylib, or
+#                                         h9.dll, and h9.h), which go-h9
+#                                         fetches
 #   SHA256SUMS
 #
 # Every binary is built from an unpacked `git archive` of HEAD, not the
@@ -105,7 +109,18 @@ cp "$src/LICENSE" "$work/$name/LICENSE"
 cp "$src/third_party/drawterm/LICENSE" "$work/$name/LICENSE.drawterm"
 archive "$work/$name" "$name"
 
+# libh9 (src/capi.zig): Linux's against glibc, since a program that loads
+# it, such as a Go one through purego, has glibc's loader.
+for t in x86_64-linux-gnu aarch64-linux-gnu aarch64-macos x86_64-windows-gnu; do
+	name="libh9-$version-$t"
+	build "$work/build-lib-$t" "$t" libh9
+	cp -R "$work/build-lib-$t/libh9" "$work/$name"
+	cp "$src/LICENSE" "$work/$name/LICENSE"
+	cp "$src/third_party/drawterm/LICENSE" "$work/$name/LICENSE.drawterm"
+	archive "$work/$name" "$name"
+done
+
 rm -rf "$work"
-(cd "$out" && shasum -a 256 h9-* >SHA256SUMS)
+(cd "$out" && shasum -a 256 h9-* libh9-* >SHA256SUMS)
 echo "release: $out"
 ls -1 "$out"

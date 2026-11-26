@@ -11,16 +11,17 @@ Every proposal at the top of [design/](README.md), in the order they were writte
 | [host-cmd](host-cmd.md) |  | draft | in progress on host-cmd | Rethinking host commands |
 | [child-machines](child-machines.md) | [#109](../../../issues/109) | proposed |  | Child machines |
 | [wine-draw](wine-draw.md) | [#158](../../../issues/158) | proposed | in progress on wine-draw | Wine windows through draw |
-| [baseline-1](baseline-1.md) |  | draft | in progress on claude/project-thread-zhebn2 | Baseline 1 (h9 at the end of epoch 0) |
+| [baseline-1](baseline-1.md) |  | implemented |  | Baseline 1 (h9 at the end of epoch 0) |
 | [file-interface](file-interface.md) |  | draft | needs kernel-port | A wider file interface inside the kernel, with 9P2000 as a view |
 | [host-handles](host-handles.md) |  | draft | needs kernel-port | Host access through handles |
-| [kernel-port](kernel-port.md) |  | draft | needs baseline-1 | Port the kernel core to Zig, as an instance |
-| [memory-model](memory-model.md) |  | draft | needs baseline-1 | One memory model under both ABIs |
-| [plan-format](plan-format.md) |  | draft | needs baseline-1, child-machines | The plan as a file, and the one way in |
+| [kernel-port](kernel-port.md) |  | draft |  | Port the kernel core to Zig, as an instance |
+| [memory-model](memory-model.md) |  | draft |  | One memory model under both ABIs |
+| [plan-format](plan-format.md) |  | draft | needs child-machines | The plan as a file, and the one way in |
 | [scheduler](scheduler.md) |  | draft | needs kernel-port | A scheduler, with processes on per-core executors |
 | [virtual-loopback](virtual-loopback.md) | [#315](../../../issues/315) | proposed |  | A loopback network per machine |
 | [file-watch](file-watch.md) | [#316](../../../issues/316) | proposed |  | Watching files for changes, on the host and in the guest |
 | [linux-dns](linux-dns.md) |  | draft |  | Name patterns for a Linux guest's DNS |
+| [libh9](libh9.md) |  | draft | in progress on claude/project-thread-prxykq | libh9, machines behind a C ABI |
 
 ```mermaid
 flowchart LR
@@ -33,7 +34,7 @@ flowchart LR
   p_host_cmd["host-cmd<br/>draft"]:::draft
   p_child_machines["child-machines<br/>proposed"]:::draft
   p_wine_draw["wine-draw<br/>proposed"]:::draft
-  p_baseline_1["baseline-1<br/>draft"]:::draft
+  p_baseline_1["baseline-1<br/>implemented"]:::implemented
   p_file_interface["file-interface<br/>draft"]:::draft
   p_host_handles["host-handles<br/>draft"]:::draft
   p_kernel_port["kernel-port<br/>draft"]:::draft
@@ -43,6 +44,7 @@ flowchart LR
   p_virtual_loopback["virtual-loopback<br/>proposed"]:::draft
   p_file_watch["file-watch<br/>proposed"]:::draft
   p_linux_dns["linux-dns<br/>draft"]:::draft
+  p_libh9["libh9<br/>draft"]:::draft
   p_host_handles --> p_host_sandbox
   p_kernel_port --> p_file_interface
   p_kernel_port --> p_host_handles

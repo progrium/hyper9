@@ -1,0 +1,10 @@
+/* libh9's exports on ELF hosts: h9.h's functions, and nothing of the
+   kernel's own h9_ calls between its C and Zig. */
+{
+	global:
+		h9_abi_version;
+		h9_version;
+		h9_machine_*;
+	local:
+		*;
+};

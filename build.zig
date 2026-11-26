@@ -101,6 +101,9 @@ const kern_flags_common = [_][]const u8{
     "-Wno-missing-braces",
     "-D_THREAD_SAFE",
     "-fno-sanitize=undefined",
+    // drawterm's names (error, print, lock, panic) stay inside h9, so in
+    // libh9 (src/capi.zig), a shared library, they don't bind to libc's.
+    "-fvisibility=hidden",
 };
 // PTHREAD, as Make.linux, makes libc/lock.c's Lock a pthread mutex. Without
 // it unlock is a plain store with no release ordering, so on arm64 another
@@ -1944,6 +1947,36 @@ pub fn build(b: *std.Build) void {
     // running both doesn't run them twice; `zig build test integration`
     // runs everything.
 
+    // libh9 (src/capi.zig): machines behind a C ABI, as a shared library,
+    // with its header, in zig-out/libh9 (docs/embedding.md, "From C and
+    // other languages").
+    const libh9 = b.addLibrary(.{
+        .name = "h9",
+        .linkage = .dynamic,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/capi.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            // Debug info is most of a release build's size (30 MB of 36).
+            .strip = if (optimize == .debug) null else true,
+            .imports = &.{.{ .name = "h9", .module = mod.mod }},
+        }),
+    });
+    if (os == .macos) {
+        addSdkPaths(b, libh9.root_module);
+        libh9.root_module.linkFramework("Hypervisor", .{});
+    }
+    if (target.result.ofmt == .elf) libh9.setVersionScript(b.path("src/capi/libh9.map"));
+    const libh9_dir: std.Build.InstallDir = .{ .custom = "libh9" };
+    const libh9_step = b.step("libh9", "Build libh9, h9 behind a C ABI (src/capi/h9.h), into zig-out/libh9");
+    libh9_step.dependOn(&b.addInstallArtifact(libh9, .{
+        .dest_dir = .{ .override = libh9_dir },
+        .implib_dir = if (os == .windows) .{ .override = libh9_dir } else .disabled,
+        .pdb_dir = .disabled,
+    }).step);
+    libh9_step.dependOn(&b.addInstallFileWithDir(b.path("src/capi/h9.h"), libh9_dir, "h9.h").step);
+
     // docs/embedding/embed.zig, docs/embedding.md's example of embedding h9.
     const embed_example = b.addExecutable(.{
         .name = "embed",
@@ -1983,6 +2016,27 @@ pub fn build(b: *std.Build) void {
         if (emu != .none) run_embed.addCheck(.{ .expect_stdout_match = "machine 1 (hcpu): exited \"\"\n  hello\n" });
         run_embed.addCheck(.{ .expect_term = .{ .exited = 0 } });
         test_step.dependOn(&run_embed.step);
+    }
+
+    // docs/embedding/hello.c, libh9 from C. zig build test runs it on the
+    // hello fixture where the embed example runs, with the emulator, so
+    // it needs no entitlement.
+    const libh9_example = b.addExecutable(.{
+        .name = "libh9-hello",
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
+    });
+    libh9_example.root_module.addCSourceFile(.{ .file = b.path("docs/embedding/hello.c") });
+    libh9_example.root_module.addIncludePath(b.path("src/capi"));
+    libh9_example.root_module.linkLibrary(libh9);
+    b.step("libh9-example", "Build docs/embedding/hello.c, libh9 from C, as zig-out/bin/libh9-hello").dependOn(&b.addInstallArtifact(libh9_example, .{}).step);
+    if (emu != .none and runs_here) {
+        const run_c = b.addRunArtifact(libh9_example);
+        run_c.addFileArg(host_hello);
+        run_c.addArgs(&.{ "--engine", "hcpu" });
+        run_c.addCheck(.{ .expect_stdout_match = "engine hcpu, arch " });
+        run_c.addCheck(.{ .expect_stdout_match = "hello\nexited \"\"\n" });
+        run_c.addCheck(.{ .expect_term = .{ .exited = 0 } });
+        test_step.dependOn(&run_c.step);
     }
 
     // ha64's [hcpu] cases, through the engine interface on

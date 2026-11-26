@@ -25,6 +25,7 @@ builds with `zig build embed` and runs in `zig build test`.
 8. [Several machines in one process](#several-machines-in-one-process)
 9. [Connecting files, devices, and 9P servers](#connecting-files-devices-and-9p-servers)
 10. [Rules for embedders](#rules-for-embedders)
+11. [From C and other languages](#from-c-and-other-languages)
 
 ## A first program
 
@@ -508,3 +509,53 @@ writes.
 - Exit codes are yours to decide; the library returns `exits` strings.
 - The library never reads the process's stdin, environment, or terminal,
   and never writes to stdout itself. Everything goes through `Options`.
+
+## From C and other languages
+
+libh9 is the same machines behind a C ABI, as a shared library, for
+programs that aren't written in Zig. `zig build libh9` puts it
+(`libh9.so`, `libh9.dylib`, or `h9.dll`) and its header,
+[src/capi/h9.h](../src/capi/h9.h), in `zig-out/libh9`, and each release
+has an archive of them for Linux (against glibc) on amd64 and arm64,
+macOS on arm64, and Windows on amd64. Go programs use it through
+[go-h9](https://github.com/progrium/go-h9), which loads it without cgo.
+
+The ABI is small on purpose. A machine is configured with the `h9`
+command's own flags, parsed as the command parses them, so options added
+to the command reach libh9 without a change to the ABI:
+
+```c
+const char *flags[] = {"--dir", "/path/to/root", "--net", "disable", "--timeout", "30s"};
+char msg[512];
+h9_machine *m = h9_machine_new(flags, 6, msg, sizeof msg);
+
+const char *argv[] = {"rc", "-c", "echo hello from $sysname"};
+int r = h9_machine_run(m, argv, 3, NULL, 0, H9_NOFD, 1, 2, msg, sizeof msg);
+// r is H9_EXITED with the exits string in msg, H9_KILLED with the note,
+// or -1 with why it didn't run.
+h9_machine_free(m);
+```
+
+Each run takes the console's descriptors (HANDLEs on Windows) for that
+run alone, and `h9_machine_signal` delivers `H9_INTERRUPT`, `H9_HANGUP`,
+or `H9_STOP` from another thread. [embedding/hello.c](embedding/hello.c)
+is a complete program, built by `zig build libh9-example` and run by
+`zig build test`.
+
+What differs from the command:
+
+- The library reads no environment. With no mount on `/`, the root is
+  the built-in one, never `$H9ROOT`; the cwd is bound only with `--cwd`;
+  and there's no proxy unless the caller's flags say so.
+- `--check`, `--version`, `--help`, `--print`, and `--rc` are the
+  command's, and `--gfx`, `--serve`, `--trace`, and `--cred` aren't in
+  libh9 yet.
+- `H9_ABI_VERSION` changes whenever the ABI does, until it's declared
+  stable; check `h9_abi_version()` after loading the library.
+
+A host that installs signal handlers of its own, such as Go's runtime,
+can use libh9 as it is: after making each machine, libh9 adds
+`SA_ONSTACK` to the handlers h9 installed, which Go requires. On macOS,
+the host program needs the hypervisor entitlement to use HVF, as above;
+without it, `.auto` falls back to the emulator.
+
