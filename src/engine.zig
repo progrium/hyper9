@@ -438,24 +438,34 @@ pub const hwcap_arm64_atomics: u64 = 1 << 8;
 /// parent's when it starts, and given back when it ends.
 pub const Quota = struct {
     limit: u64,
-    used: std.atomic.Value(u64) = .init(0),
+    // Under a lock, since wasm32 has no 64-bit atomics.
+    used: u64 = 0,
+    mutex: std.atomic.Mutex = .unlocked,
+
+    fn lock(q: *Quota) void {
+        while (!q.mutex.tryLock()) std.atomic.spinLoopHint();
+    }
 
     /// Takes `n` bytes, or nothing if fewer are left.
     pub fn take(q: *Quota, n: u64) bool {
-        var cur = q.used.load(.monotonic);
-        while (true) {
-            if (n > q.limit or cur > q.limit - n) return false;
-            cur = q.used.cmpxchgWeak(cur, cur + n, .acq_rel, .monotonic) orelse return true;
-        }
+        q.lock();
+        defer q.mutex.unlock();
+        if (n > q.limit - q.used) return false;
+        q.used += n;
+        return true;
     }
 
     pub fn give(q: *Quota, n: u64) void {
-        _ = q.used.fetchSub(n, .acq_rel);
+        q.lock();
+        defer q.mutex.unlock();
+        q.used -|= n;
     }
 
     /// The bytes not taken.
-    pub fn left(q: *const Quota) u64 {
-        return q.limit -| q.used.load(.acquire);
+    pub fn left(q: *Quota) u64 {
+        q.lock();
+        defer q.mutex.unlock();
+        return q.limit -| q.used;
     }
 };
 
