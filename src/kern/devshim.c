@@ -200,3 +200,30 @@ h9_shim_fs_chanreadlink(Chan *c, char *buf, int nbuf, int *r)
 	poperror();
 	return 0;
 }
+
+/*
+ * And src/kern/fifo.zig's: the overlay's lower chan for a FIFO's key,
+ * and whether a chan is a FIFO's (src/kern/fscheck.h), which stats it.
+ */
+extern Chan *h9_overlay_lower(Chan*);
+extern int h9_fs_chanisfifo(Chan*);
+
+int
+h9_shim_overlay_lower(Chan *c, Chan **r)
+{
+	if(waserror())
+		return -1;
+	*r = h9_overlay_lower(c);
+	poperror();
+	return 0;
+}
+
+int
+h9_shim_fs_chanisfifo(Chan *c, int *r)
+{
+	if(waserror())
+		return -1;
+	*r = h9_fs_chanisfifo(c);
+	poperror();
+	return 0;
+}

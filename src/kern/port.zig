@@ -22,6 +22,7 @@
 //! - `tsleep.zig`: tsleep.c, sleep with a timeout.
 //! - `sema.zig`: sema.c, semaphores and rendezvous for guests.
 //! - `dev/hcons.zig`: devhcons.c, #y, a machine's console.
+//! - `fifo.zig`: fifo.c, the Linux ABI's FIFOs.
 //!
 //! This file is the root the kernel builds compile (build.zig's addKern,
 //! and src/nskernel.zig), and holds what the ported files share: the C
@@ -44,6 +45,7 @@ pub const devroot = @import("dev/root.zig");
 pub const tsleep = @import("tsleep.zig");
 pub const sema = @import("sema.zig");
 pub const devhcons = @import("dev/hcons.zig");
+pub const fifo = @import("fifo.zig");
 
 /// Whether this is the namespace kernel (src/nskernel.zig,
 /// design/epoch-0/namespace-kernel.md), which builds with H9_NSKERNEL and
@@ -63,6 +65,7 @@ comptime {
     tsleep.exportC();
     sema.exportC();
     if (!nskernel) devhcons.exportC();
+    fifo.exportC();
 }
 
 test {
@@ -81,6 +84,7 @@ test {
     _ = tsleep;
     _ = sema;
     _ = devhcons;
+    _ = fifo;
 }
 
 /// A kernel error. The Plan 9 error string is on the process, in
