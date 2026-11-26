@@ -835,7 +835,7 @@ test "--print shows the plan and doesn't run [baseline]" {
     try std.testing.expect(std.mem.indexOf(u8, r.out, "profile:  tight\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "net.disable") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "memory=512M timeout=1m") != null);
-    try std.testing.expect(std.mem.indexOf(u8, r.out, "devmask:  #C #I #ℏ #U #ι #b #i #m #μ\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "devmask:  #C #I #ℏ #U #ū #ι #b #i #m #μ\n") != null);
 }
 
 test "--memory caps guest memory [baseline]" {
@@ -5341,7 +5341,7 @@ test "--no-guest-tools leaves out the bind and masks #H [guest-tools]" {
     defer p.deinit();
     try std.testing.expect(std.mem.indexOf(u8, p.out, "#H/bin") == null);
     // The web host also masks #I, having no sockets.
-    const want = if (getenv(3, "H9_TEST_WEB") != null) "devmask:  #C #I #H #U #ι #b #i #m #μ\n" else "devmask:  #C #H #U #ι #b #i #m #μ\n";
+    const want = if (getenv(3, "H9_TEST_WEB") != null) "devmask:  #C #I #H #U #ū #ι #b #i #m #μ\n" else "devmask:  #C #H #U #ū #ι #b #i #m #μ\n";
     try std.testing.expect(std.mem.indexOf(u8, p.out, want) != null);
     const r = try run(e, &.{ "--no-guest-tools", "ls", "#H" });
     defer r.deinit();
@@ -10123,17 +10123,48 @@ test "ns prints an up instance as bind -u [upper-layers]" {
     });
     defer r.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{r.err});
-    // The host path as ns writes it, which on Windows has / for each \
-    // and a leading / (#U/C:/...).
-    var hp: [std.Io.Dir.max_path_bytes + 1]u8 = undefined;
-    const host = if (builtin.os.tag == .windows) blk: {
-        hp[0] = '/';
-        @memcpy(hp[1..][0..s.path.len], s.path);
-        std.mem.replaceScalar(u8, hp[1..][0..s.path.len], '\\', '/');
-        break :blk hp[0 .. s.path.len + 1];
-    } else s.path;
-    var want: [std.Io.Dir.max_path_bytes + 32]u8 = undefined;
-    try expectIn(r.out, try std.fmt.bufPrint(&want, "bind -u '#U{s}/up' /n/x", .{host}));
+    // The layer by its handle's name, not its host path
+    // (design/host-handles.md).
+    try expectIn(r.out, "bind -u '#Ud");
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "/up' /n/x") == null);
+}
+
+test "/proc/n/ns shows handle names and no host path, in every profile [host-handles]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.createDirPath(std.testing.io, "r");
+    var rb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    for ([_][]const u8{ "--profile=default", "--profile=tight" }) |profile| {
+        const r = try run(e, &.{ "--cwd", s.path, profile, "--readable", try under(&s, &rb, "r"), "--rc", "cat /proc/$pid/ns" });
+        defer r.deinit();
+        errdefer std.debug.print("{s}: {s}\nstderr: {s}\n", .{ profile, r.out, r.err });
+        try expectIn(r.out, "'#Ucwd' /mnt/term/cwd");
+        try expectIn(r.out, "'#Ud");
+        // No host tree by its host path, whatever the host spells it as.
+        try std.testing.expect(std.mem.indexOf(u8, r.out, "#U/") == null);
+        try std.testing.expect(std.mem.indexOf(u8, r.out, std.fs.path.basename(s.path)) == null);
+    }
+}
+
+test "--ns replays /proc/n/ns output in a machine with the same handles [host-handles]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.createDirPath(std.testing.io, "sub");
+    try s.tmp.dir.createDirPath(std.testing.io, "mnt");
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "sub/f", .data = "hi\n" });
+    const w = try run(e, &.{ "--cwd", s.path, "--rc", "bind /mnt/term/cwd/sub /mnt/term/cwd/mnt && cat /proc/$pid/ns >/mnt/term/cwd/ns" });
+    defer w.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{w.err});
+    try std.testing.expectEqual(@as(u8, 0), w.code);
+    var nb: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+    const r = try run(e, &.{ "--cwd", s.path, "--ns", try std.fmt.bufPrint(&nb, "@{s}/ns", .{s.path}), "--rc", "cat /mnt/term/cwd/mnt/f" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("hi\n", r.out);
 }
 
 test "links and FIFOs are made in the layer [upper-layers]" {
@@ -10154,10 +10185,48 @@ test "links and FIFOs are made in the layer [upper-layers]" {
         try std.testing.expectEqualStrings("ok\n", r.out);
         var lb: [64]u8 = undefined;
         const n = try s.tmp.dir.readLink(std.testing.io, "up/root/lnk", &lb);
+        // On Windows the link keeps its target with '\\' for each '/', as
+        // WSL and tar make them, and the FIFO is an empty file with WSL's
+        // reparse tag for one.
+        if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, lb[0..n], '\\', '/');
         try std.testing.expectEqualStrings("/etc/alpine-release", lb[0..n]);
-        const st = try s.tmp.dir.statFile(std.testing.io, "up/root/ff", .{ .follow_symlinks = false });
-        try std.testing.expectEqual(std.Io.File.Kind.named_pipe, st.kind);
+        if (builtin.os.tag == .windows) {
+            var pb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            try std.testing.expectEqual(@as(u32, 0x80000024), try reparseTag(try std.fmt.bufPrint(&pb, "{s}\\up\\root\\ff", .{s.path})));
+        } else {
+            const st = try s.tmp.dir.statFile(std.testing.io, "up/root/ff", .{ .follow_symlinks = false });
+            try std.testing.expectEqual(std.Io.File.Kind.named_pipe, st.kind);
+        }
     }
+}
+
+/// The reparse tag of path's own entry on Windows (FindFirstFileW's
+/// dwReserved0), or 0 if it has none.
+fn reparseTag(path: []const u8) !u32 {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const W = struct {
+        const FindData = extern struct {
+            attrs: u32,
+            times: [6]u32,
+            size_high: u32,
+            size_low: u32,
+            reserved0: u32,
+            reserved1: u32,
+            name: [260]u16,
+            alt: [14]u16,
+            rest: [3]u32,
+        };
+        extern "kernel32" fn FindFirstFileW(p: [*:0]const u16, d: *FindData) callconv(.winapi) ?*anyopaque;
+        extern "kernel32" fn FindClose(h: ?*anyopaque) callconv(.winapi) i32;
+    };
+    var wp: [std.Io.Dir.max_path_bytes:0]u16 = undefined;
+    const n = try std.unicode.utf8ToUtf16Le(&wp, path);
+    wp[n] = 0;
+    var d: W.FindData = undefined;
+    const h = W.FindFirstFileW(&wp, &d);
+    if (h == null or @intFromPtr(h) == std.math.maxInt(usize)) return error.FileNotFound;
+    _ = W.FindClose(h);
+    return if (d.attrs & 0x400 != 0) d.reserved0 else 0;
 }
 
 test "a rename across directories copies up and renames in the layer [upper-layers]" {
@@ -13583,11 +13652,12 @@ test "a child's memory is reserved from the parent's and returned at exit [child
     defer r.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{r.err});
     try std.testing.expectEqualStrings("a\nb\n", r.out);
-    // Two at once don't.
-    const two = try run(e, &.{ "--children", "--memory", "512m", "--rc", "h9 --memory 300m --rc 'sleep 3' & sleep 1; h9 --memory 300m --rc 'echo b'; echo $status; wait" });
+    // Two at once don't: the second starts once the first is up.
+    const two = try run(e, &.{ "--children", "--memory", "512m", "--rc", "cd /tmp; h9 --memory 300m --rc 'touch up; sleep 5' & while(! test -e up) sleep 0.1; h9 --memory 300m --rc 'echo b' || echo refused; wait" });
     defer two.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ two.out, two.err });
     try expectIn(two.err, "memory");
-    try std.testing.expect(std.mem.indexOf(u8, two.out, "b\n") == null);
+    try std.testing.expectEqualStrings("refused\n", two.out);
     // Without --memory, a child gets half of what's left.
     const half = try run(e, &.{ "--children", "--memory", "512m", "--rc", "h9 --print --rc date | grep '^memory'" });
     defer half.deinit();
@@ -13608,10 +13678,15 @@ test "a child that wants more memory than is left fails at exec [child-machines]
 
 test "a child's processes count against the parent's pids [child-machines]" {
     const e = try env(@src());
-    const r = try run(e, &.{ "--children", "--pids", "6", "--rc", "h9 --rc 'sleep 2 & sleep 2 & sleep 2 & sleep 2 & sleep 2 & sleep 2 & wait' >[2=1]" });
-    defer r.deinit();
-    errdefer std.debug.print("stdout: {s}\n", .{r.out});
-    try expectIn(r.out, "no procs");
+    // Which fork fails depends on when the parent's own processes start,
+    // so each engine's output is checked alone.
+    var it = std.mem.tokenizeScalar(u8, e.engines, ',');
+    while (it.next()) |engine| {
+        const r = try runOn(e, engine, &.{ "--children", "--pids", "6", "--rc", "h9 --rc 'sleep 2 & sleep 2 & sleep 2 & sleep 2 & sleep 2 & sleep 2 & wait' >[2=1]" }, null);
+        defer r.deinit();
+        errdefer std.debug.print("engine {s} stdout: {s}\n", .{ engine, r.out });
+        try expectIn(r.out, "no procs");
+    }
     // Its own limit is what the parent has left.
     const p = try run(e, &.{ "--children", "--pids", "20", "--rc", "h9 --print --rc date | grep '^pids'" });
     defer p.deinit();
@@ -13660,7 +13735,12 @@ test "a child can't write what the caller can't [child-machines]" {
     try s.init();
     defer s.deinit();
     var at_buf: [std.Io.Dir.max_path_bytes + 16]u8 = undefined;
-    const at = try std.fmt.bufPrint(&at_buf, "/mnt/term{s}", .{s.path});
+    // On Windows, /mnt/term/C:/... with / for each \.
+    const at = if (builtin.os.tag == .windows) blk: {
+        const w = try std.fmt.bufPrint(&at_buf, "/mnt/term/{s}", .{s.path});
+        std.mem.replaceScalar(u8, w, '\\', '/');
+        break :blk w;
+    } else try std.fmt.bufPrint(&at_buf, "/mnt/term{s}", .{s.path});
     // The caller reads the scratch directory only: --writable doesn't make
     // it writable in the child, and a child's write without it stays in
     // the child's memory. The caller's cwd it can write.
@@ -13682,8 +13762,9 @@ test "a child can't write what the caller can't [child-machines]" {
 
 test "an interrupt reaches the child, and the parent's exit kills it [child-machines]" {
     const e = try env(@src());
-    // The interrupt h9's rc gets goes to the child, which exits by it.
-    const r = try run(e, &.{ "--children", "--rc", "h9 --rc 'sleep 100' & p=$apid; sleep 1; echo interrupt >/proc/$p/notepg; wait; echo after" });
+    // The interrupt h9's rc gets goes to the child, which exits by it:
+    // once the child is up, as an rc still starting can swallow one.
+    const r = try run(e, &.{ "--children", "--rc", "cd /tmp; h9 --rc 'touch up; sleep 100' & p=$apid; while(! test -e up) sleep 0.1; echo interrupt >/proc/$p/notepg; wait; echo after" });
     defer r.deinit();
     try std.testing.expectEqualStrings("after\n", r.out);
     // A child never outlives its machine: this ends long before 100s.

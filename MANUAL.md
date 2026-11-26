@@ -678,7 +678,7 @@ run rc
 # profile:  default
 # enforces: env.scrub fs.read.scope fs.write.overlay fs.write.scope ipc.restrict kernel.isolation net.outbound
 # limits:   write=overlay net=outbound
-# devmask:  #C #U #b #i #m
+# devmask:  #C #U #ū #b #i #m
 # namespace:
 #   bind '#U/Users/me/src/hyper9/.local/9front/root-11952' / ro
 #   bind -c '#O' /                                         eph  # /Users/me/src/hyper9/.local/9front/root-11952
@@ -2497,6 +2497,9 @@ Tools:
 | Hangup | SIGHUP or SIGTERM: `hangup` to every process, stop 2 s later | Closing the console, logoff, or shutdown: the same, with a shorter grace period because Windows ends the process soon after |
 | Raw mode | termios: no line editing, echo, or signals | Console mode: the same |
 
+A machine that still hasn't stopped 45 s after a hangup or a second Ctrl-C
+is ended anyway: h9 exits with 128 plus the signal's number.
+
 ### 22. Sharing files with the host
 
 **The current directory.** The host directory you run h9 from, or `--cwd
@@ -2732,7 +2735,7 @@ run mk
 # profile:  tight
 # enforces: env.scrub fs.read.scope fs.write.overlay fs.write.scope ipc.restrict kernel.isolation net.disable proc.timeout res.memory
 # limits:   write=overlay net=disable memory=512M timeout=1m
-# devmask:  #C #I #ℏ #U #b #i #m
+# devmask:  #C #I #ℏ #U #ū #b #i #m
 # namespace:
 #   bind '#U/Users/me/src/hyper9/.local/9front/root-11952' / ro
 #   bind -c '#O' /                                         eph  # /Users/me/src/hyper9/.local/9front/root-11952
@@ -2758,7 +2761,6 @@ run mk
 #   - hardlinks under writable paths can modify host files outside them
 #   - writes to writable paths are not capped (no res.disk)
 #   - paths are checked after resolving symlinks, so a host process renaming paths concurrently can race the check
-#   - /proc/n/ns shows the host paths of bound host trees
 #   - the h9 process itself is not host-sandboxed
 ```
 

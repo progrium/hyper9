@@ -249,6 +249,10 @@ pub const dotl_dev = "ℓ";
 /// h9 opens, for the 9P connections it makes.
 pub const hidx_dev = "ι";
 
+/// The tree device, `#ū` (src/host/devtree.zig): an embedder's trees in
+/// memory, which namec reaches through `#U`, so it's masked with `#U`.
+pub const tree_dev = "ū";
+
 /// Where a 9P root's connection is posted, and the board name it's under.
 pub const root_srv = "#s/root";
 
@@ -946,7 +950,10 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     if (net == .disable or web) try devmask.append(arena, 'I');
     if (net == .disable) try devmask.appendSlice(arena, hstream_dev);
     if (!in.guest_tools) try devmask.append(arena, 'H');
-    if (!pol.host_fs) try devmask.append(arena, 'U');
+    if (!pol.host_fs) {
+        try devmask.append(arena, 'U');
+        try devmask.appendSlice(arena, tree_dev);
+    }
     // h9's own mounts are through #ι by now, and a guest conversation
     // could read the host's index cache.
     try devmask.appendSlice(arena, hidx_dev);
@@ -1058,7 +1065,6 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     }
     if (children) try caveats.append(arena, "child machines share this machine's kernel and host process: a kernel bug one can trigger affects them all");
     if (in.caller) try caveats.append(arena, "a path from the caller is reached through its channel, with the caller's rights; one the child only reads is under an overlay, so the child's writes to it stay in memory");
-    try caveats.append(arena, "/proc/n/ns shows the host paths of bound host trees");
     try caveats.append(arena, "the h9 process itself is not host-sandboxed");
 
     return .{
@@ -2677,13 +2683,13 @@ test "compile: default and tight profiles" {
     const d = try compile(arena.allocator(), in, .{}, &msg);
     try t.expectEqual(Verdict.allow, d.check("/w/f", .create));
     try t.expectEqual(Verdict.read_only, d.check("/r/f", .create));
-    try t.expectEqualStrings("CU" ++ hidx_dev ++ "bim" ++ machine_dev, d.devmask);
+    try t.expectEqualStrings("CU" ++ tree_dev ++ hidx_dev ++ "bim" ++ machine_dev, d.devmask);
     try t.expect(!d.enforces.contains(.@"net.disable"));
     try t.expectEqual(@as(?u64, null), d.timeout_ns);
 
     const tt = try compile(arena.allocator(), in, .{ .profile = .tight }, &msg);
     try t.expectEqual(Verdict.read_only, tt.check("/w/f", .create));
-    try t.expectEqualStrings("CI" ++ hstream_dev ++ "U" ++ hidx_dev ++ "bim" ++ machine_dev, tt.devmask);
+    try t.expectEqualStrings("CI" ++ hstream_dev ++ "U" ++ tree_dev ++ hidx_dev ++ "bim" ++ machine_dev, tt.devmask);
     try t.expect(tt.enforces.contains(.@"net.disable"));
     try t.expect(tt.enforces.contains(.@"proc.timeout"));
 

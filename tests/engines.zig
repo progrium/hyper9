@@ -2354,7 +2354,10 @@ fn rcWithHost(kind: engine.Choice, root: []const u8, hst: ?h9.Host, script: []co
 
 test "a kernel with an empty Host can reach nothing outside [host-handles]" {
     var rb: [std.fs.max_path_bytes]u8 = undefined;
-    const root = nineRoot(&rb) orelse return error.SkipZigTest;
+    const host_root = nineRoot(&rb) orelse return error.SkipZigTest;
+    // In the form a mount takes (/C:/... on Windows).
+    var kb: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const root = kernPath(&kb, host_root);
     var ran: usize = 0;
     for ([_]engine.Choice{ .hvf, .kvm, .whp, .sud, .hcpu }) |kind| {
         var sb: [512]u8 = undefined;
@@ -2367,6 +2370,60 @@ test "a kernel with an empty Host can reach nothing outside [host-handles]" {
         const none = (try rcWithHost(kind, root, .{}, "echo hi", &sb)).?;
         try std.testing.expect(std.mem.indexOf(u8, none, "hi\n") == null);
         try std.testing.expect(!std.mem.eql(u8, none, "exited "));
+        ran += 1;
+    }
+    if (ran == 0) return error.SkipZigTest;
+}
+
+test "an embedder's in-memory dirs handle serves a root [host-handles]" {
+    var rb: [std.fs.max_path_bytes]u8 = undefined;
+    const root = nineRoot(&rb) orelse return error.SkipZigTest;
+    const arch = switch (builtin.cpu.arch) {
+        .aarch64 => "arm64",
+        .x86_64 => "amd64",
+        else => return error.SkipZigTest,
+    };
+    // rc and what it runs, read into memory, and a file only the tree has.
+    const gpa = std.testing.allocator;
+    var files: [6]h9.host.memtree.File = undefined;
+    const names = [_][]const u8{ "bin/rc", "bin/echo", "bin/cat", "bin/ls" };
+    var bufs: [5][]u8 = undefined;
+    var nb: usize = 0;
+    defer for (bufs[0..nb]) |b| gpa.free(b);
+    var pb: [4][32]u8 = undefined;
+    for (names, 0..) |n, i| {
+        var hb: [std.fs.max_path_bytes + 32]u8 = undefined;
+        bufs[nb] = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, try std.fmt.bufPrint(&hb, "{s}/{s}/{s}", .{ root, arch, n }), gpa, .limited(1 << 26));
+        nb += 1;
+        files[i] = .{ .path = try std.fmt.bufPrint(&pb[i], "{s}/{s}", .{ arch, n }), .data = bufs[nb - 1], .exec = true };
+    }
+    var hb: [std.fs.max_path_bytes + 32]u8 = undefined;
+    bufs[nb] = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, try std.fmt.bufPrint(&hb, "{s}/rc/lib/rcmain", .{root}), gpa, .limited(1 << 20));
+    nb += 1;
+    files[4] = .{ .path = "rc/lib/rcmain", .data = bufs[nb - 1] };
+    files[5] = .{ .path = "lib/mem.txt", .data = "from memory\n" };
+    var mt: h9.host.MemTree = undefined;
+    try mt.init(gpa, &files);
+    defer mt.deinit();
+    // The tree's path names it in the plan and the mount; nothing is there
+    // on the host.
+    var mb: [std.fs.max_path_bytes + 8]u8 = undefined;
+    var kb: [std.fs.max_path_bytes + 9]u8 = undefined;
+    const mem = kernPath(&kb, try std.fmt.bufPrint(&mb, "{s}-mem", .{root}));
+    const Allow = struct {
+        fn check(_: *anyopaque, _: []const u8, _: h9.policy.Op) h9.policy.Verdict {
+            return .allow;
+        }
+        const vt: h9.host.Dirs.VTable = .{ .check = check };
+    };
+    const list = [_]h9.host.Dir{.{ .name = "root", .path = mem, .writable = false, .tree = mt.tree() }};
+    const hst: h9.Host = .{ .dirs = .{ .list = &list, .ctx = &mt, .vtable = &Allow.vt } };
+    var ran: usize = 0;
+    for ([_]engine.Choice{ .hvf, .kvm, .whp, .sud, .hcpu }) |kind| {
+        var sb: [512]u8 = undefined;
+        const got = try rcWithHost(kind, mem, hst, "echo hi; cat /lib/mem.txt; ls /lib", &sb) orelse continue;
+        errdefer std.debug.print("engine {t}\n", .{kind});
+        try std.testing.expectEqualStrings("hi\nfrom memory\n/lib/mem.txt\nexited ", got);
         ran += 1;
     }
     if (ran == 0) return error.SkipZigTest;

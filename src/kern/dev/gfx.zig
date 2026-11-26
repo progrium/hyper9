@@ -6,7 +6,8 @@
 //!
 //! - #i opens the screen at its first walk, not its attach, and adds
 //!   /dev/screen (design/epoch-0/headless-screen.md).
-//! - #c limits /dev/snarf to the machine with the screen.
+//! - #c (src/kern/dev/cons.zig) asks `snarfopen` before opening /dev/snarf,
+//!   which limits it to the machine with the screen.
 //! - #b serves kbdfs's format on /dev/kbd, and adds /dev/kbdin.
 //! - #m adds /dev/mousein.
 //!
@@ -40,10 +41,8 @@ const Rune = c_uint;
 
 // drawterm's devices, which these wrap.
 extern var drawdevtab: c.Dev;
-extern var consdevtab: c.Dev;
 extern var kbddevtab: c.Dev;
 extern var mousedevtab: c.Dev;
-extern var snarftab: *Dirtab; // devcons.c's /dev/snarf
 
 // src/kern/gfx.c: the screen's image, under drawlock.
 extern fn h9_gfx_screenshot(np: *c_int, err: *[*:0]const u8) ?[*]u8;
@@ -259,73 +258,18 @@ pub const Draw = dev.Native('i', "draw", .{
     .gens = &.{&topgen},
 });
 
-// devcons serves /dev/snarf, from the clipboard, whenever there's a
-// screen, and it's never masked. Opening it is limited to processes with
-// #i unmasked, so only the machine with the window reaches the clipboard,
-// and it opens the screen there: rio opens /dev/snarf before the display,
-// and serves its own snarf buffer to its windows when that fails.
+// devcons (src/kern/dev/cons.zig) serves /dev/snarf, from the clipboard,
+// whenever there's a screen, and it's never masked. Opening it is limited
+// to processes with #i unmasked, so only the machine with the window
+// reaches the clipboard, and it opens the screen there: rio opens
+// /dev/snarf before the display, and serves its own snarf buffer to its
+// windows when that fails. cons.zig's open calls this first.
 
-fn consopen(ch: *Chan, omode: c_int) Error!*Chan {
-    if (ch.qid.path == snarftab.qid.path and (ch.qid.type & c.QTDIR) == 0) {
-        if (pgrp.devmasked(up().pgrp, dev.devno('i')))
-            return port.kerror(&port.Egreg);
-        try drawensure();
-    }
-    return dev.open(&consdevtab, ch, omode);
+pub fn snarfopen() Error!void {
+    if (pgrp.devmasked(up().pgrp, dev.devno('i')))
+        return port.kerror(&port.Egreg);
+    try drawensure();
 }
-
-fn consreset() void {
-    devreset_(&consdevtab);
-}
-fn consinit() void {
-    devinit_(&consdevtab);
-}
-fn consshutdown() void {
-    devshutdown_(&consdevtab);
-}
-fn consattach(spec: [*:0]const u8) Error!*Chan {
-    return dev.attach(&consdevtab, spec);
-}
-fn conswalk(ch: *Chan, nc: ?*Chan, name: [*]const [*:0]const u8, nname: c_int) Error!?*Walkqid {
-    return dev.walkdev(&consdevtab, ch, nc, name, nname);
-}
-fn consstat(ch: *Chan, db: [*]u8, n: c_int) Error!c_int {
-    return dev.stat(&consdevtab, ch, db, n);
-}
-fn conscreate(ch: *Chan, name: [*:0]const u8, omode: c_int, perm: c_uint) Error!*Chan {
-    return dev.create(&consdevtab, ch, name, omode, perm);
-}
-fn consclose(ch: *Chan) Error!void {
-    return dev.close(&consdevtab, ch);
-}
-fn consread(ch: *Chan, a: ?*anyopaque, n: c_int, off: i64) Error!c_int {
-    return dev.read(&consdevtab, ch, a, n, off);
-}
-fn conswrite(ch: *Chan, a: ?*const anyopaque, n: c_int, off: i64) Error!c_int {
-    return dev.write(&consdevtab, ch, a, n, off);
-}
-fn consremove(ch: *Chan) Error!void {
-    return dev.remove(&consdevtab, ch);
-}
-fn conswstat(ch: *Chan, db: [*]u8, n: c_int) Error!c_int {
-    return dev.wstat(&consdevtab, ch, db, n);
-}
-
-pub const Cons = dev.Native('c', "cons", .{
-    .reset = consreset,
-    .init = consinit,
-    .shutdown = consshutdown,
-    .attach = consattach,
-    .walk = conswalk,
-    .stat = consstat,
-    .open = consopen,
-    .create = conscreate,
-    .close = consclose,
-    .read = consread,
-    .write = conswrite,
-    .remove = consremove,
-    .wstat = conswstat,
-});
 
 // /dev/kbd. drawterm's devkbd serves the window's keys as 'r' and 'R'
 // messages (a rune pressed or released), the format 9front's kbdfs reads
@@ -715,7 +659,6 @@ pub const Mouse = dev.Native('m', "mouse", .{
 
 pub fn exportC() void {
     @export(&Draw.dev, .{ .name = "h9drawdevtab" });
-    @export(&Cons.dev, .{ .name = "h9consdevtab" });
     @export(&Kbd.dev, .{ .name = "h9kbddevtab" });
     @export(&Mouse.dev, .{ .name = "h9mousedevtab" });
     @export(&h9_kbdkey, .{ .name = "h9_kbdkey" });

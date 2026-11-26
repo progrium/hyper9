@@ -21,6 +21,8 @@ pub const planned = @import("planned.zig");
 pub const fromPlan = planned.fromPlan;
 pub const closeDirs = planned.closeDirs;
 pub const net = @import("net.zig");
+pub const memtree = @import("memtree.zig");
+pub const MemTree = memtree.MemTree;
 
 /// An open directory handle: an fd, or on Windows a `HANDLE`.
 pub const Handle = if (builtin.os.tag == .windows) std.os.windows.HANDLE else c_int;
@@ -68,6 +70,55 @@ pub const Dir = struct {
     handle: Handle = no_handle,
     /// For a tree that's one file, its name in `handle`'s directory.
     leaf: ?[]const u8 = null,
+    /// A tree with no host directory: an embedder's, in memory, which
+    /// `#ū` (src/host/devtree.zig) serves read-only where `path` is bound.
+    /// `path` names it in the plan and in mounts, and `handle` is unused.
+    tree: ?Tree = null,
+};
+
+/// A read-only tree an embedder serves itself. Entries are numbered, the
+/// top 0; a directory's children are listed in order.
+pub const Tree = struct {
+    ctx: *anyopaque,
+    vtable: *const VTable,
+
+    pub const Entry = struct {
+        id: u64,
+        name: [:0]const u8,
+        dir: bool,
+        len: u64 = 0,
+        /// Listed with execute permission.
+        exec: bool = false,
+    };
+
+    pub const VTable = struct {
+        entry: *const fn (ctx: *anyopaque, id: u64) ?Entry,
+        /// The directory holding `id`, which is 0 for the top.
+        parent: *const fn (ctx: *anyopaque, id: u64) u64,
+        /// The `i`th entry of directory `id`.
+        child: *const fn (ctx: *anyopaque, id: u64, i: usize) ?Entry,
+        /// Bytes of file `id` from `off` into `buf`: how many, 0 at the end.
+        read: *const fn (ctx: *anyopaque, id: u64, off: u64, buf: []u8) usize,
+    };
+
+    pub fn entry(t: Tree, id: u64) ?Entry {
+        return t.vtable.entry(t.ctx, id);
+    }
+    pub fn parent(t: Tree, id: u64) u64 {
+        return t.vtable.parent(t.ctx, id);
+    }
+    pub fn child(t: Tree, id: u64, i: usize) ?Entry {
+        return t.vtable.child(t.ctx, id, i);
+    }
+    pub fn read(t: Tree, id: u64, off: u64, buf: []u8) usize {
+        return t.vtable.read(t.ctx, id, off, buf);
+    }
+    /// The entry of directory `id` named `name`.
+    pub fn lookup(t: Tree, id: u64, name: []const u8) ?Entry {
+        var i: usize = 0;
+        while (t.child(id, i)) |e| : (i += 1) if (std.mem.eql(u8, e.name, name)) return e;
+        return null;
+    }
 };
 
 pub const Dirs = struct {
@@ -276,6 +327,7 @@ pub const Spawn = struct {
 test {
     _ = planned;
     _ = @import("dirs.zig");
+    _ = memtree;
 }
 
 test "an empty Host has no handles [host-handles]" {

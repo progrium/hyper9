@@ -86,6 +86,9 @@ const Ufsinfo = struct {
     contained: bool,
     top: ?[*:0]WCHAR,
     lpath: ?[*:0]WCHAR,
+    /// Open on a FIFO (an IO_REPARSE_TAG_LX_FIFO file): the handle is the
+    /// reparse point's, opened only to check it, never read or written.
+    fifo: bool = false,
 };
 
 fn newdir() *DirState {
@@ -154,6 +157,13 @@ fn wfdislink(wfd: *const FindData) bool {
         (wfd.dwReserved0 == w.IO_REPARSE_TAG_SYMLINK or wfd.dwReserved0 == w.IO_REPARSE_TAG_MOUNT_POINT);
 }
 
+/// A FIFO, as WSL makes them: an empty file with an IO_REPARSE_TAG_LX_FIFO
+/// reparse point (design/epoch-0/linux-fifo.md). A Linux program's open
+/// of one joins h9's own pipe for it (src/kern/fifo.zig).
+fn wfdisfifo(wfd: *const FindData) bool {
+    return wfd.dwFileAttributes & w.FILE_ATTRIBUTE_REPARSE_POINT != 0 and wfd.dwReserved0 == w.IO_REPARSE_TAG_LX_FIFO;
+}
+
 /// A link's Dir, for a Linux process: DMSYMLINK, its target's length.
 fn linkdir(path: [*:0]const WCHAR, d: *Dir, qid: Qid) void {
     var target: [MAX_PATH * 3]u8 = undefined;
@@ -186,6 +196,7 @@ fn wfdtodmode(wfd: *const FindData) c_uint {
     var m: c_uint = c.DMREAD | c.DMWRITE | c.DMEXEC;
     if (wfd.dwFileAttributes & w.FILE_ATTRIBUTE_DIRECTORY != 0) m |= c.DMDIR;
     if (wfd.dwFileAttributes & w.FILE_ATTRIBUTE_READONLY != 0) m &= ~@as(c_uint, c.DMWRITE);
+    if (wfdisfifo(wfd)) m |= fs.DMFIFO;
     // Owner bits only (0700, 0600, 0500). Windows has no group or other
     // bits, and Postgres refuses a data directory that reads as group- or
     // world-writable.
@@ -200,6 +211,32 @@ fn findone(path: [*:0]const WCHAR, wfd: *FindData) bool {
     return true;
 }
 
+/// A FindFirstFile or FindNextFile entry is the parent directory's copy
+/// of a name's times and size, which NTFS updates lazily: a directory's
+/// last-write time there stays at what it was before a name was made in
+/// it, so a listing (or a walk) and a stat would disagree on its mtime
+/// and qid.vers, and an index made from a listing would be stale
+/// (design/epoch-0/mount-index.md). GetFileAttributesEx reads the name's
+/// own record, so each takes the times and size from there; the
+/// attributes and reparse tag stay the entry's.
+fn ownrecord(path: [*:0]const WCHAR, wfd: *FindData) void {
+    var fa: w.WIN32_FILE_ATTRIBUTE_DATA = undefined;
+    if (w.GetFileAttributesExW(path, w.GetFileExInfoStandard, &fa) == 0) return;
+    wfd.ftLastAccessTime = fa.ftLastAccessTime;
+    wfd.ftLastWriteTime = fa.ftLastWriteTime;
+    wfd.nFileSizeHigh = fa.nFileSizeHigh;
+    wfd.nFileSizeLow = fa.nFileSizeLow;
+}
+
+/// A host file's qid from its entry, once ownrecord has updated it.
+fn fileqid(path: [*:0]const WCHAR, wfd: *const FindData) Qid {
+    var q: Qid = std.mem.zeroes(Qid);
+    q.type = if (wfd.dwFileAttributes & w.FILE_ATTRIBUTE_DIRECTORY != 0) c.QTDIR else c.QTFILE;
+    q.path = pathhash(path);
+    q.vers = unixtime(&wfd.ftLastWriteTime);
+    return q;
+}
+
 fn wfdtoqid(path: [*:0]const WCHAR, wfd_: ?*const FindData) Error!Qid {
     var q: Qid = std.mem.zeroes(Qid);
     switch (pathtype(path)) {
@@ -210,13 +247,9 @@ fn wfdtoqid(path: [*:0]const WCHAR, wfd_: ?*const FindData) Error!Qid {
         },
         .file => {
             var f: FindData = undefined;
-            const wfd = wfd_ orelse blk: {
-                if (!findone(path, &f)) return w.oserr();
-                break :blk &f;
-            };
-            q.type = if (wfd.dwFileAttributes & w.FILE_ATTRIBUTE_DIRECTORY != 0) c.QTDIR else c.QTFILE;
-            q.path = pathhash(path);
-            q.vers = unixtime(&wfd.ftLastWriteTime);
+            if (wfd_) |x| f = x.* else if (!findone(path, &f)) return w.oserr();
+            ownrecord(path, &f);
+            q = fileqid(path, &f);
         },
     }
     return q;
@@ -248,8 +281,12 @@ fn wfdtodir(path: [*:0]const WCHAR, d: *Dir, wfd_: ?*const FindData) Error!void 
                     f.nFileSizeHigh = fa.nFileSizeHigh;
                     f.nFileSizeLow = fa.nFileSizeLow;
                 }
-                wfd = &f;
+            } else {
+                // A listing's entry, as a stat sees it (ownrecord).
+                f = wfd.?.*;
+                ownrecord(path, &f);
             }
+            wfd = &f;
             const x = wfd.?;
             d.mode = wfdtodmode(x);
             d.atime = unixtime(&x.ftLastAccessTime);
@@ -257,7 +294,7 @@ fn wfdtodir(path: [*:0]const WCHAR, d: *Dir, wfd_: ?*const FindData) Error!void 
             d.length = @bitCast((@as(u64, x.nFileSizeHigh) << 32) | x.nFileSizeLow);
         },
     }
-    d.qid = try wfdtoqid(path, wfd);
+    d.qid = if (wfd) |x| fileqid(path, x) else try wfdtoqid(path, null);
     d.uid = c.eve;
     d.gid = c.eve;
     d.muid = c.eve;
@@ -323,6 +360,7 @@ fn fsattach(spec: [*:0]const u8) Error!*Chan {
 fn fsclone(ch: *Chan, nc: *Chan) void {
     const uif = alloc(Ufsinfo);
     uif.* = uifOf(ch).*;
+    uif.fifo = false;
     uif.path = wstrdup(wspan(uif.path));
     if (uif.top) |t| uif.top = wstrdup(wspan(t));
     if (uif.lpath) |l| uif.lpath = wstrdup(wspan(l));
@@ -512,6 +550,22 @@ fn fsopen(ch: *Chan, mode: c_int) Error!*Chan {
         }
         d.keep = true;
         uif.dir = d;
+    } else if (isfifoPath(uif.path)) {
+        // A FIFO is opened only to check it, as its reparse point (which
+        // the host can't open otherwise), and never read or written
+        // (fsread, fswrite): a Linux program's open joins h9's own pipe
+        // for it (src/kern/fifo.zig), and a Plan 9 program sees an empty
+        // file. As devfs_posix.zig does.
+        uif.dir = null;
+        uif.fh = h9_fs_createfile(uif.path, w.FILE_READ_ATTRIBUTES, w.FILE_SHARE_READ | w.FILE_SHARE_WRITE | w.FILE_SHARE_DELETE, null, w.OPEN_EXISTING, w.FILE_FLAG_OPEN_REPARSE_POINT, null);
+        if (uif.fh == invalid) return w.oserr();
+        errdefer {
+            _ = w.CloseHandle(uif.fh);
+            uif.fh = invalid;
+        }
+        try allowhandle(uif.fh, op);
+        if (mode & c.ORCLOSE != 0) try allowhandle(uif.fh, Remove);
+        uif.fifo = true;
     } else {
         uif.dir = null;
         // FILE_READ_ATTRIBUTES so GetFinalPathNameByHandle works on a
@@ -635,6 +689,7 @@ fn seek(uif: *Ufsinfo, offset: i64) void {
 fn fsread(ch: *Chan, va: ?*anyopaque, n: c_int, offset: i64) Error!c_int {
     if (ch.qid.type & c.QTDIR != 0) return dirread(ch, @ptrCast(va), n, offset);
     const uif = uifOf(ch);
+    if (uif.fifo) return 0; // see fsopen
     sync.qlock(&uif.oq);
     defer sync.qunlock(&uif.oq);
     seek(uif, offset);
@@ -647,6 +702,7 @@ fn fsread(ch: *Chan, va: ?*anyopaque, n: c_int, offset: i64) Error!c_int {
 fn fswrite(ch: *Chan, va: ?*const anyopaque, n: c_int, offset: i64) Error!c_int {
     if (ch.qid.type & c.QTDIR != 0) return dirread(ch, @ptrCast(@constCast(va)), n, offset);
     const uif = uifOf(ch);
+    if (uif.fifo) return port.kerror(&port.Eperm); // see fsopen
     sync.qlock(&uif.oq);
     defer sync.qunlock(&uif.oq);
     seek(uif, offset);
@@ -656,28 +712,62 @@ fn fswrite(ch: *Chan, va: ?*const anyopaque, n: c_int, offset: i64) Error!c_int 
     return @intCast(r);
 }
 
-/// Deletes with POSIX semantics, as unlink(2) does: the name goes at
-/// once, even while the file is open, rather than when the last handle
-/// closes, so a new file can take the name right away. Falls back to
-/// DeleteFile where the file system doesn't support it.
-fn posixdelete(path: [*:0]const WCHAR) bool {
-    // FILE_DISPOSITION_INFO_EX: DELETE | POSIX_SEMANTICS | IGNORE_READONLY_ATTRIBUTE
-    const fd: extern struct { Flags: w.DWORD } = .{ .Flags = 0x1 | 0x2 | 0x10 };
-    const h = h9_fs_createfile(path, w.DELETE, w.FILE_SHARE_READ | w.FILE_SHARE_WRITE | w.FILE_SHARE_DELETE, null, w.OPEN_EXISTING, w.FILE_FLAG_OPEN_REPARSE_POINT, null);
-    if (h == invalid) return h9_fs_deletefile(path) != 0;
-    const ok = w.SetFileInformationByHandle(h, w.FileDispositionInfoEx, &fd, @sizeOf(@TypeOf(fd)));
-    _ = w.CloseHandle(h);
-    if (ok != 0) return true;
-    return h9_fs_deletefile(path) != 0;
+/// path's own entry, a link itself rather than its target, opened for
+/// deletion or renaming beneath the machine's directory handle
+/// (h9_fs_createfile goes through src/host/dirs.c's walk), so what the
+/// host deletes or renames is the file that walk found, not whatever
+/// the path names by the time the host resolves it again.
+fn openown(path: [*:0]const WCHAR) Error!HANDLE {
+    const h = h9_fs_createfile(path, w.DELETE | w.SYNCHRONIZE | w.FILE_READ_ATTRIBUTES, w.FILE_SHARE_READ | w.FILE_SHARE_WRITE | w.FILE_SHARE_DELETE, null, w.OPEN_EXISTING, w.FILE_FLAG_OPEN_REPARSE_POINT | w.FILE_FLAG_BACKUP_SEMANTICS, null);
+    if (h == invalid) return w.oserr();
+    return h;
 }
 
-/// Removes a link, a directory's with RemoveDirectory.
-fn removelink(path: [*:0]const WCHAR) Error!void {
-    const attr = h9_fs_getattr(path);
-    if (attr == w.INVALID_FILE_ATTRIBUTES) return w.oserr();
-    if (attr & w.FILE_ATTRIBUTE_DIRECTORY != 0) {
-        if (h9_fs_removedir(path) == 0) return w.oserr();
-    } else if (!posixdelete(path)) return w.oserr();
+/// Removes path's own entry, a file, an empty directory, or a link,
+/// through a handle (openown). With POSIX semantics the name goes at
+/// once, even while the file is open, rather than when the last handle
+/// closes, so a new file can take the name right away; where the file
+/// system doesn't support that, the classic disposition, on the same
+/// handle.
+fn removeown(path: [*:0]const WCHAR) Error!void {
+    const h = try openown(path);
+    defer _ = w.CloseHandle(h);
+    // FILE_DISPOSITION_INFO_EX: DELETE | POSIX_SEMANTICS | IGNORE_READONLY_ATTRIBUTE
+    const fdx: extern struct { Flags: w.DWORD } = .{ .Flags = 0x1 | 0x2 | 0x10 };
+    if (w.SetFileInformationByHandle(h, w.FileDispositionInfoEx, &fdx, @sizeOf(@TypeOf(fdx))) != 0) return;
+    const err = w.GetLastError();
+    // FILE_DISPOSITION_INFO's DeleteFile, for a file system without the Ex form.
+    const fd: extern struct { DeleteFile: u8 } = .{ .DeleteFile = 1 };
+    if (w.SetFileInformationByHandle(h, w.FileDispositionInfo, &fd, @sizeOf(@TypeOf(fd))) != 0) return;
+    // The Ex form's error says more (a directory that isn't empty, say)
+    // unless it was only unsupported.
+    if (err != 50 and err != 87) w.SetLastError(err); // ERROR_NOT_SUPPORTED, ERROR_INVALID_PARAMETER
+    return w.oserr();
+}
+
+/// Renames path's own entry to name within its directory, through a
+/// handle (openown): NtSetInformationFile's FileRenameInformation with no
+/// root directory and a bare name renames the file where it is, so the
+/// host never resolves the new name's directory again. Not
+/// SetFileInformationByHandle, which reads a bare name as relative to
+/// the process's current directory and would move the file there. An
+/// existing name isn't replaced, as MoveFile didn't.
+fn renameown(path: [*:0]const WCHAR, name: []const WCHAR) Error!void {
+    for (name) |ch| if (ch == '\\' or ch == '/' or ch == ':') return port.kerror(&port.Ebadchar);
+    if (name.len == 0 or name.len > MAX_PATH) return port.kerror(&port.Ebadstat);
+    const h = try openown(path);
+    defer _ = w.CloseHandle(h);
+    // FILE_RENAME_INFO: ReplaceIfExists (padded), RootDirectory, FileNameLength, FileName.
+    const Info = extern struct { replace: w.DWORD, root: ?HANDLE, len: w.DWORD, name: [MAX_PATH + 1]WCHAR };
+    var info: Info = .{ .replace = 0, .root = null, .len = @intCast(name.len * 2), .name = undefined };
+    @memcpy(info.name[0..name.len], name);
+    info.name[name.len] = 0;
+    var iosb: w.IO_STATUS_BLOCK = undefined;
+    const st = w.NtSetInformationFile(h, &iosb, &info, @intCast(@offsetOf(Info, "name") + (name.len + 1) * 2), w.FileRenameInformation);
+    if (st < 0) {
+        w.SetLastError(@intCast(w.RtlNtStatusToDosError(st)));
+        return w.oserr();
+    }
 }
 
 fn fsremove(ch: *Chan) Error!void {
@@ -685,14 +775,9 @@ fn fsremove(ch: *Chan) Error!void {
     const uif = uifOf(ch);
     // A link is removed, not its target.
     try allow(ownpath(uif), Remove);
-    if (uif.lpath) |l| {
-        try removelink(l);
-    } else if (ch.qid.type & fs.QTSYMLINK != 0) {
-        // A link a Linux walk stopped at.
-        try removelink(uif.path);
-    } else if (ch.qid.type & c.QTDIR != 0) {
-        if (h9_fs_removedir(uif.path) == 0) return w.oserr();
-    } else if (!posixdelete(uif.path)) return w.oserr();
+    // ownpath is the link itself for a link (lpath, or a link a Linux
+    // walk stopped at), else the file.
+    try removeown(ownpath(uif));
 }
 
 fn nochange(d: *const Dir) bool {
@@ -765,7 +850,9 @@ fn fswstat(ch: *Chan, buf: [*]u8, n: c_int) Error!c_int {
         if (!wcseq(ownpath(uif), newpath)) {
             try allow(newpath, Create);
             try allow(ownpath(uif), Rename);
-            if (h9_fs_movefile(ownpath(uif), newpath) == 0) return w.oserr();
+            const np = wspan(newpath);
+            const slash = std.mem.lastIndexOfScalar(WCHAR, np, '\\') orelse return port.kerror(&port.Ebadstat);
+            try renameown(ownpath(uif), np[slash + 1 ..]);
         }
         if (uif.lpath) |lp| {
             free(lp);
@@ -941,27 +1028,120 @@ pub fn anchor(ch: *Chan) Error!void {
     setpath(uif, wstrdup(p), null);
 }
 
-/// Symbolic links aren't made on Windows hosts.
-///
-/// This is load-bearing for the sandbox. fscreate, fsremove, and the
-/// wstat rename path still check a path string and then let the host
-/// re-resolve it (CreateFile, DeleteFile, MoveFile), which is the same
-/// check-then-act shape the POSIX backend had to close. It is safe here
-/// only because the guest has no way to win that race: it can't plant a
-/// reparse point (no symlink or junction creation anywhere in this
-/// driver) and can't move a file across directories into an in-policy
-/// name (rename is EXDEV), so it can never make the check and the
-/// operation resolve to different files. fsopen and the wstat time-set
-/// don't rely on that: they open first and check the handle
-/// (allowhandle).
-///
-/// If link or junction creation is ever added here, the create, remove,
-/// and rename paths must move to handle-bound checks first (open then
-/// check, and a handle-relative create via the NT RootDirectory, as
-/// devfs_posix.zig does with openat, unlinkat, and renameat), or this
-/// race reopens.
-fn fssymlink(_: *Chan, _: [*:0]const u8, _: [*:0]const u8) Error!void {
-    return port.kerror(&port.Eperm);
+/// Deletes the entry h was opened on (made just now, by mkentry), when
+/// what was to make it a link or a FIFO failed; err is kept.
+fn unmake(h: HANDLE) void {
+    const err = w.GetLastError();
+    const fdx: extern struct { Flags: w.DWORD } = .{ .Flags = 0x1 | 0x2 | 0x10 };
+    if (w.SetFileInformationByHandle(h, w.FileDispositionInfoEx, &fdx, @sizeOf(@TypeOf(fdx))) == 0) {
+        const fd: extern struct { DeleteFile: u8 } = .{ .DeleteFile = 1 };
+        _ = w.SetFileInformationByHandle(h, w.FileDispositionInfo, &fd, @sizeOf(@TypeOf(fd)));
+    }
+    w.SetLastError(err);
+}
+
+/// A new, empty entry name in ch's directory, a directory if dir, made
+/// beneath the machine's directory handle (h9_fs_createfile and
+/// h9_fs_createdir go through src/host/dirs.c's walk) and opened as
+/// itself, for a reparse point to be set on it. name must be a plain
+/// name: no separator, and no ':', which names a stream.
+fn mkentry(ch: *Chan, name: [*:0]const u8, dir: bool) Error!HANDLE {
+    for (std.mem.span(name)) |b| if (b == '\\' or b == '/' or b == ':') return port.kerror(&port.Ebadchar);
+    const uif = uifOf(ch);
+    if (pathtype(uif.path) == .root) return port.kerror(&port.Eperm);
+    const p = catpath(uif.path, name);
+    defer free(p);
+    try allow(p, Create);
+    const access = w.GENERIC_WRITE | w.DELETE | w.FILE_READ_ATTRIBUTES;
+    const share = w.FILE_SHARE_READ | w.FILE_SHARE_WRITE | w.FILE_SHARE_DELETE;
+    if (dir) {
+        if (h9_fs_createdir(p, null) == 0) return w.oserr();
+        const h = h9_fs_createfile(p, access, share, null, w.OPEN_EXISTING, w.FILE_FLAG_OPEN_REPARSE_POINT | w.FILE_FLAG_BACKUP_SEMANTICS, null);
+        if (h == invalid) return w.oserr();
+        return h;
+    }
+    const h = h9_fs_createfile(p, access, share, null, w.CREATE_NEW, w.FILE_FLAG_OPEN_REPARSE_POINT, null);
+    if (h == invalid) return w.oserr();
+    return h;
+}
+
+/// Sets a reparse point on h: tag, with data (REPARSE_DATA_BUFFER's
+/// header, then data).
+fn setreparse(h: HANDLE, tag: w.DWORD, data: []const u8) bool {
+    var buf: [8 + 16 * 1024]u8 align(4) = undefined;
+    if (data.len > buf.len - 8) {
+        w.SetLastError(206); // ERROR_FILENAME_EXCED_RANGE
+        return false;
+    }
+    std.mem.writeInt(u32, buf[0..4], tag, .little);
+    std.mem.writeInt(u16, buf[4..6], @intCast(data.len), .little);
+    std.mem.writeInt(u16, buf[6..8], 0, .little);
+    @memcpy(buf[8..][0..data.len], data);
+    var got: w.DWORD = 0;
+    return w.DeviceIoControl(h, w.FSCTL_SET_REPARSE_POINT, &buf, @intCast(8 + data.len), null, 0, &got, null) != 0;
+}
+
+/// A reparse point's failure: EPERM for a missing privilege (a symbolic
+/// link needs SeCreateSymbolicLinkPrivilege), else the host's error.
+fn reparseerr() Error {
+    if (w.GetLastError() == w.ERROR_PRIVILEGE_NOT_HELD) return port.kerror(&port.Eperm);
+    return w.oserr();
+}
+
+/// Whether target, a link's target relative to the directory dir, names a
+/// directory there now, so the link is made as a directory link, which
+/// the host can walk through. Only the kind of link depends on it.
+fn targetisdir(dir: [*:0]const WCHAR, target: []const u8) bool {
+    if (target.len == 0 or target[0] == '/') return false;
+    var tb: [MAX_PATH * 3:0]u8 = undefined;
+    if (target.len >= tb.len) return false;
+    @memcpy(tb[0..target.len], target);
+    tb[target.len] = 0;
+    for (tb[0..target.len]) |*b| if (b.* == '/') {
+        b.* = '\\';
+    };
+    const p = catpath(dir, @ptrCast(&tb));
+    defer free(p);
+    const a = w.GetFileAttributesW(p);
+    return a != w.INVALID_FILE_ATTRIBUTES and a & w.FILE_ATTRIBUTE_DIRECTORY != 0;
+}
+
+/// A symbolic link name in ch's directory with target as it's written:
+/// an empty entry made beneath the directory handle (mkentry), then an
+/// IO_REPARSE_TAG_SYMLINK reparse point set on that handle, so nothing
+/// is made by a path the host resolves again (design/host-handles.md).
+/// The target is kept verbatim, with '\\' for each '/', and always marked
+/// relative: an absolute Linux target ("/etc/x") is a guest path, not a
+/// host one, and fsreadlink gives it back with '/' (h9_fs_readlinkw). A
+/// missing privilege is EPERM.
+fn fssymlink(ch: *Chan, name: [*:0]const u8, target: [*:0]const u8) Error!void {
+    const t = std.mem.span(target);
+    if (t.len == 0) return port.kerror(&port.Ebadarg);
+    var wt: [MAX_PATH * 4]WCHAR = undefined;
+    const n = w.MultiByteToWideChar(w.CP_UTF8, 0, t.ptr, @intCast(t.len), &wt, wt.len);
+    if (n <= 0) return port.kerror(&port.Ebadarg);
+    const tw = wt[0..@intCast(n)];
+    for (tw) |*x| if (x.* == '/') {
+        x.* = '\\';
+    };
+    // SubstituteName and PrintName, the same, after the symlink header.
+    const bytes = tw.len * 2;
+    var data: [12 + 2 * MAX_PATH * 4 * 2]u8 = undefined;
+    if (12 + 2 * bytes > data.len) return port.kerror(&port.Ebadarg);
+    std.mem.writeInt(u16, data[0..2], 0, .little); // SubstituteNameOffset
+    std.mem.writeInt(u16, data[2..4], @intCast(bytes), .little);
+    std.mem.writeInt(u16, data[4..6], @intCast(bytes), .little); // PrintNameOffset
+    std.mem.writeInt(u16, data[6..8], @intCast(bytes), .little);
+    std.mem.writeInt(u32, data[8..12], w.SYMLINK_FLAG_RELATIVE, .little);
+    @memcpy(data[12..][0..bytes], std.mem.sliceAsBytes(tw));
+    @memcpy(data[12 + bytes ..][0..bytes], std.mem.sliceAsBytes(tw));
+    const h = try mkentry(ch, name, targetisdir(uifOf(ch).path, t));
+    defer _ = w.CloseHandle(h);
+    if (!setreparse(h, w.IO_REPARSE_TAG_SYMLINK, data[0 .. 12 + 2 * bytes])) {
+        const e = reparseerr();
+        unmake(h);
+        return e;
+    }
 }
 
 /// syncfs(2) on ch syncs its own file, as fsync does. Directories, and
@@ -980,13 +1160,33 @@ fn fsrename(_: *Chan, _: *Chan, _: [*:0]const u8) Error!bool {
     return false;
 }
 
-/// Windows has no FIFOs (design/epoch-0/linux-fifo.md).
-pub fn mkfifo(_: *Chan, _: [*:0]const u8, _: c_uint) Error!void {
-    return port.kerror(&port.Eperm);
+/// A FIFO name in ch's directory, as WSL makes them: an empty file made
+/// beneath the directory handle (mkentry) with an IO_REPARSE_TAG_LX_FIFO
+/// reparse point, which needs no privilege. Windows has no FIFOs of its
+/// own; h9 serves this one (src/kern/fifo.zig).
+pub fn mkfifo(ch: *Chan, name: [*:0]const u8, _: c_uint) Error!void {
+    if (dev.of(ch).dc != 'U') return port.kerror(&port.Eperm);
+    const h = try mkentry(ch, name, false);
+    defer _ = w.CloseHandle(h);
+    if (!setreparse(h, w.IO_REPARSE_TAG_LX_FIFO, &.{})) {
+        const e = reparseerr();
+        unmake(h);
+        return e;
+    }
 }
 
-pub fn isfifoChan(_: *Chan) bool {
-    return false;
+/// Whether path's own entry is a FIFO (wfdisfifo).
+fn isfifoPath(path: [*:0]const WCHAR) bool {
+    if (pathtype(path) != .file) return false;
+    var wfd: FindData = undefined;
+    return findone(path, &wfd) and wfdisfifo(&wfd);
+}
+
+/// Whether the devfs chan ch is a FIFO's.
+pub fn isfifoChan(ch: *Chan) bool {
+    if (dev.of(ch).dc != 'U') return false;
+    const uif = uifOf(ch);
+    return uif.fifo or isfifoPath(ownpath(uif));
 }
 
 /// The target of the link ch's last name was, as it's written.
@@ -1009,8 +1209,8 @@ fn fsaccess(m: c_int) Error!u32 {
     };
 }
 
-/// Links aren't made here (see fssymlink), so a Linux link is the
-/// switch's default, a copy, and its attributes are built from stat.
+/// Links are made beneath the directory handle (fssymlink), as the
+/// create, remove, and rename they rely on are.
 pub const Device = dev.Native('U', "fs", .{
     .attach = fsattach,
     .walk = fswalk,
