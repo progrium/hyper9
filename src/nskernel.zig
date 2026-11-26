@@ -23,6 +23,9 @@ comptime {
     // #ℓ's and #ℏ's leaves.
     _ = dotl;
     _ = hstream;
+    // The kernel's Zig (design/kernel-port.md), with the C functions of
+    // the drawterm files it replaces.
+    _ = @import("kern_port");
 }
 
 const gpa = web.gpa;
