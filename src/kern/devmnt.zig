@@ -15,6 +15,16 @@
 //! functions directly, and `mntdevtab`, the C `Dev` devtab.c and nstab.c
 //! name, holds wrappers that raise for C callers. A process waits for its
 //! reply in sync.zig's sleep, which parks it.
+//!
+//! h9: the device's optional operations (design/file-interface.md) are
+//! the wide requests, 9P2000.L's Tsymlink, Treadlink, Tgetattr,
+//! Tsetattr, Tlink, and Trename, with devmnt's fids, which it sends only
+//! to a server that takes them: a `#ℓ` conversation that translates to
+//! 9P2000.L, directly or under a `#ι` index (`wideof`). The translator
+//! (src/dotl/client.zig) sends each on with the server's fids, so a
+//! Linux process's link, rename, or stat on a .L mount translates once.
+//! Against any other server they're the switch's defaults, so what a
+//! 9P2000 server sees doesn't change.
 
 const std = @import("std");
 const port = @import("port.zig");
@@ -54,6 +64,11 @@ pub const Mntrpc = extern struct {
     b: ?*Block = null, // reply blocks
     flushed: ?*Mntrpc = null, // message this one flushes
     done: u8 = 0, // Rpc completed
+    /// h9: a wide request's body (design/file-interface.md), sent as is
+    /// after the header of request.type and request.tag, for want of a
+    /// convS2M for it; its reply's body is left in b.
+    wide: ?[*]const u8 = null,
+    nwide: c_int = 0,
 };
 
 const TAGSHIFT = 5;
@@ -661,9 +676,21 @@ fn mountio1(m: *Mnt, r: *Mntrpc) Error!void {
     c.unlock(&m.lk);
 
     // Transmit a file system rpc
-    var n: c_int = @intCast(c.sizeS2M(&r.request));
-    const b = qio.allocb(n);
-    n = @intCast(c.convS2M(&r.request, b.wp, @intCast(n)));
+    var n: c_int = undefined;
+    var b: *Block = undefined;
+    if (r.wide) |w| {
+        // h9: a wide request, which convS2M doesn't know.
+        n = BIT32SZ + BIT8SZ + BIT16SZ + r.nwide;
+        b = qio.allocb(n);
+        pbit32(b.wp, @bitCast(n));
+        b.wp[4] = r.request.type;
+        pbit16(b.wp + 5, r.request.tag);
+        @memcpy(b.wp[7..][0..@intCast(r.nwide)], w[0..@intCast(r.nwide)]);
+    } else {
+        n = @intCast(c.sizeS2M(&r.request));
+        b = qio.allocb(n);
+        n = @intCast(c.convS2M(&r.request, b.wp, @intCast(n)));
+    }
     if (n <= 0 or n > m.msize) {
         port.print("mountio: proc %s %lud: convS2M returned %d for tag %d fid %d T%d\n", .{
             @as([*]u8, &up().text),              up().pid,                   n, @as(c_int, r.request.tag),
@@ -732,7 +759,8 @@ pub fn mntrpcread(m: *Mnt, r: *Mntrpc) Error!c_int {
     const t = nb.rp[@intCast(BIT32SZ)];
     var hlen: c_int = switch (t) {
         c.Rread => BIT32SZ + BIT8SZ + BIT16SZ + BIT32SZ,
-        else => len,
+        // h9: a wide reply's body is the data.
+        else => if (widereply(t)) BIT32SZ + BIT8SZ + BIT16SZ else len,
     };
     // (A Rread shorter than its header would pull up past the message,
     // and past what's queued, which drawterm's doesn't check.)
@@ -740,7 +768,10 @@ pub fn mntrpcread(m: *Mnt, r: *Mntrpc) Error!c_int {
         hlen = len;
     nb = qio.pullupqueue(q, hlen).?;
 
-    if (c.convM2S(nb.rp, @intCast(len), &r.reply) <= 0) {
+    if (widereply(t)) {
+        r.reply.type = t;
+        r.reply.tag = gbit16(nb.rp + 5);
+    } else if (c.convM2S(nb.rp, @intCast(len), &r.reply) <= 0) {
         // bad message, dump it
         port.print("mntrpcread: convM2S failed\n", .{});
         _ = qio.qdiscard(q, len);
@@ -897,6 +928,8 @@ fn mntralloc(ch: *Chan) *Mntrpc {
     new.done = 0;
     new.flushed = null;
     new.b = null;
+    new.wide = null;
+    new.nwide = 0;
     return new;
 }
 
@@ -961,6 +994,216 @@ fn rpcattn(v: ?*anyopaque) callconv(.c) c_int {
     return @intFromBool(r.done != 0 or r.m.?.rip == null);
 }
 
+// h9: the wide requests (design/file-interface.md), 9P2000.L's, with
+// devmnt's fids, for a server that takes them.
+
+const Tsymlink = 16;
+const Trename = 20;
+const Treadlink = 22;
+const Tgetattr = 24;
+const Tsetattr = 26;
+const Tlink = 70;
+
+/// Whether t is a wide request's reply.
+fn widereply(t: u8) bool {
+    return switch (t) {
+        Tsymlink + 1, Trename + 1, Treadlink + 1, Tgetattr + 1, Tsetattr + 1, Tlink + 1 => true,
+        else => false,
+    };
+}
+
+// src/kern/devdotl.c and devhidx.c.
+extern fn h9_dotl_wide(*Chan) c_int;
+extern fn h9_hidx_wide(*Chan) c_int;
+
+/// ch's mount, if its server takes the wide requests: a #ℓ
+/// conversation that translates to 9P2000.L, directly or under a #ι
+/// index.
+fn wideof(ch: *Chan) ?*Mnt {
+    const m = mntchk(ch);
+    const mc: *Chan = m.c orelse return null;
+    if (h9_dotl_wide(mc) != 0 or h9_hidx_wide(mc) != 0)
+        return m;
+    return null;
+}
+
+/// A wide request's body, as 9P encodes it.
+const Wbody = struct {
+    buf: [2 * 4096 + 64]u8 = undefined,
+    n: usize = 0,
+
+    fn put32(w: *Wbody, v: u32) void {
+        std.mem.writeInt(u32, w.buf[w.n..][0..4], v, .little);
+        w.n += 4;
+    }
+    fn put64(w: *Wbody, v: u64) void {
+        std.mem.writeInt(u64, w.buf[w.n..][0..8], v, .little);
+        w.n += 8;
+    }
+    fn str(w: *Wbody, s: [*:0]const u8) Error!void {
+        const z = std.mem.span(s);
+        if (z.len > 4096 or w.n + 2 + z.len > w.buf.len)
+            return port.kerror(&port.Etoolong);
+        std.mem.writeInt(u16, w.buf[w.n..][0..2], @intCast(z.len), .little);
+        @memcpy(w.buf[w.n + 2 ..][0..z.len], z);
+        w.n += 2 + z.len;
+    }
+};
+
+/// Sends the wide request t with body w for ch and returns its reply's
+/// body, in out.
+fn widerpc(m: *Mnt, ch: *Chan, t: u8, w: *const Wbody, out: []u8) Error![]u8 {
+    const r = mntralloc(ch);
+    defer mntfree(r);
+    r.request.type = t;
+    r.request.fid = @bitCast(ch.fid);
+    r.wide = &w.buf;
+    r.nwide = @intCast(w.n);
+    try mountrpc(m, r);
+    var n: usize = 0;
+    var b_: ?*Block = r.b;
+    while (b_) |b| : (b_ = b.next) {
+        const k = @min(@as(usize, @intCast(blen(b))), out.len - n);
+        @memcpy(out[n..][0..k], b.rp[0..k]);
+        n += k;
+    }
+    return out[0..n];
+}
+
+fn mntreadlink(ch: *Chan, buf: []u8) Error!?usize {
+    // Only a link a Linux process's walk stopped at is one.
+    if (ch.qid.type & QTSYMLINK == 0)
+        return null;
+    const m = wideof(ch) orelse return null;
+    var w: Wbody = .{};
+    w.put32(@bitCast(ch.fid));
+    var out: [2 + 4096]u8 = undefined;
+    const rep = try widerpc(m, ch, Treadlink, &w, &out);
+    if (rep.len < 2)
+        return port.kerror(&port.Emountrpc);
+    const n = @min(std.mem.readInt(u16, rep[0..2], .little), rep.len - 2, buf.len - 1);
+    @memcpy(buf[0..n], rep[2..][0..n]);
+    buf[n] = 0;
+    return n;
+}
+
+fn mntsymlink(dir: *Chan, name: [*:0]const u8, target: [*:0]const u8) Error!void {
+    const m = wideof(dir) orelse return port.kerror(&port.Eperm);
+    var w: Wbody = .{};
+    w.put32(@bitCast(dir.fid));
+    try w.str(name);
+    try w.str(target);
+    w.put32(0); // the gid, which the translator gives from its user map
+    var out: [64]u8 = undefined;
+    _ = try widerpc(m, dir, Tsymlink, &w, &out);
+}
+
+fn mntlink(ch: *Chan, dir: *Chan, name: [*:0]const u8) Error!bool {
+    const m = wideof(ch) orelse return false;
+    var w: Wbody = .{};
+    w.put32(@bitCast(dir.fid));
+    w.put32(@bitCast(ch.fid));
+    try w.str(name);
+    var out: [64]u8 = undefined;
+    _ = try widerpc(m, ch, Tlink, &w, &out);
+    return true;
+}
+
+fn mntrename(ch: *Chan, dir: *Chan, name: [*:0]const u8) Error!bool {
+    const m = wideof(ch) orelse return false;
+    var w: Wbody = .{};
+    w.put32(@bitCast(ch.fid));
+    w.put32(@bitCast(dir.fid));
+    try w.str(name);
+    var out: [64]u8 = undefined;
+    _ = try widerpc(m, ch, Trename, &w, &out);
+    return true;
+}
+
+fn mnthasattr(ch: *Chan) bool {
+    return wideof(ch) != null;
+}
+
+// Linux's file types, for a Tgetattr's mode.
+const S_IFMT = 0o170000;
+const S_IFDIR = 0o040000;
+const S_IFLNK = 0o120000;
+const S_IFIFO = 0o010000;
+const QTSYMLINK = 0x02; // H9_QTSYMLINK
+const DMSYMLINK = 0x02000000;
+const DMFIFO = 0x00200000;
+
+fn mntgetattr(ch: *Chan, mask: u64, a: *Attr) Error!void {
+    const m = wideof(ch) orelse return dev.getattrdefault(ch, a);
+    var w: Wbody = .{};
+    w.put32(@bitCast(ch.fid));
+    w.put64(mask);
+    var out: [256]u8 = undefined;
+    const rep = try widerpc(m, ch, Tgetattr, &w, &out);
+    if (rep.len < 153)
+        return port.kerror(&port.Emountrpc);
+    const r64 = struct {
+        fn at(b: []const u8, o: usize) u64 {
+            return std.mem.readInt(u64, b[o..][0..8], .little);
+        }
+    }.at;
+    const r32 = struct {
+        fn at(b: []const u8, o: usize) u32 {
+            return std.mem.readInt(u32, b[o..][0..4], .little);
+        }
+    }.at;
+    a.* = std.mem.zeroes(Attr);
+    a.valid = r64(rep, 0) & c.Abasic;
+    a.qid = .{ .type = rep[8], .vers = r32(rep, 9), .path = r64(rep, 13) };
+    const lm = r32(rep, 21);
+    a.mode = lm & 0o777;
+    switch (lm & S_IFMT) {
+        S_IFDIR => a.mode |= c.DMDIR,
+        S_IFLNK => a.mode |= DMSYMLINK,
+        S_IFIFO => a.mode |= DMFIFO,
+        else => {},
+    }
+    a.uid = r32(rep, 25);
+    a.gid = r32(rep, 29);
+    a.nlink = r64(rep, 33);
+    a.rdev = r64(rep, 41);
+    a.size = r64(rep, 49);
+    a.blocks = r64(rep, 65);
+    a.atime = @bitCast(r64(rep, 73));
+    a.atimens = @bitCast(r64(rep, 81));
+    a.mtime = @bitCast(r64(rep, 89));
+    a.mtimens = @bitCast(r64(rep, 97));
+    a.ctime = @bitCast(r64(rep, 105));
+    a.ctimens = @bitCast(r64(rep, 113));
+}
+
+fn mntsetattr(ch: *Chan, mask: u64, a: *const Attr) Error!void {
+    const m = wideof(ch) orelse return dev.setattrdefault(ch, mask, a);
+    // 9P2000.L's setattr bits.
+    var valid: u32 = 0;
+    if (mask & c.Amode != 0) valid |= 0x1;
+    if (mask & c.Auid != 0) valid |= 0x2;
+    if (mask & c.Agid != 0) valid |= 0x4;
+    if (mask & c.Asize != 0) valid |= 0x8;
+    if (mask & c.Aatime != 0) valid |= if (a.atimens == c.Anow) 0x10 else 0x10 | 0x80;
+    if (mask & c.Amtime != 0) valid |= if (a.mtimens == c.Anow) 0x20 else 0x20 | 0x100;
+    var w: Wbody = .{};
+    w.put32(@bitCast(ch.fid));
+    w.put32(valid);
+    w.put32(a.mode & 0o7777);
+    w.put32(a.uid);
+    w.put32(a.gid);
+    w.put64(a.size);
+    w.put64(@bitCast(a.atime));
+    w.put64(@bitCast(if (a.atimens == c.Anow) 0 else a.atimens));
+    w.put64(@bitCast(a.mtime));
+    w.put64(@bitCast(if (a.mtimens == c.Anow) 0 else a.mtimens));
+    var out: [64]u8 = undefined;
+    _ = try widerpc(m, ch, Tsetattr, &w, &out);
+}
+
+const Attr = dev.Attr;
+
 pub const Device = dev.Native('M', "mnt", .{
     .reset = mntreset,
     .attach = noattach,
@@ -973,6 +1216,13 @@ pub const Device = dev.Native('M', "mnt", .{
     .write = mntwrite,
     .remove = mntremove,
     .wstat = mntwstat,
+    .readlink = mntreadlink,
+    .symlink = mntsymlink,
+    .link = mntlink,
+    .getattr = mntgetattr,
+    .setattr = mntsetattr,
+    .rename = mntrename,
+    .hasattr = mnthasattr,
 });
 
 // The C kernel's names, with its semantics: a function that fails raises

@@ -94,13 +94,9 @@ const Fid = struct {
     /// A FIFO, opened without the server (design/epoch-0/linux-fifo.md): a Linux
     /// open joins h9's pipe for it, and anything else reads it as empty.
     fifo: bool = false,
-    /// A link a Linux process's walk stopped at (design/epoch-0/linux-symlinks.md):
-    /// it opens without the server, to read, and reads as its target.
+    /// A link a Linux process's walk stopped at (design/epoch-0/linux-symlinks.md),
+    /// which the kernel reads with a wide Treadlink.
     link: bool = false,
-    /// A link being made (a create with DMSYMLINK): the fid is still the
-    /// directory's on the server, and its first write is the target, which
-    /// makes the link by Tsymlink, named by the last of `path`.
-    mklink: bool = false,
 };
 
 /// A hidden server fid at an attach's root, which outlives the fid devmnt
@@ -155,7 +151,9 @@ const Bound = struct {
     open: ?u32 = null,
 };
 
-const Kind = enum { version, attach, walk, open, create, read, readlink, readdir, write, symlink, clunk, remove, stat, wstat };
+/// `wide` is one of the wide requests (wire.wide), passed on with the
+/// server's fids.
+const Kind = enum { version, attach, walk, open, create, read, readdir, write, clunk, remove, stat, wstat, wide };
 
 const Op = struct {
     arena: std.heap.ArenaAllocator,
@@ -341,6 +339,12 @@ pub const Client = struct {
         return c.dialect == .@"9P2000.L" or c.dialect == .@"9P2000.L.Z";
     }
 
+    /// Whether the mount may send the wide requests (`wire.wide`): the
+    /// connection translates to 9P2000.L (design/file-interface.md).
+    pub fn wide(c: *const Client) bool {
+        return c.translating();
+    }
+
     /// Whether a dropped connection can be resumed on a new one: only
     /// with `9P2000.L.Z`, which has Trebind and op_ids.
     pub fn canReconnect(c: *const Client) bool {
@@ -424,7 +428,7 @@ pub const Client = struct {
                 c.in_mount.items.len = 0;
                 break;
             }
-            const d = wire.decode(p9.T, frame, max, false) catch return c.fail("bad 9P message from the mount");
+            const d = wire.decode(wire.wide.T, frame, max, false) catch return c.fail("bad 9P message from the mount");
             try c.request(d.tag, d.msg);
         }
     }
@@ -750,7 +754,7 @@ pub const Client = struct {
         c.gpa.destroy(op);
     }
 
-    fn request(c: *Client, tag: u16, msg: p9.T) Allocator.Error!void {
+    fn request(c: *Client, tag: u16, msg: wire.wide.T) Allocator.Error!void {
         if (c.dialect == .failed) return c.rerror(tag, c.err.?);
         // A create's directory attributes, if a walk brought them, give
         // its mode (create(5)) before the create drops them.
@@ -759,7 +763,7 @@ pub const Client = struct {
             else => null,
         };
         switch (msg) {
-            .Twrite, .Tcreate, .Tremove, .Twstat => c.dropAhead(),
+            .Twrite, .Tcreate, .Tremove, .Twstat, .Tsymlink, .Trename, .Tsetattr, .Tlink => c.dropAhead(),
             .Tclunk => |cl| if (c.fids.get(cl.fid)) |f| if (f.rclose) c.dropAhead(),
             else => {},
         }
@@ -805,12 +809,8 @@ pub const Client = struct {
                 const op = try c.newOp(tag, .open);
                 op.fid = o.fid;
                 op.mode = o.mode;
-                // A link opens only to read its target, without the server.
-                if (f.link) {
-                    if (o.mode & 3 != wire.OREAD and o.mode & 3 != wire.OEXEC) return c.finishErrno(op, attr.E.LOOP);
-                    f.open = true;
-                    return c.finish(op, p9.Ropen{ .qid = .{ .type = wire.QTSYMLINK, .vers = f.qid.vers, .path = f.qid.path }, .iounit = 0 });
-                }
+                // A link doesn't open: the kernel follows it.
+                if (f.link) return c.finishErrno(op, attr.E.LOOP);
                 // A walk's attributes answer the type check.
                 if (c.cachedStat(f)) |st| return c.stepOpen(op, 0, .{ .Rgetattr = .{ .valid = L.GETATTR_BASIC, .stat = st } });
                 try c.send(op, l.Tgetattr{ .fid = f.sfid, .request_mask = L.GETATTR_BASIC }, .{ .main = 0 });
@@ -825,12 +825,6 @@ pub const Client = struct {
                 op.mode = cr.mode;
                 op.perm = cr.perm;
                 op.name = try op.allocator().dupe(u8, cr.name);
-                // A link: made by the first write, which is its target,
-                // since a 9P2000 create can't carry one.
-                if (cr.perm & wire.DMSYMLINK != 0) {
-                    f.mklink = true;
-                    return c.created(op, f, .{ .type = wire.QTSYMLINK });
-                }
                 // The mode depends on the directory's (create(5)), from
                 // attributes held for it or a Tgetattr.
                 if (create_dir) |st| return c.createSend(op, f, st.mode);
@@ -840,14 +834,7 @@ pub const Client = struct {
                 const f = c.fids.get(r.fid) orelse return c.rerror(tag, "unknown fid");
                 if (!f.open) return c.rerror(tag, "fid not open");
                 if (f.qid.type & wire.QTDIR != 0) return c.readDir(tag, r.fid, f, r.offset, r.count);
-                if (f.mklink) return c.rerror(tag, "permission denied");
                 if (f.fifo) return c.sendMount(tag, wire.common.Rread{ .data = .{ .bytes = "" } });
-                if (f.link) {
-                    const op = try c.newOp(tag, .readlink);
-                    op.offset = r.offset;
-                    op.count = r.count;
-                    return c.send(op, l.Treadlink{ .fid = f.sfid }, .{ .main = 0 });
-                }
                 // From what was read ahead, or a read of a whole upstream
                 // msize when this one follows the last.
                 if (f.eof_at == r.offset and r.offset == f.ahead_off + f.ahead.items.len) {
@@ -880,15 +867,6 @@ pub const Client = struct {
                 const f = c.fids.get(w.fid) orelse return c.rerror(tag, "unknown fid");
                 if (!f.open) return c.rerror(tag, "fid not open");
                 if (f.fifo or f.link) return c.rerror(tag, "permission denied");
-                if (f.mklink) {
-                    if (w.offset != 0 or w.data.bytes.len == 0 or w.data.bytes.len > c.msize - wire.io_header) return c.rerror(tag, "bad link target");
-                    const op = try c.newOp(tag, .symlink);
-                    op.fid = w.fid;
-                    op.count = @intCast(w.data.bytes.len);
-                    const target = try op.allocator().dupe(u8, w.data.bytes);
-                    const gid = c.opts.users.number(c.opts.users.user);
-                    return c.send(op, l.Tsymlink{ .dfid = f.sfid, .name = f.path.items[f.path.items.len - 1], .symtgt = target, .gid = gid }, .{ .main = 0 });
-                }
                 const op = try c.newOp(tag, .write);
                 const n = @min(w.data.bytes.len, c.msize - wire.io_header);
                 try c.send(op, wire.common.Twrite{ .fid = f.sfid, .offset = w.offset, .data = .{ .bytes = w.data.bytes[0..n] } }, .{ .main = 0 });
@@ -933,6 +911,116 @@ pub const Client = struct {
                 }
                 try c.wstatNext(op, f);
             },
+            // The wide requests (design/file-interface.md): each passed
+            // on with the server's fids, and its reply passed back.
+            .Tsymlink => |s| {
+                const f = c.fids.get(s.dfid) orelse return c.rerror(tag, "unknown fid");
+                if (f.qid.type & wire.QTDIR == 0) return c.rerror(tag, "not a directory");
+                if (!validName(s.name)) return c.rerror(tag, "bad character in file name");
+                const op = try c.newOp(tag, .wide);
+                const a = op.allocator();
+                const gid = c.opts.users.number(c.opts.users.user);
+                try c.send(op, l.Tsymlink{ .dfid = f.sfid, .name = try a.dupe(u8, s.name), .symtgt = try a.dupe(u8, s.symtgt), .gid = gid }, .{ .main = 0 });
+            },
+            .Treadlink => |r| {
+                const f = c.fids.get(r.fid) orelse return c.rerror(tag, "unknown fid");
+                const op = try c.newOp(tag, .wide);
+                try c.send(op, l.Treadlink{ .fid = f.sfid }, .{ .main = 0 });
+            },
+            .Tgetattr => |g| {
+                const f = c.fids.get(g.fid) orelse return c.rerror(tag, "unknown fid");
+                const op = try c.newOp(tag, .wide);
+                try c.send(op, l.Tgetattr{ .fid = f.sfid, .request_mask = g.request_mask }, .{ .main = 0 });
+            },
+            .Tsetattr => |s| {
+                const f = c.fids.get(s.fid) orelse return c.rerror(tag, "unknown fid");
+                const op = try c.newOp(tag, .wide);
+                var sa = s;
+                sa.fid = f.sfid;
+                try c.send(op, sa, .{ .main = 0 });
+            },
+            .Tlink => |k| {
+                const d = c.fids.get(k.dfid) orelse return c.rerror(tag, "unknown fid");
+                const f = c.fids.get(k.fid) orelse return c.rerror(tag, "unknown fid");
+                if (d.root != f.root) return c.rerror(tag, "cross-device link");
+                if (!validName(k.name)) return c.rerror(tag, "bad character in file name");
+                const op = try c.newOp(tag, .wide);
+                try c.send(op, l.Tlink{ .dfid = d.sfid, .fid = f.sfid, .name = try op.allocator().dupe(u8, k.name) }, .{ .main = 0 });
+            },
+            .Trename => |rn| {
+                const f = c.fids.get(rn.fid) orelse return c.rerror(tag, "unknown fid");
+                const d = c.fids.get(rn.dfid) orelse return c.rerror(tag, "unknown fid");
+                if (d.root != f.root) return c.rerror(tag, "cross-device link");
+                if (!validName(rn.name)) return c.rerror(tag, "bad character in file name");
+                if (f.path.items.len == 0) return c.rerror(tag, "can't rename the root");
+                const op = try c.newOp(tag, .wide);
+                op.fid = rn.fid;
+                op.newfid = rn.dfid;
+                op.name = try op.allocator().dupe(u8, rn.name);
+                try c.send(op, l.Trename{ .fid = f.sfid, .dfid = d.sfid, .name = op.name }, .{ .main = 0 });
+            },
+        }
+    }
+
+    /// A wide request's reply, passed back to the mount; a Trename's
+    /// moves the fids at and under the old path to the new.
+    fn stepWide(c: *Client, op: *Op, msg: l.R) Allocator.Error!void {
+        if (lerror(msg)) |e| return c.finishErrno(op, e);
+        switch (msg) {
+            .Rsymlink => |r| return c.finish(op, l.Rsymlink{ .qid = r.qid }),
+            .Rreadlink => |r| return c.finish(op, l.Rreadlink{ .target = r.target }),
+            .Rgetattr => |r| return c.finish(op, l.Rgetattr{ .valid = r.valid, .stat = r.stat }),
+            .Rsetattr => return c.finish(op, l.Rsetattr{}),
+            .Rlink => return c.finish(op, l.Rlink{}),
+            .Rrename => {
+                const f = c.fids.get(op.fid) orelse return c.finishErr(op, "unknown fid");
+                const d = c.fids.get(op.newfid) orelse return c.finishErr(op, "unknown fid");
+                try c.moved(f, d, op.name);
+                return c.finish(op, l.Rrename{});
+            },
+            else => return c.unexpected(),
+        }
+    }
+
+    /// After a rename across directories, every fid at or under f's path
+    /// is under d's, as name.
+    fn moved(c: *Client, f: *Fid, d: *Fid, name: []const u8) Allocator.Error!void {
+        const old = try c.gpa.alloc([]u8, f.path.items.len);
+        defer {
+            for (old) |s| c.gpa.free(s);
+            c.gpa.free(old);
+        }
+        for (f.path.items, old) |s, *o| o.* = try c.gpa.dupe(u8, s);
+        var new: std.ArrayList([]u8) = .empty;
+        defer {
+            for (new.items) |s| c.gpa.free(s);
+            new.deinit(c.gpa);
+        }
+        for (d.path.items) |s| try new.append(c.gpa, try c.gpa.dupe(u8, s));
+        try new.append(c.gpa, try c.gpa.dupe(u8, name));
+        var it = c.fids.valueIterator();
+        while (it.next()) |g| {
+            const p = &g.*.path;
+            if (g.*.root != f.root or p.items.len < old.len) continue;
+            var same = true;
+            for (old, p.items[0..old.len]) |a, b| {
+                if (!std.mem.eql(u8, a, b)) {
+                    same = false;
+                    break;
+                }
+            }
+            if (!same) continue;
+            const rest = p.items.len - old.len;
+            var np: std.ArrayList([]u8) = .empty;
+            errdefer {
+                for (np.items) |s| c.gpa.free(s);
+                np.deinit(c.gpa);
+            }
+            for (new.items) |s| try np.append(c.gpa, try c.gpa.dupe(u8, s));
+            for (p.items[old.len..][0..rest]) |s| try np.append(c.gpa, try c.gpa.dupe(u8, s));
+            for (p.items) |s| c.gpa.free(s);
+            p.deinit(c.gpa);
+            p.* = np;
         }
     }
 
@@ -1081,21 +1169,14 @@ pub const Client = struct {
                 }
                 return c.finish(op, wire.common.Rread{ .data = .{ .bytes = data[0..got] } });
             },
-            .readlink => {
-                if (lerror(msg)) |e| return c.finishErrno(op, e);
-                if (msg != .Rreadlink) return c.unexpected();
-                const target = msg.Rreadlink.target;
-                const from: usize = @intCast(@min(op.offset, target.len));
-                const k = @min(op.count, target.len - from);
-                return c.finish(op, wire.common.Rread{ .data = .{ .bytes = target[from..][0..k] } });
-            },
+            .wide => return c.stepWide(op, msg),
             .readdir => return c.stepReaddir(op, msg),
             .write => {
                 if (lerror(msg)) |e| return c.finishErrno(op, e);
                 if (msg != .Rwrite) return c.unexpected();
                 return c.finish(op, wire.common.Rwrite{ .count = msg.Rwrite.count });
             },
-            .symlink => return c.stepSymlink(op, n, msg),
+
             .clunk, .remove => return c.stepRemove(op, n, msg),
             .stat => {
                 if (lerror(msg)) |e| return c.finishErrno(op, e);
@@ -1331,32 +1412,6 @@ pub const Client = struct {
         }
     }
 
-    /// A link's target written to a fid a create with DMSYMLINK made:
-    /// Tsymlink in the directory, then a walk to the link, which the fid
-    /// becomes.
-    fn stepSymlink(c: *Client, op: *Op, n: u32, msg: l.R) Allocator.Error!void {
-        if (lerror(msg)) |e| return c.finishErrno(op, e);
-        const f = c.fids.get(op.fid) orelse return c.finishErr(op, "unknown fid");
-        switch (n) {
-            0 => {
-                if (msg != .Rsymlink) return c.unexpected();
-                op.sfid = try c.tmpSfid(op);
-                try c.send(op, wire.common.Twalk{ .fid = f.sfid, .newfid = op.sfid, .wnames = .init(&.{f.path.items[f.path.items.len - 1]}) }, .{ .main = 1 });
-            },
-            1 => {
-                if (msg != .Rwalk) return c.unexpected();
-                if (msg.Rwalk.wqids.n != 1) return c.finishErrno(op, attr.E.NOENT);
-                keep(op, op.sfid);
-                try c.clunk(f.sfid);
-                f.sfid = op.sfid;
-                f.qid = msg.Rwalk.wqids.qids[0];
-                f.mklink = false;
-                f.link = true;
-                return c.finish(op, wire.common.Rwrite{ .count = op.count });
-            },
-            else => unreachable,
-        }
-    }
 
     fn created(c: *Client, op: *Op, f: *Fid, qid: wire.Qid) Allocator.Error!void {
         try f.path.append(c.gpa, try c.gpa.dupe(u8, op.name));
@@ -2005,22 +2060,22 @@ const Harness = struct {
     }
 
     /// The next reply devmnt would read, or null.
-    fn next(h: *Harness) !?wire.Frame(p9.R) {
+    fn next(h: *Harness) !?wire.Frame(wire.wide.R) {
         const hd = (try wire.header(h.replies.items, 1 << 20)) orelse return null;
         testing.allocator.free(h.last);
         h.last = try testing.allocator.dupe(u8, h.replies.items[0..hd.size]);
         Client.consume(&h.replies, hd.size);
-        return try wire.decode(p9.R, h.last, 1 << 20, false);
+        return try wire.decode(wire.wide.R, h.last, 1 << 20, false);
     }
 
-    fn rpc(h: *Harness, msg: anytype) !p9.R {
+    fn rpc(h: *Harness, msg: anytype) !wire.wide.R {
         const tag = try h.send(msg);
         const r = (try h.next()) orelse return error.NoReply;
         try testing.expectEqual(tag, r.tag);
         return r.msg;
     }
 
-    fn ok(h: *Harness, msg: anytype) !p9.R {
+    fn ok(h: *Harness, msg: anytype) !wire.wide.R {
         const r = try h.rpc(msg);
         if (r == .Rerror) {
             std.debug.print("Rerror: {s}\n", .{r.Rerror.ename});
@@ -2041,7 +2096,7 @@ const Harness = struct {
         _ = try h.ok(p9.Tattach{ .fid = 0, .afid = wire.nofid, .uname = "glenda", .aname = "" });
     }
 
-    fn walk(h: *Harness, fid: u32, newfid: u32, path: []const []const u8) !p9.R {
+    fn walk(h: *Harness, fid: u32, newfid: u32, path: []const []const u8) !wire.wide.R {
         return h.rpc(p9.Twalk{ .fid = fid, .newfid = newfid, .wnames = .init(path) });
     }
 
@@ -2272,7 +2327,7 @@ test "symlinks are followed inside the mount" {
     try testing.expectEqual(@as(u16, 1), (try h.walk(0, 4, &.{ "usr", "loop" })).Rwalk.wqids.n);
 }
 
-test "a Linux process's walk stops at a link, which reads as its target and lists" {
+test "a Linux process's walk stops at a link, which Treadlink reads, and lists" {
     for ([_][]const u8{ wire.version_l, wire.version_lz }) |v| {
         var h = try Harness.init(v);
         defer h.deinit();
@@ -2287,8 +2342,8 @@ test "a Linux process's walk stops at a link, which reads as its target and list
         try testing.expectEqual(@as(u16, 1), w.Rwalk.wqids.n);
         try testing.expectEqual(wire.QTSYMLINK, w.Rwalk.wqids.qids[0].type);
         try testing.expectEqualStrings("unknown fid", try h.err(p9.Tstat{ .fid = 1 }));
-        // At the last name, a fid on the link, which opens to read its
-        // target, and stats as a link.
+        // At the last name, a fid on the link, which doesn't open, stats
+        // as a link, and has its target read by the kernel's wide Treadlink.
         const d = try h.walk(0, 2, &.{ "d", "dangling" });
         try testing.expectEqual(@as(u16, 2), d.Rwalk.wqids.n);
         try testing.expectEqual(wire.QTSYMLINK, d.Rwalk.wqids.qids[1].type);
@@ -2298,9 +2353,10 @@ test "a Linux process's walk stops at a link, which reads as its target and list
         try testing.expectEqual(@as(u64, 7), sd.length);
         _ = try h.ok(p9.Twalk{ .fid = 2, .newfid = 3, .wnames = .{} });
         try testing.expectEqualStrings("too many symbolic links", try h.err(p9.Topen{ .fid = 3, .mode = wire.OWRITE }));
-        const got = try h.cat(4, &.{"lib"});
-        defer testing.allocator.free(got);
-        try testing.expectEqualStrings("usr/lib", got);
+        _ = try h.ok(p9.Twalk{ .fid = 0, .newfid = 4, .wnames = .init(&.{"lib"}) });
+        try testing.expectEqualStrings("too many symbolic links", try h.err(p9.Topen{ .fid = 4, .mode = wire.OREAD }));
+        try testing.expectEqualStrings("usr/lib", (try h.ok(l.Treadlink{ .fid = 4 })).Rreadlink.target);
+        _ = try h.ok(p9.Tclunk{ .fid = 4 });
         // Listings show links, a dangling one too.
         const dirs = try h.ls(&.{"d"}, 8192);
         try testing.expectEqual(@as(usize, 2), dirs.items.len);
@@ -2356,19 +2412,43 @@ test "directory reads" {
     _ = try h.ok(p9.Tcreate{ .fid = 5, .name = "made", .perm = wire.DMNAMEDPIPE | 0o600, .mode = wire.OREAD });
     _ = try h.ok(p9.Tclunk{ .fid = 5 });
     try testing.expect(h.s.lookup("d/made").?.kind == .fifo);
-    // A create with DMSYMLINK makes a link by Tsymlink, with the first
-    // write as its target; the fid is then the link.
+    // The kernel's wide Tsymlink makes a link (design/file-interface.md).
     _ = try h.ok(p9.Twalk{ .fid = 0, .newfid = 5, .wnames = .init(&.{"d"}) });
-    _ = try h.ok(p9.Tcreate{ .fid = 5, .name = "ln", .perm = wire.DMSYMLINK | 0o777, .mode = wire.OWRITE });
-    try testing.expect(h.s.lookup("d/ln") == null);
-    try testing.expectEqual(@as(u32, 3), (try h.ok(p9.Twrite{ .fid = 5, .offset = 0, .data = .{ .bytes = "sub" } })).Rwrite.count);
-    try testing.expectEqualStrings("permission denied", try h.err(p9.Twrite{ .fid = 5, .offset = 0, .data = .{ .bytes = "sub" } }));
+    _ = try h.ok(l.Tsymlink{ .dfid = 5, .name = "ln", .symtgt = "sub", .gid = 0 });
     _ = try h.ok(p9.Tclunk{ .fid = 5 });
     try testing.expect(h.s.lookup("d/ln").?.kind == .link);
     try testing.expectEqualStrings("sub", h.s.lookup("d/ln").?.target);
     // Nor does a directory for writing.
     _ = try h.ok(p9.Twalk{ .fid = 0, .newfid = 6, .wnames = .init(&.{"d"}) });
     try testing.expectEqualStrings("file is a directory", try h.err(p9.Topen{ .fid = 6, .mode = wire.OWRITE }));
+}
+
+test "the kernel's wide requests pass to the server with its fids" {
+    var h = try Harness.init(wire.version_l);
+    defer h.deinit();
+    _ = try h.s.add("a/f", .file, "abc");
+    _ = try h.s.add("b/g", .file, "old");
+    try h.mount();
+    _ = try h.ok(p9.Twalk{ .fid = 0, .newfid = 1, .wnames = .init(&.{ "a", "f" }) });
+    _ = try h.ok(p9.Twalk{ .fid = 0, .newfid = 2, .wnames = .init(&.{"b"}) });
+    // Tlink: a second name for the same file.
+    _ = try h.ok(l.Tlink{ .dfid = 2, .fid = 1, .name = "h" });
+    try testing.expect(h.s.lookup("b/h").?.inode() == h.s.lookup("a/f").?);
+    const ga = try h.ok(l.Tgetattr{ .fid = 1, .request_mask = L.GETATTR_BASIC });
+    try testing.expectEqual(@as(u64, 2), ga.Rgetattr.stat.nlink);
+    // Trename replaces, and the moved fid's path follows it.
+    _ = try h.ok(l.Trename{ .fid = 1, .dfid = 2, .name = "g" });
+    try testing.expect(h.s.lookup("a/f") == null);
+    try testing.expectEqualStrings("abc", h.s.lookup("b/g").?.inode().data.items);
+    _ = try h.ok(p9.Tstat{ .fid = 1 });
+    const st, _ = attr.Dir.parse(h.last[9..]).?;
+    try testing.expectEqualStrings("g", st.name);
+    // Tsetattr: mode and size.
+    _ = try h.ok(l.Tsetattr{ .fid = 1, .valid = L.SETATTR_MODE | L.SETATTR_SIZE, .mode = 0o600, .uid = 0, .gid = 0, .size = 1, .atime_sec = 0, .atime_nsec = 0, .mtime_sec = 0, .mtime_nsec = 0 });
+    try testing.expectEqual(@as(u32, 0o600), h.s.lookup("b/g").?.inode().mode);
+    try testing.expectEqualStrings("a", h.s.lookup("b/h").?.inode().data.items);
+    // Unknown fids are 9P2000 errors.
+    try testing.expectEqualStrings("unknown fid", try h.err(l.Treadlink{ .fid = 9 }));
 }
 
 test "wstat renames, truncates, and syncs" {
@@ -2426,14 +2506,14 @@ test "a flush flushes the server's requests" {
     _ = try h.ok(p9.Topen{ .fid = 1, .mode = wire.OREAD });
     h.s.hold = true;
     const rt = try h.send(p9.Tread{ .fid = 1, .offset = 0, .count = 10 });
-    try testing.expectEqual(@as(?wire.Frame(p9.R), null), try h.next());
+    try testing.expectEqual(@as(?wire.Frame(wire.wide.R), null), try h.next());
     const ft = try h.send(p9.Tflush{ .oldtag = rt });
     const r = (try h.next()).?;
     try testing.expectEqual(ft, r.tag);
     try testing.expect(r.msg == .Rflush);
     try h.s.release();
     try h.pump();
-    try testing.expectEqual(@as(?wire.Frame(p9.R), null), try h.next());
+    try testing.expectEqual(@as(?wire.Frame(wire.wide.R), null), try h.next());
     // The tag is free again.
     _ = try h.ok(p9.Tclunk{ .fid = 1 });
 }
@@ -2498,7 +2578,7 @@ test "a reconnect rebinds fids, reopens without O_TRUNC, and resends a write onc
     h.s.drop_after_write = h.s.writes;
     const tag = try h.send(p9.Twrite{ .fid = 1, .offset = 2, .data = .{ .bytes = "cd" } });
     try testing.expect(h.s.dropped);
-    try testing.expectEqual(@as(?wire.Frame(p9.R), null), try h.next());
+    try testing.expectEqual(@as(?wire.Frame(wire.wide.R), null), try h.next());
     try testing.expect(h.c.canReconnect());
     // A request made while the connection is down waits for it.
     const tag2 = try h.send(p9.Twrite{ .fid = 1, .offset = 4, .data = .{ .bytes = "ef" } });

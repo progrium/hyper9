@@ -12,6 +12,7 @@
 #include "dat.h"
 #include "fns.h"
 #include "error.h"
+#include "devx.h"
 
 int
 h9_dev_reset(Dev *d)
@@ -174,12 +175,73 @@ h9_dev_gen(Devgen *gen, Chan *c, char *name, Dirtab *tab, int ntab, int i, Dir *
 }
 
 /*
- * What else the Zig calls that can raise: h9's hooks in chan.zig,
- * devfs's anchored attach and reading a Linux symbolic link's target
- * (src/kern/fscheck.h).
+ * The optional operations (src/kern/devx.h), each of which may raise.
+ */
+int
+h9_dev_readlink(Devx *x, Chan *c, char *buf, int nbuf, int *r)
+{
+	if(waserror())
+		return -1;
+	*r = x->readlink(c, buf, nbuf);
+	poperror();
+	return 0;
+}
+
+int
+h9_dev_symlink(Devx *x, Chan *c, char *name, char *target)
+{
+	if(waserror())
+		return -1;
+	x->symlink(c, name, target);
+	poperror();
+	return 0;
+}
+
+int
+h9_dev_link(Devx *x, Chan *c, Chan *dir, char *name, int *r)
+{
+	if(waserror())
+		return -1;
+	*r = x->link(c, dir, name);
+	poperror();
+	return 0;
+}
+
+int
+h9_dev_getattr(Devx *x, Chan *c, uvlong mask, Attr *a)
+{
+	if(waserror())
+		return -1;
+	x->getattr(c, mask, a);
+	poperror();
+	return 0;
+}
+
+int
+h9_dev_setattr(Devx *x, Chan *c, uvlong mask, Attr *a)
+{
+	if(waserror())
+		return -1;
+	x->setattr(c, mask, a);
+	poperror();
+	return 0;
+}
+
+int
+h9_dev_rename(Devx *x, Chan *c, Chan *dir, char *name, int *r)
+{
+	if(waserror())
+		return -1;
+	*r = x->rename(c, dir, name);
+	poperror();
+	return 0;
+}
+
+/*
+ * What else the Zig calls that can raise: h9's hook in chan.zig,
+ * devfs's anchored attach (src/kern/fscheck.h).
  */
 extern void h9_fs_anchor(Chan*);
-extern int h9_fs_chanreadlink(Chan*, char*, int);
 
 int
 h9_shim_fs_anchor(Chan *c)
@@ -191,12 +253,3 @@ h9_shim_fs_anchor(Chan *c)
 	return 0;
 }
 
-int
-h9_shim_fs_chanreadlink(Chan *c, char *buf, int nbuf, int *r)
-{
-	if(waserror())
-		return -1;
-	*r = h9_fs_chanreadlink(c, buf, nbuf);
-	poperror();
-	return 0;
-}

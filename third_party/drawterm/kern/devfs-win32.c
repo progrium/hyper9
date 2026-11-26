@@ -11,6 +11,7 @@
 
 #include	<libsec.h>	/* for sha1 in pathhash() */
 #include	"fscheck.h"	/* h9: sandbox hooks */
+#include	"devx.h"	/* h9: optional operations */
 
 typedef struct DIR	DIR;
 typedef	struct Ufsinfo	Ufsinfo;
@@ -1352,4 +1353,26 @@ Dev fsdevtab = {
 	devbwrite,
 	fsremove,
 	fswstat,
+};
+
+/*
+ * h9: the optional operations (design/file-interface.md,
+ * src/kern/devx.h). Links aren't made here (see h9_fs_symlink), so a
+ * Linux link is the switch's default, a copy, and its attributes are
+ * built from stat.
+ */
+static int
+fsrename(Chan *c, Chan *dir, char *name)
+{
+	return h9_fs_rename(c, dir, name);
+}
+
+Devx fsdevx = {
+	'U',
+	h9_fs_readlink,
+	h9_fs_symlink,
+	nil,
+	nil,
+	nil,
+	fsrename,
 };

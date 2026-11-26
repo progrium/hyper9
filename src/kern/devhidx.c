@@ -125,6 +125,28 @@ h9_hidx_dotl(Chan *c)
 	return srv != nil && devtab[srv->type]->dc == 0x2113;
 }
 
+/*
+ * Whether c is a conversation's data over a 9P2000.L server's #ℓ
+ * conversation, so devmnt may send it the wide requests, which the
+ * index layer passes on (design/file-interface.md).
+ */
+extern int h9_dotl_wide(Chan*);
+
+int
+h9_hidx_wide(Chan *c)
+{
+	int n;
+	Chan *srv;
+
+	if(devtab[c->type]->dc != Hidxdc || TYPE(c->qid) != Qdata)
+		return 0;
+	n = CONV(c->qid);
+	if(n < 0 || n >= Maxconv)
+		return 0;
+	srv = convs[n].srv;
+	return srv != nil && h9_dotl_wide(srv);
+}
+
 static void*
 upmach(void)
 {

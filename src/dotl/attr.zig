@@ -627,6 +627,21 @@ pub const Stat = struct {
     blksize: u32 = 4096,
     atime: u32,
     mtime: u32,
+    /// Nanoseconds, and the change time, where the file's device says
+    /// (design/file-interface.md); a Dir has neither, and the change
+    /// time is then the modification time.
+    atime_ns: u32 = 0,
+    mtime_ns: u32 = 0,
+    ctime: ?u32 = null,
+    ctime_ns: u32 = 0,
+
+    fn ctimeOf(s: *const Stat) u32 {
+        return s.ctime orelse s.mtime;
+    }
+
+    fn ctimeNs(s: *const Stat) u32 {
+        return if (s.ctime != null) s.ctime_ns else s.mtime_ns;
+    }
 
     pub fn fromDir(d: *const Dir, kind: Kind, uid: u32, gid: u32) Stat {
         const mode = linuxMode(d, kind);
@@ -661,10 +676,19 @@ pub const Stat = struct {
         std.mem.writeInt(u64, b[48..56], s.size, .little);
         std.mem.writeInt(u32, b[56..60], s.blksize, .little);
         std.mem.writeInt(u64, b[64..72], s.blocks(), .little);
-        std.mem.writeInt(u64, b[72..80], s.atime, .little);
-        std.mem.writeInt(u64, b[88..96], s.mtime, .little);
-        std.mem.writeInt(u64, b[104..112], s.mtime, .little);
+        s.times64(&b);
         return b;
+    }
+
+    /// The times at 72 in the generic and amd64 `struct stat`: three
+    /// {i64 sec, i64 nsec}, access, modification, and change.
+    fn times64(s: *const Stat, b: []u8) void {
+        std.mem.writeInt(u64, b[72..80], s.atime, .little);
+        std.mem.writeInt(u64, b[80..88], s.atime_ns, .little);
+        std.mem.writeInt(u64, b[88..96], s.mtime, .little);
+        std.mem.writeInt(u64, b[96..104], s.mtime_ns, .little);
+        std.mem.writeInt(u64, b[104..112], s.ctimeOf(), .little);
+        std.mem.writeInt(u64, b[112..120], s.ctimeNs(), .little);
     }
 
     /// amd64's `struct stat`, 144 bytes.
@@ -680,9 +704,7 @@ pub const Stat = struct {
         std.mem.writeInt(u64, b[48..56], s.size, .little);
         std.mem.writeInt(u64, b[56..64], s.blksize, .little);
         std.mem.writeInt(u64, b[64..72], s.blocks(), .little);
-        std.mem.writeInt(u64, b[72..80], s.atime, .little);
-        std.mem.writeInt(u64, b[88..96], s.mtime, .little);
-        std.mem.writeInt(u64, b[104..112], s.mtime, .little);
+        s.times64(&b);
         return b;
     }
 
@@ -701,8 +723,11 @@ pub const Stat = struct {
         std.mem.writeInt(u32, b[52..56], s.blksize, .little);
         std.mem.writeInt(u64, b[56..64], s.blocks(), .little);
         std.mem.writeInt(u32, b[64..68], s.atime, .little);
+        std.mem.writeInt(u32, b[68..72], s.atime_ns, .little);
         std.mem.writeInt(u32, b[72..76], s.mtime, .little);
-        std.mem.writeInt(u32, b[80..84], s.mtime, .little);
+        std.mem.writeInt(u32, b[76..80], s.mtime_ns, .little);
+        std.mem.writeInt(u32, b[80..84], s.ctimeOf(), .little);
+        std.mem.writeInt(u32, b[84..88], s.ctimeNs(), .little);
         std.mem.writeInt(u64, b[88..96], s.ino, .little);
         return b;
     }
@@ -722,8 +747,11 @@ pub const Stat = struct {
         std.mem.writeInt(u32, b[24..28], s.blksize, .little);
         std.mem.writeInt(u32, b[28..32], @truncate(s.blocks()), .little);
         std.mem.writeInt(u32, b[32..36], s.atime, .little);
+        std.mem.writeInt(u32, b[36..40], s.atime_ns, .little);
         std.mem.writeInt(u32, b[40..44], s.mtime, .little);
-        std.mem.writeInt(u32, b[48..52], s.mtime, .little);
+        std.mem.writeInt(u32, b[44..48], s.mtime_ns, .little);
+        std.mem.writeInt(u32, b[48..52], s.ctimeOf(), .little);
+        std.mem.writeInt(u32, b[52..56], s.ctimeNs(), .little);
         return b;
     }
 
@@ -742,8 +770,11 @@ pub const Stat = struct {
         std.mem.writeInt(u64, b[48..56], s.blocks(), .little);
         // atime at 64, btime 80, ctime 96, mtime 112: {i64 sec, u32 nsec, i32}.
         std.mem.writeInt(i64, b[64..72], s.atime, .little);
-        std.mem.writeInt(i64, b[96..104], s.mtime, .little);
+        std.mem.writeInt(u32, b[72..76], s.atime_ns, .little);
+        std.mem.writeInt(i64, b[96..104], s.ctimeOf(), .little);
+        std.mem.writeInt(u32, b[104..108], s.ctimeNs(), .little);
         std.mem.writeInt(i64, b[112..120], s.mtime, .little);
+        std.mem.writeInt(u32, b[120..124], s.mtime_ns, .little);
         std.mem.writeInt(u32, b[128..132], @truncate(s.rdev >> 8), .little);
         std.mem.writeInt(u32, b[132..136], @truncate(s.rdev & 0xff), .little);
         std.mem.writeInt(u32, b[136..140], @truncate(s.dev >> 8), .little);
