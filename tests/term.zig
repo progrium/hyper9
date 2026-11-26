@@ -51,12 +51,21 @@ pub const Term = struct {
     /// and moves past it.
     pub fn expect(t: *Term, needle: []const u8, timeout_ms: u32) !void {
         const deadline = now() + timeout_ms;
+        var drained = false;
         while (true) {
             if (std.mem.indexOfPos(u8, t.out.items, t.mark, needle)) |i| {
                 t.mark = i + needle.len;
                 return;
             }
             if (t.code != null) {
+                // conhost passes a pseudoconsole's output on after its
+                // program has exited, so what it wrote last (h9's notices
+                // at exit) may still be on the way: read it once first.
+                if (is_windows and !drained) {
+                    drained = true;
+                    try t.drain(500);
+                    continue;
+                }
                 dump(t, needle);
                 return error.Exited;
             }
