@@ -9249,9 +9249,7 @@ test "Go's runtime.NumCPU follows --cpus [linux-threads]" {
 test "Go's os.Getpid and os.Getppid match /proc [linux-threads]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
-    // Under sh, so the program has a parent: the first process's PPid
-    // in /proc is 0, while getppid gives 1, as for an orphan.
-    try goEach(&le, &.{ "sh", "-c", "/mnt/term/cwd/go/gopid; true" }, {}, struct {
+    try goEach(&le, &.{"/mnt/term/cwd/go/gopid"}, {}, struct {
         fn check(_: void, r: Result) !void {
             // Line 1 is Getpid and Getppid; line 2 is the name in
             // /proc/<Getpid>/status, which is this program's only if the
@@ -9285,7 +9283,7 @@ test "Go's os/exec runs a child and gets its exit status [linux-threads]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try goLinux(&le);
-    try netCase(&le, &.{ "/mnt/term/cwd/go/gochild", "/mnt/term/cwd/go/gochild" }, "child ok\nstatus 7\n");
+    try netCase(&le, &.{"/mnt/term/cwd/go/gochild"}, "child ok\nstatus 7\nchild ok\nstatus 7\n");
 }
 
 test "a Go nil dereference becomes a panic that recover catches [linux-threads]" {
