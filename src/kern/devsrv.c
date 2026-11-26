@@ -10,7 +10,7 @@
  *
  * Changes from 9front's:
  *	- Each machine has its own root board (Srvmach, hung off Hmach), found
- *	  through the calling process's h9 record when attaching, so machines
+ *	  through the calling process's Proc when attaching, so machines
  *	  in one host process can't see each other's services. The lock, the
  *	  path counter and the all-boards list are per machine too. A board
  *	  is the root when it has no parent.

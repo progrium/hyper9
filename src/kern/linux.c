@@ -31,7 +31,7 @@ syserr(void)
 static Chan*
 swapchan(Chan *c, int which)
 {
-	Hproc *h;
+	Proc *h;
 	Chan *old;
 
 	h = h9_uphproc();
@@ -422,7 +422,7 @@ h9_linux_sync(void)
 void
 h9_linux_setcputime(ulong user, ulong sys)
 {
-	Hproc *h;
+	Proc *h;
 
 	h = h9_uphproc();
 	h->cputime[0] = user;
@@ -493,7 +493,7 @@ h9_linux_fds(int *fds, int n)
 typedef struct Wsleep Wsleep;
 struct Wsleep
 {
-	Hproc	*ph;
+	Proc	*ph;
 	ulong	gen;
 };
 
@@ -507,9 +507,9 @@ waitchanged(void *a)
 }
 
 static void
-unsleep(Hproc *ph, Hproc *h)
+unsleep(Proc *ph, Proc *h)
 {
-	Hproc **l;
+	Proc **l;
 
 	for(l = &ph->wsleep; *l != nil; l = &(*l)->wnext)
 		if(*l == h){
@@ -535,7 +535,7 @@ unsleep(Hproc *ph, Hproc *h)
 int
 h9_linux_await(char *buf, int n, int block, long want, int peek)
 {
-	Hproc *h, *ph;
+	Proc *h, *ph;
 	Hwait *w, **l, copy;
 	Wsleep x;
 	int len;
@@ -595,7 +595,7 @@ h9_linux_await(char *buf, int n, int block, long want, int peek)
 ulong
 h9_linux_ppid(void)
 {
-	Hproc *h;
+	Proc *h;
 
 	h = h9_uphproc();
 	return h->ppid != 0 ? h->ppid : 1;
@@ -638,7 +638,7 @@ h9_linux_fchdir(int fd)
 int
 h9_linux_chroot(char *path)
 {
-	Hproc *h;
+	Proc *h;
 	Chan *c, *nc, *t, *old;
 	char *p, *n, *s;
 	int top;

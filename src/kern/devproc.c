@@ -116,10 +116,10 @@ upmach(void)
 }
 
 /* The process the chan names, in the caller's machine, with a reference. */
-static Hproc*
+static Proc*
 chanproc(Chan *c)
 {
-	Hproc *h;
+	Proc *h;
 
 	h = h9_pidlookup(upmach(), PIDQ(c->qid));
 	if(h == nil)
@@ -131,7 +131,7 @@ static int
 procgen(Chan *c, char *name, Dirtab *tab, int ntab, int s, Dir *dp)
 {
 	Qid qid;
-	Hproc *h;
+	Proc *h;
 	Dirtab *t;
 	ulong pid, perm, pids[Npids];
 	char *ename;
@@ -211,7 +211,7 @@ procstat(Chan *c, uchar *db, int n)
 static Chan*
 procopen(Chan *c, int omode0)
 {
-	Hproc *h;
+	Proc *h;
 	Chan *tc;
 	ulong vers;
 	int omode;
@@ -288,7 +288,7 @@ procclose(Chan *c)
 }
 
 static int
-procargs(Hproc *h, char *buf, int nbuf)
+procargs(Proc *h, char *buf, int nbuf)
 {
 	int j, k, m, n;
 	char *a;
@@ -348,13 +348,13 @@ struct Groups
 };
 
 static void
-takegroups(Hproc *h, Groups *g)
+takegroups(Proc *h, Groups *g)
 {
 	Proc *p;
 
 	memset(g, 0, sizeof *g);
 	qlock(&h->debug);
-	p = h->p;
+	p = h;
 	if(p == nil || p->dot == nil){
 		qunlock(&h->debug);
 		error(Eprocdied);
@@ -451,14 +451,14 @@ readfd1(Chan *c, Groups *g, char *buf, int nbuf)
 static int
 prochaswaitq(void *x)
 {
-	Hproc *h;
+	Proc *h;
 
 	h = x;
-	return h->p == nil || h->waitq != nil;
+	return h->exited || h->waitq != nil;
 }
 
 static long
-statusread(Hproc *h, char *buf, int nbuf)
+statusread(Proc *h, char *buf, int nbuf)
 {
 	char state[KNAMELEN];
 	ulong mem;
@@ -466,7 +466,7 @@ statusread(Hproc *h, char *buf, int nbuf)
 	strcpy(state, "New");
 	mem = 0;
 	lock(&h->nlk);
-	if(h->p == nil)
+	if(h->exited)
 		strcpy(state, "Moribund");
 	else if(h->stopped)
 		strcpy(state, "Stopped");
@@ -492,7 +492,7 @@ statusread(Hproc *h, char *buf, int nbuf)
  * 9front.
  */
 static long
-procdebugio(Hproc *h, int what, int write, uvlong off, void *va, long n)
+procdebugio(Proc *h, int what, int write, uvlong off, void *va, long n)
 {
 	long r;
 
@@ -502,12 +502,12 @@ procdebugio(Hproc *h, int what, int write, uvlong off, void *va, long n)
 		error(Ebadctl);
 	}
 	r = Dnoreg;
-	if(h->p == nil)
+	if(h->exited)
 		r = 0;
 	else if(h->aux != nil && h9_procdebug != nil)
 		r = h9_procdebug(h->aux, what, write, off, va, n);
 	unlock(&h->nlk);
-	if(h->p == nil)
+	if(h->exited)
 		error(Eprocdied);
 	switch(r){
 	case Dbadaddr:
@@ -526,7 +526,7 @@ procread(Chan *c, void *va, long n, vlong off)
 	char statbuf[8192];	/* ns prints a union as a line per member */
 	ulong offset;
 	int i, j;
-	Hproc *h;
+	Proc *h;
 	Hwait *w;
 	Groups g;
 
@@ -576,7 +576,7 @@ procread(Chan *c, void *va, long n, vlong off)
 	case Qsegment:
 		j = 0;
 		lock(&h->nlk);
-		if(h->p != nil && h->aux != nil && h9_procsegment != nil)
+		if(!h->exited && h->aux != nil && h9_procsegment != nil)
 			j = h9_procsegment(h->aux, statbuf, sizeof statbuf);
 		unlock(&h->nlk);
 		goto statbufread;
@@ -589,8 +589,8 @@ procread(Chan *c, void *va, long n, vlong off)
 			nexterror();
 		}
 		lock(&h->exl);
-		while(h->waitq == nil && h->p != nil){
-			if(h->p == up && h->nchild == 0){
+		while(h->waitq == nil && !h->exited){
+			if(h == up && h->nchild == 0){
 				unlock(&h->exl);
 				error(Enochild);
 			}
@@ -683,7 +683,7 @@ procread(Chan *c, void *va, long n, vlong off)
 }
 
 static void
-procctlclosefiles(Hproc *h, int all, int fd)
+procctlclosefiles(Proc *h, int all, int fd)
 {
 	Groups g;
 	Fgrp *f;
@@ -717,10 +717,10 @@ procctlclosefiles(Hproc *h, int all, int fd)
 static int
 stoppedorgone(void *a)
 {
-	Hproc *h;
+	Proc *h;
 
 	h = a;
-	return h->stopped || h->p == nil;
+	return h->stopped || h->exited;
 }
 
 /*
@@ -730,9 +730,9 @@ stoppedorgone(void *a)
  * kicked; one blocked in a syscall stops when the call returns.
  */
 static void
-procstopwait(Hproc *h, int ctl)
+procstopwait(Proc *h, int ctl)
 {
-	Hproc *me;
+	Proc *me;
 
 	me = h9_uphproc();
 	lock(&h->nlk);
@@ -744,7 +744,7 @@ procstopwait(Hproc *h, int ctl)
 		unlock(&h->nlk);
 		error(Einuse);
 	}
-	if(h->stopped || h->p == nil){
+	if(h->stopped || h->exited){
 		unlock(&h->nlk);
 		return;
 	}
@@ -773,13 +773,13 @@ procstopwait(Hproc *h, int ctl)
 	lock(&h->nlk);
 	h->pdbg = 0;
 	unlock(&h->nlk);
-	if(h->p == nil)
+	if(h->exited)
 		error(Eprocdied);
 }
 
 /* Resumes a stopped process, for ctl start and startstop. */
 static void
-procstart(Hproc *h, int ctl)
+procstart(Proc *h, int ctl)
 {
 	lock(&h->nlk);
 	if(!h->stopped){
@@ -793,7 +793,7 @@ procstart(Hproc *h, int ctl)
 }
 
 static void
-procctlreq(Hproc *h, char *va, int n)
+procctlreq(Proc *h, char *va, int n)
 {
 	Cmdbuf *cb;
 	Cmdtab *ct;
@@ -845,7 +845,7 @@ procwrite(Chan *c, void *va, long n, vlong off)
 {
 	char buf[ERRMAX];
 	ulong offset;
-	Hproc *h;
+	Proc *h;
 	Hnote *nt;
 
 	offset = off;
