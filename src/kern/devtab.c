@@ -9,7 +9,7 @@
 #include "error.h"
 #include "devx.h"
 
-extern Dev consdevtab;
+extern Dev consdevtab;	/* src/kern/dev/cons.zig */
 extern Dev rootdevtab;
 extern Dev pipedevtab;
 extern Dev ssldevtab;
@@ -18,13 +18,11 @@ extern Dev mousedevtab;
 #ifdef H9_GFX_NONE
 extern Dev drawdevtab;
 #define h9drawdevtab drawdevtab
-#define h9consdevtab consdevtab
 #define h9kbddevtab kbddevtab
 #define h9mousedevtab mousedevtab
 #else
-/* devdraw opening the screen lazily, and devcons's snarf limited to the machine with it (src/kern/dev/gfx.zig) */
+/* devdraw opening the screen lazily (src/kern/dev/gfx.zig) */
 extern Dev h9drawdevtab;
-extern Dev h9consdevtab;
 extern Dev h9kbddevtab;	/* devkbd, serving kbdfs's format, and kbdin */
 extern Dev h9mousedevtab;	/* devmouse, and mousein */
 #endif
@@ -52,7 +50,7 @@ extern Dev machinedevtab;	/* #μ, child machines (src/kern/dev/machine.zig) */
 
 Dev *devtab[] = {
 	&rootdevtab,
-	&h9consdevtab,
+	&consdevtab,
 	&pipedevtab,
 	&ssldevtab,
 	&tlsdevtab,

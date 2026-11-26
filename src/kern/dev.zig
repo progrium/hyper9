@@ -634,6 +634,7 @@ const natives = .{
     // h9's own, which the namespace kernel doesn't build.
     @import("dev/proc.zig").Device,
     @import("dev/eventfd.zig").Device,
+    @import("dev/cons.zig").Device,
     @import("dev/hcons.zig").Device,
     @import("dev/env.zig").Device,
     @import("dev/hidx.zig").Device,
@@ -643,7 +644,6 @@ const natives = .{
     @import("host_dev").ip.Device,
 }) ++ (if (port.options.gfx) .{
     @import("dev/gfx.zig").Draw,
-    @import("dev/gfx.zig").Cons,
     @import("dev/gfx.zig").Kbd,
     @import("dev/gfx.zig").Mouse,
 } else .{});

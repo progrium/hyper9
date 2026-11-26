@@ -50,6 +50,7 @@
 //! - `dev/proc.zig`: devproc.c, #p.
 //! - `tsleep.zig`: tsleep.c, sleep with a timeout.
 //! - `sema.zig`: sema.c, semaphores and rendezvous for guests.
+//! - `dev/cons.zig`: drawterm's devcons.c, #c.
 //! - `dev/hcons.zig`: devhcons.c, #y, a machine's console.
 //! - `fifo.zig`: fifo.c, the Linux ABI's FIFOs.
 //! - `rootdial.zig`: rootdial.c, unix socket roots and host descriptors.
@@ -98,6 +99,7 @@ pub const process = @import("proc.zig");
 pub const devproc = @import("dev/proc.zig");
 pub const tsleep = @import("tsleep.zig");
 pub const sema = @import("sema.zig");
+pub const devcons = @import("dev/cons.zig");
 pub const devhcons = @import("dev/hcons.zig");
 pub const fifo = @import("fifo.zig");
 pub const rootdial = @import("rootdial.zig");
@@ -137,6 +139,7 @@ comptime {
     if (!nskernel) devproc.exportC();
     tsleep.exportC();
     sema.exportC();
+    if (!nskernel) devcons.exportC();
     if (!nskernel) devhcons.exportC();
     fifo.exportC();
     rootdial.exportC();
