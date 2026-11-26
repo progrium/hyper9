@@ -295,7 +295,114 @@ pub const Machine = struct {
         /// hands the machine to serve (design/epoch-0/port-streams.md), as
         /// `serve`'s connections are served, with no listener.
         serve_ports: bool = false,
+        /// A plan (design/plan-format.md), the text `h9 --plan` takes. Its
+        /// lines replace the fields a plan covers (the mounts, binds, and
+        /// namespace lines, the policy, the engine and architecture, the
+        /// environment, the cwd, the window, and serving), and the rest
+        /// (stdio, trace, signals, caches, credential helpers, and the
+        /// like) are taken from these options, as are `serve_token`, when
+        /// the plan has no `servetoken`, and `.fd` mounts, which a plan
+        /// can't hold as text. Host paths in it are taken as written, so
+        /// they're absolute. Its run line is `Machine.planRun`. A plan
+        /// that doesn't parse is `error.BadPlan`, with the line and why in
+        /// `initExplained`'s `conflict`.
+        plan: ?[]const u8 = null,
         stdio: Stdio,
+
+        /// The plan these options describe (design/plan-format.md), as
+        /// its lines would give it. A token in `serve_token`, which a plan
+        /// names by its file, and an embedder's `.fd` connections are left
+        /// out, with a note. Allocations go in `arena`.
+        pub fn toSpec(o: Options, arena: std.mem.Allocator) error{OutOfMemory}!policy.Spec {
+            const env = try arena.alloc([]const u8, o.env.len);
+            for (o.env, env) |e, *out| out.* = try std.fmt.allocPrint(arena, "{s}={s}", .{ e.name, e.value });
+            const listen = try arena.alloc([]const u8, o.serve.len);
+            for (o.serve, listen) |l, *out| out.* = try std.fmt.allocPrint(arena, "{f}", .{l});
+            var notes: std.ArrayList([]const u8) = .empty;
+            if (o.serve_token != null) try notes.append(arena, "servetoken: the embedder's, which a plan names by its file (servetoken @FILE)");
+            return .{
+                .mounts = o.mounts,
+                .binds = o.binds,
+                .ns = o.ns,
+                .policy = o.policy,
+                .guest_tools = o.guest_tools,
+                .engine = std.meta.stringToEnum(policy.EngineChoice, @tagName(o.engine)).?,
+                .arch = o.arch orelse engine.host_arch,
+                .env = env,
+                .cwd = o.cwd,
+                .gfx = if (o.gfx) |g| .{
+                    .headless = g.screen == .headless,
+                    .clipboard = g.clipboard,
+                    .scale = if (g.screen == .headless or g.scale == 1) null else g.scale,
+                    .size = if (g.size) |sz| .{ sz.dx, sz.dy } else null,
+                } else null,
+                .serve = listen,
+                .serve_root = if (std.mem.eql(u8, o.serve_root, "/")) null else o.serve_root,
+                .serve_origins = o.serve_origins,
+                .serve_net = o.serve_net,
+                .notes = notes.items,
+            };
+        }
+
+        /// The plan's text: what `toSpec` gives, written as a plan file.
+        pub fn toPlan(o: Options, arena: std.mem.Allocator) error{OutOfMemory}![]const u8 {
+            return (try o.toSpec(arena)).text(arena);
+        }
+
+        /// These options with plan `text`'s lines in place of the fields
+        /// a plan covers (see `plan`), allocated in `arena`; the run line
+        /// is in `run`. `io` reads a `servetoken @FILE`.
+        pub fn withPlan(o: Options, arena: std.mem.Allocator, io: std.Io, text: []const u8, run_line: *?[]const []const u8, why: *[]const u8) error{ OutOfMemory, BadPlan }!Options {
+            var perr: policy.PlanError = .{};
+            const s = policy.parsePlan(arena, text, &perr) catch |e| {
+                if (e == error.OutOfMemory) return error.OutOfMemory;
+                why.* = try std.fmt.allocPrint(arena, "plan: line {d}: {s}", .{ perr.line, perr.msg });
+                return error.BadPlan;
+            };
+            var r = o;
+            r.plan = null;
+            var mounts: std.ArrayList(Mount) = .empty;
+            try mounts.appendSlice(arena, s.mounts);
+            for (o.mounts) |m| if (m.kind == .fd) try mounts.append(arena, m);
+            r.mounts = mounts.items;
+            r.binds = s.binds;
+            r.ns = s.ns;
+            r.policy = s.policy;
+            r.guest_tools = s.guest_tools;
+            if (s.engine) |e| r.engine = std.meta.stringToEnum(engine.Choice, @tagName(e)).?;
+            r.arch = s.arch orelse o.arch;
+            const env = try arena.alloc(EnvVar, s.env.len);
+            for (s.env, env) |e, *out| {
+                const eq = std.mem.indexOfScalar(u8, e, '=').?;
+                out.* = .{ .name = e[0..eq], .value = e[eq + 1 ..] };
+            }
+            r.env = env;
+            r.cwd = s.cwd;
+            r.gfx = if (s.gfx) |g| .{
+                .screen = if (g.headless) .headless else .window,
+                .clipboard = g.clipboard,
+                .scale = g.scale orelse 1,
+                .size = if (g.size) |sz| .{ .dx = sz[0], .dy = sz[1] } else null,
+            } else null;
+            const listen = try arena.alloc(Listen, s.serve.len);
+            for (s.serve, listen) |a, *out| out.* = Listen.parse(a) catch {
+                why.* = try std.fmt.allocPrint(arena, "plan: serve {s}: not an address h9 can listen on", .{a});
+                return error.BadPlan;
+            };
+            r.serve = listen;
+            r.serve_root = s.serve_root orelse "/";
+            if (s.serve_token) |f| {
+                const tok = std.Io.Dir.cwd().readFileAlloc(io, f[1..], arena, .limited(4096)) catch {
+                    why.* = try std.fmt.allocPrint(arena, "plan: servetoken {s}: can't read it", .{f});
+                    return error.BadPlan;
+                };
+                r.serve_token = std.mem.trim(u8, tok, " \t\r\n");
+            }
+            r.serve_origins = s.serve_origins;
+            r.serve_net = s.serve_net;
+            run_line.* = s.run;
+            return r;
+        }
     };
 
     /// Host-held pseudoterminals (src/hostpty.zig).
@@ -340,7 +447,7 @@ pub const Machine = struct {
         }
     };
 
-    pub const InitError = engine.CreateError || gfx.Error || error{PolicyConflict};
+    pub const InitError = engine.CreateError || gfx.Error || error{ PolicyConflict, BadPlan };
 
     /// Host streams behind the guest's console: reads from `in` (none means
     /// EOF), writes to fd 1 go to `out` and to fd 2 to `err`.
@@ -386,6 +493,8 @@ pub const Machine = struct {
     out_of_memory: bool = false,
     /// The machine's claim on the screen, with `Options.gfx`; in `arena`.
     gfx_claim: ?*gfx.Claim = null,
+    /// `Options.plan`'s run line, in `arena`.
+    plan_run: ?[]const []const u8 = null,
     /// The listeners' bound addresses, once a run has opened them; in
     /// `arena`.
     serve_addrs: []const []const u8 = &.{},
@@ -409,6 +518,10 @@ pub const Machine = struct {
     /// Compiles a policy for a machine with these options, as `init` does,
     /// without creating one (for `--print`).
     pub fn compilePlan(arena: std.mem.Allocator, opts: Options, err_msg: *[]const u8) policy.CompileError!policy.Plan {
+        comptime {
+            // A plan's engine names are engine.Choice's.
+            for (std.meta.fieldNames(engine.Choice)) |f| std.debug.assert(@hasField(policy.EngineChoice, f));
+        }
         const arch = opts.arch orelse engine.host_arch orelse .arm64;
         var in: policy.Inputs = .{ .mounts = opts.mounts, .binds = opts.binds, .cwd = opts.cwd, .arch = arch, .guest_tools = opts.guest_tools, .nameservers = opts.nameservers };
         if (opts.serve.len > 0 or opts.serve_ports) {
@@ -514,6 +627,13 @@ pub const Machine = struct {
         const DUPLICATE_SAME_ACCESS: w.DWORD = 2;
     };
 
+    /// The run line of the plan the machine was made from
+    /// (design/plan-format.md), or null: `m.run(.{ .guest = argv[0] },
+    /// argv)` runs it.
+    pub fn planRun(m: *const Machine) ?[]const []const u8 {
+        return m.plan_run;
+    }
+
     /// Whether the options put a tree on `#L`.
     pub fn hasLinux(opts: Options) bool {
         for (opts.mounts) |mt| if (mt.stack()) |st| if (st[0] == .linux) return true;
@@ -526,8 +646,7 @@ pub const Machine = struct {
         return initExplained(gpa, io, opts, null);
     }
 
-    pub fn initExplained(gpa: std.mem.Allocator, io: std.Io, opts: Options, conflict: ?*[]const u8) InitError!Machine {
-        const arch = opts.arch orelse engine.host_arch orelse return error.WrongArch;
+    pub fn initExplained(gpa: std.mem.Allocator, io: std.Io, given: Options, conflict: ?*[]const u8) InitError!Machine {
         const arena = try gpa.create(std.heap.ArenaAllocator);
         arena.* = .init(gpa);
         errdefer {
@@ -535,6 +654,17 @@ pub const Machine = struct {
             gpa.destroy(arena);
         }
         var msg: []const u8 = "";
+        // A plan's lines in place of the fields it covers
+        // (design/plan-format.md).
+        var plan_run: ?[]const []const u8 = null;
+        const opts = if (given.plan) |text| given.withPlan(arena.allocator(), io, text, &plan_run, &msg) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.BadPlan => {
+                if (conflict) |c| c.* = msg;
+                return error.BadPlan;
+            },
+        } else given;
+        const arch = opts.arch orelse engine.host_arch orelse return error.WrongArch;
         const plan = compilePlan(arena.allocator(), opts, &msg) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Conflict => {
@@ -560,7 +690,7 @@ pub const Machine = struct {
         }
         errdefer if (claim) |cl| gfx.release(cl);
         const eng = try engine.create(gpa, io, opts.engine, .{ .arch = arch, .memory = plan.memory });
-        return .{ .gpa = gpa, .io = io, .opts = o, .arch = arch, .engine = eng, .plan = plan, .arena = arena, .gfx_claim = claim };
+        return .{ .gpa = gpa, .io = io, .opts = o, .arch = arch, .engine = eng, .plan = plan, .arena = arena, .gfx_claim = claim, .plan_run = plan_run };
     }
 
     /// What closing the window does: a hangup, as for a closed terminal.

@@ -57,11 +57,23 @@ pub fn main(init: std.process.Init) !u8 {
     const args = try init.minimal.args.toSlice(arena);
     if (web) web_pwd = init.environ_map.get("PWD") orelse "/";
 
-    const cfg = cli.parse(arena, args) catch {
+    const parsed = cli.parse(arena, args) catch {
         if (cli.why.len > 0) std.debug.print("h9: {s}\n", .{cli.why});
         std.debug.print(cli.usage, .{});
         return 2;
     };
+    // --plan (design/plan-format.md): read on the host, with h9's own
+    // permissions, before the machine starts, and narrowed by the flags.
+    const cfg = if (parsed.plan) |path| blk: {
+        const text = readPlan(io, arena, path) catch |e| {
+            std.debug.print("h9: --plan {s}: {s}\n", .{ path, if (e == error.FileNotFound) "not found" else @errorName(e) });
+            return exit_failed;
+        };
+        break :blk cli.withPlan(arena, parsed, text) catch {
+            if (cli.why.len > 0) std.debug.print("h9: {s}\n", .{cli.why});
+            return 2;
+        };
+    } else parsed;
     // The web host can't listen (design/epoch-0/serve.md).
     if (web and cfg.serve.len > 0) {
         std.debug.print("h9: --serve isn't available on the web host\n", .{});
@@ -254,7 +266,7 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
         .timeout_ns = cfg.timeout_ns,
         .pids = cfg.pids,
         .cpus = cfg.cpus,
-        .cwd_writable = if (cfg.sandbox != null) true else null,
+        .cwd_writable = if (cfg.sandbox != null) true else cfg.cwd_writable,
         .host_fs = cfg.host_fs,
     };
     var base: h9.Machine.Options = .{
@@ -290,6 +302,23 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
     };
 
     if (h9.Machine.hasLinux(base)) base.nameservers = try hostNameservers(arena, io);
+    // --ns @FILE is read on the host, with h9's own permissions, before
+    // the machine starts; inline lines are taken as they are
+    // (design/epoch-0/mounts.md, "Namespace files").
+    var ns_texts: std.ArrayList([]const u8) = .empty;
+    for (cfg.ns) |v| {
+        if (v[0] != '@') {
+            try ns_texts.append(arena, v);
+            continue;
+        }
+        const text = std.Io.Dir.cwd().readFileAlloc(io, v[1..], arena, .limited(1 << 20)) catch |e| {
+            std.debug.print("h9: --ns {s}: {s}\n", .{ v, if (e == error.FileNotFound) "not found" else @errorName(e) });
+            return exit_failed;
+        };
+        try ns_texts.append(arena, text);
+    }
+    base.ns = ns_texts.items;
+    base.env = env.items;
     var conflict: []const u8 = "";
     var plan = h9.Machine.compilePlan(arena, base, &conflict) catch |err| switch (err) {
         error.Conflict => {
@@ -300,9 +329,15 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
     };
     if (plan.serve) |*sv| sv.only = serve_only;
     if (cfg.print) {
+        // The plan these flags compile to (design/plan-format.md), which
+        // --plan runs, then what it compiles to, as comments.
+        var spec = try base.toSpec(arena);
+        spec.notes = &.{};
+        spec.serve_token = cfg.serve_token;
+        spec.run = try cli.runLine(arena, cfg);
         var buf: [4096]u8 = undefined;
         var w = std.Io.File.stdout().writerStreaming(io, &buf);
-        plan.print(&w.interface) catch {};
+        h9.policy.printPlan(&w.interface, spec, &plan) catch {};
         w.interface.flush() catch {};
     }
     if (cfg.print) return 0;
@@ -344,21 +379,6 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
     opts.env = env.items;
     opts.signals = &host.signals;
     opts.trace = if (cfg.trace) |t| (if (t.len > 0) &trace_w.interface else &err_w.interface) else null;
-    // --ns @FILE is read on the host, with h9's own permissions, before
-    // the machine starts; inline lines are taken as they are
-    // (design/epoch-0/mounts.md, "Namespace files").
-    var ns_texts: std.ArrayList([]const u8) = .empty;
-    for (cfg.ns) |v| {
-        if (v[0] != '@') {
-            try ns_texts.append(arena, v);
-            continue;
-        }
-        const text = std.Io.Dir.cwd().readFileAlloc(io, v[1..], arena, .limited(1 << 20)) catch |e| {
-            std.debug.print("h9: --ns {s}: {s}\n", .{ v, if (e == error.FileNotFound) "not found" else @errorName(e) });
-            return exit_failed;
-        };
-        try ns_texts.append(arena, text);
-    }
     opts.ns = ns_texts.items;
     opts.console_tty = (std.Io.File.stdin().isTty(io) catch false) and (std.Io.File.stdout().isTty(io) catch false);
     // A run that only serves doesn't read the console, so it can run in
@@ -475,6 +495,23 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
 /// The host's working directory on the web host, where WASI has none of
 /// its own: the JS host passes it as $PWD.
 var web_pwd: []const u8 = "/";
+
+/// A plan file's text, or standard input's for `-`.
+fn readPlan(io: std.Io, arena: std.mem.Allocator, path: []const u8) ![]const u8 {
+    const limit: std.Io.Limit = .limited(1 << 20);
+    if (std.mem.eql(u8, path, "-")) {
+        var buf: [4096]u8 = undefined;
+        var r = std.Io.File.stdin().readerStreaming(io, &buf);
+        return r.interface.allocRemaining(arena, limit);
+    }
+    // A pipe, as from `--plan <(h9 ... --print)`, has no size to read
+    // up to, so it's read as a stream.
+    const f = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer f.close(io);
+    var buf: [4096]u8 = undefined;
+    var r = f.readerStreaming(io, &buf);
+    return r.interface.allocRemaining(arena, limit);
+}
 
 /// An absolute host path for `p`, with symlinks resolved. WASI has no
 /// realpath, so the web host resolves one component at a time with
