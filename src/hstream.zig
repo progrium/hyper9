@@ -1,6 +1,6 @@
 //! Host streams (design/epoch-0/websocket-9p.md): WebSocket connections h9
 //! makes on the host and hands to the kernel through devhstream
-//! (src/kern/devhstream.c), which devmnt can mount. A stream is made by h9
+//! (src/kern/dev/hstream.zig), which devmnt can mount. A stream is made by h9
 //! for a `ws://` root or a namespace-file mount (host-made), or by the
 //! guest through `/net/ws/clone` (a conversation).
 //!
@@ -38,7 +38,7 @@
 //! client's first 9P message, checks it in the dialect slot, and only then
 //! tells the listener's `Served` that the stream is ready to serve.
 //!
-//! The leaves called from devhstream.c never raise kernel errors: they
+//! The leaves called from dev/hstream.zig never raise kernel errors: they
 //! return -1 with the error in the caller's ERRMAX buffer, and the C side
 //! raises it.
 
@@ -659,7 +659,7 @@ fn newStreamPages(owner: usize, conv: ?u8, pages: ?*const kern.Pages) ?*Stream {
     return null;
 }
 
-// The C side (src/kern/devhstream.c).
+// The C side (src/kern/dev/hstream.zig).
 
 fn wake(id: u32) void {
     kern.hstreamWake(id);
@@ -804,7 +804,7 @@ fn connecting(owner: usize) bool {
     return false;
 }
 
-/// For devhstream.c's h9_hstream_dial: starts a host-made stream to
+/// For dev/hstream.zig's h9_hstream_dial: starts a host-made stream to
 /// `url` with the options machine `mach` registered, and returns its id,
 /// or -1 with the error in `err`.
 fn h9_hstream_redial(mach: ?*anyopaque, url: [*]const u8, n: c_long, err: [*]u8) callconv(.c) c_long {
@@ -1795,7 +1795,7 @@ fn keepaliveLoop() void {
     }
 }
 
-// Leaves called from devhstream.c.
+// Leaves called from dev/hstream.zig.
 
 fn putErr(err: [*]u8, msg: []const u8) void {
     const n = @min(msg.len, kern.ERRMAX - 1);

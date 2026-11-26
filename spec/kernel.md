@@ -202,11 +202,11 @@ Posting sets the channel's `srvname` to its `/srv` path, which `/proc/n/ns` prin
 
 The machine's last process to release its groups (`h9_kern_release` in `src/kern/proc.c`) closes every posted channel, as closing a lease does, while the machine is still there; the boards go with the machine.
 
-#### Host-stream device `#ℏ` (`src/kern/devhstream.c`, `src/hstream.zig`)
+#### Host-stream device `#ℏ` (`src/kern/dev/hstream.zig`, `src/hstream.zig`)
 
 WebSockets, for roots, namespace-file mounts, and the guest's `/net/ws` ([websocket-9p](../design/epoch-0/websocket-9p.md)).
 
-It follows devhcons's pattern: Zig does TCP, TLS (`std.crypto.tls`) and the framing (`src/ws.zig`) on a host reader thread per stream, the guest sleeps on a Rendez in the kernel until the stream has data, and a note interrupts it.
+It follows #y's pattern, and is a native device too ([kernel-port](../design/kernel-port.md)): Zig does TCP, TLS (`std.crypto.tls`) and the framing (`src/ws.zig`) on a host reader thread per stream, the guest sleeps on a Rendez in the kernel until the stream has data, and a note interrupts it.
 
 A host-made stream has no path: `h9_hstream_fd` makes its channel, which is posted as `#s/root` or mounted at once, so the guest can't reach it by name.
 

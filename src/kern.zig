@@ -1287,7 +1287,7 @@ fn fdPtr(fd: std.posix.fd_t) ?*anyopaque {
 }
 
 /// Wakes guest reads and connects waiting on host stream `id`
-/// (src/kern/devhstream.c). Called from the stream's thread, which isn't
+/// (src/kern/dev/hstream.zig). Called from the stream's thread, which isn't
 /// a kernel process, as `wakeConsole` is.
 pub fn hstreamWake(id: u32) void {
     c.h9_hstream_wake(id);
@@ -1515,7 +1515,7 @@ fn console(id: c_ulong) ?*Console {
 pub const nskernel = @hasDecl(build_options, "nskernel") and build_options.nskernel;
 
 comptime {
-    // devhstream.c's leaves.
+    // src/kern/dev/hstream.zig's leaves.
     _ = @import("hstream.zig");
     if (available and nskernel) {
         @export(&h9_plan_get, .{ .name = "h9_plan_get" });
