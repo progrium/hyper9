@@ -25,7 +25,7 @@ git clone https://github.com/progrium/hyper9 && cd hyper9
 . scripts/env.sh       # Zig's cache and tools in .local/; puts zig-out/bin on PATH
 ./scripts/fetch.sh     # the pinned 9front release and other sources
 zig build              # builds and signs zig-out/bin/h9
-h9 --check             # which backends work here, and why not
+h9 --check             # which engines work here, and why not
 ```
 
 That's enough to run h9's built-in root, 44 of 9front's commands inside the
@@ -47,8 +47,8 @@ brew install qemu
 zig build mkroot       # about a minute, ~250 MB in .local/9front/root
 ```
 
-Linux (KVM, the emulator, or the native backend in containers and CI),
-Windows, and the browser host are covered in the manual's
+Linux (KVM, the emulator, or the sud engine in containers and CI),
+Windows, and the web host are covered in the manual's
 [Installing](MANUAL.md#2-installing) chapter and in
 [DEVELOPING.md](DEVELOPING.md).
 

@@ -2,18 +2,18 @@
 //! a 2-instruction loop of 10⁹ iterations, 10⁶ one-byte pwrite round
 //! trips, and 10⁶ _nsec calls (the cost of a system call itself), for
 //! arm64 and amd64, and 10⁷ bare arm64 vCPU exits and re-entries (an SVC
-//! that run returns, with no system call served) on every backend built in that can run them.
+//! that run returns, with no system call served) on every engine built in that can run them.
 //! zig build bench builds it with ReleaseFast and runs it.
 //!
 //! Then the compute benchmarks (tests/bench/*.c: fib, sieve, md5, qsort,
 //! and a double-precision loop), built as arm64 and 386 text by build.zig,
-//! on every backend that runs them, and on the emulator once per tier (T0
-//! and T1, through H9_EMU_TIER). Each run's exit message is
+//! on every engine that runs them, and on the emulator once per tier (T0
+//! and T1, through H9_HCPU_TIER). Each run's exit message is
 //! its checksum, which must match the same C run natively.
 
 const std = @import("std");
 const h9 = @import("h9");
-const vmm = h9.vmm;
+const engine = h9.engine;
 const aout = h9.aout;
 
 const loop_iters = 1_000_000_000;
@@ -192,11 +192,11 @@ const Compute = struct {
 };
 
 const computes = [_]Compute{
-    .{ .name = "fib", .native = bench_fib, .arm64 = @embedFile("bench_fib_arm64"), .i386 = @embedFile("bench_fib_386") },
-    .{ .name = "sieve", .native = bench_sieve, .arm64 = @embedFile("bench_sieve_arm64"), .i386 = @embedFile("bench_sieve_386") },
-    .{ .name = "md5", .native = bench_md5, .arm64 = @embedFile("bench_md5_arm64"), .i386 = @embedFile("bench_md5_386") },
-    .{ .name = "qsort", .native = bench_qsort, .arm64 = @embedFile("bench_qsort_arm64"), .i386 = @embedFile("bench_qsort_386") },
-    .{ .name = "fp", .native = bench_fp, .arm64 = @embedFile("bench_fp_arm64"), .i386 = @embedFile("bench_fp_386") },
+    .{ .name = "fib", .sud = bench_fib, .arm64 = @embedFile("bench_fib_arm64"), .i386 = @embedFile("bench_fib_386") },
+    .{ .name = "sieve", .sud = bench_sieve, .arm64 = @embedFile("bench_sieve_arm64"), .i386 = @embedFile("bench_sieve_386") },
+    .{ .name = "md5", .sud = bench_md5, .arm64 = @embedFile("bench_md5_arm64"), .i386 = @embedFile("bench_md5_386") },
+    .{ .name = "qsort", .sud = bench_qsort, .arm64 = @embedFile("bench_qsort_arm64"), .i386 = @embedFile("bench_qsort_386") },
+    .{ .name = "fp", .sud = bench_fp, .arm64 = @embedFile("bench_fp_arm64"), .i386 = @embedFile("bench_fp_386") },
 };
 
 /// Counts ECX down from 10⁹, then exits(nil).
@@ -257,11 +257,11 @@ pub fn main(init: std.process.Init) !void {
             std.process.exit(2);
         }
     }
-    if (!compute_only) try w.print("{s: <7} {s: <6} {s: <7} {s: >8}  {s}\n", .{ "case", "arch", "vmm", "time", "rate" });
-    if (!compute_only) for (cases) |c| for ([_]vmm.BackendKind{ .hvf, .kvm, .native, .emu }) |kind| for (tiersOf(kind)) |tier| {
+    if (!compute_only) try w.print("{s: <7} {s: <6} {s: <7} {s: >8}  {s}\n", .{ "case", "arch", "engine", "time", "rate" });
+    if (!compute_only) for (cases) |c| for ([_]engine.Choice{ .hvf, .kvm, .sud, .hcpu }) |kind| for (tiersOf(kind)) |tier| {
         if (loop_only and (!std.mem.eql(u8, c.name, "loop") or (tier != null and std.mem.eql(u8, tier.?, "t0")))) continue;
-        if (tier) |t| _ = setenv("H9_EMU_TIER", t, 1) else _ = unsetenv("H9_EMU_TIER");
-        defer _ = unsetenv("H9_EMU_TIER");
+        if (tier) |t| _ = setenv("H9_HCPU_TIER", t, 1) else _ = unsetenv("H9_HCPU_TIER");
+        defer _ = unsetenv("H9_HCPU_TIER");
         var ns: i96 = try runOne(gpa, io, kind, c) orelse continue;
         for (1..repeat) |_| ns = @min(ns, (try runOne(gpa, io, kind, c)).?);
         const s = @as(f64, @floatFromInt(ns)) / 1e9;
@@ -285,9 +285,9 @@ pub fn main(init: std.process.Init) !void {
     // The bare vCPU round trip: run returning .syscall and run again,
     // with no system call served (SVC or SYSCALL, and a branch back).
     if (loop_only) return w.flush();
-    if (!compute_only) for ([_]aout.Arch{ .arm64, .amd64 }) |arch| for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .native, .emu }) |kind| for (tiersOf(kind)) |tier| {
-        if (tier) |t| _ = setenv("H9_EMU_TIER", t, 1) else _ = unsetenv("H9_EMU_TIER");
-        defer _ = unsetenv("H9_EMU_TIER");
+    if (!compute_only) for ([_]aout.Arch{ .arm64, .amd64 }) |arch| for ([_]engine.Choice{ .hvf, .kvm, .whp, .sud, .hcpu }) |kind| for (tiersOf(kind)) |tier| {
+        if (tier) |t| _ = setenv("H9_HCPU_TIER", t, 1) else _ = unsetenv("H9_HCPU_TIER");
+        defer _ = unsetenv("H9_HCPU_TIER");
         var ns: i96 = try bareRoundTrip(gpa, io, kind, arch) orelse continue;
         for (1..repeat) |_| ns = @min(ns, (try bareRoundTrip(gpa, io, kind, arch)).?);
         var lb: [16]u8 = undefined;
@@ -295,7 +295,7 @@ pub fn main(init: std.process.Init) !void {
         try w.flush();
     };
 
-    try w.print("\n{s: <7} {s: <6} {s: <7} {s: >8}  {s: <10} {s}\n", .{ "compute", "arch", "vmm", "time", "vs native", "rate (where the emulator counts)" });
+    try w.print("\n{s: <7} {s: <6} {s: <7} {s: >8}  {s: <10} {s}\n", .{ "compute", "arch", "engine", "time", "vs native", "rate (where the emulator counts)" });
     for (computes) |c| {
         var want: u32 = undefined;
         var native_ns: i96 = std.math.maxInt(i96);
@@ -309,34 +309,34 @@ pub fn main(init: std.process.Init) !void {
         _ = std.fmt.bufPrint(&hex, "{x:0>8}", .{want}) catch unreachable;
         for ([_]aout.Arch{ .arm64, .i386 }) |arch| {
             const text = if (arch == .arm64) c.arm64 else c.i386;
-            for ([_]vmm.BackendKind{ .hvf, .kvm, .native, .emu }) |kind| {
+            for ([_]engine.Choice{ .hvf, .kvm, .sud, .hcpu }) |kind| {
                 for (tiersOf(kind)) |tier| {
-                    if (tier) |t| _ = setenv("H9_EMU_TIER", t, 1) else _ = unsetenv("H9_EMU_TIER");
-                    defer _ = unsetenv("H9_EMU_TIER");
-                    const before = vmm.emuRetired();
-                    const st0 = vmm.emuT1Stats();
+                    if (tier) |t| _ = setenv("H9_HCPU_TIER", t, 1) else _ = unsetenv("H9_HCPU_TIER");
+                    defer _ = unsetenv("H9_HCPU_TIER");
+                    const before = engine.hcpuRetired();
+                    const st0 = engine.hcpuT1Stats();
                     var r = try runText(gpa, io, kind, arch, text) orelse continue;
                     // T1's dispatch counts for the first run: a run whose
                     // regions differ shows here (compiled, region entries,
                     // links, and instructions handed to T0).
                     var st: ?[4]u64 = null;
-                    if (st0) |a| if (vmm.emuT1Stats()) |b| if (tier != null and std.mem.eql(u8, tier.?, "t1")) {
+                    if (st0) |a| if (engine.hcpuT1Stats()) |b| if (tier != null and std.mem.eql(u8, tier.?, "t1")) {
                         st = .{ b[0] - a[0], b[1] - a[1], b[2] - a[2], b[3] - a[3] };
                     };
-                    const insns: ?u64 = if (kind == .emu) if (vmm.emuRetired()) |n| n - before.? else null else null;
+                    const insns: ?u64 = if (kind == .hcpu) if (engine.hcpuRetired()) |n| n - before.? else null else null;
                     for (1..repeat) |_| {
                         const again = (try runText(gpa, io, kind, arch, text)).?;
                         if (again.ns < r.ns) r = again;
                     }
                     const s = @as(f64, @floatFromInt(r.ns)) / 1e9;
-                    const label = if (tier) |t| try std.fmt.allocPrint(gpa, "emu/{s}", .{t}) else try std.fmt.allocPrint(gpa, "{t}", .{kind});
+                    const label = if (tier) |t| try std.fmt.allocPrint(gpa, "hcpu/{s}", .{t}) else try std.fmt.allocPrint(gpa, "{t}", .{kind});
                     defer gpa.free(label);
                     try w.print("{s: <7} {t: <6} {s: <7} {d: >7.3}s  {d: <10.1}", .{ c.name, arch, label, s, s / (@as(f64, @floatFromInt(native_ns)) / 1e9) });
                     if (insns) |n| try w.print(" {d:.2} G instructions/s ({d} M)", .{ @as(f64, @floatFromInt(n)) / s / 1e9, n / 1_000_000 });
                     if (st) |v| try w.print("  [compiled {d}, entries {d}, linked {d}, t0 {d}]", .{ v[0], v[1], v[2], v[3] });
                     // Where things sat, modulo 16 KiB, for runs that vary
                     // from process to process.
-                    if (st != null) if (vmm.emuLayout()) |l| try w.print("  [mod 16K: cpu.v 0x{x}, arena 0x{x}, code 0x{x}, stack 0x{x}]", .{ l[0] % 16384, l[1] % 16384, l[2] % 16384, l[3] % 16384 });
+                    if (st != null) if (engine.hcpuLayout()) |l| try w.print("  [mod 16K: cpu.v 0x{x}, arena 0x{x}, code 0x{x}, stack 0x{x}]", .{ l[0] % 16384, l[1] % 16384, l[2] % 16384, l[3] % 16384 });
                     if (!std.mem.eql(u8, r.msg[0..@min(r.msg.len, 8)], &hex) or r.msg.len != 8) {
                         try w.print("  WRONG: exited \"{s}\", want {s}\n", .{ r.msg, &hex });
                         bad = true;
@@ -350,13 +350,13 @@ pub fn main(init: std.process.Init) !void {
     if (bad) std.process.exit(1);
 }
 
-/// The emulator once per tier (H9_EMU_TIER) where it's built in; every
-/// other backend once.
-fn tiersOf(kind: vmm.BackendKind) []const ?[:0]const u8 {
-    return if (kind == .emu and vmm.hcpu != null) &.{ "t0", "t1" } else &.{null};
+/// The emulator once per tier (H9_HCPU_TIER) where it's built in; every
+/// other engine once.
+fn tiersOf(kind: engine.Choice) []const ?[:0]const u8 {
+    return if (kind == .hcpu and engine.hcpu != null) &.{ "t0", "t1" } else &.{null};
 }
 
-fn tierLabel(buf: []u8, kind: vmm.BackendKind, tier: ?[]const u8) []const u8 {
+fn tierLabel(buf: []u8, kind: engine.Choice, tier: ?[]const u8) []const u8 {
     const t = tier orelse return @tagName(kind);
     return std.fmt.bufPrint(buf, "{t}/{s}", .{ kind, t }) catch @tagName(kind);
 }
@@ -369,9 +369,9 @@ const bare_iters = 10_000_000;
 /// The time of `bare_iters` exits and re-entries of a vCPU on `kind`, at
 /// 0x10000: SVC then B back to it on arm64, SYSCALL then JMP back to it on
 /// amd64.
-fn bareRoundTrip(gpa: std.mem.Allocator, io: std.Io, kind: vmm.BackendKind, arch: aout.Arch) !?i96 {
-    var b = vmm.create(gpa, io, kind, .{ .arch = arch }) catch |e| switch (e) {
-        error.HypervisorUnavailable, error.BackendNotBuilt, error.WrongArch => return null,
+fn bareRoundTrip(gpa: std.mem.Allocator, io: std.Io, kind: engine.Choice, arch: aout.Arch) !?i96 {
+    var b = engine.create(gpa, io, kind, .{ .arch = arch }) catch |e| switch (e) {
+        error.HypervisorUnavailable, error.EngineNotBuilt, error.WrongArch => return null,
         else => return e,
     };
     defer b.destroy();
@@ -392,7 +392,7 @@ fn bareRoundTrip(gpa: std.mem.Allocator, io: std.Io, kind: vmm.BackendKind, arch
     var v = try b.createVcpu();
     defer v.destroy();
     try v.setAddressSpace(as);
-    var u: vmm.Ureg = .initExec(arch, 0x10000, 0, 0);
+    var u: engine.Ureg = .initExec(arch, 0x10000, 0, 0);
     v.setUreg(&u);
     const start: std.Io.Timestamp = .now(io, .awake);
     for (0..bare_iters) |_| {
@@ -401,7 +401,7 @@ fn bareRoundTrip(gpa: std.mem.Allocator, io: std.Io, kind: vmm.BackendKind, arch
     return start.untilNow(io, .awake).toNanoseconds();
 }
 
-fn runText(gpa: std.mem.Allocator, io: std.Io, kind: vmm.BackendKind, arch: aout.Arch, text: []const u8) !?struct { ns: i96, msg: []const u8 } {
+fn runText(gpa: std.mem.Allocator, io: std.Io, kind: engine.Choice, arch: aout.Arch, text: []const u8) !?struct { ns: i96, msg: []const u8 } {
     const bytes = try gpa.alloc(u8, aout.header_size + text.len);
     defer gpa.free(bytes);
     const hs = arch.headerSize();
@@ -410,11 +410,11 @@ fn runText(gpa: std.mem.Allocator, io: std.Io, kind: vmm.BackendKind, arch: aout
     var discard: std.Io.Writer.Discarding = .init(&.{});
     const start: std.Io.Timestamp = .now(io, .awake);
     var m = h9.Machine.init(gpa, io, .{
-        .backend = kind,
+        .engine = kind,
         .arch = arch,
         .stdio = .{ .out = &discard.writer, .err = &discard.writer },
     }) catch |e| switch (e) {
-        error.HypervisorUnavailable, error.BackendNotBuilt, error.WrongArch => return null,
+        error.HypervisorUnavailable, error.EngineNotBuilt, error.WrongArch => return null,
         else => return e,
     };
     defer m.deinit();
@@ -431,7 +431,7 @@ fn runText(gpa: std.mem.Allocator, io: std.Io, kind: vmm.BackendKind, arch: aout
 
 /// The wall time of one run of `c` on `kind`, including machine setup, or
 /// null if `kind` can't run `c.arch` here.
-fn runOne(gpa: std.mem.Allocator, io: std.Io, kind: vmm.BackendKind, c: Case) !?i96 {
+fn runOne(gpa: std.mem.Allocator, io: std.Io, kind: engine.Choice, c: Case) !?i96 {
     const hs = c.arch.headerSize();
     const bytes = try gpa.alloc(u8, hs + c.text.len);
     defer gpa.free(bytes);
@@ -441,11 +441,11 @@ fn runOne(gpa: std.mem.Allocator, io: std.Io, kind: vmm.BackendKind, c: Case) !?
     var discard: std.Io.Writer.Discarding = .init(&.{});
     const start: std.Io.Timestamp = .now(io, .awake);
     var m = h9.Machine.init(gpa, io, .{
-        .backend = kind,
+        .engine = kind,
         .arch = c.arch,
         .stdio = .{ .out = &discard.writer, .err = &discard.writer },
     }) catch |e| switch (e) {
-        error.HypervisorUnavailable, error.BackendNotBuilt, error.WrongArch => return null,
+        error.HypervisorUnavailable, error.EngineNotBuilt, error.WrongArch => return null,
         else => return e,
     };
     defer m.deinit();

@@ -1,6 +1,6 @@
 // Writes argv[2] to the file argv[1] (a ctl file, or #I/cs), as rc's
 // echo would. Exits cleanly if the write succeeds, or with its error.
-// See tests/backends.zig, "[5]".
+// See tests/engines.zig, "[5]".
 
 #include "lib.S"
 

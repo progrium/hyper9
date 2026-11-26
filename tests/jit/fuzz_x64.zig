@@ -1,4 +1,4 @@
-//! zig build fuzz-x64 [-- options]: random long-mode programs (src/jit/
+//! zig build fuzz-x64 [-- options]: random long-mode programs (src/engine/hcpu/jit/
 //! check/gen_x86.zig's `program64`) run on hx64's T0 and, with Unicorn's
 //! prebuilt library fetched, checked against Unicorn an instruction at a time:
 //! registers, RIP, the RFLAGS bits the instruction defines, the FS and GS

@@ -1,7 +1,7 @@
 // Asks #I/cs to translate argv[1], then connects to the first address
 // it returned, as libc's dial does. Exits cleanly if the connect
 // succeeds, or with the error of the call that failed.
-// See tests/backends.zig, "[5]".
+// See tests/engines.zig, "[5]".
 
 #include "lib.S"
 

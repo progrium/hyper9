@@ -1,4 +1,4 @@
-# The browser host's root archive (design/epoch-0/browser-host.md): the
+# The web host's root archive (design/epoch-0/browser-host.md): the
 # paths, relative to the 386 root tree, that `zig build web` packs into
 # zig-out/web/root.h9a for the demo page. A path ending in / is an empty
 # directory, such as a mount point. tools/webroot.zig reads this.

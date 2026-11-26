@@ -1444,11 +1444,11 @@ test "state: ready, in progress, and stalled" {
 test "new fills the template" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
-    const out = try fromTemplate(arena_state.allocator(), "---\nslug: x\n---\n\n# Proposal: [Title]\n", "kvm", "KVM backend", "progrium", "2026-11-03");
+    const out = try fromTemplate(arena_state.allocator(), "---\nslug: x\n---\n\n# Proposal: [Title]\n", "kvm", "KVM engine", "progrium", "2026-11-03");
     try std.testing.expectEqualStrings(
         \\---
         \\slug: kvm
-        \\title: KVM backend
+        \\title: KVM engine
         \\status: draft
         \\created: 2026-11-03
         \\authors: [progrium]
@@ -1457,7 +1457,7 @@ test "new fills the template" {
         \\branch: []
         \\---
         \\
-        \\# Proposal: KVM backend
+        \\# Proposal: KVM engine
         \\
     , out);
 }

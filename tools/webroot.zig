@@ -1,4 +1,4 @@
-//! Makes the browser host's root archive (design/epoch-0/browser-host.md)
+//! Makes the web host's root archive (design/epoch-0/browser-host.md)
 //! from a root tree and a list of paths in it:
 //!
 //!     webroot ROOT LIST OUT

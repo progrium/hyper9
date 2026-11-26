@@ -4,7 +4,7 @@
 //! once the memory is large (its old buffer is external memory until
 //! then), a few ms each at a GiB: Claude Code's `--version` grew it about
 //! 900 times. main.zig makes this std.heap.page_allocator on the web host,
-//! and the vmm's allocations use it (`vmm.host_gpa`). wasi-libc's malloc
+//! and the engine's allocations use it (`engine.host_gpa`). wasi-libc's malloc
 //! still takes std's.
 const builtin = @import("builtin");
 

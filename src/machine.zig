@@ -10,11 +10,11 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const vmm = @import("vmm.zig");
-const loader = @import("loader.zig");
-const aout = @import("aout.zig");
+const engine = @import("engine.zig");
+const loader = @import("abi/plan9/loader.zig");
+const aout = @import("abi/plan9/aout.zig");
 const kern = @import("kern.zig");
-const syscall = @import("syscall.zig");
+const syscall = @import("abi/plan9/syscall.zig");
 const policy = @import("policy.zig");
 const segment = @import("segment.zig");
 const newns = @import("newns.zig");
@@ -30,13 +30,13 @@ const ws = @import("ws.zig");
 const cred = @import("cred.zig");
 const statictree = @import("statictree.zig");
 const serve = @import("serve.zig");
-const lsys = @import("linux/sys.zig");
-const lsig = @import("linux/signal.zig");
-const lexec = @import("linux/exec.zig");
-const lmm = @import("linux/mm.zig");
-const vclock = @import("linux/vclock.zig");
-const elf = @import("linux/elf.zig");
-const kc = @import("linux/kc.zig");
+const lsys = @import("abi/linux/sys.zig");
+const lsig = @import("abi/linux/signal.zig");
+const lexec = @import("abi/linux/exec.zig");
+const lmm = @import("abi/linux/mm.zig");
+const vclock = @import("abi/linux/vclock.zig");
+const elf = @import("abi/linux/elf.zig");
+const kc = @import("abi/linux/kc.zig");
 const attr = @import("dotl/attr.zig");
 const gfx = @import("gfx.zig");
 const hostpty = @import("hostpty.zig");
@@ -128,7 +128,7 @@ pub const RunError = error{
     /// A `--serve` listener couldn't listen (exit code 125); see `err_msg`
     /// (design/epoch-0/serve.md).
     ServeFailed,
-} || kern.Error || vmm.CreateError || loader.Error;
+} || kern.Error || engine.CreateError || loader.Error;
 
 /// The built-in root `#Hroot` serves (design/epoch-0/builtin-root.md): what it
 /// was built from, for the plan, `--version` and `--check`.
@@ -145,7 +145,7 @@ pub const builtin_root = struct {
     pub const commands: usize = t.commands;
 
     /// Whether `arch` has commands in it.
-    pub fn has(arch: vmm.Arch) bool {
+    pub fn has(arch: engine.Arch) bool {
         for (arches) |a| if (std.mem.eql(u8, a, arch.name())) return true;
         return false;
     }
@@ -190,9 +190,9 @@ pub const Machine = struct {
     pub const Listen = serve.Listen;
 
     pub const Options = struct {
-        backend: vmm.BackendKind = .auto,
+        engine: engine.Choice = .auto,
         /// Architecture of the binaries this machine runs; null means the host's.
-        arch: ?vmm.Arch = null,
+        arch: ?engine.Arch = null,
         /// The mounts, in order (design/epoch-0/mounts.md). Mounts on `/` stack
         /// into the root, and mounts on `#L` into the Linux tree. With
         /// nothing on `/` the root is an empty tree in memory, so only
@@ -263,7 +263,7 @@ pub const Machine = struct {
         /// CLI reads `--ns @FILE` on the host.
         ns: []const []const u8 = &.{},
         /// How many processes may own a vCPU before the rest share the
-        /// pool (src/cpupool.zig); null means the backend's limit less the
+        /// pool (src/cpupool.zig); null means the engine's limit less the
         /// pool. For tests of the pool.
         owned_vcpus: ?u32 = null,
         /// Host events to deliver while a run is in progress (Ctrl-C,
@@ -289,7 +289,7 @@ pub const Machine = struct {
         serve_net: bool = false,
         /// Pseudoterminals the embedder holds the master of, opened with
         /// `Ptys.open` while a run is in progress (src/hostpty.zig). Not
-        /// on the browser host.
+        /// on the web host.
         ptys: ?*Ptys = null,
         /// On the web host, serve the namespace on each port the page
         /// hands the machine to serve (design/epoch-0/port-streams.md), as
@@ -340,7 +340,7 @@ pub const Machine = struct {
         }
     };
 
-    pub const InitError = vmm.CreateError || gfx.Error || error{PolicyConflict};
+    pub const InitError = engine.CreateError || gfx.Error || error{PolicyConflict};
 
     /// Host streams behind the guest's console: reads from `in` (none means
     /// EOF), writes to fd 1 go to `out` and to fd 2 to `err`.
@@ -363,8 +363,8 @@ pub const Machine = struct {
 
     gpa: std.mem.Allocator,
     io: std.Io,
-    backend: vmm.Backend,
-    arch: vmm.Arch,
+    engine: engine.Engine,
+    arch: engine.Arch,
     opts: Options,
     /// The compiled policy; allocated in `arena`.
     plan: policy.Plan,
@@ -409,7 +409,7 @@ pub const Machine = struct {
     /// Compiles a policy for a machine with these options, as `init` does,
     /// without creating one (for `--print`).
     pub fn compilePlan(arena: std.mem.Allocator, opts: Options, err_msg: *[]const u8) policy.CompileError!policy.Plan {
-        const arch = opts.arch orelse vmm.host_arch orelse .arm64;
+        const arch = opts.arch orelse engine.host_arch orelse .arm64;
         var in: policy.Inputs = .{ .mounts = opts.mounts, .binds = opts.binds, .cwd = opts.cwd, .arch = arch, .guest_tools = opts.guest_tools, .nameservers = opts.nameservers };
         if (opts.serve.len > 0 or opts.serve_ports) {
             const ls = try arena.alloc(policy.Serve.Listener, opts.serve.len + @intFromBool(opts.serve_ports));
@@ -527,7 +527,7 @@ pub const Machine = struct {
     }
 
     pub fn initExplained(gpa: std.mem.Allocator, io: std.Io, opts: Options, conflict: ?*[]const u8) InitError!Machine {
-        const arch = opts.arch orelse vmm.host_arch orelse return error.WrongArch;
+        const arch = opts.arch orelse engine.host_arch orelse return error.WrongArch;
         const arena = try gpa.create(std.heap.ArenaAllocator);
         arena.* = .init(gpa);
         errdefer {
@@ -559,8 +559,8 @@ pub const Machine = struct {
             claim = &cl.claim;
         }
         errdefer if (claim) |cl| gfx.release(cl);
-        const backend = try vmm.create(gpa, io, opts.backend, .{ .arch = arch, .memory = plan.memory });
-        return .{ .gpa = gpa, .io = io, .opts = o, .arch = arch, .backend = backend, .plan = plan, .arena = arena, .gfx_claim = claim };
+        const eng = try engine.create(gpa, io, opts.engine, .{ .arch = arch, .memory = plan.memory });
+        return .{ .gpa = gpa, .io = io, .opts = o, .arch = arch, .engine = eng, .plan = plan, .arena = arena, .gfx_claim = claim };
     }
 
     /// What closing the window does: a hangup, as for a closed terminal.
@@ -579,24 +579,24 @@ pub const Machine = struct {
     pub const default_tmp_dir = if (builtin.os.tag == .windows) "C:\\Windows\\Temp" else "/tmp";
 
     pub fn deinit(m: *Machine) void {
-        // A stuck process still uses the backend and the plan, so they're
+        // A stuck process still uses the engine and the plan, so they're
         // leaked rather than freed under it.
         if (m.stuck) return;
         if (m.gfx_claim) |cl| gfx.release(cl);
-        vclock.forget(m.backend);
-        m.backend.destroy();
+        vclock.forget(m.engine);
+        m.engine.destroy();
         m.arena.deinit();
         m.gpa.destroy(m.arena);
     }
 
     /// The CPUs the machine may use, as /dev/sysstat lists them and
     /// `$NPROC` says: `--cpus`
-    /// when given, else the host's CPU count, capped by the backend's vCPU
+    /// when given, else the host's CPU count, capped by the engine's vCPU
     /// limit.
     fn cpuCount(m: *const Machine) u32 {
         const host: u32 = @intCast(@min(std.Thread.getCpuCount() catch 1, std.math.maxInt(u32)));
         const want = m.plan.cpus orelse host;
-        const max = m.backend.maxVcpus() catch want;
+        const max = m.engine.maxVcpus() catch want;
         return @max(1, @min(want, max));
     }
 
@@ -611,7 +611,7 @@ pub const Machine = struct {
     /// can't be interrupted, or `in` has no cancel and is blocked in a read,
     /// `run` returns after a short grace period anyway and the machine is
     /// left `stuck`: the
-    /// backend, plan and run state are leaked rather than freed under the
+    /// engine, plan and run state are leaked rather than freed under the
     /// process, and the Machine itself may be dropped. The process can
     /// still touch `argv`, the program bytes, `Stdio` and the trace writer
     /// when its host call returns, so an embedder must keep those alive or
@@ -622,7 +622,7 @@ pub const Machine = struct {
         m.out_of_memory = false;
         // The listeners are bound before anything runs, so one that can't
         // listen ends the run here (design/epoch-0/serve.md, "Flags").
-        // The browser host can't listen, so its build leaves serving out.
+        // The web host can't listen, so its build leaves serving out.
         const srv: ?*serve.Server = if (comptime web.enabled) blk: {
             // The page's ports are served with no listener
             // (design/epoch-0/port-streams.md).
@@ -670,7 +670,7 @@ pub const Machine = struct {
         // Heap-allocated, with its own copy of the machine, so a stuck
         // process never refers to the caller's Machine.
         const job = try m.gpa.create(Job);
-        const pool = cpupool.Pool.init(m.gpa, m.io, m.backend, m.plan.cpus, m.opts.owned_vcpus) catch |e| {
+        const pool = cpupool.Pool.init(m.gpa, m.io, m.engine, m.plan.cpus, m.opts.owned_vcpus) catch |e| {
             m.gpa.destroy(job);
             return e;
         };
@@ -860,14 +860,14 @@ pub const Machine = struct {
 
         fn allocPages(ctx: *anyopaque, n: usize) ?[*]u8 {
             const j: *Job = @ptrCast(@alignCast(ctx));
-            const mem = j.m.backend.allocPages(n / vmm.page_size) catch return null;
+            const mem = j.m.engine.allocPages(n / engine.page_size) catch return null;
             return mem.ptr;
         }
 
         fn freePages(ctx: *anyopaque, p: [*]u8, n: usize) void {
             const j: *Job = @ptrCast(@alignCast(ctx));
-            const a: [*]align(vmm.page_size) u8 = @alignCast(p);
-            j.m.backend.freePages(a[0..n]);
+            const a: [*]align(engine.page_size) u8 = @alignCast(p);
+            j.m.engine.freePages(a[0..n]);
         }
 
         fn lockSpin(j: *Job) void {
@@ -995,7 +995,7 @@ pub const Machine = struct {
                 if (j.all_done.waitTimeout(j.m.io, .{ .duration = tick })) |_| return true else |_| j.stopAll();
             }
             // Processes already tearing down aren't stuck, only slow: an
-            // emulator engine with thousands of regions takes seconds to
+            // hcpu engine with thousands of regions takes seconds to
             // close. Wait for those, up to a bound.
             while (waited < teardown_ms and j.allExiting()) : (waited += 10) {
                 const tick: std.Io.Clock.Duration = .{ .raw = .fromMilliseconds(10), .clock = .awake };
@@ -1030,12 +1030,12 @@ pub const Machine = struct {
         /// How it runs guest code, while it does.
         lease: ?*cpupool.Lease = null,
         lease_store: cpupool.Lease = undefined,
-        as: ?vmm.AddressSpace = null,
+        as: ?engine.AddressSpace = null,
         segs: segment.Segs = .{},
         sys: syscall.Process = undefined,
         /// Registers to start from.
-        ureg: vmm.Ureg = undefined,
-        extra: vmm.Extra = .{ .arm64 = .{} },
+        ureg: engine.Ureg = undefined,
+        extra: engine.Extra = .{ .arm64 = .{} },
         /// The Tos address, for the pid at fork.
         tos: u64 = 0,
         /// The a.out, for symbolizing faults in the trace.
@@ -1054,12 +1054,12 @@ pub const Machine = struct {
         noteureg: u64 = 0,
         /// The FP/SIMD state when the handler was entered, which noted
         /// restores (9front's fpunotify and fpunoted).
-        note_extra: ?vmm.Extra = null,
+        note_extra: ?engine.Extra = null,
         /// For /proc/n/status: the syscall being served plus 1, or 0 while
         /// running guest code, and the mapped memory in KiB.
         in_sys: web.Atomic(u64) = .init(0),
         mem_kb: web.Atomic(u64) = .init(0),
-        /// The Linux personality's state, while the process runs a Linux
+        /// The Linux ABI's state, while the process runs a Linux
         /// binary (design/epoch-0/linux-personality.md). Its Mm owns `as`.
         lx: ?*lsys.Process = null,
         /// Set in a vfork child: its parent waits on it until the child
@@ -1075,9 +1075,9 @@ pub const Machine = struct {
         /// The registers at the last syscall entry, or at the stop while
         /// `dbg_stopped`; /proc/n/regs serves them in a syscall
         /// (`in_sys`) or stopped, as 9front serves its dbgreg.
-        dbg_ureg: vmm.Ureg = undefined,
+        dbg_ureg: engine.Ureg = undefined,
         /// The FP registers while `dbg_stopped`.
-        dbg_extra: vmm.Extra = undefined,
+        dbg_extra: engine.Extra = undefined,
         dbg_stopped: bool = false,
         /// A debugger wrote `dbg_ureg` or `dbg_extra` while stopped.
         dbg_ureg_set: bool = false,
@@ -1218,7 +1218,7 @@ pub const Machine = struct {
             while (done < data.len) {
                 const va = addr +% done;
                 if (va < addr) break;
-                const chunk = @min(data.len - done, vmm.page_size - va % vmm.page_size);
+                const chunk = @min(data.len - done, engine.page_size - va % engine.page_size);
                 if (!as.copy(va, data[done..][0..chunk], if (write) .write else .read)) break;
                 done += chunk;
             }
@@ -1240,7 +1240,7 @@ pub const Machine = struct {
                 @memcpy(data[0..n], cur[o..][0..n]);
                 return n;
             }
-            var tmp: [@sizeOf(vmm.Ureg)]u8 = undefined;
+            var tmp: [@sizeOf(engine.Ureg)]u8 = undefined;
             @memcpy(tmp[0..cur.len], cur);
             @memcpy(tmp[o..][0..n], data[0..n]);
             p.dbg_ureg = p.dbg_ureg.restored(tmp[0..cur.len]);
@@ -1278,7 +1278,7 @@ pub const Machine = struct {
             p.sys = .{
                 .pid = p.pid,
                 .gpa = m.gpa,
-                .backend = m.backend,
+                .engine = m.engine,
                 .as = p.as.?,
                 .segs = &p.segs,
                 .trace = m.opts.trace,
@@ -1494,8 +1494,8 @@ pub const Machine = struct {
         };
         kern.setText(std.fmt.bufPrintSentinel(&name_buf, "{s}", .{basename(name)}, 0) catch "a.out");
 
-        p.as = try m.backend.newAddressSpace();
-        const img = try loader.load(m.gpa, m.backend, p.as.?, bytes, argv, p.pid);
+        p.as = try m.engine.newAddressSpace();
+        const img = try loader.load(m.gpa, m.engine, p.as.?, bytes, argv, p.pid);
         // Under the lock, since /proc/n/segment may be read already.
         p.segs.replace(p.as.?, img.segs);
         p.tos = img.tos;
@@ -1837,7 +1837,7 @@ pub const Machine = struct {
         // exit_group in between posts it a kill note that's lost. It looks
         // here, once it exists: a later exit_group's note reaches it.
         if (p.lx) |l| if (!l.isLeader() and l.g.ending()) return .{ .killed = "kill" };
-        var last_fault: struct { addr: u64 = 0, access: @FieldType(vmm.Fault, "access") = .read, pc: u64 = 0, gen: u64 = 0 } = .{};
+        var last_fault: struct { addr: u64 = 0, access: @FieldType(engine.Fault, "access") = .read, pc: u64 = 0, gen: u64 = 0 } = .{};
         while (true) {
             if (j.stopping.load(.acquire)) return .{ .killed = if (j.timed_out.load(.acquire)) timeout_note else stopped_note };
             if (p.lx) |l| {
@@ -1885,7 +1885,7 @@ pub const Machine = struct {
                     // A CPU exception that isn't a page fault (an
                     // instruction the CPU doesn't have, a divide by zero)
                     // is its own signal, as on Linux, not a fault to
-                    // retry: every x86 backend reports it at the PC with
+                    // retry: every x86 engine reports it at the PC with
                     // the vector in Ureg.type and the syndrome, and every
                     // arm64 one with the ESR as the syndrome. On arm64 the
                     // page must be in, as for an ID read above; a fault
@@ -1959,7 +1959,7 @@ pub const Machine = struct {
             // On 386, int 0x80 (Linux's call) is a general protection
             // fault for a 9front process, as its IDT gate allows only
             // INT $64 from user mode (design/epoch-0/linux-i386.md).
-            if (exit == .syscall and u == .i386 and u.i386.trap != vmm.ia32.vector_syscall) {
+            if (exit == .syscall and u == .i386 and u.i386.trap != engine.ia32.vector_syscall) {
                 const note = "sys: trap: general protection violation";
                 if (!(kern.postNote(p.pid, note, .debug) catch false)) {
                     return .{ .killed = try std.fmt.bufPrint(&p.msg_buf, "{s} pc=0x{x}", .{ note, u.pc() }) };
@@ -2056,13 +2056,13 @@ pub const Machine = struct {
     /// before it runs on. Returns the status it ends with if the machine
     /// is torn down meanwhile. A note doesn't end the stop; ctl kill does,
     /// and the note delivery after it kills the process.
-    fn stopPoint(p: *Proc, vcpu: *cpupool.Lease, u: *vmm.Ureg) RunError!?Status {
+    fn stopPoint(p: *Proc, vcpu: *cpupool.Lease, u: *engine.Ureg) RunError!?Status {
         // A stop request flags the process, and Ptraceme waits for a note,
         // which flags it too; the kernel decides.
         if (!p.stop_flag.swap(false, .acq_rel) and !p.note_flag.load(.acquire)) return null;
         if (!kern.wantStop()) return null;
         const j = p.job;
-        var x: vmm.Extra = undefined;
+        var x: engine.Extra = undefined;
         try vcpu.getExtra(&x);
         p.dbgLock();
         p.dbg_ureg = u.*;
@@ -2100,7 +2100,7 @@ pub const Machine = struct {
     /// and enters the handler; without one, or for a note that arrives in
     /// the handler, or if the frame doesn't fit, returns the note the
     /// process dies with. `u` holds the current registers.
-    fn deliver(p: *Proc, vcpu: *cpupool.Lease, u: *vmm.Ureg) vmm.Error!?[]const u8 {
+    fn deliver(p: *Proc, vcpu: *cpupool.Lease, u: *engine.Ureg) engine.Error!?[]const u8 {
         var msg: [kern.ERRMAX]u8 = undefined;
         switch (kern.popNote(&msg, u.pc())) {
             .none => return null,
@@ -2124,7 +2124,7 @@ pub const Machine = struct {
         // The word under the Ureg is the previous saved Ureg.
         gm.write(as, f.nureg - w, prev[0..w]) catch return p.keepNote(&msg);
         gm.write(as, f.sp, words[0 .. 3 * w]) catch return p.keepNote(&msg);
-        var x: vmm.Extra = undefined;
+        var x: engine.Extra = undefined;
         try vcpu.getExtra(&x);
         p.note_extra = x;
         p.noteureg = f.nureg;
@@ -2139,7 +2139,7 @@ pub const Machine = struct {
     /// the note for NDFLT. Outside a handler, anything but NRSTR fails
     /// with "bad arg in system call". Returns the note the process dies
     /// with, if it does.
-    fn noted(p: *Proc, vcpu: *cpupool.Lease, u: *vmm.Ureg, arg: i32) vmm.Error!?[]const u8 {
+    fn noted(p: *Proc, vcpu: *cpupool.Lease, u: *engine.Ureg, arg: i32) engine.Error!?[]const u8 {
         var msg: [kern.ERRMAX]u8 = undefined;
         const how: kern.Noted = @enumFromInt(arg);
         switch (kern.noted(how, &msg) catch {
@@ -2157,7 +2157,7 @@ pub const Machine = struct {
         }
         const as = p.as.?;
         const nureg = p.noteureg;
-        var saved: [@sizeOf(vmm.Ureg)]u8 = undefined;
+        var saved: [@sizeOf(engine.Ureg)]u8 = undefined;
         const w = u.wordSize();
         const n = u.size();
         if (nureg < w or nureg % w != 0) return suicide;
@@ -2199,7 +2199,7 @@ pub const Machine = struct {
     /// 9front's exit status for a broken noted.
     const suicide = "Suicide";
 
-    // The Linux personality (design/epoch-0/linux-personality.md): exec of an
+    // The Linux ABI (design/epoch-0/linux-personality.md): exec of an
     // ELF binary, the exit loop's calls and signals, and clone.
 
     /// The environment a Linux program starts with, from /env: rc lists
@@ -2278,7 +2278,7 @@ pub const Machine = struct {
         defer if (interp_src) |s| s.put();
         var random: [16]u8 = undefined;
         m.io.random(&random);
-        const prog = lexec.build(m.gpa, m.backend, .{
+        const prog = lexec.build(m.gpa, m.engine, .{
             .arch = m.arch,
             .exe = &exe,
             .interp = if (interp) |*ii| ii else null,
@@ -2324,10 +2324,10 @@ pub const Machine = struct {
                 .host = .{ .ctx = j, .kill = linuxKill, .pgidOf = linuxPgid },
                 .pgid = p.pid,
                 .sid = p.pid,
-                .hwcap = lexec.hwcap(m.arch, m.backend),
+                .hwcap = lexec.hwcap(m.arch, m.engine),
                 .vdso = prog.vdso,
                 .ncpu = j.ncpu,
-                .mem_limit = m.plan.memory orelse vmm.default_memory,
+                .mem_limit = m.plan.memory orelse engine.default_memory,
                 .console_tty = m.opts.console_tty,
                 .trace = m.opts.trace,
                 .trace_lock = &j.trace_lock,
@@ -2567,14 +2567,14 @@ pub const Machine = struct {
 
     /// Serves a Linux process's syscall exit. Returns the status when the
     /// process exits.
-    fn linuxSyscall(m: *Machine, p: *Proc, l: *lsys.Process, vcpu: *cpupool.Lease, u: *vmm.Ureg) RunError!?Status {
+    fn linuxSyscall(m: *Machine, p: *Proc, l: *lsys.Process, vcpu: *cpupool.Lease, u: *engine.Ureg) RunError!?Status {
         // See the 9front branch of `loop`.
         if (p.note_flag.load(.acquire)) kern.interrupt(kern.self());
         if (u.* == .i386) {
             const r = &u.i386;
             // On 386 only int 0x80 is a Linux call: INT $64, 9front's, is
             // a general protection fault, SIGSEGV (design/epoch-0/linux-i386.md).
-            if (r.trap != vmm.ia32.vector_linux) {
+            if (r.trap != engine.ia32.vector_linux) {
                 const a = l.sig.actions[lsig.SIGSEGV];
                 if (a.handler == lsig.SIG_DFL or a.handler == lsig.SIG_IGN or l.sig.mask & lsig.bit(lsig.SIGSEGV) != 0) {
                     return .{ .killed = lsig.deathNote(lsig.SIGSEGV, &p.msg_buf) };
@@ -2672,7 +2672,7 @@ pub const Machine = struct {
                 vcpu.setUreg(u);
             },
             .sigreturn => {
-                var x: vmm.Extra = undefined;
+                var x: engine.Extra = undefined;
                 try vcpu.getExtra(&x);
                 lsig.restore(l, &l.sig, u, &x) catch return .{ .killed = lsig.deathNote(lsig.SIGSEGV, &p.msg_buf) };
                 vcpu.setExtra(&x);
@@ -2691,7 +2691,7 @@ pub const Machine = struct {
     /// 32-bit Wine another for %fs. Entry -1 asks for a free one, as on
     /// Linux; an empty descriptor frees the entry it names. Segments stay
     /// flat whatever limit is asked for, so only the base is kept.
-    fn threadArea(l: *lsys.Process, x: *vmm.X86Extra, set: bool, desc_va: u64) i64 {
+    fn threadArea(l: *lsys.Process, x: *engine.X86Extra, set: bool, desc_va: u64) i64 {
         var d: [4]u32 = undefined;
         l.readMem(desc_va, std.mem.sliceAsBytes(&d)) catch return -attr.E.FAULT;
         const first = lsig.i386_tls_entry;
@@ -2723,13 +2723,13 @@ pub const Machine = struct {
     }
 
     /// Sets the stack pointer of a Linux call's registers.
-    fn setSp(u: *vmm.Ureg, sp: u64) void {
+    fn setSp(u: *engine.Ureg, sp: u64) void {
         switch (u.*) {
             inline else => |*r| r.sp = @truncate(sp),
         }
     }
 
-    fn setTls(x: *vmm.Extra, v: u64) void {
+    fn setTls(x: *engine.Extra, v: u64) void {
         switch (x.*) {
             inline else => |*e| e.tls = v,
         }
@@ -2790,7 +2790,7 @@ pub const Machine = struct {
     /// The leader's side of a thread's execve: once only it and the
     /// thread are left, runs the exec, and tells the thread how it went.
     /// Returns whether there was one.
-    fn leaderExec(m: *Machine, p: *Proc, vcpu: *cpupool.Lease, u: *vmm.Ureg) bool {
+    fn leaderExec(m: *Machine, p: *Proc, vcpu: *cpupool.Lease, u: *engine.Ureg) bool {
         const l = p.lx.?;
         const g = l.g;
         const req: *ExecReq = @ptrCast(@alignCast(g.exec_req orelse return false));
@@ -2822,7 +2822,7 @@ pub const Machine = struct {
     /// caller's thread group, sharing its memory (design/0049-linux-
     /// threads.md). Returns 0 in the child, and the child's pid (tid) or
     /// -errno in the caller.
-    fn linuxClone(m: *Machine, p: *Proc, l: *lsys.Process, u: *const vmm.Ureg, cl: lsys.Clone) i64 {
+    fn linuxClone(m: *Machine, p: *Proc, l: *lsys.Process, u: *const engine.Ureg, cl: lsys.Clone) i64 {
         const vfork = cl.flags & lsys.CLONE_VFORK != 0;
         const thread = cl.flags & lsys.CLONE_THREAD != 0;
         const share = cl.flags & lsys.CLONE_VM != 0;
@@ -2887,7 +2887,7 @@ pub const Machine = struct {
     /// the stack. A call that returned EINTR is restarted when no handler
     /// ran, or when the handler has SA_RESTART. Returns the note the
     /// process dies with, if it does.
-    fn deliverLinux(m: *Machine, p: *Proc, vcpu: *cpupool.Lease, u: *vmm.Ureg, flagged: bool) vmm.Error!?[]const u8 {
+    fn deliverLinux(m: *Machine, p: *Proc, vcpu: *cpupool.Lease, u: *engine.Ureg, flagged: bool) engine.Error!?[]const u8 {
         const l = p.lx.?;
         if (flagged) {
             var msg: [kern.ERRMAX]u8 = undefined;
@@ -2937,7 +2937,7 @@ pub const Machine = struct {
             }
             const saved = l.sig.suspend_mask orelse l.sig.mask;
             l.sig.suspend_mask = null;
-            var x: vmm.Extra = undefined;
+            var x: engine.Extra = undefined;
             try vcpu.getExtra(&x);
             lsig.setup(l, &l.sig, u, &x, .{
                 .signo = signo,
@@ -2967,7 +2967,7 @@ pub const Machine = struct {
 
     /// Backs the registers up to the syscall instruction, with its number
     /// and first argument as they were, so it runs again.
-    fn rewind(u: *vmm.Ureg, r: lsys.Process.Restart) void {
+    fn rewind(u: *engine.Ureg, r: lsys.Process.Restart) void {
         switch (u.*) {
             .arm64 => |*a| {
                 a.pc = r.pc - 4;
@@ -3013,14 +3013,14 @@ pub const Machine = struct {
                     w.print("processor\t: {d}\nBogoMIPS\t: 48.00\nFeatures\t: fp asimd cpuid\nCPU implementer\t: 0x00\nCPU architecture: 8\nCPU variant\t: 0x0\nCPU part\t: 0x000\nCPU revision\t: 0\n\n", .{i}) catch {};
                 } else if (j.m.arch == .amd64) {
                     // x86-64-v2, which hx64 has, and every host the other
-                    // backends run amd64 on.
+                    // engines run amd64 on.
                     w.print("processor\t: {d}\nvendor_id\t: h9\ncpu family\t: 6\nmodel\t\t: 0\nmodel name\t: h9 virtual CPU\ncpu cores\t: {d}\nflags\t\t: fpu tsc cx8 cmov mmx fxsr sse sse2 pni ssse3 cx16 sse4_1 sse4_2 popcnt\n\n", .{ i, ncpu }) catch {};
                 } else {
                     w.print("processor\t: {d}\nvendor_id\t: h9\ncpu family\t: 6\nmodel\t\t: 0\nmodel name\t: h9 virtual CPU\ncpu cores\t: {d}\nflags\t\t: fpu tsc cx8 cmov mmx fxsr sse sse2\n\n", .{ i, ncpu }) catch {};
                 }
             }
         } else if (eq(u8, name, "meminfo")) {
-            const total_kb = (j.m.plan.memory orelse vmm.default_memory) / 1024;
+            const total_kb = (j.m.plan.memory orelse engine.default_memory) / 1024;
             var used_kb: u64 = 0;
             {
                 j.lockSpin();
@@ -3152,7 +3152,7 @@ pub const Machine = struct {
     /// rfork. With RF.PROC, starts a child that resumes from `u` with 0
     /// returned, and returns its pid; without, changes the caller's groups.
     /// On error the error string is set.
-    fn fork(m: *Machine, p: *Proc, flags: u32, u: *const vmm.Ureg) error{Failed}!u32 {
+    fn fork(m: *Machine, p: *Proc, flags: u32, u: *const engine.Ureg) error{Failed}!u32 {
         const flag: c_int = @bitCast(flags);
         if (flags & kern.RF.PROC == 0) {
             kern.rfork(flag) catch return error.Failed;
@@ -3161,7 +3161,7 @@ pub const Machine = struct {
         const j = p.job;
         // 9front's error when it runs out of procs.
         const c = j.newProc(if (p.serving) .serving else .program) catch return failWith("no procs");
-        const cas = m.backend.newAddressSpace() catch {
+        const cas = m.engine.newAddressSpace() catch {
             j.dropProc(c);
             return failWith("no procs");
         };
@@ -3224,8 +3224,8 @@ pub const Machine = struct {
         const hdr = aout.parse(bytes) catch return failWith(ebadexec);
         if (hdr.arch != m.arch) return failWith(ebadexec);
 
-        const nas = m.backend.newAddressSpace() catch return failWith("virtual memory allocation failed");
-        var img = loader.load(m.gpa, m.backend, nas, bytes, prog.argv, p.pid) catch |err| {
+        const nas = m.engine.newAddressSpace() catch return failWith("virtual memory allocation failed");
+        var img = loader.load(m.gpa, m.engine, nas, bytes, prog.argv, p.pid) catch |err| {
             nas.destroy();
             return failWith(switch (err) {
                 error.BadExec, error.Truncated, error.BadMagic => ebadexec,
@@ -3260,7 +3260,7 @@ pub const Machine = struct {
         p.as = nas;
         p.dbg_lock.unlock();
         if (was_linux) {
-            // From the Linux personality back to 9front's, whose state
+            // From the Linux ABI back to 9front's, whose state
             // was never made.
             kern.setNotify(false);
             if (kc.inView()) kc.setSlash(false) catch {};
@@ -3551,7 +3551,7 @@ pub const Machine = struct {
     /// Unpacks a host archive into the tree at `root` (a guest path), as
     /// `--archive` does: a tar, a gzipped one, or an `.h9a`. Its files go into the
     /// in-memory tree, so they count against `--memory`. Symbolic links
-    /// are kept for the Linux personality; hard links are copies.
+    /// are kept for the Linux ABI; hard links are copies.
     fn unpackArchive(m: *Machine, path: []const u8, root: [:0]const u8) !void {
         const bytes = std.Io.Dir.cwd().readFileAlloc(m.io, path, m.gpa, .limited(std.math.maxInt(u31))) catch |e| {
             return m.fail("--archive {s}: {t}", .{ path, e });
@@ -3619,7 +3619,7 @@ pub const Machine = struct {
 
     const h9a_magic = "h9root1\n";
 
-    /// Unpacks an `.h9a`, the browser host's root archive
+    /// Unpacks an `.h9a`, the web host's root archive
     /// (tools/webroot.zig): entries of a u32 path length, the path, a u32
     /// POSIX mode, and a u32 size and the data, or 0xffffffff and the
     /// index of an earlier entry with the same data.
@@ -3967,11 +3967,11 @@ pub const Machine = struct {
     /// tree either.
     fn connectStatic(m: *Machine, r: policy.NinePRoot, url: []const u8, comptime what: []const u8) RunError!u31 {
         const shown = ws.Url.elide(url);
-        // The browser host serves static trees with the page's fetch.
+        // The web host serves static trees with the page's fetch.
         if (comptime no_threads) return m.fail(what ++ " {f}: static trees are served by the page here", .{shown}) else return m.serveStatic(r, url, what);
     }
 
-    /// No host threads to serve static trees on: the browser host.
+    /// No host threads to serve static trees on: the web host.
     const no_threads = builtin.os.tag == .wasi or builtin.os.tag == .freestanding;
 
     fn serveStatic(m: *Machine, r: policy.NinePRoot, url: []const u8, comptime what: []const u8) RunError!u31 {
@@ -4687,7 +4687,7 @@ const fpsave_max = 32 * 16 + 8;
 /// The FP registers in 9front's FPsave layout, as /proc/n/fpregs serves
 /// them: on arm64 `regs[32][2]`, `control`, `status`; on amd64 and 386
 /// the FXSAVE area.
-fn fpsave(x: *const vmm.Extra, buf: *[fpsave_max]u8) []u8 {
+fn fpsave(x: *const engine.Extra, buf: *[fpsave_max]u8) []u8 {
     switch (x.*) {
         .arm64 => |a| {
             for (a.v, 0..) |q, i| std.mem.writeInt(u128, buf[i * 16 ..][0..16], q, .little);
@@ -4696,14 +4696,14 @@ fn fpsave(x: *const vmm.Extra, buf: *[fpsave_max]u8) []u8 {
             return buf[0..fpsave_max];
         },
         .amd64, .i386 => |t| {
-            @memcpy(buf[0..@sizeOf(vmm.Fxsave)], std.mem.asBytes(&t.fx));
-            return buf[0..@sizeOf(vmm.Fxsave)];
+            @memcpy(buf[0..@sizeOf(engine.Fxsave)], std.mem.asBytes(&t.fx));
+            return buf[0..@sizeOf(engine.Fxsave)];
         },
     }
 }
 
 /// Takes back an FPsave image from `fpsave`, keeping the thread pointer.
-fn setFpsave(x: *vmm.Extra, img: []const u8) void {
+fn setFpsave(x: *engine.Extra, img: []const u8) void {
     switch (x.*) {
         .arm64 => |*a| {
             for (&a.v, 0..) |*q, i| q.* = std.mem.readInt(u128, img[i * 16 ..][0..16], .little);
@@ -4711,7 +4711,7 @@ fn setFpsave(x: *vmm.Extra, img: []const u8) void {
             a.fpsr = std.mem.readInt(u32, img[516..520], .little);
         },
         .amd64, .i386 => |*t| {
-            @memcpy(std.mem.asBytes(&t.fx), img[0..@sizeOf(vmm.Fxsave)]);
+            @memcpy(std.mem.asBytes(&t.fx), img[0..@sizeOf(engine.Fxsave)]);
             // MXCSR's reserved bits would make FXRSTOR fault.
             t.fx.mxcsr &= 0xffff;
         },
@@ -4729,14 +4729,14 @@ fn traceLine(w: *std.Io.Writer, lock: *std.atomic.Mutex, line: []const u8) void 
 /// Prints a fault to the trace: the Ureg, the faulting address and the PC
 /// symbolized from the a.out symbol table. `lock` keeps it in one piece
 /// among the other processes' trace lines.
-fn dumpFault(w: *std.Io.Writer, lock: *std.atomic.Mutex, u: *const vmm.Ureg, f: vmm.Fault, bytes: []const u8) void {
+fn dumpFault(w: *std.Io.Writer, lock: *std.atomic.Mutex, u: *const engine.Ureg, f: engine.Fault, bytes: []const u8) void {
     while (!lock.tryLock()) std.atomic.spinLoopHint();
     defer lock.unlock();
     dumpFaultTo(w, u, f, bytes) catch {};
     w.flush() catch {};
 }
 
-fn dumpFaultTo(w: *std.Io.Writer, u: *const vmm.Ureg, f: vmm.Fault, bytes: []const u8) std.Io.Writer.Error!void {
+fn dumpFaultTo(w: *std.Io.Writer, u: *const engine.Ureg, f: engine.Fault, bytes: []const u8) std.Io.Writer.Error!void {
     try w.print("h9: fault: {t} addr=0x{x} syndrome=0x{x}\n", .{ f.access, f.addr, f.syndrome });
     try w.writeAll("h9: pc ");
     try writeSym(w, bytes, u.pc());

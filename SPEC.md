@@ -20,8 +20,8 @@ h9 is a small Zig library and CLI that runs native 9front executables directly o
 
 - Start and run a 9front binary as fast as a native process: no VM image, no boot, no guest kernel.
 - One invocation can hold a whole process tree (rc pipelines, servers posting to /srv, rio, and its clients).
-- Run native code only: arm64 9front binaries on arm64 hosts, amd64 binaries on x86\_64 hosts. 386 binaries run on the emulator, including on the browser host, which has no CPU to run natively on ([i386](design/epoch-0/i386.md), [browser-host](design/epoch-0/browser-host.md)).
-- One host backend each for Hypervisor.framework (macOS), KVM (Linux) and Windows Hypervisor Platform (Windows), and a native backend for Linux x86\_64 hosts without KVM.
+- Run native code only: arm64 9front binaries on arm64 hosts, amd64 binaries on x86\_64 hosts. 386 binaries run on the emulator, including on the web host, which has no CPU to run natively on ([i386](design/epoch-0/i386.md), [browser-host](design/epoch-0/browser-host.md)).
+- One engine each for Hypervisor.framework (macOS), KVM (Linux) and Windows Hypervisor Platform (Windows), and a sud engine for Linux x86\_64 hosts without KVM.
 - Self-hosting: the 9front compilers and mk run inside and can rebuild the 9front userland.
 
 **Non-goals (for now)**
@@ -42,15 +42,15 @@ h9 is a small Zig library and CLI that runs native 9front executables directly o
 | Language | Zig 0.17.x (`minimum_zig_version` in `build.zig.zon`) | Change versions deliberately, in a PR of their own, after building and testing on every host. drawterm's C is compiled with `zig cc`. |
 | Terminal | Text mode on the host TTY; with `--gfx`, one host window drawn by drawterm's GUI backends ([gfx](design/epoch-0/gfx.md)), or with `--gfx=headless` a screen in memory ([headless-screen](design/headless-screen.md)) | consctl `rawon`; the interrupt key posts an `interrupt` note |
 | Guest exit mechanism | MMIO doorbell (`OUT` on x86) | Works the same on all three hypervisors |
-| Emulator | A user-mode emulator backend on h9's own CPUs, ha64, h86, and hx64 ([hcpu](design/epoch-0/hcpu.md)), built into every `h9` | For development and CI on hosts and VMs without a usable hypervisor |
-| No-hypervisor native | On Linux x86\_64, guest code runs on the host CPU in a stub process per address space, with Syscall User Dispatch and seccomp turning its syscalls into exits ([native-backend](design/epoch-0/native-backend.md)) | For containers and cloud VMs without KVM, at native speed; an explicit `--backend native`, since it shares h9's process and isn't a security boundary, so `auto` never selects it |
-| Browser host | h9 on wasm32-wasi, with coroutines on JSPI, and 386 binaries on h9's own CPU (h86) | One machine per Web Worker; the same build runs under Node for the tests |
+| Emulator | The hcpu engine, user-mode, on h9's own CPUs, ha64, h86, and hx64 ([hcpu](design/epoch-0/hcpu.md)), built into every `h9` | For development and CI on hosts and VMs without a usable hypervisor |
+| No-hypervisor engine (sud) | On Linux x86\_64, guest code runs on the host CPU in a stub process per address space, with Syscall User Dispatch and seccomp turning its syscalls into exits ([native-backend](design/epoch-0/native-backend.md)) | For containers and cloud VMs without KVM, at native speed; an explicit `--engine sud`, since it shares h9's process and isn't a security boundary, so `auto` never selects it |
+| Web host | h9 on wasm32-wasi, with coroutines on JSPI, and 386 binaries on h9's own CPU (h86) | One machine per Web Worker; the same build runs under Node for the tests |
 
 ## Architecture
 
 &#91;embedded content: architecture · host process, guest VM, host OS\]
 
-Each Plan 9 process runs in user mode on its own vCPU. A syscall traps into the shim, exits through the doorbell, and is served by drawterm's kernel on the host. The new code is the machine library (highlighted), the vmm backends, and the shims; the CLI is a thin wrapper.
+Each Plan 9 process runs in user mode on its own vCPU. A syscall traps into the shim, exits through the doorbell, and is served by drawterm's kernel on the host. The new code is the machine library (highlighted), the engines, and the shims; the CLI is a thin wrapper.
 
 ## The rest of the spec
 
@@ -58,16 +58,17 @@ This file is the overview. Each part of h9 is described, as built, in a file und
 
 | File | What it describes |
 | --- | --- |
-| [spec/engines.md](spec/engines.md) | The `vmm` interface; the hypervisor backends (HVF, KVM, and WHP), the native backend, and the emulator backend; and the guest shims |
+| [spec/engines.md](spec/engines.md) | The `engine` interface; the hypervisor engines (HVF, KVM, and WHP), the sud engine, and the hcpu engine; and the guest shims |
 | [spec/jit.md](spec/jit.md), [spec/h86.md](spec/h86.md), [spec/hx64.md](spec/hx64.md), [spec/ha64.md](spec/ha64.md) | h9's own CPUs for the emulator: the layer they share, and each architecture |
 | [spec/kernel.md](spec/kernel.md) | The process model; and the kernel: drawterm's `kern/`, what h9 adds to it, and the Zig/C seam rules |
 | [spec/abi-plan9.md](spec/abi-plan9.md) | The 9front binary ABI, a.out loading, the syscall table, and Go programs |
-| [spec/abi-linux.md](spec/abi-linux.md) | The Linux personality |
+| [spec/abi-linux.md](spec/abi-linux.md) | The Linux ABI |
 | [spec/ninep.md](spec/ninep.md) | Mounts and the root, static trees, the 9P dialects, and serving |
 | [spec/machine.md](spec/machine.md) | The boot sequence, slim roots, the terminal, and graphics |
 | [spec/sandbox.md](spec/sandbox.md) | The security stance and the sandbox policy |
 | [spec/cli.md](spec/cli.md) | The CLI: parsing, program resolution, flags, the default guest environment, exit codes, signals, and code structure |
-| [spec/host-js.md](spec/host-js.md) | The browser host, the same build under Node, and the namespace kernel |
+| [spec/host-web.md](spec/host-web.md) | The web host, under Node or in a page |
+| [spec/nskernel.md](spec/nskernel.md) | The namespace kernel, for the web host and as a native library |
 | [spec/testing.md](spec/testing.md) | Debugging, testing, and CI |
 
 Proposals and other docs written before the split name sections of this file, such as "SPEC.md, Emulator backend". Those sections are now here:
@@ -75,7 +76,7 @@ Proposals and other docs written before the split name sections of this file, su
 | Section of SPEC.md before the split | Now in |
 | --- | --- |
 | Hypervisor layer (`vmm`), Native backend (`native`), and Emulator backend (`emu`) | [spec/engines.md](spec/engines.md) |
-| Browser host (`web`) | [spec/host-js.md](spec/host-js.md) |
+| Browser host (`web`) | [spec/host-web.md](spec/host-web.md) |
 | Guest shims and ABI | The shims in [spec/engines.md](spec/engines.md#guest-shims); the binary ABI, a.out loading, and the syscall table in [spec/abi-plan9.md](spec/abi-plan9.md) |
 | Process model | [spec/kernel.md](spec/kernel.md#process-model) |
 | Go programs | [spec/abi-plan9.md](spec/abi-plan9.md#go-programs) |

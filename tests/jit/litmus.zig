@@ -1,4 +1,4 @@
-//! zig build litmus [-- options]: the litmus tests (src/jit/check/
+//! zig build litmus [-- options]: the litmus tests (src/engine/hcpu/jit/check/
 //! litmus.zig) on every tier, with each test's tally of outcomes. Exits 1
 //! if any run saw an outcome its test forbids.
 //!

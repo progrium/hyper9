@@ -1,10 +1,10 @@
 //! h9: run 9front executables on host hypervisors.
 
-pub const aout = @import("aout.zig");
+pub const aout = @import("abi/plan9/aout.zig");
 /// Linux ELF binaries (design/epoch-0/linux-personality.md).
-pub const linux_elf = @import("linux/elf.zig");
-pub const vmm = @import("vmm.zig");
-pub const loader = @import("loader.zig");
+pub const linux_elf = @import("abi/linux/elf.zig");
+pub const engine = @import("engine.zig");
+pub const loader = @import("abi/plan9/loader.zig");
 pub const segment = @import("segment.zig");
 pub const kern = @import("kern.zig");
 pub const Machine = @import("machine.zig").Machine;
@@ -17,7 +17,7 @@ pub const EnvVar = @import("machine.zig").EnvVar;
 pub const policy = @import("policy.zig");
 pub const Policy = policy.Policy;
 pub const guestmem = @import("guestmem.zig");
-pub const syscall = @import("syscall.zig");
+pub const syscall = @import("abi/plan9/syscall.zig");
 pub const newns = @import("newns.zig");
 pub const consin = @import("consin.zig");
 pub const ws = @import("ws.zig");
@@ -30,7 +30,7 @@ pub const gfx = @import("gfx.zig");
 pub const rootindex = @import("rootindex.zig");
 pub const web = @import("web.zig");
 /// The 9P2000.L server over a tree in memory that the dotl tests use,
-/// for tests/backends.zig's [fd-mounts] cases; only in tests.
+/// for tests/engines.zig's [fd-mounts] cases; only in tests.
 pub const dotl_test_server = if (@import("builtin").is_test) @import("dotl/testserver.zig").Server else void;
 
 /// What this h9 was built from, for `--version`.
@@ -52,7 +52,7 @@ test {
     _ = aout;
     _ = loader;
     _ = segment;
-    _ = vmm;
+    _ = engine;
     _ = kern;
     _ = guestmem;
     _ = syscall;
@@ -67,15 +67,15 @@ test {
     _ = serve;
     _ = gfx;
     _ = @import("cpupool.zig");
-    _ = @import("linux/nr.zig");
-    _ = @import("linux/mm.zig");
-    _ = @import("linux/elf.zig");
-    _ = @import("linux/vclock.zig");
-    _ = @import("linux/signal.zig");
-    _ = @import("linux/sys.zig");
-    _ = @import("linux/locks.zig");
-    _ = @import("linux/cputime.zig");
-    _ = @import("linux/netlink.zig");
+    _ = @import("abi/linux/nr.zig");
+    _ = @import("abi/linux/mm.zig");
+    _ = @import("abi/linux/elf.zig");
+    _ = @import("abi/linux/vclock.zig");
+    _ = @import("abi/linux/signal.zig");
+    _ = @import("abi/linux/sys.zig");
+    _ = @import("abi/linux/locks.zig");
+    _ = @import("abi/linux/cputime.zig");
+    _ = @import("abi/linux/netlink.zig");
     _ = @import("dotl/attr.zig");
     _ = @import("dotl/wire.zig");
     _ = @import("dotl/client.zig");

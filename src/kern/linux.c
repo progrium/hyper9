@@ -1,5 +1,5 @@
 /*
- * Kernel helpers for the Linux personality (design/epoch-0/linux-personality.md):
+ * Kernel helpers for the Linux ABI (design/epoch-0/linux-personality.md):
  * the per-process root swap at exec, walks relative to a directory fd,
  * fd flags, and await without blocking. Each returns -1 with the error
  * string set on failure, as glue.c's wrappers do.
@@ -342,7 +342,7 @@ h9_linux_fdchan(int fd, long *refs)
 
 /*
  * fd's channel, with a reference h9_linux_chanput releases: what a lazily
- * filled private file mapping reads its pages from (src/linux/mm.zig),
+ * filled private file mapping reads its pages from (src/abi/linux/mm.zig),
  * after the fd is closed or renumbered. nil if fd isn't open for reading.
  */
 void*
@@ -520,7 +520,7 @@ unsleep(Hproc *ph, Hproc *h)
 }
 
 /*
- * await for the Linux personality: the wait record of the child `want`,
+ * await for the Linux ABI: the wait record of the child `want`,
  * or of any child when want <= 0. Without block, returns 0 when there are
  * children but no such record yet, as wait4's WNOHANG. With peek, the
  * record stays, as waitid's WNOWAIT. Fails with Enochild when no child

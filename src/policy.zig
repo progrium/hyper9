@@ -8,7 +8,7 @@
 //! followed); the CLI resolves them before building a Policy.
 
 const std = @import("std");
-const aout = @import("aout.zig");
+const aout = @import("abi/plan9/aout.zig");
 pub const mount = @import("mount.zig");
 const web = @import("web.zig").enabled;
 
@@ -53,13 +53,13 @@ pub const Policy = struct {
     /// Egress allowlist of dial-string patterns (`tcp!10.0.0.0/8!564`);
     /// when non-empty, every connect and cs lookup must match one.
     net_allow: []const []const u8 = &.{},
-    /// Cap on guest memory in bytes; null means the backend's region size.
+    /// Cap on guest memory in bytes; null means the engine's region size.
     memory: ?u64 = null,
     /// Machine deadline; null means the profile's default.
     timeout_ns: ?u64 = null,
     /// Cap on live processes in the machine; null means unlimited.
     pids: ?u32 = null,
-    /// Cap on vCPUs running guest code at once; null means the backend's
+    /// Cap on vCPUs running guest code at once; null means the engine's
     /// limit (64 on HVF) or, on the emulator, unlimited.
     cpus: ?u32 = null,
     /// Whether the cwd is writable; null means the profile's default.
@@ -506,14 +506,14 @@ pub const Gfx = struct {
     /// The GUI backend's name: cocoa, win32, x11, web or headless.
     backend: []const u8,
     /// Whether /dev/snarf is the host clipboard (not `--gfx=noclip`). On
-    /// the browser host, the page's, as the user pastes into the canvas.
+    /// the web host, the page's, as the user pastes into the canvas.
     clipboard: bool = true,
     scale: u8 = 1,
     /// The headless screen's size, for a machine with the headless screen
     /// (design/headless-screen.md) rather than a window.
     headless: ?struct { dx: u16, dy: u16 } = null,
 
-    /// The browser host's canvas (design/epoch-0/browser-gfx.md).
+    /// The web host's canvas (design/epoch-0/browser-gfx.md).
     pub fn isWeb(g: Gfx) bool {
         return std.mem.eql(u8, g.backend, "web");
     }
@@ -2031,7 +2031,7 @@ test "compile: --gfx binds #i, #m and #b after the console, and masks them witho
     }
 }
 
-test "compile: the browser host's canvas shows clipboard=page and its own caveats" {
+test "compile: the web host's canvas shows clipboard=page and its own caveats" {
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
     var msg: []const u8 = "";

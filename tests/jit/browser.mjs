@@ -1,6 +1,6 @@
 // Runs the wasm emitter's tests (suite.mjs) in Chromium, through
 // Playwright: the same modules, compiled and installed by h9-web.js, in
-// the engine the browser host runs on.
+// the engine the web host runs on.
 //
 //   node tests/jit/browser.mjs path/to/jit-runtime.wasm [seeds]
 

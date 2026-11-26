@@ -1,4 +1,4 @@
-# Windows 11 ARM64 guest for testing h9's emu backend on Windows
+# Windows 11 ARM64 guest for testing h9's hcpu engine on Windows
 # (experimental in Lima: QEMU only, plain mode). The installer ISO is
 # ~/Downloads/Win11_25H2_English_Arm64_v2.iso, or WIN_ISO when running
 # `scripts/lima/vm up windows`. See scripts/lima/README.md.

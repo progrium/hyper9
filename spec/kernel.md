@@ -56,7 +56,7 @@ Because calls clear that flag as they return, a note posted while one call is fi
 
 Each process runs on one vCPU at a time, and hypervisors cap the live vCPUs per VM (`hv_vm_get_max_vcpu_count` on HVF, `KVM_CAP_MAX_VCPUS` on KVM). On HVF a vCPU is bound to its thread, so a process past the cap can't simply borrow one: it needs pool threads that run the guest on its behalf.
 
-Measured on an M3 Max (macOS 15.8.1, 14 cores): `hv_vm_get_max_vcpu_count` reports 64, and the 65th live `hv_vcpu_create` fails with `HV_NO_RESOURCES`. Destroyed vCPUs free their slots, and a create takes about 120 µs. The emulator's limit is its own, 64 ([jit.md](jit.md#the-emulator-backend-hcpu)).
+Measured on an M3 Max (macOS 15.8.1, 14 cores): `hv_vm_get_max_vcpu_count` reports 64, and the 65th live `hv_vcpu_create` fails with `HV_NO_RESOURCES`. Destroyed vCPUs free their slots, and a create takes about 120 µs. The emulator's limit is its own, 64 ([jit.md](jit.md#the-hcpu-engine-hcpu)).
 
 So on HVF 64 is a hard cap on *live* processes, not just running ones, and a pipeline of 65 stages or `mk -j` with many jobs reaches it.
 
@@ -68,9 +68,9 @@ Processes beyond that run guest code through a pool of 8 pool threads, each with
 
 A handoff costs two thread wake-ups per syscall, so only the processes past the first 56 pay it.
 
-`--cpus` caps how many vCPUs run guest code at the same moment, owned or pooled, on every backend. Runs take slots in ticket order, so a process that exits for a syscall and runs again queues behind the others, and a run waiting 5 ms with no slot freed kicks the run that has held one longest, which ends with `interrupted` and queues again, so guest code that makes no kernel calls (a spinning goroutine) can't keep the rest out.
+`--cpus` caps how many vCPUs run guest code at the same moment, owned or pooled, on every engine. Runs take slots in ticket order, so a process that exits for a syscall and runs again queues behind the others, and a run waiting 5 ms with no slot freed kicks the run that has held one longest, which ends with `interrupted` and queues again, so guest code that makes no kernel calls (a spinning goroutine) can't keep the rest out.
 
-The emulator and the native backend have no vCPU limit, so every process owns an engine or a stub thread there.
+The emulator and the sud engine have no vCPU limit, so every process owns an engine or a stub thread there.
 
 ## Kernel: drawterm `kern/` and the Zig seam
 
@@ -78,7 +78,7 @@ We vendor 9front drawterm's `kern/`, its libraries (libc, libdraw, libmemdraw, l
 
 ### Reused as-is
 
-These are reused as-is: chan/dev/mount machinery, devroot, devcons (for everything but `cons` itself), devmnt (the 9P client), devlfd (`#φ`, for unix socket servers and embedders' descriptors), devfs-posix, and devfs-win32 (the host filesystem, with h9's sandbox hook calls), devpipe (with a FIFO mode for the Linux personality's named pipes: one queue that every open reads and writes, with opens counted by mode), devip (with h9's network hook calls), devtls, devssl, devdraw, devmouse, devaudio, qio, and the auth code.
+These are reused as-is: chan/dev/mount machinery, devroot, devcons (for everything but `cons` itself), devmnt (the 9P client), devlfd (`#φ`, for unix socket servers and embedders' descriptors), devfs-posix, and devfs-win32 (the host filesystem, with h9's sandbox hook calls), devpipe (with a FIFO mode for the Linux ABI's named pipes: one queue that every open reads and writes, with opens counted by mode), devip (with h9's network hook calls), devtls, devssl, devdraw, devmouse, devaudio, qio, and the auth code.
 
 We compile drawterm's `.c` files but not its `kern/devtab.c` or `kern/devenv.c`; our own copies live in `src/kern/`. The vendored tree's few changes are small and marked: the sandbox hooks (see Sandbox policy) and `Chan.srvname`, which `kern/chan.c`'s `chanfree` frees, as on 9front.
 
@@ -130,7 +130,7 @@ Serves `/fd/N`.
 
 #### The Linux view `#L` (`src/kern/devlinux.c`, `#λ` before [mounts](../design/epoch-0/mounts.md)), eventfds `#ε` (`src/kern/linuxnet.c`), and ptys `#τ` (`src/kern/devpty.c`)
 
-A Linux process's `/`, its eventfd, epoll, and signalfd instances, and its pseudoterminals (see Linux personality).
+A Linux process's `/`, its eventfd, epoll, and signalfd instances, and its pseudoterminals (see Linux ABI).
 
 #### `tsleep` (`src/kern/tsleep.c`)
 
@@ -142,7 +142,7 @@ The list is guarded by a host lock (`glue.c`, `glue-win32.c`) that the kproc hol
 
 drawterm has no semaphores. 9front's code is ported closely, with the wait lists in 64 hashed buckets keyed by the host address of the semaphore word rather than in the segment, since h9's segments are Zig objects; the word is changed with host atomics.
 
-`src/syscall.zig` checks the address first (aligned, mapped, in a writable segment), and the pages it names never move while it's shared.
+`src/abi/plan9/syscall.zig` checks the address first (aligned, mapped, in a writable segment), and the pages it names never move while it's shared.
 
 `rendezvous` is 9front's on drawterm's Rgrp, so `procinterrupt` still pulls a process out of it, but it also checks for a note that arrived before the process was on the list.
 
@@ -202,13 +202,13 @@ drawterm's devcons gives whole-second time, three words of `bintime`, an empty `
 
 So devcons calls hooks: `#c/pid` and `#c/ppid` (machine-local pids, as `$pid` and `/proc` have them, in 9front's 12-character format); `bintime` (wall nanoseconds, ticks, `fasthz`, and monotonic nanoseconds, big-endian, with a short read getting the leading words that fit); `time` (seconds, nanoseconds, ticks, and `fasthz`, in drawterm's text format); and `sysstat`, a line per CPU the machine may use, in 9front's ten columns with zeros for the counters h9 doesn't keep, so Go's `runtime.NumCPU` counts them.
 
-The CPU count is `--cpus` if given, else the host's, capped by the backend's vCPU limit. The guest's `NPROC` is the same count, so `mk` runs that many jobs ([self-host](../design/epoch-0/self-host.md)).
+The CPU count is `--cpus` if given, else the host's, capped by the engine's vCPU limit. The guest's `NPROC` is the same count, so `mk` runs that many jobs ([self-host](../design/epoch-0/self-host.md)).
 
 The clock is one per host process (`src/kern.zig`): wall time from the host's real-time clock, and monotonic time from its monotonic clock, offset to the wall time at the kernel's boot; ticks are the monotonic nanoseconds, so `fasthz` is 10⁹. Writes to `time` and `bintime` still fail.
 
 #### Overlay device `#O` (`src/kern/devoverlay.c`)
 
-Copy-on-write trees in memory over a lower directory, for the root's overlay, `--write=ephemeral`, and the private `/tmp` (see Sandbox policy). An instance can report each change to the machine, for the root's discarded-changes notice. A file in memory with `DMEXCL` is open on at most one chan at a time, as on 9front's file servers: another open fails with "file is locked" (ramfs's string) until that chan is closed; host files (`#U`) have no such bit. A FIFO node (`Nfifo`, from the Linux personality's `mkfifo`) lists with `H9_DMFIFO` and isn't read or written itself, and a host FIFO below opens for writing without a copy-up. A union `bind -c` of a ramfs can't keep writes off the host, since a union sends every operation on an existing name to the member that has it.
+Copy-on-write trees in memory over a lower directory, for the root's overlay, `--write=ephemeral`, and the private `/tmp` (see Sandbox policy). An instance can report each change to the machine, for the root's discarded-changes notice. A file in memory with `DMEXCL` is open on at most one chan at a time, as on 9front's file servers: another open fails with "file is locked" (ramfs's string) until that chan is closed; host files (`#U`) have no such bit. A FIFO node (`Nfifo`, from the Linux ABI's `mkfifo`) lists with `H9_DMFIFO` and isn't read or written itself, and a host FIFO below opens for writing without a copy-up. A union `bind -c` of a ramfs can't keep writes off the host, since a union sends every operation on an existing name to the member that has it.
 
 An instance is a copy-on-write tree or a **union** ([mounts](../design/epoch-0/mounts.md)): up to 64 members, each a directory chan rooted at a path in the union (`""` for its top, or a path such as `etc`), merged at every depth. A walk looks in each member from the top down, a directory lists every member's names once, the first member that has a name answers for it, and a create goes to the first `-c` member that has the parent. Removing a name from an upper member uncovers a lower one. A union's qids are its own, mapped from its members' in a table, so two members' files never share one. A `bind -c '#O'` over a union is a copy-on-write overlay of it that copies up and whites out.
 
@@ -250,7 +250,7 @@ A missing architecture gets the skeleton only, with a warning; `-Drelease` fails
 
 1. drawterm raises errors with `waserror()`/`error()`, built on setjmp/longjmp. A longjmp across a Zig frame skips its `defer` and `errdefer`. So Zig code never sits between a `waserror` and an `error`.
 2. drawterm already provides the seam. Each `sysX` wrapper in `kern/sysfile.c` (`sysopen`, `syspread`, `sysbind`, `sysmount`, and so on) runs `waserror`; on error it stores the string for `errstr` and returns -1. Zig calls these directly and turns -1 into an error union. New process and segment calls get wrappers in the same style.
-3. C calls Zig only for leaf work that cannot fail into the kernel: the vmm layer, page allocation, the a.out parser, console I/O. A leaf returns a status, and the C side raises any kernel error.
+3. C calls Zig only for leaf work that cannot fail into the kernel: the engine layer, page allocation, the a.out parser, console I/O. A leaf returns a status, and the C side raises any kernel error.
 4. drawterm's `up` (`_getproc()`, per host thread) stays authoritative. Every guest thread is created through drawterm's kproc path (`h9_kern_spawn`), so `up` is set before any kernel call. Zig never uses bare `std.Thread` for anything that touches the kernel, and never boots the kernel on a caller's thread. The one exception is `--gfx` on macOS, where AppKit needs the main thread: `h9.gfx.main` boots the kernel on it and adopts it as a kernel Proc (`h9_kern_adopt`, through drawterm's clone path) before handing it to AppKit.
 5. drawterm's Proc has no parent, note group, segments, or Egrp. We add these fields, plus a pointer to the Zig-side process record.
 6. The build uses `zig build`: C sources go through `addCSourceFiles` with drawterm's flags, and one `build.zig` produces binaries for every host.

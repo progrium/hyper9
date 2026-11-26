@@ -1,0 +1,240 @@
+//! Shared file mappings (design/epoch-0/linux-personality.md, "Memory"): the
+//! pages of MAP_SHARED mappings of one file, one set per chunk (`mm.chunk_size`)
+//! of it, shared by every process that maps that part of the file, so their
+//! stores reach each other at once, as SQLite's WAL index (the -shm
+//! file) needs.
+//!
+//! h9 has no page cache, so this table stands in for one, only for files
+//! that are mapped shared. A chunk's pages are read from the file when
+//! the first process maps it. While they're mapped, the Linux layer's
+//! read and write calls on the file go through them as well as to the
+//! file (`read`, `wrote`), so a program that mixes the two sees one file.
+//! When the last mapping goes, pages that any mapping could write are
+//! written back to the file, through the file itself, posted in #s when
+//! a mapping that could write them came, so a file removed while mapped
+//! (shm_open then unlink, memfd_create) keeps them for the processes
+//! that still have it open; msync doesn't wait for that, since other
+//! processes see the pages already. Writes from outside the Linux
+//! layer (9front programs, the host) don't reach mapped pages, and the
+//! pages beyond the file's end are kept, not SIGBUS.
+//!
+//! A MAP_PRIVATE mapping of a file that's mapped shared maps these pages
+//! too, copy-on-write, so it sees other processes' stores until it writes
+//! a page, as Linux's page cache gives it (mm.zig, "overlays").
+
+const std = @import("std");
+const kern = @import("../../kern.zig");
+const engine = @import("../../engine.zig");
+const mm = @import("mm.zig");
+const locks = @import("locks.zig");
+
+const chunk = mm.chunk_size;
+
+const Key = struct {
+    /// The engine whose pages these are: an address space can map only
+    /// its own engine's.
+    engine: usize,
+    file: locks.Key,
+    /// The chunk's index in the file: its offset / chunk.
+    index: u64,
+};
+
+const Entry = struct {
+    key: Key,
+    engine: engine.Engine,
+    pages: *mm.Pages,
+    /// Some mapping could write them, so they're written back.
+    writable: bool,
+    path: [:0]u8,
+    /// The #s post holding the file open for the write-back, once a
+    /// mapping could write the pages, or empty (then the path is used).
+    post: [24]u8 = undefined,
+    post_len: u8 = 0,
+    /// The last mapping went and the pages are being written back: still
+    /// in the table, so a new mapping waits for the file to have them
+    /// instead of reading it first (`pagesFor`).
+    draining: bool = false,
+};
+
+var post_seq: std.atomic.Value(u32) = .init(0);
+
+/// Posts the file open as `fd` for e's write-back, if it isn't yet.
+fn postFile(e: *Entry, fd: u31) void {
+    if (e.post_len != 0) return;
+    const name = std.fmt.bufPrintSentinel(&e.post, "#s/lxm.{d}", .{post_seq.fetchAdd(1, .monotonic)}, 0) catch return;
+    const sfd = kern.create(name, kern.OWRITE, 0o600) catch return;
+    defer kern.close(sfd) catch {};
+    var nb: [16]u8 = undefined;
+    const t = std.fmt.bufPrint(&nb, "{d}", .{fd}) catch return;
+    _ = kern.pwrite(sfd, t, -1) catch {
+        kern.remove(name) catch {};
+        return;
+    };
+    e.post_len = @intCast(name.len);
+}
+
+const gpa = @import("../../web.zig").gpa;
+var mutex: std.atomic.Mutex = .unlocked;
+var table: std.AutoHashMapUnmanaged(Key, *Entry) = .empty;
+/// Entries, so the read and write paths can skip the table when empty.
+var live: std.atomic.Value(usize) = .init(0);
+
+fn lock() void {
+    while (!mutex.tryLock()) std.atomic.spinLoopHint();
+}
+
+fn engineId(b: engine.Engine) usize {
+    return switch (b) {
+        inline else => |p| @intFromPtr(p),
+    };
+}
+
+pub const Error = error{ OutOfMemory, NoSpace, Io };
+
+/// The pages of chunk `index` of the file open as `fd`, read from it if
+/// no process maps them yet, with a reference for the caller. It's taken
+/// under the table's lock, so the last mapping going meanwhile (another
+/// process's munmap, as when the sender of a memfd unmaps it as the
+/// receiver maps it) can't free them (`released`).
+pub fn pagesFor(eng: engine.Engine, file: locks.Key, index: u64, fd: u31, path: []const u8, writable: bool) Error!*mm.Pages {
+    const key: Key = .{ .engine = engineId(eng), .file = file, .index = index };
+    lock();
+    defer mutex.unlock();
+    while (table.get(key)) |e| {
+        if (e.draining) {
+            mutex.unlock();
+            std.atomic.spinLoopHint();
+            lock();
+            continue;
+        }
+        e.writable = e.writable or writable;
+        if (writable) postFile(e, fd);
+        _ = e.pages.refs.fetchAdd(1, .acq_rel);
+        return e.pages;
+    }
+    const mem = eng.allocPages(mm.pages_per_chunk) catch return error.NoSpace;
+    errdefer eng.freePages(mem);
+    var done: usize = 0;
+    while (done < mem.len) {
+        const n = kern.pread(fd, mem[done..], @intCast(index * chunk + done)) catch return error.Io;
+        if (n == 0) break;
+        done += n;
+    }
+    const e = try gpa.create(Entry);
+    errdefer gpa.destroy(e);
+    const p = try gpa.create(mm.Pages);
+    errdefer gpa.destroy(p);
+    const pz = try gpa.dupeSentinel(u8, path, 0);
+    errdefer gpa.free(pz);
+    // The table's reference and the caller's.
+    p.* = .{ .mem = mem, .refs = .init(2), .file = e, .release = released };
+    e.* = .{ .key = key, .engine = eng, .pages = p, .writable = writable, .path = pz };
+    try table.put(gpa, key, e);
+    if (writable) postFile(e, fd);
+    _ = live.fetchAdd(1, .monotonic);
+    return p;
+}
+
+/// Pages.release: no Mm maps `p`, so it goes (written back if it could
+/// have been written), unless another mapping took it meanwhile.
+fn released(p: *mm.Pages) void {
+    const e: *Entry = @ptrCast(@alignCast(p.file.?));
+    lock();
+    // Another Mm still owes a call (mm.Pages.pending), so the last one
+    // frees them; or a mapping took them meanwhile.
+    const owed = p.pending.fetchSub(1, .acq_rel) != 1;
+    if (owed or p.refs.load(.acquire) != 1) {
+        mutex.unlock();
+        return;
+    }
+    // Written back before the entry leaves the table: a process mapping
+    // the file meanwhile (the receiver of a memfd its sender has just
+    // unmapped) would otherwise read the file before the pages reach it.
+    e.draining = true;
+    mutex.unlock();
+    if (e.writable) writeBack(e);
+    lock();
+    _ = table.remove(e.key);
+    _ = live.fetchSub(1, .monotonic);
+    mutex.unlock();
+    if (e.post_len != 0) kern.remove(e.post[0..e.post_len :0]) catch {};
+    e.engine.freePages(p.mem);
+    gpa.destroy(p);
+    gpa.free(e.path);
+    gpa.destroy(e);
+}
+
+/// Writes the pages within the file's current length back to it.
+fn writeBack(e: *Entry) void {
+    const name: [:0]const u8 = if (e.post_len != 0) e.post[0..e.post_len :0] else e.path;
+    const fd = kern.open(name, kern.OWRITE) catch kern.open(e.path, kern.ORDWR) catch return;
+    defer kern.close(fd) catch {};
+    var st: [512]u8 = undefined;
+    _ = kern.fstat(fd, &st) catch return;
+    const flen = std.mem.readInt(u64, st[33..41], .little);
+    const base = e.key.index * chunk;
+    if (flen <= base) return;
+    const n: usize = @intCast(@min(chunk, flen - base));
+    _ = kern.pwrite(fd, e.pages.mem[0..n], @intCast(base)) catch {};
+}
+
+/// Applies `f` to each mapped chunk overlapping [off, off+len) of the
+/// file, with the piece of the pages and of the caller's buffer.
+fn each(file: locks.Key, off: u64, buf: []u8, comptime f: fn (pages: []u8, data: []u8) void) void {
+    if (live.load(.monotonic) == 0 or buf.len == 0) return;
+    lock();
+    defer mutex.unlock();
+    var it = table.valueIterator();
+    while (it.next()) |ep| {
+        const e = ep.*;
+        if (!std.meta.eql(e.key.file, file)) continue;
+        const base = e.key.index * chunk;
+        const lo = @max(base, off);
+        const hi = @min(base + chunk, off + buf.len);
+        if (lo >= hi) continue;
+        f(e.pages.mem[@intCast(lo - base)..@intCast(hi - base)], buf[@intCast(lo - off)..@intCast(hi - off)]);
+    }
+}
+
+/// Whether any of the file is mapped shared.
+pub fn mapped(file: locks.Key) bool {
+    if (live.load(.monotonic) == 0) return false;
+    lock();
+    defer mutex.unlock();
+    var it = table.keyIterator();
+    while (it.next()) |k| if (std.meta.eql(k.file, file)) return true;
+    return false;
+}
+
+/// After a read of [off, off+data.len): what's mapped is newer.
+pub fn read(file: locks.Key, off: u64, data: []u8) void {
+    each(file, off, data, struct {
+        fn f(pages: []u8, d: []u8) void {
+            @memcpy(d, pages);
+        }
+    }.f);
+}
+
+/// After a write of `data` at off: the mappings see it.
+pub fn wrote(file: locks.Key, off: u64, data: []u8) void {
+    each(file, off, data, struct {
+        fn f(pages: []u8, d: []u8) void {
+            @memcpy(pages, d);
+        }
+    }.f);
+}
+
+/// After a truncate to `len`: mapped pages past it read as zero.
+pub fn truncated(file: locks.Key, len: u64) void {
+    if (live.load(.monotonic) == 0) return;
+    lock();
+    defer mutex.unlock();
+    var it = table.valueIterator();
+    while (it.next()) |ep| {
+        const e = ep.*;
+        if (!std.meta.eql(e.key.file, file)) continue;
+        const base = e.key.index * chunk;
+        if (len >= base + chunk) continue;
+        @memset(e.pages.mem[@intCast(@max(len, base) - base)..], 0);
+    }
+}

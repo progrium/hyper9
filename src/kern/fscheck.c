@@ -1120,7 +1120,7 @@ extern int h9_overlay_isfifo(Chan*);
 
 /*
  * The target of the link that path's last name is, through #U and an
- * overlay over it, for the Linux personality's readlinkat and lstat
+ * overlay over it, for the Linux ABI's readlinkat and lstat
  * (design/epoch-0/symlinks-in-root.md). Plan 9 programs never see links,
  * so it's a leaf, not a 9P message. Returns the target's length, with
  * it in buf, or -1 with the error in errstr, as the sys* wrappers do.
@@ -1216,7 +1216,7 @@ h9_fs_chanreadlink(Chan *c, char *buf, int nbuf)
 }
 
 /*
- * Moves old to new in another directory, for the Linux personality's
+ * Moves old to new in another directory, for the Linux ABI's
  * renameat: a host rename when both are in devfs trees (fscheck.h), and
  * a move in memory when both are in one overlay (devoverlay.c).
  */
@@ -1279,7 +1279,7 @@ h9_fs_renamepath(char *old, char *new)
 }
 
 /*
- * Makes path a symbolic link to target, for the Linux personality's
+ * Makes path a symbolic link to target, for the Linux ABI's
  * symlinkat: in memory in an overlay, on the host in a devfs tree,
  * where the new name is checked like a create, or on a 9P2000.L mount by
  * Tsymlink. Anywhere else it's
@@ -1383,7 +1383,7 @@ h9_fs_mntsymlink(Chan *dir, char *name, char *target)
 }
 
 /*
- * Makes path a FIFO, for the Linux personality's mknodat
+ * Makes path a FIFO, for the Linux ABI's mknodat
  * (design/epoch-0/linux-fifo.md): a node in memory in an overlay, or a host FIFO
  * in a devfs tree, where the new name is checked like a create. Anywhere
  * else, such as a plain 9P root, it's "operation not permitted". On a

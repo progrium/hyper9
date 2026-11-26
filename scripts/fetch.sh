@@ -2,7 +2,7 @@
 # Fetches the 9front source at the pinned release, the pinned 9front arm64
 # image, prebuilt Unicorn libraries (zig build lockstep's oracle), and the
 # Alpine roots into .local, and on request the release's 386 or amd64 ISO,
-# one architecture's Alpine root, the browser host's Linux demo root, the
+# one architecture's Alpine root, the web host's Linux demo root, the
 # workloads' Linux root, diod, and ZeroFS.
 #
 #   scripts/fetch.sh [part...]   (parts: src image unicorn
@@ -96,7 +96,7 @@ echo "$UNICORN_WHEELS" | while read -r name tag sha; do
 done
 fi
 
-# Alpine roots for the Linux personality's tests: each a layer blob from
+# Alpine roots for the Linux ABI's tests: each a layer blob from
 # Docker Hub checked against its pinned digest, unpacked once, for each
 # alpine-<arch> part asked for.
 mkdir -p "$H9_LOCAL/linux"
@@ -119,7 +119,7 @@ echo "$ALPINE_LAYERS" | while read -r arch sha; do
 	echo "linux/alpine-$arch: $ALPINE_VERSION"
 done
 
-# The browser host's Linux demo root: the arm64 Alpine root with the pinned
+# The web host's Linux demo root: the arm64 Alpine root with the pinned
 # packages unpacked over a copy of it, for src/web/linux.list.
 if want alpinearm64web; then
 dir="$H9_LOCAL/linux/alpine-arm64-web"

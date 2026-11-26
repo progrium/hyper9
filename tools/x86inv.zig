@@ -1,6 +1,6 @@
 //! The 386 instruction inventory (design/epoch-0/zig-interpreter.md, and the
 //! 386 plan's first step): finds the code in every 386 binary under the
-//! given paths, decodes it with h86's decoder (src/interp/x86/decode.zig),
+//! given paths, decodes it with h86's decoder (src/engine/hcpu/interp/x86/decode.zig),
 //! and reports what it uses and what T0 can't run.
 //!
 //!     zig build x86-inventory -- [--top N] PATH...

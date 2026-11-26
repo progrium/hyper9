@@ -1,5 +1,5 @@
 // Opens /dev/kbd and writes what one read of it returns to stdout
-// (tests/backends.zig, design/epoch-0/gfx.md). The test types into the window
+// (tests/engines.zig, design/epoch-0/gfx.md). The test types into the window
 // until the run ends.
 
 #include "lib.S"

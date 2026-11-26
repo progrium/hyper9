@@ -8,7 +8,7 @@ This describes, as built, how a machine's namespace is put together at boot, the
 - [Boot sequence](#boot-sequence)
 - [Terminal](#terminal)
 - [Graphics (`--gfx`)](#graphics---gfx)
-  - [On the browser host](#on-the-browser-host)
+  - [On the web host](#on-the-web-host)
 
 ## Slim roots
 
@@ -70,7 +70,7 @@ Exit status: an empty `exits` string gives 0, a decimal number from 1 to 255 giv
 
 A machine with `Machine.Options.gfx` claims the process's one screen (`src/gfx.zig`; a second machine gets `GfxInUse`). `Options.gfx.screen` picks a host window (`.window`, `--gfx`) or the headless screen (`.headless`, `--gfx=headless`, [headless-screen](../design/headless-screen.md)). The screen opens once per process and stays, so a later machine that asks for the other kind, or the headless screen at another size, also gets `GfxInUse`.
 
-The window is drawn by drawterm's own GUI backend, chosen at build time with `-Dgfx`: Cocoa on macOS and Win32 on Windows by default, and X11 on Linux only with `-Dgfx=x11` (glibc). The headless screen, `src/kern/gfx-headless.c`, is a screen in memory (`XRGB32`, 1024×768 unless `Options.gfx.size` says), whose flushes go nowhere and whose "host clipboard" is a buffer in the h9 process; it never opens a window or touches the host's display. It's linked into every native build with graphics, beside the window backend: `-Dgfx=headless`, Linux's default, is a build whose only screen it is. `-Dgfx=none` builds `src/kern/nogfx.c`'s stubs instead. `h9.gfx.headless`'s hooks inject keys and mouse events, read and set its clipboard, read its pixels, and close it, in any build with it; `tests/backends.zig` uses them.
+The window is drawn by drawterm's own GUI backend, chosen at build time with `-Dgfx`: Cocoa on macOS and Win32 on Windows by default, and X11 on Linux only with `-Dgfx=x11` (glibc). The headless screen, `src/kern/gfx-headless.c`, is a screen in memory (`XRGB32`, 1024×768 unless `Options.gfx.size` says), whose flushes go nowhere and whose "host clipboard" is a buffer in the h9 process; it never opens a window or touches the host's display. It's linked into every native build with graphics, beside the window backend: `-Dgfx=headless`, Linux's default, is a build whose only screen it is. `-Dgfx=none` builds `src/kern/nogfx.c`'s stubs instead. `h9.gfx.headless`'s hooks inject keys and mouse events, read and set its clipboard, read its pixels, and close it, in any build with it; `tests/engines.zig` uses them.
 
 The backend files are compiled unchanged; `src/kern/gfx-gui.h`, force-included before them, renames drawterm's screen interface (`screeninit`, `attachscreen`, `flushmemscreen`, `screensize`, `getcolor`, `setcolor`, `setcursor`, `mouseset`, `clipread`, and `clipwrite`) to `h9_gui_*`, and `kbdkey` to `h9_kbdkey`. `gfx-headless.c` defines the same interface as `h9_hl_*`, and `src/kern/gfx.c` defines drawterm's names, calling one set or the other by the screen the machine claimed (`h9_gfx_headless`). The backend defines `gscreen`, which the headless screen uses when it's the one open. `gfx-gui.h` also turns the backend's `exit` (X11) or `ExitProcess` (Win32) on a closed window into `h9_gfx_exit`, which posts `hangup` to the machine with the window (as for a closed terminal) and parks the backend's thread.
 
@@ -92,7 +92,7 @@ The console stays the host terminal, so `/dev/cons` and kernel prints still go t
 
 On macOS AppKit needs the main thread, so the CLI runs through `h9.gfx.main`, which gives AppKit the main thread and runs the machine on another; an embedder using `--gfx` on macOS does the same. The headless screen needs no AppKit, so `--gfx=headless` runs the machine directly.
 
-### On the browser host
+### On the web host
 
 Web builds have `web`, h9's own backend, `src/kern/gfx-web.c` ([browser-gfx](../design/epoch-0/browser-gfx.md)), compiled with `gfx.c`, without `gfx-gui.h` and without the headless screen. Its JS half is `GfxHost` in `h9-web.js`, in the machine's Worker, which owns the page's canvas as an `OffscreenCanvas`; without one (`h9-node`, or a page that passed no `gfx`), `gfx_present` is 0 and `--gfx` fails with `GfxNotBuilt`.
 

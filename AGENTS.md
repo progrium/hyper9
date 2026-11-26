@@ -4,7 +4,7 @@
 
 - Read [DEVELOPING.md](DEVELOPING.md) for setup, build commands, and repository layout.
 - Read [SPEC.md](SPEC.md) before changing architecture or behavior that crosses components. It's the overview of the spec, and lists the files under `spec/` that describe each part of h9 as built; read the ones that cover what you're changing, and verify in the source what is implemented today.
-- Read [spec/jit.md](spec/jit.md), [spec/h86.md](spec/h86.md), and [spec/ha64.md](spec/ha64.md) before changing h9's own CPUs (`src/interp/`, `src/jit/`, and `src/vmm/hcpu.zig`); like SPEC.md, they describe what's built.
+- Read [spec/jit.md](spec/jit.md), [spec/h86.md](spec/h86.md), and [spec/ha64.md](spec/ha64.md) before changing h9's own CPUs (`src/engine/hcpu/interp/`, `src/engine/hcpu/jit/`, and `src/engine/hcpu/engine.zig`); like SPEC.md, they describe what's built.
 - Read [design/README.md](design/README.md) before changing anything a proposal covers. Changes to the design go through proposals in `design/`.
 - Check the existing code and tests before proposing or changing behavior. Keep changes focused and preserve established decisions unless the task explicitly calls for revisiting them.
 
@@ -12,7 +12,7 @@
 
 - This is a Zig project targeting native 9front executables on host hypervisors. Use the Zig version and setup described in DEVELOPING.md.
 - Keep the public machine/library API independent of CLI-global state; keep the CLI a thin wrapper.
-- Keep hypervisor-specific behavior behind the `src/vmm.zig` interface and its backend implementations.
+- Keep hypervisor-specific behavior behind the `src/engine.zig` interface and its engine implementations.
 - Treat `third_party/drawterm` as vendored upstream code. Prefer changes in project-owned code; modify the vendor tree only when necessary, and keep such changes minimal. It is a squashed git subtree: update it only with `scripts/vendor-drawterm.sh`, never by copying files over it.
 - Update MANUAL.md for user-visible changes, and DEVELOPING.md for changes to building or testing. Keep README.md short: it introduces h9 and links out, so a new feature goes there only if it belongs among its few examples.
 
@@ -42,6 +42,6 @@ zig build kern
 zig build design -- check
 ```
 
-`zig build test` runs the unit and backend tests, and `zig build integration` runs the integration cases. They don't overlap, so `zig build test integration` runs both, each once.
+`zig build test` runs the unit and engine tests, and `zig build integration` runs the integration cases. They don't overlap, so `zig build test integration` runs both, each once.
 
 DEVELOPING.md documents setup, including `scripts/env.sh` and `scripts/fetch.sh`.

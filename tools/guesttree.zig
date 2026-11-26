@@ -172,7 +172,7 @@ pub fn scanLimited(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, limit:
 /// Whether `data` starts with a 9front a.out magic (arm64, amd64 or 386).
 fn isAout(data: []const u8) bool {
     if (data.len < 4) return false;
-    // As src/aout.zig's: 386, amd64 and arm64.
+    // As src/abi/plan9/aout.zig's: 386, amd64 and arm64.
     const magic = std.mem.readInt(u32, data[0..4], .big);
     return magic == 0x000001eb or magic == 0x00008a97 or magic == 0x00008c47;
 }

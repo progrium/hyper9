@@ -1,4 +1,4 @@
-# Ubuntu 24.04 x86_64 guest for testing h9's emu backend with amd64
+# Ubuntu 24.04 x86_64 guest for testing h9's hcpu engine with amd64
 # binaries. Fully emulated (QEMU TCG) on Apple Silicon, so it's slow.
 # Created by scripts/lima/vm; see scripts/lima/README.md.
 base: template:ubuntu-24.04

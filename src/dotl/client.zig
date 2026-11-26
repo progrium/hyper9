@@ -1236,7 +1236,7 @@ pub const Client = struct {
         if (op.perm & wire.DMDIR != 0) {
             try c.send(op, l.Tmkdir{ .dfid = f.sfid, .name = op.name, .mode = mode, .gid = gid }, .{ .main = 0 });
         } else if (op.perm & wire.DMNAMEDPIPE != 0) {
-            // A FIFO, for the Linux personality's mknod: made, and walked
+            // A FIFO, for the Linux ABI's mknod: made, and walked
             // to, but not opened (design/epoch-0/linux-fifo.md).
             try c.send(op, l.Tmknod{ .dfid = f.sfid, .name = op.name, .mode = attr.S_IFIFO | (mode & 0o777), .major = 0, .minor = 0, .gid = gid }, .{ .main = 30 });
         } else if (c.dialect == .@"9P2000.L.Z") {

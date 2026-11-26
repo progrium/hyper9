@@ -1,13 +1,13 @@
 //! A process's memory segments: text, data (data and bss together) and
 //! stack, plus up to five that segattach adds (`shared` and `memory`), each
-//! a set of pages from the backend's allocator that it can free again. See
+//! a set of pages from the engine's allocator that it can free again. See
 //! SPEC.md, "Process model", and design/epoch-0/segattach.md.
 //!
 //! A segment can be attached to several address spaces (rfork with RFMEM
 //! shares text, data and bss), and a change to it, such as brk growing the
 //! data, is mapped into all of them. It's freed when the last one detaches.
 //!
-//! Pages come in chunks, one backend allocation and one mapping each, so a
+//! Pages come in chunks, one engine allocation and one mapping each, so a
 //! segment grows without copying. Semaphore wait lists (src/kern/sema.c)
 //! are keyed by the host address of the guest word, so they rely on a
 //! segment's pages never moving while it's shared; copy-on-write or
@@ -16,9 +16,9 @@
 //! headroom, and `Segs.growStack` extends it on faults and at syscalls.
 
 const std = @import("std");
-const vmm = @import("vmm.zig");
+const engine = @import("engine.zig");
 
-const page = vmm.page_size;
+const page = engine.page_size;
 
 /// Copies `src` into `dst`, which is freshly allocated and so zero, a page
 /// at a time, skipping pages of `src` that are zero. A Go program reserves
@@ -55,13 +55,13 @@ pub const stack_slack: u64 = 64 << 10;
 /// Smallest step the data segment's mapping grows by.
 pub const min_grow: u64 = 64 << 10;
 
-pub const Error = vmm.CreateError;
+pub const Error = engine.CreateError;
 
 pub const Segment = struct {
     gpa: std.mem.Allocator,
-    backend: vmm.Backend,
+    engine: engine.Engine,
     kind: Kind,
-    perms: vmm.Perms,
+    perms: engine.Perms,
     /// [base, top) is mapped: data grows `top` up, the stack grows `base` down.
     base: u64,
     top: u64,
@@ -72,21 +72,21 @@ pub const Segment = struct {
     cexec: bool = false,
     /// Sorted by address and contiguous, covering [base, top).
     chunks: std.ArrayList(Chunk) = .empty,
-    attached: std.ArrayList(vmm.AddressSpace) = .empty,
+    attached: std.ArrayList(engine.AddressSpace) = .empty,
     lock: std.atomic.Mutex = .unlocked,
 
     const Chunk = struct { va: u64, mem: []align(page) u8 };
 
     /// A segment of `len` zeroed bytes at `base`, attached to nothing yet;
     /// `len` may be 0.
-    pub fn create(gpa: std.mem.Allocator, backend: vmm.Backend, kind: Kind, perms: vmm.Perms, base: u64, len: u64) Error!*Segment {
+    pub fn create(gpa: std.mem.Allocator, eng: engine.Engine, kind: Kind, perms: engine.Perms, base: u64, len: u64) Error!*Segment {
         std.debug.assert(base % page == 0 and len % page == 0);
         const s = try gpa.create(Segment);
-        s.* = .{ .gpa = gpa, .backend = backend, .kind = kind, .perms = perms, .base = base, .top = base + len, .brk = base + len };
+        s.* = .{ .gpa = gpa, .engine = eng, .kind = kind, .perms = perms, .base = base, .top = base + len, .brk = base + len };
         errdefer s.free();
         if (len > 0) {
             try s.chunks.ensureUnusedCapacity(gpa, 1);
-            s.chunks.appendAssumeCapacity(.{ .va = base, .mem = try backend.allocPages(@intCast(len / page)) });
+            s.chunks.appendAssumeCapacity(.{ .va = base, .mem = try eng.allocPages(@intCast(len / page)) });
         }
         return s;
     }
@@ -94,7 +94,7 @@ pub const Segment = struct {
     /// Frees a segment that's attached to nothing.
     fn free(s: *Segment) void {
         std.debug.assert(s.attached.items.len == 0);
-        for (s.chunks.items) |c| s.backend.freePages(c.mem);
+        for (s.chunks.items) |c| s.engine.freePages(c.mem);
         s.chunks.deinit(s.gpa);
         s.attached.deinit(s.gpa);
         s.gpa.destroy(s);
@@ -120,7 +120,7 @@ pub const Segment = struct {
 
     /// Maps the segment into `as`. A segment attached to nothing is freed
     /// if this fails, so callers can hand over a fresh one.
-    pub fn attach(s: *Segment, as: vmm.AddressSpace) Error!void {
+    pub fn attach(s: *Segment, as: engine.AddressSpace) Error!void {
         s.lockSpin();
         attachLocked(s, as) catch |e| {
             const orphan = s.attached.items.len == 0;
@@ -131,7 +131,7 @@ pub const Segment = struct {
         s.lock.unlock();
     }
 
-    fn attachLocked(s: *Segment, as: vmm.AddressSpace) Error!void {
+    fn attachLocked(s: *Segment, as: engine.AddressSpace) Error!void {
         try s.attached.ensureUnusedCapacity(s.gpa, 1);
         for (s.chunks.items, 0..) |c, i| {
             as.map(c.va, c.mem, s.perms) catch |e| {
@@ -143,7 +143,7 @@ pub const Segment = struct {
     }
 
     /// Unmaps the segment from `as`, and frees it if that was the last.
-    pub fn detach(s: *Segment, as: vmm.AddressSpace) void {
+    pub fn detach(s: *Segment, as: engine.AddressSpace) void {
         s.lockSpin();
         for (s.attached.items, 0..) |a, i| if (std.meta.eql(a, as)) {
             for (s.chunks.items) |c| as.unmap(c.va);
@@ -160,7 +160,7 @@ pub const Segment = struct {
     pub fn copy(s: *Segment) Error!*Segment {
         s.lockSpin();
         defer s.lock.unlock();
-        const n = try create(s.gpa, s.backend, s.kind, s.perms, s.base, s.top - s.base);
+        const n = try create(s.gpa, s.engine, s.kind, s.perms, s.base, s.top - s.base);
         n.brk = s.brk;
         n.cexec = s.cexec;
         for (s.chunks.items) |c| copySparse(n.chunks.items[0].mem[@intCast(c.va - s.base)..][0..c.mem.len], c.mem);
@@ -172,11 +172,11 @@ pub const Segment = struct {
     /// contiguous.
     fn addChunkLocked(s: *Segment, va: u64, len: u64, at: usize) Error!void {
         try s.chunks.ensureUnusedCapacity(s.gpa, 1);
-        const mem = try s.backend.allocPages(@intCast(len / page));
+        const mem = try s.engine.allocPages(@intCast(len / page));
         for (s.attached.items, 0..) |as, i| {
             as.map(va, mem, s.perms) catch |e| {
                 for (s.attached.items[0..i]) |m| m.unmap(va);
-                s.backend.freePages(mem);
+                s.engine.freePages(mem);
                 return e;
             };
         }
@@ -211,7 +211,7 @@ pub const Segment = struct {
             const c = s.chunks.items[s.chunks.items.len - 1];
             if (c.va < top) break;
             for (s.attached.items) |as| as.unmap(c.va);
-            s.backend.freePages(c.mem);
+            s.engine.freePages(c.mem);
             _ = s.chunks.pop();
             s.top = c.va;
         }
@@ -228,7 +228,7 @@ pub const Segment = struct {
         if (s.top > top) {
             const at = s.chunks.items.len - 1;
             const old = s.chunks.items[at];
-            const mem = try s.backend.allocPages(@intCast((top - old.va) / page));
+            const mem = try s.engine.allocPages(@intCast((top - old.va) / page));
             @memcpy(mem, old.mem[0..mem.len]);
             for (s.attached.items, 0..) |as, i| {
                 as.unmap(old.va);
@@ -239,11 +239,11 @@ pub const Segment = struct {
                         m.unmap(old.va);
                         m.map(old.va, old.mem, s.perms) catch {};
                     }
-                    s.backend.freePages(mem);
+                    s.engine.freePages(mem);
                     return e;
                 };
             }
-            s.backend.freePages(old.mem);
+            s.engine.freePages(old.mem);
             s.chunks.items[at] = .{ .va = old.va, .mem = mem };
             s.top = top;
         }
@@ -393,13 +393,13 @@ pub const Segs = struct {
     }
 
     /// Detaches every segment from `as`.
-    pub fn release(s: *Segs, as: vmm.AddressSpace) void {
+    pub fn release(s: *Segs, as: engine.AddressSpace) void {
         s.lockSpin();
         defer s.lock.unlock();
         s.releaseLocked(as);
     }
 
-    fn releaseLocked(s: *Segs, as: vmm.AddressSpace) void {
+    fn releaseLocked(s: *Segs, as: engine.AddressSpace) void {
         inline for (.{ "text", "data", "stack" }) |f| if (@field(s, f)) |seg| {
             seg.detach(as);
             @field(s, f) = null;
@@ -411,7 +411,7 @@ pub const Segs = struct {
     }
 
     /// Detaches every segment from `old`, then takes `new`'s (exec).
-    pub fn replace(s: *Segs, old: vmm.AddressSpace, new: Segs) void {
+    pub fn replace(s: *Segs, old: engine.AddressSpace, new: Segs) void {
         s.lockSpin();
         defer s.lock.unlock();
         s.releaseLocked(old);
@@ -422,7 +422,7 @@ pub const Segs = struct {
     /// segments are shared, the stack is copied, and data and `memory`
     /// segments are shared with RFMEM (`share`) and copied without it.
     /// Each segment keeps its slot.
-    pub fn fork(s: *const Segs, as: vmm.AddressSpace, share: bool) Error!Segs {
+    pub fn fork(s: *const Segs, as: engine.AddressSpace, share: bool) Error!Segs {
         var c: Segs = .{ .stack_floor = s.stack_floor, .ustktop = s.ustktop, .seg_max = s.seg_max };
         errdefer c.release(as);
         if (s.text) |t| {
@@ -451,7 +451,7 @@ pub const Segs = struct {
     /// address space, in their slots, except those with SG_CEXEC and any
     /// that overlap the new image. On error, those attached so far stay in
     /// `s`, so releasing it detaches them.
-    pub fn inherit(s: *Segs, old: *const Segs, as: vmm.AddressSpace) Error!void {
+    pub fn inherit(s: *Segs, old: *const Segs, as: engine.AddressSpace) Error!void {
         for (old.extra, &s.extra) |e, *slot| if (e) |seg| {
             if (seg.cexec) continue;
             const span = seg.span();
@@ -520,7 +520,7 @@ pub const Segs = struct {
     /// segattach(attr, class, va, len), with 9front's placement rules
     /// (`place`), for the class `kind` (null for one h9 doesn't have).
     /// Errors are checked in 9front's order. Returns the base.
-    pub fn segattach(s: *Segs, gpa: std.mem.Allocator, backend: vmm.Backend, as: vmm.AddressSpace, class: ?Kind, attr: u32, va: u64, len: u64) SegError!u64 {
+    pub fn segattach(s: *Segs, gpa: std.mem.Allocator, eng: engine.Engine, as: engine.AddressSpace, class: ?Kind, attr: u32, va: u64, len: u64) SegError!u64 {
         if (va != 0 and va >= s.ustktop) return error.BadArg;
         const slot = for (&s.extra) |*e| {
             if (e.* == null) break e;
@@ -532,8 +532,8 @@ pub const Segs = struct {
         if (sp.hi - sp.lo > s.seg_max) return error.NoVmem;
         try s.trimHeadroom(sp);
 
-        const perms: vmm.Perms = .{ .write = attr & SG_RONLY == 0 };
-        const seg = Segment.create(gpa, backend, kind, perms, sp.lo, sp.hi - sp.lo) catch return error.NoVmem;
+        const perms: engine.Perms = .{ .write = attr & SG_RONLY == 0 };
+        const seg = Segment.create(gpa, eng, kind, perms, sp.lo, sp.hi - sp.lo) catch return error.NoVmem;
         seg.cexec = attr & SG_CEXEC != 0;
         seg.attach(as) catch return error.NoVmem;
         s.lockSpin();
@@ -555,7 +555,7 @@ pub const Segs = struct {
     /// segdetach(addr): detaches the segattach segment containing `addr`
     /// from `as`, which frees it if no other process has it. Text, data
     /// and stack can't be detached.
-    pub fn segdetach(s: *Segs, as: vmm.AddressSpace, addr: u64) SegError!void {
+    pub fn segdetach(s: *Segs, as: engine.AddressSpace, addr: u64) SegError!void {
         const slot = s.extraAt(addr) orelse return error.BadArg;
         const seg = slot.*.?;
         s.lockSpin();
@@ -626,7 +626,7 @@ pub const Segs = struct {
     }
 
     /// segflush(va, len): checks that the span's pages are all in
-    /// segments. Nothing runs from segattach segments, and the backends
+    /// segments. Nothing runs from segattach segments, and the engines
     /// keep data coherent across vCPUs, so there's nothing to flush.
     pub fn segflush(s: *Segs, va: u64, len: u64) SegError!void {
         const end = std.math.add(u64, va, len) catch return error.BadArg;
@@ -664,7 +664,7 @@ pub const Segs = struct {
     /// 9front's txt2data does. The host file is never written; text is
     /// read into pages at exec. Returns whether the range touches text.
     /// Called on another thread while the process is stopped.
-    pub fn ownText(s: *Segs, as: vmm.AddressSpace, va: u64, len: u64) Error!bool {
+    pub fn ownText(s: *Segs, as: engine.AddressSpace, va: u64, len: u64) Error!bool {
         s.lockSpin();
         defer s.lock.unlock();
         const t = s.text orelse return false;

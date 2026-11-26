@@ -1,6 +1,6 @@
 //! zig build hcpu (and x86-jit): h86's [hcpu] cases, each
 //! run on T0 alone and on T1 through dispatch, with ir_eval and with this
-//! host's emitter. The machine is src/jit/x86/t1.zig's: code at 0x1000
+//! host's emitter. The machine is src/engine/hcpu/jit/x86/t1.zig's: code at 0x1000
 //! (two pages, writable), data at 0x20000, stack at 0x21000, and nothing
 //! mapped at 0x3000 or 0x22000.
 //!

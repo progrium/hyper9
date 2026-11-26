@@ -26,7 +26,7 @@ This describes, as built, h9's security stance and the sandbox policy: what a gu
 
 ## Sandbox policy
 
-Sandboxing is a `Policy` in `Machine.Options`: a set of capabilities, host paths, network rules, and limits. The capability model follows [isobox](https://github.com/can1357/isobox): named capabilities, profiles that set defaults, explicit flags that override them, and a printable plan with caveats. Unlike isobox, enforcement lives in the shared kernel, so the capability set is the same on every vmm backend; there's no per-host intersection to compute.
+Sandboxing is a `Policy` in `Machine.Options`: a set of capabilities, host paths, network rules, and limits. The capability model follows [isobox](https://github.com/can1357/isobox): named capabilities, profiles that set defaults, explicit flags that override them, and a printable plan with caveats. Unlike isobox, enforcement lives in the shared kernel, so the capability set is the same on every engine; there's no per-host intersection to compute.
 
 | Capability | Mechanism |
 | --- | --- |
@@ -96,7 +96,7 @@ The resolved path, which holds no links, is checked against the access rules as 
 
 A listing shows each link with its target's `Dir` and leaves out a link whose target is missing or loops, since walking it fails.
 
-`h9_fs_readlink` (and `h9_fs_readlinkpath` by guest path, through the root overlay; `kern.readlink`) gives a link's target as written, for the Linux personality; Plan 9 programs never see links.
+`h9_fs_readlink` (and `h9_fs_readlinkpath` by guest path, through the root overlay; `kern.readlink`) gives a link's target as written, for the Linux ABI; Plan 9 programs never see links.
 
 These rules are a 9front program's. For a Linux program the boundary is the process's root instead of the tree's top ([Linux symlinks](#linux-symlinks)).
 
@@ -206,7 +206,7 @@ The root's overlay is printed as `bind -c '#O' /` with `eph` and, over a host tr
 
 The overlay device (`src/kern/devoverlay.c`) keeps a tree in memory over a lower chan: a walk looks in memory first and falls through to the lower device, so devfs's checks (`--read-deny`, hidden paths, symlink resolution) apply to every lower lookup.
 
-A memory node is a copy (a file or directory with its own data), a whiteout (a removed lower name), a directory marker (a lower directory with changed children) or a symbolic link a Linux program made (see Linux personality).
+A memory node is a copy (a file or directory with its own data), a whiteout (a removed lower name), a directory marker (a lower directory with changed children) or a symbolic link a Linux program made (see Linux ABI).
 
 A lower file is copied up whole the first time it's opened for writing, or not read at all with `OTRUNC`; a process that already has the lower file open keeps reading it. Renaming a lower directory, or a marker, is refused ("permission denied").
 
@@ -216,7 +216,7 @@ Instances are made by the namespace builder (`h9_overlay_newpath`) and attached 
 
 ### Up layers
 
-The `up` mount option ([upper-layers](../design/upper-layers.md)) makes a writable tree, a `--dir`, a `--url` to a writable 9P server (a port on the browser host too), or a `--tmp`, the layer that takes every change over what's beneath it: on `/` or `#L`, every other member of the stack, with the layer on top whatever its order; elsewhere, what's at DST when the mount is made. It's printed as `bind -u NEW OLD` with `up` in the access column, and `--ns` replays it. The layer is the stack's up member (see the overlay device in [kernel.md](kernel.md)), so the changes land in it as an unpacked OCI layer, with copies of the files the guest changed, `.wh.NAME` for names it removed, and `.wh..wh..opq` in directories it removed and made again, and none of it in memory. A stack with an up member has no overlay. `up` with `ro`, `rw`, or `eph`, a second `up` member on one stack, `up` on `--archive` or `--builtin`, and `up` under `--write=none` or `--write=ephemeral` are exit 2. A layer on a host directory owns its files as the user h9 runs as. A layer is written as the guest goes, so a run that fails leaves part of one.
+The `up` mount option ([upper-layers](../design/upper-layers.md)) makes a writable tree, a `--dir`, a `--url` to a writable 9P server (a port on the web host too), or a `--tmp`, the layer that takes every change over what's beneath it: on `/` or `#L`, every other member of the stack, with the layer on top whatever its order; elsewhere, what's at DST when the mount is made. It's printed as `bind -u NEW OLD` with `up` in the access column, and `--ns` replays it. The layer is the stack's up member (see the overlay device in [kernel.md](kernel.md)), so the changes land in it as an unpacked OCI layer, with copies of the files the guest changed, `.wh.NAME` for names it removed, and `.wh..wh..opq` in directories it removed and made again, and none of it in memory. A stack with an up member has no overlay. `up` with `ro`, `rw`, or `eph`, a second `up` member on one stack, `up` on `--archive` or `--builtin`, and `up` under `--write=none` or `--write=ephemeral` are exit 2. A layer on a host directory owns its files as the user h9 runs as. A layer is written as the guest goes, so a run that fails leaves part of one.
 
 Every stack reads whiteouts in every member, so a layer mounts again, without `up`, as it was, under a new layer or by itself. `--archive` unpacks an archive's `.wh.` entries as files, which a stack then reads as whiteouts; off a stack they're plain files, as is a `.wh.` file in any tree that isn't a stack member.
 
