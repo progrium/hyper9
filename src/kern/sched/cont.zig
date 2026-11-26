@@ -118,6 +118,8 @@ pub const Cont = struct {
     word: std.atomic.Value(u32) = .init(0),
     /// On wasm, whether its frames are in its Asyncify buffer.
     unwound: bool = false,
+    /// Its link on a run queue (runq.zig), while it's on one.
+    next: ?*Cont = null,
 
     const parked_bit: u32 = 1 << 31;
 

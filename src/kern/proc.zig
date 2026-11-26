@@ -45,6 +45,12 @@ const up = port.up;
 const Error = port.Error;
 
 const Proc = c.Proc;
+
+// The C and the Zig must agree on the record: see errlab in h9proc.h.
+comptime {
+    std.debug.assert(@offsetOf(Proc, "errlab") == 0);
+    std.debug.assert(@sizeOf(@FieldType(Proc, "errlab")) % 16 == 0);
+}
 const Hmach = c.Hmach;
 const Hnote = c.Hnote;
 const Hwait = c.Hwait;

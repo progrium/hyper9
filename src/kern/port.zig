@@ -30,9 +30,10 @@
 //! - `dev/ns.zig`: h9's src/kern/devns.c, the namespace kernel's #N.
 //! - `fscheck.zig`: the kernel's half of h9's src/kern/fscheck.c, FIFOs
 //!   by path for the Linux ABI.
-//! - `linuxnet.zig`, `dev/eventfd.zig`, and `rconv.zig`: h9's
-//!   src/kern/linuxnet.c, the Linux ABI's readiness and socket calls, #ε,
-//!   and the read-ahead for remote conversations.
+//! - `linuxnet.zig` and `dev/eventfd.zig`: h9's src/kern/linuxnet.c,
+//!   the Linux ABI's readiness and socket calls, and #ε.
+//! - `ready.zig`: readiness, the device switch's `ready` and `watch`
+//!   (design/file-interface.md).
 //! - `dev/gfx.zig`: the devices of h9's src/kern/gfx.c, #i, #c, #b, and
 //!   #m over drawterm's, in builds with a screen (`options.gfx`).
 //!
@@ -87,7 +88,7 @@ pub const netcheck = @import("netcheck.zig");
 pub const fscheck = @import("fscheck.zig");
 pub const devns = @import("dev/ns.zig");
 pub const linuxnet = @import("linuxnet.zig");
-pub const rconv = @import("rconv.zig");
+pub const ready = @import("ready.zig");
 pub const deveventfd = @import("dev/eventfd.zig");
 pub const devgfx = @import("dev/gfx.zig");
 pub const glue = @import("glue.zig");
@@ -170,7 +171,7 @@ test {
     _ = fscheck;
     _ = devns;
     _ = linuxnet;
-    _ = rconv;
+    _ = ready;
     _ = deveventfd;
     _ = glue;
     _ = process;
@@ -375,6 +376,13 @@ pub const testing = struct {
     /// Each call starts the namespace again.
     pub fn namespace() !*c.Proc {
         const p = try begin();
+        try namespaceOf(p);
+        return p;
+    }
+
+    /// namespace's, for p, which must be `up` (a process on a
+    /// continuation, as sync.zig's cases run).
+    pub fn namespaceOf(p: *c.Proc) !void {
         if (@as(?*c.Pgrp, p.pgrp)) |old| pgrp.closepgrp(old);
         p.pgrp = try pgrp.newpgrp();
         p.fgrp = try pgrp.dupfgrp(null);
@@ -386,7 +394,6 @@ pub const testing = struct {
         slash.path = chan.newpath("/");
         p.slash = slash;
         p.dot = try chan.cclone(slash);
-        return p;
     }
 };
 

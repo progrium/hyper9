@@ -36,6 +36,7 @@ const Pipe = struct {
     qref: [2]c_int = .{ 0, 0 },
     fifo: bool = false, // h9: a Linux FIFO's pipe (fifopipe)
     fref: [2]c_int = .{ 0, 0 }, // h9: a FIFO's opens for reading and for writing
+    watch: dev.rd.Watchers = .{}, // h9: both queues' (design/file-interface.md)
 };
 
 var pipealloc: struct {
@@ -99,6 +100,9 @@ fn pipeattach(spec: [*:0]const u8) Error!*Chan {
         c.exhausted(@constCast("memory"));
         unreachable;
     };
+
+    qio.qsetwatch(p.q[0], &p.watch);
+    qio.qsetwatch(p.q[1], &p.watch);
 
     c.lock(&pipealloc.lk);
     pipealloc.path += 1;
@@ -367,7 +371,22 @@ pub const Device = dev.Native('|', "pipe", .{
     .remove = dev.devremove,
     .wstat = dev.devwstat,
     .gens = &.{&pipegen},
+    .ready = pipeready,
+    .watch = pipewatch,
 });
+
+/// h9: readiness (design/file-interface.md): a data file's queues, and
+/// a directory always.
+fn pipeready(ch: *Chan, ev: c_int) c_int {
+    const rq = h9_pipeq(ch, 0) orelse return dev.readydefault(ev);
+    return qio.qready(rq, h9_pipeq(ch, 1).?, ev);
+}
+
+fn pipewatch(ch: *Chan, ev: c_int, w: *dev.rd.Watch, wk: *dev.rd.Waker) void {
+    _ = ev;
+    if (h9_pipeq(ch, 0) == null) return;
+    dev.rd.add(&pipeof(ch).watch, w, wk);
+}
 
 /// h9: the queue a read of c takes from (wr == 0) or a write to c adds
 /// to, for Linux poll (src/kern/linuxnet.zig); nil if c isn't a data file.

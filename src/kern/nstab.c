@@ -155,7 +155,6 @@ void h9_fs_markroot(Chan *c, int lx) { USED(c, lx); }
 int h9_hidx_wide(Chan *c) { USED(c); return 0; }
 
 /* linuxnet.zig's: no Linux sockets to wake. */
-void h9_qwake(Queue *q) { USED(q); }
 
 #ifndef H9_NSKERNEL_HOSTFS
 /* devfs's and fscheck.zig's: no host tree under an overlay. */

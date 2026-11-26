@@ -92,6 +92,15 @@ struct Devx
 	 * once where it can: 0, or 1 if it can't, for the default to try.
 	 */
 	int	(*rename)(Chan *c, Chan *dir, char *name);
+
+	/*
+	 * Readiness (file-interface, Part 1; src/kern/ready.zig): the
+	 * events of ev ready on c now, as Linux's poll bits, and a watch w
+	 * (a ready.zig Watch) with its waker wk, hung on what c's readiness
+	 * comes from. Neither raises.
+	 */
+	int	(*ready)(Chan *c, int ev);
+	void	(*watch)(Chan *c, int ev, void *w, void *wk);
 };
 
 extern Devx *devxtab[];

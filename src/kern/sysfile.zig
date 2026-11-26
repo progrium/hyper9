@@ -790,10 +790,14 @@ pub fn fstat(fd: c_int, s: [*]u8, n: c_int) Error!c_int {
 
 /// h9: fstat's work on a channel, for kserve (src/kern/kserve.zig).
 pub fn chanstat(ch: *Chan, s: [*]u8, n: c_int) Error!c_int {
-    var r = try dev.stat(dev.of(ch), ch, s, n);
-    if (pathlast(ch.path)) |name| if (name[0] != 0) {
-        r = dirsetname(name, @intCast(std.mem.len(name)), s, r, n);
-    };
+    return channame(ch, s, try dev.stat(dev.of(ch), ch, s, n), n);
+}
+
+/// The Dir of length r in s (of n), named as ch's path names it, as
+/// chanstat gives it.
+pub fn channame(ch: *Chan, s: [*]u8, r: c_int, n: c_int) c_int {
+    if (pathlast(ch.path)) |name| if (name[0] != 0)
+        return dirsetname(name, @intCast(std.mem.len(name)), s, r, n);
     return r;
 }
 

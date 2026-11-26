@@ -1,10 +1,11 @@
 //! drawterm's allocb.c and qio.c (design/kernel-port.md): blocks, and the
 //! I/O queues pipes, devmnt's conversations, and h9's streams are made
 //! of. A close translation: the same functions in the same order, with
-//! error unions in place of C's error labels, and h9's two patches kept: the
-//! readiness hook (`h9_qwake`, which wakes Linux pollers whenever a
-//! queue's state changes), and reader and writer locks that a note
-//! interrupts (`qlockintr`).
+//! error unions in place of C's error labels, and h9's two patches kept: a
+//! queue's watchers (design/file-interface.md, Part 1: `watch`, a
+//! ready.zig list its owner hangs on it, notified whenever its state
+//! changes), and reader and writer locks that a note interrupts
+//! (`qlockintr`).
 //!
 //! A process waits in a queue in three places, each one small function:
 //! `qlockintr` (behind another reader or writer), `qwait` (for data), and
@@ -17,6 +18,7 @@
 const std = @import("std");
 const port = @import("port.zig");
 const sync = @import("sync.zig");
+const rd = @import("ready.zig");
 const c = port.c;
 const up = port.up;
 const Error = port.Error;
@@ -160,7 +162,33 @@ pub fn checkb(b: *Block, msg: [*:0]const u8) void {
 // qio.c
 
 /// h9: wakes Linux pollers (src/kern/linuxnet.zig).
-extern fn h9_qwake(q: *Queue) void;
+/// h9: the queue changed: tells its watchers (design/file-interface.md).
+fn qwake(q: *Queue) void {
+    if (q.watch) |w| rd.notify(w);
+}
+
+/// h9: the events of ev (ready.zig's) ready on a channel that reads rq
+/// and writes wq, with an error or hangup always reported: what a pipe
+/// and a pty answer (design/file-interface.md).
+pub fn qready(rq: *Queue, wq: *Queue, ev_: c_int) c_int {
+    const ev = ev_ | rd.Err | rd.Hup;
+    var r: c_int = 0;
+    if (qcanread(rq))
+        r |= rd.In
+    else if (qisclosed(rq) != 0)
+        r |= rd.In | rd.Hup | rd.Rdhup;
+    if (qisclosed(wq) != 0)
+        r |= rd.Err
+    else if (qfull(wq) == 0)
+        r |= rd.Out;
+    return r & ev;
+}
+
+/// h9: hangs w, the owner's watchers, on q, for every change of its
+/// state; a pipe hangs one on both its queues.
+pub fn qsetwatch(q: *Queue, w: ?*rd.Watchers) void {
+    q.watch = w;
+}
 
 /// h9: qlock for a queue's reader or writer lock, which a note
 /// interrupts. A reader waiting behind another reader (one pipe that
@@ -205,6 +233,8 @@ pub const Queue = extern struct {
     wr: c.Rendez, // process waiting to write
 
     err: [port.ERRMAX]u8,
+
+    watch: ?*rd.Watchers, // h9: notified at each change (qsetwatch)
 };
 
 const Maxatomic = 64 * 1024;
@@ -552,7 +582,7 @@ fn iunlock_consumer(q: *Queue) c_int {
         q.state = s & ~@as(c_int, Qflow);
 
     c.iunlock(&q.lk);
-    h9_qwake(q); // h9
+    qwake(q); // h9
 
     if (s & Qflow != 0) {
         // Wake up flow-controlled writers. Note that this is done even
@@ -587,7 +617,7 @@ fn iunlock_producer(q: *Queue) c_int {
 
     q.state = s & ~@as(c_int, Qstarve);
     c.iunlock(&q.lk);
-    h9_qwake(q); // h9
+    qwake(q); // h9
 
     if (s & Qstarve != 0)
         _ = sync.wakeup(&q.rr);
@@ -1159,7 +1189,7 @@ pub fn qclose(q_: ?*Queue) void {
     // Wake up readers and writers.
     _ = sync.wakeup(&q.rr);
     _ = sync.wakeup(&q.wr);
-    h9_qwake(q); // h9
+    qwake(q); // h9
 
     // Free queued blocks.
     freeblist(tofree);
@@ -1186,7 +1216,7 @@ pub fn qhangup(q: *Queue, msg_: ?[*:0]const u8) void {
     // Wake up readers and writers.
     _ = sync.wakeup(&q.rr);
     _ = sync.wakeup(&q.wr);
-    h9_qwake(q); // h9
+    qwake(q); // h9
 }
 
 /// Return non-zero if the queue is hung up.
@@ -1739,4 +1769,45 @@ test "a writer past the limit waits for a reader to drain the queue, and a note 
     try testing.expectEqual(256, qlen(q));
     qsetlimit(q, 1024);
     try testing.expectEqual(0, qfull(q));
+}
+
+const Wrote = struct {
+    fn run(q: *Queue) void {
+        _ = qwrite(q, "wake", 4) catch {};
+    }
+
+    /// An executor of its own, on a host thread that's no process: it
+    /// resumes the reader there.
+    fn resumer(rq: *sync.sched.RunQueue, pool: *sync.sched.Pool, s: *sync.ktest.Sproc, ok: *bool) void {
+        var e: sync.Kexec = .init(pool, null);
+        defer e.deinit();
+        ok.* = if (sync.ktest.runUntil(&e, rq, sync.ktest.Sproc.isDone, s)) |_| true else |_| false;
+    }
+};
+
+test "a read parks on a continuation, a writer on another thread readies it, and a third resumes it [scheduler]" {
+    const me = try kt.begin();
+    const q = qopen(1024, 0, null, null).?;
+    defer qfree(q);
+    var pool: sync.sched.Pool = .{ .size = 64 * 1024 };
+    defer pool.deinit();
+    var rq: sync.sched.RunQueue = .{};
+    var e: sync.Kexec = .init(&pool, me);
+    defer e.deinit();
+    var s: sync.ktest.Sproc = undefined;
+    s.init(&rq);
+    var r: Reader = .{ .q = q };
+
+    try testing.expectEqual(sync.sched.Outcome.parked, try s.call(&e, Reader.run, .{&r}));
+    try testing.expect(q.rr.p == s.p);
+    var w: kt.Kproc = undefined;
+    try w.start(Wrote.run, .{q});
+    w.join();
+    var ok = false;
+    const t = try std.Thread.spawn(.{}, Wrote.resumer, .{ &rq, &pool, &s, &ok });
+    t.join();
+    try testing.expect(ok);
+    try testing.expectEqual(null, r.result);
+    try testing.expectEqualStrings("wake", r.buf[0..@intCast(r.n)]);
+    try testing.expect(up() == me);
 }

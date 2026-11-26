@@ -166,7 +166,18 @@ Dev *devtab[] = {
  */
 extern Devx fsdevx;
 
+/* devip's readiness: its host sockets' (src/kern/linuxnet.zig) */
+extern int h9_ip_ready(Chan*, int);
+extern void h9_ip_watch(Chan*, int, void*, void*);
+
+static Devx ipdevx = {
+	'I',
+	.ready = h9_ip_ready,
+	.watch = h9_ip_watch,
+};
+
 Devx *devxtab[] = {
 	&fsdevx,
+	&ipdevx,
 	0
 };

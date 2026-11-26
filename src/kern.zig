@@ -16,6 +16,7 @@ const resolver = @import("resolver.zig");
 const consin = @import("consin.zig");
 const web = @import("web.zig");
 const Host = @import("host/host.zig").Host;
+const host_dirs = @import("host/dirs.zig");
 const dotl_kern = @import("dotl/kern.zig");
 const hidx_kern = @import("rootindex/kern.zig");
 const hstream = @import("hstream.zig");
@@ -252,6 +253,15 @@ const c_stub = struct {
     fn h9_fgetattr(_: c_int, _: u64, _: *Attr, _: [*]u8, _: c_int) c_int {
         return -1;
     }
+    fn h9_fsync(_: c_int, _: c_int) c_int {
+        return -1;
+    }
+    fn h9_setattr(_: [*:0]const u8, _: c_int, _: u64, _: *const Attr) c_int {
+        return -1;
+    }
+    fn h9_fsetattr(_: c_int, _: u64, _: *const Attr) c_int {
+        return -1;
+    }
     fn h9_fs_mkfifopath(_: [*:0]const u8, _: c_uint) c_int {
         return -1;
     }
@@ -402,6 +412,9 @@ const c_real = struct {
     extern fn h9_rename(old: [*:0]const u8, new: [*:0]const u8) c_int;
     extern fn h9_getattr(path: [*:0]const u8, nofollow: c_int, mask: u64, a: *Attr, dir: [*]u8, ndir: c_int) c_int;
     extern fn h9_fgetattr(fd: c_int, mask: u64, a: *Attr, dir: [*]u8, ndir: c_int) c_int;
+    extern fn h9_fsync(fd: c_int, datasync: c_int) c_int;
+    extern fn h9_setattr(path: [*:0]const u8, nofollow: c_int, mask: u64, a: *const Attr) c_int;
+    extern fn h9_fsetattr(fd: c_int, mask: u64, a: *const Attr) c_int;
     extern fn h9_fs_mkfifopath(path: [*:0]const u8, perm: c_uint) c_int;
 
     extern fn h9_overlay_drop(id: c_int) void;
@@ -442,7 +455,7 @@ pub fn boot() Error!void {
         .booting => if (web.enabled) web.yield() else std.atomic.spinLoopHint(),
         .idle => if (boot_state.cmpxchgStrong(.idle, .booting, .acq_rel, .acquire) == null) {
             // The monotonic clock starts at the wall time of the boot.
-            _ = monoNs();
+            _ = osMonoNs();
             const t = web.Thread.spawn(.{}, bootThread, .{}) catch {
                 boot_state.store(.idle, .release);
                 return error.OutOfMemory;
@@ -472,8 +485,8 @@ fn bootThread() void {
 /// them find no Kernel.
 pub const Kernel = struct {
     gpa: std.mem.Allocator,
-    /// The host it may reach (design/host-handles.md). Only held for now:
-    /// host-handles' later steps move the devices onto it.
+    /// The host it may reach (design/host-handles.md). The devices find it
+    /// through their thread's plan (`policy.Plan.host`) for now.
     host: *const Host,
     mach: *Mach,
     /// Guards the settings below, which a process reads from its own
@@ -1092,6 +1105,23 @@ pub fn fgetattr(fd: u31, a: *Attr, dir: []u8) Error!usize {
     return try check(c.h9_fgetattr(fd, Attr.basic, a, dir.ptr, clampLen(dir.len)));
 }
 
+/// Sets what `mask` names from `a` on `path` (following a link in its
+/// last name): the device's setattr, a Tsetattr on a .L mount, and by
+/// default a wstat, in whole seconds. `a.mode` is Plan 9's, with DMDIR
+/// and the rest as a stat gave them; a time's nanoseconds `now_ns` mean
+/// the time now.
+pub fn setattr(path: [*:0]const u8, mask: u64, a: *const Attr) Error!void {
+    _ = try check(c.h9_setattr(path, 0, mask, a));
+}
+
+/// fd's, as setattr.
+pub fn fsetattr(fd: u31, mask: u64, a: *const Attr) Error!void {
+    _ = try check(c.h9_fsetattr(fd, mask, a));
+}
+
+/// In a setattr's atimens or mtimens: the time now (devx.h's Anow).
+pub const now_ns: i64 = (1 << 30) - 1;
+
 /// Makes `path` a FIFO with permissions `perm`: a node in memory in an
 /// overlay, or a host FIFO in a devfs tree, where the new name is checked
 /// like a create (design/epoch-0/linux-fifo.md). For the Linux ABI's
@@ -1406,6 +1436,12 @@ pub fn wstat(name: [*:0]const u8, buf: []u8) Error!usize {
     return checkn(c.h9_wstat(name, buf.ptr, buf.len));
 }
 
+/// Makes what was written to fd's file durable, only its data if
+/// datasync: the device's fsync, by default the null wstat.
+pub fn fsync(fd: u31, datasync: bool) Error!void {
+    _ = try check(c.h9_fsync(fd, @intFromBool(datasync)));
+}
+
 pub fn fwstat(fd: u31, buf: []u8) Error!usize {
     return checkn(c.h9_fwstat(fd, buf.ptr, buf.len));
 }
@@ -1529,6 +1565,7 @@ comptime {
     // src/kern/dev/hstream.zig's leaves.
     _ = @import("hstream.zig");
     if (available and nskernel) {
+        if (host_dirs.supported) @export(&h9_host_dir, .{ .name = "h9_host_dir" });
         @export(&h9_plan_get, .{ .name = "h9_plan_get" });
         @export(&h9_plan_set, .{ .name = "h9_plan_set" });
         @export(&h9_overlay_pool, .{ .name = "h9_overlay_pool" });
@@ -1545,6 +1582,7 @@ comptime {
         @export(&h9_cons_raw, .{ .name = "h9_cons_raw" });
         @export(&h9_cons_echo, .{ .name = "h9_cons_echo" });
         @export(&h9_cons_poll, .{ .name = "h9_cons_poll" });
+        if (host_dirs.supported) @export(&h9_host_dir, .{ .name = "h9_host_dir" });
         @export(&h9_policy_active, .{ .name = "h9_policy_active" });
         @export(&h9_policy_check, .{ .name = "h9_policy_check" });
         @export(&h9_plan_get, .{ .name = "h9_plan_get" });
@@ -1590,13 +1628,43 @@ fn clockNow(clock: std.Io.Clock) i64 {
 var mono_offset: web.Atomic(i64) = .init(0);
 var mono_set: std.atomic.Value(bool) = .init(false);
 
-/// Wall time in nanoseconds since the epoch.
+/// The calling thread's machine's clock (design/host-handles.md): its
+/// host's, if its plan has a host with one. Kernel threads without a
+/// machine read the OS's.
+fn threadClock() ?@import("host/host.zig").Clock {
+    const p = fs_plan orelse return null;
+    const h = p.host orelse return null;
+    return h.clock;
+}
+
+/// Wall time in nanoseconds since the epoch, by the calling thread's
+/// machine's clock.
 pub fn wallNs() i64 {
+    if (threadClock()) |cl| return cl.wall();
+    return osWallNs();
+}
+
+/// Monotonic time in nanoseconds, starting near the wall time, by the
+/// calling thread's machine's clock.
+pub fn monoNs() i64 {
+    if (threadClock()) |cl| return cl.mono();
+    return osMonoNs();
+}
+
+/// Fills `buf` with entropy from the calling thread's machine's host
+/// (design/host-handles.md), or from `io` for a thread without one.
+pub fn random(io: std.Io, buf: []u8) void {
+    if (fs_plan) |p| if (p.host) |h| if (h.random) |r| return r.fill(buf);
+    io.random(buf);
+}
+
+/// The OS's wall time: the clock a plan's host gives (src/host/planned.zig).
+pub fn osWallNs() i64 {
     return clockNow(.real);
 }
 
-/// Monotonic time in nanoseconds, starting near the wall time.
-pub fn monoNs() i64 {
+/// The OS's monotonic time, starting near the wall time.
+pub fn osMonoNs() i64 {
     if (!mono_set.load(.acquire)) {
         const off = clockNow(.real) - clockNow(.awake);
         // The first reader to set it wins; the others use its offset.
@@ -1737,6 +1805,19 @@ fn h9_policy_active() callconv(.c) c_int {
     return @intFromBool(fs_plan != null);
 }
 
+/// src/host/dirs.c's: the calling thread's machine's directory handle that
+/// holds host path `path`, with the path relative to it in `rel`
+/// (design/host-handles.md). -2 with no host, which devfs opens by path
+/// as before; -3 if no handle holds it; -4 if `rel` is too short.
+fn h9_host_dir(path: [*:0]const u8, rel: [*]u8, nrel: c_int, flags: *c_int) callconv(.c) i64 {
+    const p = fs_plan orelse return host_dirs.none;
+    const h = p.host orelse return host_dirs.none;
+    var contained = false;
+    const r = host_dirs.hostDir(h, std.mem.span(path), rel[0..@intCast(@max(nrel, 0))], &contained);
+    flags.* = @intFromBool(contained);
+    return r;
+}
+
 fn h9_policy_check(path: [*]const u8, len: c_long, op: c_int) callconv(.c) c_int {
     const p = fs_plan orelse return 0;
     const o = std.enums.fromInt(policy.Op, op) orelse return @backingInt(policy.Verdict.hidden);
@@ -1779,12 +1860,30 @@ fn h9_net_check(op: c_int, proto: c_int, addr: [*]const u8, port: c_int) callcon
     // layer's sendto redirect it right after this, through
     // h9_dns_target, which refuses it if there's no resolver.
     if (p.resolves and o == .connect and pt == 53 and netProto(proto) != null and p.net != .disable) return 0;
-    if (p.netCheck(o, netProto(proto), addr[0..16], pt)) return 0;
-    // A UDP connect to an address recorded for an allowed name is
-    // getaddrinfo's route probe (design/linux-dns.md, Updates): allowed,
-    // but h9_net_redirect marks the conversation probe-only and
-    // h9_net_send refuses its sends.
-    if (o == .connect and p.netProbe(netProto(proto), addr[0..16])) return 1;
+    // The machine's dialer and listener decide (design/host-handles.md);
+    // one that's absent refuses everything. A plan without a host is
+    // asked itself.
+    const a = addr[0..16];
+    if (p.host) |h| {
+        switch (o) {
+            .connect => {
+                const d = h.dial orelse return -1;
+                if (d.allows(netProto(proto), a, pt)) return 0;
+                // A UDP connect to an address recorded for an allowed name is
+                // getaddrinfo's route probe (design/linux-dns.md, Updates): allowed,
+                // but h9_net_redirect marks the conversation probe-only and
+                // h9_net_send refuses its sends.
+                if (d.probe(netProto(proto), a)) return 1;
+            },
+            .announce => {
+                const l = h.listen orelse return -1;
+                if (l.allows(netProto(proto), a, pt)) return 0;
+            },
+        }
+        return -1;
+    }
+    if (p.netCheck(o, netProto(proto), a, pt)) return 0;
+    if (o == .connect and p.netProbe(netProto(proto), a)) return 1;
     return -1;
 }
 
@@ -1849,13 +1948,22 @@ pub fn dnsPeer(kind: resolver.Transport, lport: u16, addr: *[16]u8, port: *u16) 
 fn h9_net_lookup(proto: c_int, name: [*:0]const u8, port: c_int) callconv(.c) c_int {
     const p = fs_plan orelse return 0;
     const pt = netPort(port) orelse return -1;
+    if (p.host) |h| {
+        const d = h.dial orelse return -1;
+        return if (d.lookup(netProto(proto), std.mem.span(name), pt)) 0 else -1;
+    }
     return if (p.netLookup(netProto(proto), std.mem.span(name), pt)) 0 else -1;
 }
 
 fn h9_net_resolved(proto: c_int, name: [*:0]const u8, port: c_int, addrs: [*]const [16]u8, n: c_int) callconv(.c) void {
     const p = fs_plan orelse return;
     const pt = netPort(port) orelse return;
-    p.netResolved(netProto(proto), std.mem.span(name), pt, addrs[0..@intCast(@max(n, 0))]);
+    const got = addrs[0..@intCast(@max(n, 0))];
+    if (p.host) |h| {
+        if (h.dial) |d| d.resolved(netProto(proto), std.mem.span(name), pt, got);
+        return;
+    }
+    p.netResolved(netProto(proto), std.mem.span(name), pt, got);
 }
 
 /// Returns the bytes read, 0 at EOF, -1 on error, or -2 when the caller

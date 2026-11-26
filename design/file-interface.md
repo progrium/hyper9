@@ -90,8 +90,8 @@ Policy checks move with the operations: each new operation is checked where `ope
 
 Part 1:
 
-- [ ] `test "epoll on a mounted /net conversation without read-ahead [file-interface]"` passes, and `src/kern/linuxnet.c`'s read-ahead processes are deleted.
-- [ ] `test "poll on a pipe, a pty, and an eventfd through ready [file-interface]"` passes.
+- [x] `test "epoll on a mounted /net conversation without read-ahead [file-interface]"` passes, and `src/kern/linuxnet.c`'s read-ahead processes are deleted.
+- [x] `test "poll on a pipe, a pty, and an eventfd through ready [file-interface]"` passes.
 
 Part 2:
 
@@ -102,14 +102,14 @@ Part 2:
 
 Part 3:
 
-- [ ] `test "a blocked fcntl lock wakes without polling [file-interface]"` passes, and the 2 ms poll is deleted.
-- [ ] `test "fsync reaches a .L server as Tfsync [file-interface]"` passes.
+- [x] `test "a blocked fcntl lock wakes without polling [file-interface]"` passes, and the 2 ms poll is deleted.
+- [x] `test "fsync reaches a .L server as Tfsync [file-interface]"` passes.
 
 All parts:
 
 - [ ] The Linux cases, PostgreSQL's included, pass on every engine with none newly skipped.
-- [ ] [kernel-port](kernel-port.md)'s conformance transcripts are unchanged.
-- [ ] [spec/kernel.md](../spec/kernel.md), [spec/abi-linux.md](../spec/abi-linux.md), and [spec/ninep.md](../spec/ninep.md) describe the interface and its views.
+- [x] [kernel-port](kernel-port.md)'s conformance transcripts are unchanged.
+- [x] [spec/kernel.md](../spec/kernel.md), [spec/abi-linux.md](../spec/abi-linux.md), and [spec/ninep.md](../spec/ninep.md) describe the interface and its views.
 
 ## Implementation
 
@@ -136,3 +136,22 @@ All parts:
 - **`setattr` has no device of its own yet** but devmnt's `Tsetattr`: the host tree and the overlay take the default `wstat`. The Linux ABI doesn't call it yet; `chmod`, `truncate`, and `utimensat` still `wstat`.
 - **stat's owner is unchanged**: the Linux ABI takes the link count, ctime, and nanoseconds from `getattr`, and still reports the caller as every file's owner.
 - The new cases are tagged `[file-interface]`, and pending until the proposal is accepted; with `H9_TEST_PENDING=1` they pass on sud and hcpu. The "9front ls" case's expected output is what dev's h9 printed.
+
+**2026-11-26, Part 1 on the file-interface-2 branch.** `ready` and `watch` are built (`src/kern/ready.zig`), as [spec/kernel.md](../spec/kernel.md) describes, on pipes, ptys, the console, `#ε`, devip, and devmnt, and `poll`, `select`, and `epoll` use them; the read-ahead (`src/kern/rconv.zig`) and qio's `h9_qwake` hook are deleted. Some things it found:
+
+- **How a server says so** (the second open issue): by version negotiation, which version(5) allows. devmnt offers `9P2000.ready` in a mount's own `Tversion`, and kserve answers it; a server that answers `9P2000` gets no `Tready`. `Tready` (type 160) is `tag[2] fid[4] events[4]`, with bit `0x40000000` asking for an answer at once, and `Rready` (161) is `tag[2] events[4]`, as [spec/ninep.md](../spec/ninep.md) gives. A waiting `Tready` is an asynchronous devmnt request, whose reply a reader kproc per mount reads when no process is waiting for one.
+- **A 9front server's `/net` is always ready**, so a non-blocking read of a conversation mounted from one blocks, where the read-ahead answered `EAGAIN`. So does one mounted through a `#ℓ` conversation, which answers devmnt `9P2000` itself.
+- **A remote `SO_ERROR` is a guess**: `ECONNREFUSED` when the server says `Err`, since the conversation's error isn't carried.
+- `MSG_PEEK` and `FIONREAD` on a remote conversation read into a buffer per conversation that later reads take first, the one place something is still read ahead.
+
+**2026-11-26, Part 3 on the file-interface-2 branch.** `fsync(chan, datasync)` is built, with the null wstat as its default, and devmnt sends `Tfsync`, with `datasync`, to a .L mount; the Linux ABI's `fsync` and `fdatasync` call it. A blocked `F_SETLKW` or `flock` waits on Part 1's wakers, which each change to the lock table fires, and the 2 ms poll is deleted. Some things it found:
+
+- **`lock` and `unlock` aren't device operations yet.** The Linux ABI's one table (`src/abi/linux/locks.zig`) still serves every device, so a lock is seen by the programs of every machine in the h9 process and by none outside it, as before; a host tree's `fcntl` locks and a .L server's `Tlock` would be the devices' own, and a lock wait would hang on the device's waker rather than the table's.
+- The lock case compares a lock's wake with a pipe reader's in the same run, since a loaded host slows both: a 2 ms poll added most of a millisecond or more to the median.
+
+**2026-11-26, Part 4 and the spec on the file-interface-2 branch.** Part 2's devmnt already sends the wide form to a translating `#ℓ`, so what was left of a Linux process on a .L root translating twice was in the calls that still went through a `Dir`:
+
+- **The Linux ABI calls `setattr`**: `chmod`, `truncate`, `utimensat`, their fd forms, and an `O_TRUNC` open's truncate are one `Tsetattr` on a .L mount, which keeps a time's nanoseconds; elsewhere they're the default wstat, as before.
+- **A Linux `stat` is one `Tgetattr`**: an optional `attrstat` builds the `Dir` from the `Attr` (devmnt's, on a wide mount), where it was a `Tstat`, which the translator made a `Tgetattr` of, and a `Tgetattr`.
+- **Edge-triggered epoll also reports an event that didn't hold when it last looked**, besides a wake since its last report, since a remote conversation's server changes its readiness with no wake in the client while nothing watches it; the mounted /net case failed now and then under load without it.
+- Directory reads on a .L mount are still `Treaddir` and a `Tgetattr` per entry packed into `Dir`s, which the Linux ABI unpacks; a wide `readdir` would be the next step. Not done here: a `lock` operation for the host tree and devdotl, and runs on KVM, HVF, and WHP, which this host can't do.
