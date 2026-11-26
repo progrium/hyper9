@@ -784,9 +784,11 @@ ntwalk(HANDLE top, const char *rel, ACCESS_MASK access, ULONG share, ULONG disp,
 			}
 			if(trunc){
 				FILE_END_OF_FILE_INFO eof;
+				LARGE_INTEGER size;
 
+				/* A file just made, or already empty, has nothing to cut. */
 				eof.EndOfFile.QuadPart = 0;
-				if(!SetFileInformationByHandle(h, FileEndOfFileInfo, &eof, sizeof eof)){
+				if(GetFileSizeEx(h, &size) && size.QuadPart != 0 && !SetFileInformationByHandle(h, FileEndOfFileInfo, &eof, sizeof eof)){
 					DWORD err;
 
 					err = GetLastError();
