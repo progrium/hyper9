@@ -1,6 +1,7 @@
-/* Linux symlinks (design/epoch-0/linux-symlinks.md): each case named on the
- * command line prints "ok NAME" or "FAIL NAME: why". The links are made
- * in $DIR, or /tmp. */
+/* Linux symlinks (design/epoch-0/linux-symlinks.md), and hard links and
+ * renames (design/file-interface.md): each case named on the command
+ * line prints "ok NAME" or "FAIL NAME: why". The links are made in $DIR,
+ * or /tmp. "all" runs the symlink cases. */
 #define _GNU_SOURCE
 #include <dirent.h>
 #include <errno.h>
@@ -121,6 +122,98 @@ static void deleted(void) {
 	printf("ok deleted\n");
 }
 
+/* Writes s to p, replacing it. */
+static int put(const char *p, const char *s) {
+	int fd = open(p, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	int ok;
+	if (fd < 0)
+		return -1;
+	ok = write(fd, s, strlen(s)) == (ssize_t)strlen(s);
+	close(fd);
+	return ok ? 0 : -1;
+}
+
+/* Whether p holds exactly s. */
+static int holds(const char *p, const char *s) {
+	char buf[64];
+	int fd = open(p, O_RDONLY);
+	ssize_t n;
+	if (fd < 0)
+		return 0;
+	n = read(fd, buf, sizeof buf);
+	close(fd);
+	return n == (ssize_t)strlen(s) && memcmp(buf, s, n) == 0;
+}
+
+/* link makes a second name for the file, not a copy: one inode with a
+ * link count of two, and a write through either name shows through the
+ * other (design/file-interface.md). */
+static void hardlink(void) {
+	const char *a = fresh(0, "hl.a"), *b = fresh(1, "hl.b");
+	struct stat sa, sb;
+	int fd;
+
+	CHECK("hardlink", put(a, "one") == 0);
+	CHECK("hardlink", link(a, b) == 0);
+	CHECK("hardlink", stat(a, &sa) == 0 && stat(b, &sb) == 0);
+	CHECK("hardlink", sa.st_ino == sb.st_ino && sa.st_nlink == 2 && sb.st_nlink == 2);
+	fd = open(b, O_WRONLY | O_APPEND);
+	CHECK("hardlink", fd >= 0 && write(fd, "two", 3) == 3);
+	close(fd);
+	CHECK("hardlink", holds(a, "onetwo"));
+	errno = 0;
+	CHECK("hardlink", link(a, b) < 0 && errno == EEXIST);
+	CHECK("hardlink", unlink(a) == 0);
+	CHECK("hardlink", stat(b, &sb) == 0 && sb.st_nlink == 1 && holds(b, "onetwo"));
+	unlink(b);
+	printf("ok hardlink\n");
+}
+
+/* rename across directories moves the file itself and replaces what the
+ * new name was in one step: the same inode at the new name, and an fd
+ * open on the replaced file still reads it. A directory moves whole
+ * (design/file-interface.md). */
+static void renamedir(void) {
+	char da[256], db[256], a[300], b[300], y[300], d[300], dy[320];
+	struct stat sa, st;
+	char buf[8];
+	int fd;
+
+	snprintf(da, sizeof da, "%s/rn.a", dir());
+	snprintf(db, sizeof db, "%s/rn.b", dir());
+	snprintf(a, sizeof a, "%s/x", da);
+	snprintf(b, sizeof b, "%s/x", db);
+	snprintf(y, sizeof y, "%s/y", da);
+	snprintf(d, sizeof d, "%s/d", db);
+	snprintf(dy, sizeof dy, "%s/y", d);
+	unlink(a);
+	unlink(b);
+	unlink(y);
+	unlink(dy);
+	rmdir(d);
+	rmdir(da);
+	rmdir(db);
+	CHECK("renamedir", mkdir(da, 0755) == 0 && mkdir(db, 0755) == 0);
+	CHECK("renamedir", put(a, "new") == 0 && put(b, "old") == 0 && put(y, "y") == 0);
+	CHECK("renamedir", stat(a, &sa) == 0);
+	fd = open(b, O_RDONLY);
+	CHECK("renamedir", fd >= 0);
+	CHECK("renamedir", rename(a, b) == 0);
+	errno = 0;
+	CHECK("renamedir", stat(a, &st) < 0 && errno == ENOENT);
+	CHECK("renamedir", stat(b, &st) == 0 && st.st_ino == sa.st_ino && holds(b, "new"));
+	CHECK("renamedir", pread(fd, buf, sizeof buf, 0) == 3 && memcmp(buf, "old", 3) == 0);
+	close(fd);
+	CHECK("renamedir", rename(da, d) == 0 && holds(dy, "y"));
+	errno = 0;
+	CHECK("renamedir", stat(da, &st) < 0 && errno == ENOENT);
+	unlink(dy);
+	unlink(b);
+	rmdir(d);
+	rmdir(db);
+	printf("ok renamedir\n");
+}
+
 int main(int argc, char **argv) {
 	setvbuf(stdout, 0, _IONBF, 0);
 	for (int i = 1; i < argc; i++) {
@@ -129,6 +222,8 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "nofollow")) nofollow();
 		if (all || !strcmp(n, "loop")) loop();
 		if (all || !strcmp(n, "deleted")) deleted();
+		if (!strcmp(n, "hardlink")) hardlink();
+		if (!strcmp(n, "renamedir")) renamedir();
 	}
 	return failed;
 }
