@@ -45,13 +45,11 @@ Dev *devtab[] = {
 };
 
 /* Their optional operations (design/file-interface.md, src/kern/devx.h). */
-extern Devx overlaydevx;
 #ifdef H9_NSKERNEL_HOSTFS
 extern Devx fsdevx;
 #endif
 
 Devx *devxtab[] = {
-	&overlaydevx,
 #ifdef H9_NSKERNEL_HOSTFS
 	&fsdevx,
 #endif
@@ -173,6 +171,7 @@ void h9_qwake(Queue *q) { USED(q); }
 void h9_fs_anchor(Chan *c) { USED(c); }
 
 void h9_fs_mkfifo(Chan *c, char *name, ulong perm) { USED(c, name, perm); error(Eperm); }
+int h9_fs_mkfifoz(Chan *c, char *name, ulong perm) { USED(c, name, perm); kstrcpy(up->errstr, Eperm, ERRMAX); return -1; }
 int h9_fs_isfifo(Chan *c) { USED(c); return 0; }
 
 int h9_fs_chanisfifo(Chan *c) { USED(c); return 0; }

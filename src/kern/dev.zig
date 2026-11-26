@@ -577,6 +577,7 @@ const natives = .{
     @import("devmnt.zig").Device,
     @import("dev/pipe.zig").Device,
     @import("dev/root.zig").Device,
+    @import("dev/overlay.zig").Device,
 };
 
 /// d's functions, if it's native.

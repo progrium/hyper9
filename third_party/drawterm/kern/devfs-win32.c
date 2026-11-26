@@ -1290,6 +1290,17 @@ h9_fs_mkfifo(Chan *c, char *name, ulong perm)
 	error(Eperm);
 }
 
+/* h9: h9_fs_mkfifo for the overlay's Zig: 0, or -1 with the error set */
+int
+h9_fs_mkfifoz(Chan *c, char *name, ulong perm)
+{
+	USED(c);
+	USED(name);
+	USED(perm);
+	kstrcpy(up->errstr, Eperm, ERRMAX);
+	return -1;
+}
+
 int
 h9_fs_isfifo(Chan *c)
 {

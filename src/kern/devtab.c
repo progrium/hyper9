@@ -165,10 +165,8 @@ Dev *devtab[] = {
  * (design/file-interface.md, src/kern/devx.h).
  */
 extern Devx fsdevx;
-extern Devx overlaydevx;
 
 Devx *devxtab[] = {
 	&fsdevx,
-	&overlaydevx,
 	0
 };

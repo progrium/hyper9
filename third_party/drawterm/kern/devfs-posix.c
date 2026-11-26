@@ -1468,6 +1468,17 @@ h9_fs_mkfifo(Chan *c, char *name, ulong perm)
 #endif
 }
 
+/* h9: h9_fs_mkfifo for the overlay's Zig: 0, or -1 with the error set */
+int
+h9_fs_mkfifoz(Chan *c, char *name, ulong perm)
+{
+	if(waserror())
+		return -1;
+	h9_fs_mkfifo(c, name, perm);
+	poperror();
+	return 0;
+}
+
 /* h9: whether the devfs chan c is a host FIFO's */
 int
 h9_fs_isfifo(Chan *c)
