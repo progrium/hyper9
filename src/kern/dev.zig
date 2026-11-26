@@ -578,16 +578,18 @@ const natives = .{
     @import("dev/pipe.zig").Device,
     @import("dev/root.zig").Device,
     @import("dev/pty.zig").Device,
-} ++ if (port.options.nskernel) .{
+} ++ (if (port.options.nskernel) .{
     @import("dev/ns.zig").Device,
 } else .{
+    // h9's own, which the namespace kernel doesn't build.
+    @import("dev/proc.zig").Device,
     @import("dev/eventfd.zig").Device,
-} ++ if (port.options.gfx) .{
+}) ++ (if (port.options.gfx) .{
     @import("dev/gfx.zig").Draw,
     @import("dev/gfx.zig").Cons,
     @import("dev/gfx.zig").Kbd,
     @import("dev/gfx.zig").Mouse,
-} else .{};
+} else .{});
 
 /// d's functions, if it's native.
 fn nativeOps(d: *Dev) ?*const Ops {

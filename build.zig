@@ -12,10 +12,10 @@ const drawterm = "third_party/drawterm";
 // chan.c, dev.c, devmnt.c, devpipe.c, devroot.c, pgrp.c, qio.c, qlock.c,
 // rwlock.c, sleep.c, and sysfile.c. Plus the OS files below.
 const kern_sources = [_][]const u8{
-    "alloc.c",    "data.c",     "devaudio.c", "devaudio-none.c",
-    "devcons.c",  "devdraw.c",  "devip.c",    "devkbd.c",
-    "devmouse.c", "devssl.c",   "devtls.c",   "error.c",
-    "parse.c",    "stub.c",     "term.c",     "waserror.c",
+    "alloc.c",    "data.c",    "devaudio.c", "devaudio-none.c",
+    "devcons.c",  "devdraw.c", "devip.c",    "devkbd.c",
+    "devmouse.c", "devssl.c",  "devtls.c",   "error.c",
+    "parse.c",    "stub.c",    "term.c",     "waserror.c",
 };
 // OS=posix (Make.unix), and OS=win32 with FS=fs-win32 (Make.win64).
 const kern_posix = [_][]const u8{ "devfs-posix.c", "devip-posix.c", "devlfd-posix.c", "posix.c" };
@@ -101,6 +101,9 @@ const kern_flags_common = [_][]const u8{
     "-Wno-missing-braces",
     "-D_THREAD_SAFE",
     "-fno-sanitize=undefined",
+    // drawterm's names (error, print, lock, panic) stay inside h9, so in
+    // libh9 (src/capi.zig), a shared library, they don't bind to libc's.
+    "-fvisibility=hidden",
 };
 // PTHREAD, as Make.linux, makes libc/lock.c's Lock a pthread mutex. Without
 // it unlock is a plain store with no release ordering, so on arm64 another
@@ -611,7 +614,7 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.O
     });
     kern.root_module.addCSourceFiles(.{
         .root = b.path("src/kern"),
-        .files = &.{ "glue.c", "proc.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "devproc.c", "devoverlay.c", "devsrv.c", "devhtools.c", "fscheck.c", "consx.c", "tsleep.c", "devshim.c", "werrstr.c", "sema.c", "rootdial.c", "devhstream.c", "devdotl.c", "devhidx.c", "kserve.c", "ns.c" },
+        .files = &.{ "procshim.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "devoverlay.c", "devsrv.c", "devhtools.c", "fscheck.c", "consx.c", "tsleep.c", "devshim.c", "werrstr.c", "sema.c", "rootdial.c", "devhstream.c", "devdotl.c", "devhidx.c", "kserve.c" },
         .flags = flags,
     });
     // The Linux ABI (design/epoch-0/linux-personality.md) and its host
@@ -772,8 +775,9 @@ const nskern_sources = [_][]const u8{
     "alloc.c", "data.c", "error.c", "parse.c", "stub.c", "waserror.c",
 };
 const nskern_h9 = [_][]const u8{
-    "glue.c",    "proc.c",   "ns.c",     "nstab.c",   "devoverlay.c", "devsrv.c",   "devhstream.c",
-    "devdotl.c", "kserve.c", "tsleep.c", "devshim.c", "werrstr.c",    "rootdial.c",
+    "procshim.c",   "nstab.c",   "devoverlay.c", "devsrv.c",
+    "devhstream.c", "devdotl.c", "kserve.c",     "tsleep.c",
+    "devshim.c",    "werrstr.c", "rootdial.c",
 };
 // libc's files the kernel subset uses, from kern_libs' list.
 const nskern_libc_skip = [_][]const u8{ "pushssl.c", "pushtls.c", "crypt.c", "dial.c" };
@@ -1962,6 +1966,36 @@ pub fn build(b: *std.Build) void {
     // running both doesn't run them twice; `zig build test integration`
     // runs everything.
 
+    // libh9 (src/capi.zig): machines behind a C ABI, as a shared library,
+    // with its header, in zig-out/libh9 (docs/embedding.md, "From C and
+    // other languages").
+    const libh9 = b.addLibrary(.{
+        .name = "h9",
+        .linkage = .dynamic,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/capi.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            // Debug info is most of a release build's size (30 MB of 36).
+            .strip = if (optimize == .debug) null else true,
+            .imports = &.{.{ .name = "h9", .module = mod.mod }},
+        }),
+    });
+    if (os == .macos) {
+        addSdkPaths(b, libh9.root_module);
+        libh9.root_module.linkFramework("Hypervisor", .{});
+    }
+    if (target.result.ofmt == .elf) libh9.setVersionScript(b.path("src/capi/libh9.map"));
+    const libh9_dir: std.Build.InstallDir = .{ .custom = "libh9" };
+    const libh9_step = b.step("libh9", "Build libh9, h9 behind a C ABI (src/capi/h9.h), into zig-out/libh9");
+    libh9_step.dependOn(&b.addInstallArtifact(libh9, .{
+        .dest_dir = .{ .override = libh9_dir },
+        .implib_dir = if (os == .windows) .{ .override = libh9_dir } else .disabled,
+        .pdb_dir = .disabled,
+    }).step);
+    libh9_step.dependOn(&b.addInstallFileWithDir(b.path("src/capi/h9.h"), libh9_dir, "h9.h").step);
+
     // docs/embedding/embed.zig, docs/embedding.md's example of embedding h9.
     const embed_example = b.addExecutable(.{
         .name = "embed",
@@ -2001,6 +2035,27 @@ pub fn build(b: *std.Build) void {
         if (emu != .none) run_embed.addCheck(.{ .expect_stdout_match = "machine 1 (hcpu): exited \"\"\n  hello\n" });
         run_embed.addCheck(.{ .expect_term = .{ .exited = 0 } });
         test_step.dependOn(&run_embed.step);
+    }
+
+    // docs/embedding/hello.c, libh9 from C. zig build test runs it on the
+    // hello fixture where the embed example runs, with the emulator, so
+    // it needs no entitlement.
+    const libh9_example = b.addExecutable(.{
+        .name = "libh9-hello",
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
+    });
+    libh9_example.root_module.addCSourceFile(.{ .file = b.path("docs/embedding/hello.c") });
+    libh9_example.root_module.addIncludePath(b.path("src/capi"));
+    libh9_example.root_module.linkLibrary(libh9);
+    b.step("libh9-example", "Build docs/embedding/hello.c, libh9 from C, as zig-out/bin/libh9-hello").dependOn(&b.addInstallArtifact(libh9_example, .{}).step);
+    if (emu != .none and runs_here) {
+        const run_c = b.addRunArtifact(libh9_example);
+        run_c.addFileArg(host_hello);
+        run_c.addArgs(&.{ "--engine", "hcpu" });
+        run_c.addCheck(.{ .expect_stdout_match = "engine hcpu, arch " });
+        run_c.addCheck(.{ .expect_stdout_match = "hello\nexited \"\"\n" });
+        run_c.addCheck(.{ .expect_term = .{ .exited = 0 } });
+        test_step.dependOn(&run_c.step);
     }
 
     // ha64's [hcpu] cases, through the engine interface on

@@ -106,6 +106,8 @@ zig build integration -Dweb   # the integration cases through h9-node on h86 (No
 zig build web-test # the demo page, the canvas cases (tests/web/gfx.mjs), and the namespace kernel's machine cases (tests/web/nskernel-browser.mjs), in Chromium with Playwright, and hcpu-web
 zig build nskernel # the namespace kernel into zig-out/nskernel (h9ns.wasm, h9ns.js, libh9ns.a, h9ns.h); -Dnskernel-hostfs keeps #U natively
 zig build nskernel-test  # its cases: tests/nskernel.zig on the native library, then tests/web/nskernel.mjs under Node 24 or later (skipped on an older Node)
+zig build libh9     # libh9, h9 behind a C ABI, into zig-out/libh9 (libh9.so, .dylib, or h9.dll, and h9.h)
+zig build libh9-example  # docs/embedding/hello.c on libh9, as zig-out/bin/libh9-hello; zig build test runs it
 zig build hcpu-web # the wasm emitter's suite (tests/jit/suite.mjs) in Chromium
 zig build x86-jit  # h86's [hcpu] cases (tests/x86.zig) on T0 and T1; zig build hcpu runs them too
 zig build x64-jit  # hx64's [hcpu] cases (tests/x64.zig) on T0 and T1; zig build hcpu runs them too
@@ -377,7 +379,7 @@ scripts/lima/vm test linux                  # engine and integration tests on th
 
 ## Releases
 
-Each GitHub release has two sets of binaries, built by
+Each GitHub release has these binaries, built by
 `scripts/release.sh [version]` into `dist/<version>/` from a clean checkout:
 
 | Asset | License | Contents |
@@ -386,6 +388,7 @@ Each GitHub release has two sets of binaries, built by
 | `h9-web-<version>.tar.gz` | MIT | the web host: `h9.wasm`, `h9-web.js`, `h9-node`, the demo page, and its root archive |
 | `h9ns-<version>.tar.gz` | MIT | the namespace kernel for the web: `h9ns.wasm`, `h9ns.js`, `h9ns-worker.js`, and the JS files they import |
 | `h9ns-<version>-<target>.tar.gz` | MIT | the namespace kernel as a static library, `libh9ns.a` and `h9ns.h`, for the targets above but Windows |
+| `libh9-<version>-<target>` | MIT | h9's C ABI as a shared library (`libh9.so`, `libh9.dylib`, or `h9.dll`) and `h9.h`, for Linux amd64 and arm64 (glibc), macOS arm64, and Windows amd64; go-h9 fetches these |
 | `SHA256SUMS` | | checksums |
 
 Releases used to include `h9-emu`, a GPLv2 build of h9 for hosts without
@@ -408,7 +411,7 @@ development builds report `git describe` (`-Dversion=V` overrides it).
 | `src/machine.zig` | one machine: builds its namespace, runs a process, and serves its syscalls |
 | `src/consin.zig` | a machine run's console input: the reader thread a guest's console read waits on, so notes can interrupt it |
 | `src/policy.zig` | the sandbox policy: profiles, the compiled plan, `--print`, and the access rules devfs checks |
-| `src/kern.zig`, `src/kern/` | the Zig/C seam into drawterm's kern; the parts of drawterm's kern ported to Zig ([kernel-port](design/kernel-port.md): `port.zig`, with queues and blocks in `qio.zig`, locks and sleep in `sync.zig`, the device helpers and switch in `dev.zig`, which calls C devices through `devshim.c`, the mount table in `pgrp.zig`, channels and `namec` in `chan.zig`, the file system calls in `sysfile.zig`, the 9P client in `devmnt.zig`, and pipes and the root device in `dev/`); boot and spawn (`glue.c`), process records and notes (`proc.c`), our device table, the machine console `#y`, devenv, and devproc ported from 9front, the copy-on-write overlay device `#O` (`devoverlay.c`), h9's guest commands `#H` (`devhtools.c`), and the devfs policy hooks (`fscheck.c`) |
+| `src/kern.zig`, `src/kern/` | the Zig/C seam into drawterm's kern; the parts of drawterm's kern ported to Zig ([kernel-port](design/kernel-port.md): `port.zig`, with queues and blocks in `qio.zig`, locks and sleep in `sync.zig`, the device helpers and switch in `dev.zig`, which calls C devices through `devshim.c`, the mount table in `pgrp.zig`, channels and `namec` in `chan.zig`, the file system calls in `sysfile.zig`, the 9P client in `devmnt.zig`, and pipes and the root device in `dev/`); boot and spawn (`glue.zig`), process records and notes (`proc.zig`), devproc ported from 9front (`dev/proc.zig`), our device table, the machine console `#y`, devenv, the copy-on-write overlay device `#O` (`devoverlay.c`), h9's guest commands `#H` (`devhtools.c`), and the devfs policy hooks (`fscheck.c`) |
 | `src/guest/` | h9's own guest commands (rc scripts), as the guest sees them under `#H`; embedded by the build through `tools/guesttree.zig`. |
 | `src/abi/plan9/syscall.zig`, `src/guestmem.zig` | the 9front syscall table, and checked access to guest memory |
 | `src/abi/plan9/loader.zig` | loads an a.out into an address space, builds the stack and Tos |
@@ -417,6 +420,7 @@ development builds report `git describe` (`-Dversion=V` overrides it).
 | `src/engine/hcpu/hcpu.zig`, `src/engine/hcpu/jit/`, `src/engine/hcpu/interp/` | h9's own CPUs for the emulator (hcpu): the JIT's IR and its reference evaluator, the runtime ABI, the emitters (arm64, wasm), the front ends (`a64/`), and the interpreters and software TLB the two tiers share. `src/engine/hcpu/jit/README.md` has the contracts |
 | `src/web.zig`, `src/web/` | the web host: coroutines on JSPI, its `std.Io` and console, the JS host (`h9-web.js`, `h9-node`, `worker.js`, `wasi-mem.js`, and `statictree.js` for static dotfs trees) and the demo page |
 | `src/nskernel.zig`, `src/nskernel/`, `src/kern/dev/ns.zig`, `src/kern/nstab.c` | the namespace kernel: its Zig root (ctl lines, dials, serving, the native API), `h9ns.h`, the `#N` device, and its device table and stubs; `src/web/h9ns.js` and `h9ns-worker.js` are its JS host |
+| `src/capi.zig`, `src/capi/` | libh9: machines behind a C ABI (`h9.h`), configured with the CLI's flags through `src/cli.zig`; `docs/embedding/hello.c` uses it |
 | `src/arch/` | per-architecture Ureg/ABI and the guest shims |
 | `third_party/drawterm` | vendored drawterm (git subtree; kern and libraries). Local changes: the sandbox hooks in `kern/devfs-posix.c` and `kern/devfs-win32.c` |
 | `tests/engines.zig` | engine conformance tests |

@@ -33,6 +33,14 @@
 //! the screen) export their C names only there: `options.nskernel` says
 //! the namespace kernel is being built.
 //!
+//! And h9's own C, as it's ported:
+//!
+//! - `glue.zig`: glue.c, booting the kernel, and the Zig side's small
+//!   calls into it.
+//! - `proc.zig`: proc.c, the process record, notes, rfork, and wait
+//!   records, with drawterm's procinit.c.
+//! - `dev/proc.zig`: devproc.c, #p.
+//!
 //! This file is the root the kernel builds compile (build.zig's addKern,
 //! and src/nskernel.zig), and holds what the ported files share: the C
 //! kernel's types (`c`, translated from port.h with the kernel's flags),
@@ -61,6 +69,14 @@ pub const linuxnet = @import("linuxnet.zig");
 pub const rconv = @import("rconv.zig");
 pub const deveventfd = @import("dev/eventfd.zig");
 pub const devgfx = @import("dev/gfx.zig");
+pub const glue = @import("glue.zig");
+pub const process = @import("proc.zig");
+pub const devproc = @import("dev/proc.zig");
+
+/// Whether this is the namespace kernel (src/nskernel.zig,
+/// design/epoch-0/namespace-kernel.md), which builds with H9_NSKERNEL and
+/// has none of h9's devices for running programs (#y, for one).
+pub const nskernel = @hasDecl(c, "H9_NSKERNEL");
 
 comptime {
     qio.exportC();
@@ -82,6 +98,9 @@ comptime {
     if (options.hostfs) fscheck.exportC();
     if (options.nskernel) devns.exportC();
     if (options.gfx) devgfx.exportC();
+    glue.exportC();
+    process.exportC();
+    if (!nskernel) devproc.exportC();
 }
 
 test {
@@ -105,6 +124,9 @@ test {
     _ = linuxnet;
     _ = rconv;
     _ = deveventfd;
+    _ = glue;
+    _ = process;
+    _ = devproc;
 }
 
 /// A kernel error. The Plan 9 error string is on the process, in
