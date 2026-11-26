@@ -7,7 +7,7 @@ Every proposal at the top of [design/](README.md), in the order they were writte
 | Proposal | Issue | Status | State | Title |
 | --- | --- | --- | --- | --- |
 | [host-sandbox](host-sandbox.md) |  | draft | needs host-handles | Host self-sandboxing |
-| [audio](audio.md) |  | draft |  | Audio (--audio) |
+| [audio](audio.md) | [#314](../../../issues/314) | proposed |  | Audio (--audio) |
 | [host-cmd](host-cmd.md) |  | draft | in progress on host-cmd | Rethinking host commands |
 | [child-machines](child-machines.md) | [#109](../../../issues/109) | proposed |  | Child machines |
 | [wine-draw](wine-draw.md) | [#158](../../../issues/158) | proposed | in progress on wine-draw | Wine windows through draw |
@@ -18,8 +18,8 @@ Every proposal at the top of [design/](README.md), in the order they were writte
 | [memory-model](memory-model.md) |  | draft | needs baseline-1 | One memory model under both ABIs |
 | [plan-format](plan-format.md) |  | draft | needs baseline-1, child-machines | The plan as a file, and the one way in |
 | [scheduler](scheduler.md) |  | draft | needs kernel-port | A scheduler, with processes on per-core executors |
-| [file-watch](file-watch.md) |  | draft |  | Watching files for changes, on the host and in the guest |
-| [virtual-loopback](virtual-loopback.md) |  | draft |  | A loopback network per machine |
+| [virtual-loopback](virtual-loopback.md) | [#315](../../../issues/315) | proposed |  | A loopback network per machine |
+| [file-watch](file-watch.md) | [#316](../../../issues/316) | proposed |  | Watching files for changes, on the host and in the guest |
 | [linux-dns](linux-dns.md) |  | draft |  | Name patterns for a Linux guest's DNS |
 
 ```mermaid
@@ -29,7 +29,7 @@ flowchart LR
   classDef implemented fill:#dfd,stroke:#393
   classDef closed fill:#eee,stroke:#999,color:#777
   p_host_sandbox["host-sandbox<br/>draft"]:::draft
-  p_audio["audio<br/>draft"]:::draft
+  p_audio["audio<br/>proposed"]:::draft
   p_host_cmd["host-cmd<br/>draft"]:::draft
   p_child_machines["child-machines<br/>proposed"]:::draft
   p_wine_draw["wine-draw<br/>proposed"]:::draft
@@ -40,8 +40,8 @@ flowchart LR
   p_memory_model["memory-model<br/>draft"]:::draft
   p_plan_format["plan-format<br/>draft"]:::draft
   p_scheduler["scheduler<br/>draft"]:::draft
-  p_file_watch["file-watch<br/>draft"]:::draft
-  p_virtual_loopback["virtual-loopback<br/>draft"]:::draft
+  p_virtual_loopback["virtual-loopback<br/>proposed"]:::draft
+  p_file_watch["file-watch<br/>proposed"]:::draft
   p_linux_dns["linux-dns<br/>draft"]:::draft
   p_host_handles --> p_host_sandbox
   p_kernel_port --> p_file_interface
