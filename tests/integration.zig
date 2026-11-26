@@ -2169,6 +2169,18 @@ fn engineList(e: Env) std.mem.TokenIterator(u8, .scalar) {
     return std.mem.tokenizeScalar(u8, e.engines, ',');
 }
 
+/// `e` with `engine` alone. `run` gives every engine the same arguments
+/// and compares their output, so a case runs each engine on its own,
+/// from a fresh start, when a run changes what the next one sees (a
+/// scratch tree or a server's files it writes to), or when its output
+/// differs between engines and runs (an engine's name, a time, or the
+/// order concurrent processes finish in).
+fn only(e: Env, engine: []const u8) Env {
+    var o = e;
+    o.engines = engine;
+    return o;
+}
+
 test "an interactive rc reads typed lines [baseline]" {
     const e = try env(@src());
     var it = engineList(e);
@@ -2507,25 +2519,29 @@ test "notepg reaches the note group and not a new one [baseline]" {
 }
 
 test "/proc/n has status, fd, ns and args [baseline]" {
-    const e = try env(@src());
-    // The times differ between runs, so only name, user and state; and
-    // with awk last, cat isn't exec'd in place of rc. rc forks awk after
-    // cat, so where processes run in parallel (KVM) cat can read rc's
-    // status while rc is still running or in another call (Close,
-    // Rfork) on the way to await: the block waits for Await first, and
-    // --timeout ends the run if rc never gets there.
-    const st = try run(e, &.{ "--timeout", "20s", "--rc", "p=$pid; { while(! ~ `{awk '{print $3}' /proc/$p/status} Await) sleep 0; cat /proc/$p/status } | awk '{print $1, ($2 == ENVIRON[\"user\"]), $3}'" });
-    defer st.deinit();
-    try std.testing.expectEqualStrings("rc 1 Await\n", st.out);
-    const fd = try run(e, &.{ "--rc", "cat /proc/$pid/fd" });
-    defer fd.deinit();
-    try std.testing.expect(std.mem.startsWith(u8, fd.out, "/mnt/term/cwd\n"));
-    const ns = try run(e, &.{ "--rc", "cat /proc/$pid/ns" });
-    defer ns.deinit();
-    try std.testing.expect(std.mem.indexOf(u8, ns.out, "bind ") != null);
-    const ls = try run(e, &.{ "--rc", "ls /proc | wc -l" });
-    defer ls.deinit();
-    try std.testing.expect(try std.fmt.parseInt(usize, std.mem.trim(u8, ls.out, " \n"), 10) >= 2);
+    const all = try env(@src());
+    var each = engineList(all);
+    while (each.next()) |engine| {
+        const e = only(all, engine);
+        // The times differ between runs, so only name, user and state; and
+        // with awk last, cat isn't exec'd in place of rc. rc forks awk after
+        // cat, so where processes run in parallel (KVM) cat can read rc's
+        // status while rc is still running or in another call (Close,
+        // Rfork) on the way to await: the block waits for Await first, and
+        // --timeout ends the run if rc never gets there.
+        const st = try run(e, &.{ "--timeout", "20s", "--rc", "p=$pid; { while(! ~ `{awk '{print $3}' /proc/$p/status} Await) sleep 0; cat /proc/$p/status } | awk '{print $1, ($2 == ENVIRON[\"user\"]), $3}'" });
+        defer st.deinit();
+        try std.testing.expectEqualStrings("rc 1 Await\n", st.out);
+        const fd = try run(e, &.{ "--rc", "cat /proc/$pid/fd" });
+        defer fd.deinit();
+        try std.testing.expect(std.mem.startsWith(u8, fd.out, "/mnt/term/cwd\n"));
+        const ns = try run(e, &.{ "--rc", "cat /proc/$pid/ns" });
+        defer ns.deinit();
+        try std.testing.expect(std.mem.indexOf(u8, ns.out, "bind ") != null);
+        const ls = try run(e, &.{ "--rc", "ls /proc | wc -l" });
+        defer ls.deinit();
+        try std.testing.expect(try std.fmt.parseInt(usize, std.mem.trim(u8, ls.out, " \n"), 10) >= 2);
+    }
 }
 
 test "seg attaches a shared segment and reads zero [segattach]" {
@@ -4410,15 +4426,19 @@ test "a write to a 9P root under the default profile doesn't reach the server [o
 }
 
 test "--check runs /bin/echo from a 9P root [ninep-roots]" {
-    const e = try env(@src());
-    var srv: RootServer = undefined;
-    try srv.start(e);
-    defer srv.stop();
-    const r = try run(e, &.{ "--url", srv.url(), "--check" });
-    defer r.deinit();
-    errdefer std.debug.print("stdout: {s}\n", .{r.out});
-    try std.testing.expectEqual(0, r.code);
-    try std.testing.expect(std.mem.indexOf(u8, r.out, "ok, /bin/echo runs") != null);
+    const all = try env(@src());
+    var each = engineList(all);
+    while (each.next()) |engine| {
+        const e = only(all, engine);
+        var srv: RootServer = undefined;
+        try srv.start(e);
+        defer srv.stop();
+        const r = try run(e, &.{ "--url", srv.url(), "--check" });
+        defer r.deinit();
+        errdefer std.debug.print("stdout: {s}\n", .{r.out});
+        try std.testing.expectEqual(0, r.code);
+        try std.testing.expect(std.mem.indexOf(u8, r.out, "ok, /bin/echo runs") != null);
+    }
 }
 
 // Metadata indexes (design/epoch-0/mount-index.md). The server is a second h9
@@ -6628,26 +6648,30 @@ test "a draw client's image shows up in /dev/screen [headless-screen]" {
 }
 
 test "a line written to /dev/mousein reaches /dev/mouse [headless-screen]" {
-    const e = try env(@src());
-    // 'A' is the pointer at x, y; 'm' moves it by x, y, as on 9front.
-    const r = try run(e, &.{ "--gfx=headless", "--rc",
-        \\</dev/mouse {
-        \\    echo A 100 200 1 0 >/dev/mousein
-        \\    read -c 49
-        \\    echo
-        \\    echo m 5 -10 0 0 >/dev/mousein
-        \\    read -c 49
-        \\    echo
-        \\}
-    });
-    defer r.deinit();
-    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
-    try std.testing.expectEqual(0, r.code);
-    var lines = std.mem.tokenizeScalar(u8, r.out, '\n');
-    for ([_][3][]const u8{ .{ "100", "200", "1" }, .{ "105", "190", "0" } }) |want| {
-        var f = std.mem.tokenizeScalar(u8, lines.next() orelse return error.Short, ' ');
-        try std.testing.expectEqualStrings("m", f.next().?);
-        for (want) |w| try std.testing.expectEqualStrings(w, f.next().?);
+    const all = try env(@src());
+    var each = engineList(all);
+    while (each.next()) |engine| {
+        const e = only(all, engine);
+        // 'A' is the pointer at x, y; 'm' moves it by x, y, as on 9front.
+        const r = try run(e, &.{ "--gfx=headless", "--rc",
+            \\</dev/mouse {
+            \\    echo A 100 200 1 0 >/dev/mousein
+            \\    read -c 49
+            \\    echo
+            \\    echo m 5 -10 0 0 >/dev/mousein
+            \\    read -c 49
+            \\    echo
+            \\}
+        });
+        defer r.deinit();
+        errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+        try std.testing.expectEqual(0, r.code);
+        var lines = std.mem.tokenizeScalar(u8, r.out, '\n');
+        for ([_][3][]const u8{ .{ "100", "200", "1" }, .{ "105", "190", "0" } }) |want| {
+            var f = std.mem.tokenizeScalar(u8, lines.next() orelse return error.Short, ' ');
+            try std.testing.expectEqualStrings("m", f.next().?);
+            for (want) |w| try std.testing.expectEqualStrings(w, f.next().?);
+        }
     }
 }
 
@@ -7676,22 +7700,27 @@ fn fifoCase(le: *const LinuxEnv, name: []const u8) !void {
 }
 
 test "mkfifo makes a FIFO that stat reports [linux-fifo]" {
-    var le: LinuxEnv = undefined;
-    try linuxEnv(@src(), &le);
-    try fifoCase(&le, "make");
-    if (builtin.os.tag == .windows) return;
-    // The host sees a host FIFO, which stays after the machine ends.
-    var s: Scratch = undefined;
-    try s.init();
-    defer s.deinit();
-    var sb: [std.Io.Dir.max_path_bytes + 64]u8 = undefined;
-    const script = try std.fmt.bufPrint(&sb, "mkfifo /mnt/term{s}/f && stat -c %F /mnt/term{s}/f && ls -l /mnt/term{s} | cut -c1", .{ s.path, s.path, s.path });
-    const r = try runLinux(&le, false, &.{ "--writable", s.path, "sh", "-c", script });
-    defer r.deinit();
-    errdefer std.debug.print("stderr: {s}\n", .{r.err});
-    try std.testing.expectEqualStrings("fifo\nt\np\n", r.out);
-    const st = try s.tmp.dir.statFile(std.testing.io, "f", .{});
-    try std.testing.expectEqual(std.Io.File.Kind.named_pipe, st.kind);
+    var all: LinuxEnv = undefined;
+    try linuxEnv(@src(), &all);
+    var each = std.mem.tokenizeScalar(u8, all.engines, ',');
+    while (each.next()) |engine| {
+        var le = all;
+        le.engines = engine;
+        try fifoCase(&le, "make");
+        if (builtin.os.tag == .windows) return;
+        // The host sees a host FIFO, which stays after the machine ends.
+        var s: Scratch = undefined;
+        try s.init();
+        defer s.deinit();
+        var sb: [std.Io.Dir.max_path_bytes + 64]u8 = undefined;
+        const script = try std.fmt.bufPrint(&sb, "mkfifo /mnt/term{s}/f && stat -c %F /mnt/term{s}/f && ls -l /mnt/term{s} | cut -c1", .{ s.path, s.path, s.path });
+        const r = try runLinux(&le, false, &.{ "--writable", s.path, "sh", "-c", script });
+        defer r.deinit();
+        errdefer std.debug.print("stderr: {s}\n", .{r.err});
+        try std.testing.expectEqualStrings("fifo\nt\np\n", r.out);
+        const st = try s.tmp.dir.statFile(std.testing.io, "f", .{});
+        try std.testing.expectEqual(std.Io.File.Kind.named_pipe, st.kind);
+    }
 }
 
 test "a writer and a reader meet through a FIFO [linux-fifo]" {
@@ -8653,14 +8682,19 @@ test "a Linux program in raw mode gets Enter as CR without ICRNL, polls with VMI
 }
 
 test "Go linux binary starts goroutines and sleeps [linux-threads]" {
-    var le: LinuxEnv = undefined;
-    try linuxEnv(@src(), &le);
-    try goLinux(&le);
-    const r = try runLinux(&le, false, &.{"/mnt/term/cwd/go/goroutines"});
-    defer r.deinit();
-    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
-    try std.testing.expect(std.mem.startsWith(u8, r.out, "ok goroutines "));
-    try std.testing.expectEqual(0, r.code);
+    var all: LinuxEnv = undefined;
+    try linuxEnv(@src(), &all);
+    var each = std.mem.tokenizeScalar(u8, all.engines, ',');
+    while (each.next()) |engine| {
+        var le = all;
+        le.engines = engine;
+        try goLinux(&le);
+        const r = try runLinux(&le, false, &.{"/mnt/term/cwd/go/goroutines"});
+        defer r.deinit();
+        errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+        try std.testing.expect(std.mem.startsWith(u8, r.out, "ok goroutines "));
+        try std.testing.expectEqual(0, r.code);
+    }
 }
 
 test "/proc lists a thread group once, with its threads under task, and statm reads, as htop needs [linux-threads]" {
@@ -8796,28 +8830,32 @@ test "a note interrupts a parked console read [browser-host]" {
 }
 
 test "errno survives a park [browser-host]" {
-    const e = try env(@src());
-    var s: Scratch = undefined;
-    try s.init();
-    defer s.deinit();
-    // Each rm fails in the host's rmdir with ENOTEMPTY, which devfs reads
-    // from errno, while other processes fail other host calls with ENOENT
-    // and park in between.
-    var cmd: std.ArrayList(u8) = .empty;
-    defer cmd.deinit(gpa);
-    for (0..8) |i| {
-        var buf: [16]u8 = undefined;
-        const d = try std.fmt.bufPrint(&buf, "d{d}", .{i});
-        try s.tmp.dir.createDirPath(std.testing.io, d);
-        const f = try std.fmt.bufPrint(&buf, "d{d}/f", .{i});
-        try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = f, .data = "" });
+    const all = try env(@src());
+    var each = engineList(all);
+    while (each.next()) |engine| {
+        const e = only(all, engine);
+        var s: Scratch = undefined;
+        try s.init();
+        defer s.deinit();
+        // Each rm fails in the host's rmdir with ENOTEMPTY, which devfs reads
+        // from errno, while other processes fail other host calls with ENOENT
+        // and park in between.
+        var cmd: std.ArrayList(u8) = .empty;
+        defer cmd.deinit(gpa);
+        for (0..8) |i| {
+            var buf: [16]u8 = undefined;
+            const d = try std.fmt.bufPrint(&buf, "d{d}", .{i});
+            try s.tmp.dir.createDirPath(std.testing.io, d);
+            const f = try std.fmt.bufPrint(&buf, "d{d}/f", .{i});
+            try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = f, .data = "" });
+        }
+        try cmd.appendSlice(gpa, "for(i in 0 1 2 3 4 5 6 7){ rm d$i >[2=1] & ls nosuch$i >[2]/dev/null & }; wait");
+        const r = try run(e, &.{ "--sandbox", s.path, "--timeout", "60s", "--rc", cmd.items });
+        defer r.deinit();
+        errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+        try std.testing.expectEqual(8, std.mem.count(u8, r.out, "not empty"));
+        try std.testing.expectEqual(8, std.mem.count(u8, r.out, "\n"));
     }
-    try cmd.appendSlice(gpa, "for(i in 0 1 2 3 4 5 6 7){ rm d$i >[2=1] & ls nosuch$i >[2]/dev/null & }; wait");
-    const r = try run(e, &.{ "--sandbox", s.path, "--timeout", "60s", "--rc", cmd.items });
-    defer r.deinit();
-    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
-    try std.testing.expectEqual(8, std.mem.count(u8, r.out, "not empty"));
-    try std.testing.expectEqual(8, std.mem.count(u8, r.out, "\n"));
 }
 
 test "exec into recycled pages doesn't run stale JIT code [browser-host]" {
@@ -9248,135 +9286,167 @@ fn expectFile(s: *Scratch, name: []const u8, want: []const u8) !void {
 }
 
 test "a new file lands in the up layer and nowhere else [upper-layers]" {
-    const e = try env(@src());
-    var s: Scratch = undefined;
-    try s.init();
-    defer s.deinit();
-    try layerTree(&s);
-    const r = try runLayer(e, &s, "echo n >/lib/new && cat /lib/new");
-    defer r.deinit();
-    errdefer std.debug.print("stderr: {s}\n", .{r.err});
-    try std.testing.expectEqualStrings("n\n", r.out);
-    try expectFile(&s, "up/lib/new", "n\n");
-    try std.testing.expect(!s.exists("a/lib/new"));
+    const all = try env(@src());
+    var each = engineList(all);
+    while (each.next()) |engine| {
+        const e = only(all, engine);
+        var s: Scratch = undefined;
+        try s.init();
+        defer s.deinit();
+        try layerTree(&s);
+        const r = try runLayer(e, &s, "echo n >/lib/new && cat /lib/new");
+        defer r.deinit();
+        errdefer std.debug.print("stderr: {s}\n", .{r.err});
+        try std.testing.expectEqualStrings("n\n", r.out);
+        try expectFile(&s, "up/lib/new", "n\n");
+        try std.testing.expect(!s.exists("a/lib/new"));
+    }
 }
 
 test "writing a file from below copies it up with its parents [upper-layers]" {
-    const e = try env(@src());
-    var s: Scratch = undefined;
-    try s.init();
-    defer s.deinit();
-    try layerTree(&s);
-    const r = try runLayer(e, &s, "echo more >>/lib/deep/x && cat /lib/deep/x");
-    defer r.deinit();
-    errdefer std.debug.print("stderr: {s}\n", .{r.err});
-    try std.testing.expectEqualStrings("A\nmore\n", r.out);
-    try expectFile(&s, "up/lib/deep/x", "A\nmore\n");
-    try expectFile(&s, "a/lib/deep/x", "A\n");
-    // Only what changed: the parents, not their other files.
-    try std.testing.expect(!s.exists("up/lib/keep"));
+    const all = try env(@src());
+    var each = engineList(all);
+    while (each.next()) |engine| {
+        const e = only(all, engine);
+        var s: Scratch = undefined;
+        try s.init();
+        defer s.deinit();
+        try layerTree(&s);
+        const r = try runLayer(e, &s, "echo more >>/lib/deep/x && cat /lib/deep/x");
+        defer r.deinit();
+        errdefer std.debug.print("stderr: {s}\n", .{r.err});
+        try std.testing.expectEqualStrings("A\nmore\n", r.out);
+        try expectFile(&s, "up/lib/deep/x", "A\nmore\n");
+        try expectFile(&s, "a/lib/deep/x", "A\n");
+        // Only what changed: the parents, not their other files.
+        try std.testing.expect(!s.exists("up/lib/keep"));
+    }
 }
 
 test "removing a name from below leaves a .wh. file [upper-layers]" {
-    const e = try env(@src());
-    var s: Scratch = undefined;
-    try s.init();
-    defer s.deinit();
-    try layerTree(&s);
-    const r = try runLayer(e, &s, "rm /lib/x; test -e /lib/x || echo gone; ls /lib | grep -c wh");
-    defer r.deinit();
-    errdefer std.debug.print("stderr: {s}\n", .{r.err});
-    try std.testing.expectEqualStrings("gone\n0\n", r.out);
-    try std.testing.expect(s.exists("up/lib/.wh.x"));
-    try std.testing.expect(s.exists("a/lib/x"));
+    const all = try env(@src());
+    var each = engineList(all);
+    while (each.next()) |engine| {
+        const e = only(all, engine);
+        var s: Scratch = undefined;
+        try s.init();
+        defer s.deinit();
+        try layerTree(&s);
+        const r = try runLayer(e, &s, "rm /lib/x; test -e /lib/x || echo gone; ls /lib | grep -c wh");
+        defer r.deinit();
+        errdefer std.debug.print("stderr: {s}\n", .{r.err});
+        try std.testing.expectEqualStrings("gone\n0\n", r.out);
+        try std.testing.expect(s.exists("up/lib/.wh.x"));
+        try std.testing.expect(s.exists("a/lib/x"));
+    }
 }
 
 test "a directory removed and made again is opaque [upper-layers]" {
-    const e = try env(@src());
-    var s: Scratch = undefined;
-    try s.init();
-    defer s.deinit();
-    try layerTree(&s);
-    const r = try runLayer(e, &s, "rm /lib/d/y /lib/d; mkdir /lib/d; ls /lib/d | wc -l");
-    defer r.deinit();
-    errdefer std.debug.print("stderr: {s}\n", .{r.err});
-    try std.testing.expectEqualStrings("      0\n", r.out);
-    try std.testing.expect(s.exists("up/lib/d/.wh..wh..opq"));
-    try std.testing.expect(!s.exists("up/lib/.wh.d"));
-    // Mounted again, the layer still hides what was below.
-    var pa: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    var pu: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const again = try run(e, &.{ "--dir", e.root, "--dir", try under(&s, &pa, "a"), "--dir", try under(&s, &pu, "up"), "--rc", "ls /lib/d | wc -l" });
-    defer again.deinit();
-    try std.testing.expectEqualStrings("      0\n", again.out);
+    const all = try env(@src());
+    var each = engineList(all);
+    while (each.next()) |engine| {
+        const e = only(all, engine);
+        var s: Scratch = undefined;
+        try s.init();
+        defer s.deinit();
+        try layerTree(&s);
+        const r = try runLayer(e, &s, "rm /lib/d/y /lib/d; mkdir /lib/d; ls /lib/d | wc -l");
+        defer r.deinit();
+        errdefer std.debug.print("stderr: {s}\n", .{r.err});
+        try std.testing.expectEqualStrings("      0\n", r.out);
+        try std.testing.expect(s.exists("up/lib/d/.wh..wh..opq"));
+        try std.testing.expect(!s.exists("up/lib/.wh.d"));
+        // Mounted again, the layer still hides what was below.
+        var pa: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        var pu: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const again = try run(e, &.{ "--dir", e.root, "--dir", try under(&s, &pa, "a"), "--dir", try under(&s, &pu, "up"), "--rc", "ls /lib/d | wc -l" });
+        defer again.deinit();
+        try std.testing.expectEqualStrings("      0\n", again.out);
+    }
 }
 
 test "renaming a directory from below is EXDEV [upper-layers]" {
-    const e = try env(@src());
-    var s: Scratch = undefined;
-    try s.init();
-    defer s.deinit();
-    try layerTree(&s);
-    // rc's mv renames with a wstat, which a directory from below refuses.
-    const r = try runLayer(e, &s, "mv /lib/d /lib/d2; test -e /lib/d/y && echo kept");
-    defer r.deinit();
-    try std.testing.expectEqualStrings("kept\n", r.out);
-    try expectIn(r.err, "cross-device link");
+    const all = try env(@src());
+    var each = engineList(all);
+    while (each.next()) |engine| {
+        const e = only(all, engine);
+        var s: Scratch = undefined;
+        try s.init();
+        defer s.deinit();
+        try layerTree(&s);
+        // rc's mv renames with a wstat, which a directory from below refuses.
+        const r = try runLayer(e, &s, "mv /lib/d /lib/d2; test -e /lib/d/y && echo kept");
+        defer r.deinit();
+        try std.testing.expectEqualStrings("kept\n", r.out);
+        try expectIn(r.err, "cross-device link");
+    }
 }
 
 test "a .wh. name can't be made in an up layer [upper-layers]" {
-    const e = try env(@src());
-    var s: Scratch = undefined;
-    try s.init();
-    defer s.deinit();
-    try layerTree(&s);
-    const r = try runLayer(e, &s, "touch /lib/.wh.keep || echo refused; cat /lib/keep");
-    defer r.deinit();
-    try std.testing.expectEqualStrings("refused\nA\n", r.out);
-    try expectIn(r.err, "permission denied");
-    try std.testing.expect(!s.exists("up/lib/.wh.keep"));
+    const all = try env(@src());
+    var each = engineList(all);
+    while (each.next()) |engine| {
+        const e = only(all, engine);
+        var s: Scratch = undefined;
+        try s.init();
+        defer s.deinit();
+        try layerTree(&s);
+        const r = try runLayer(e, &s, "touch /lib/.wh.keep || echo refused; cat /lib/keep");
+        defer r.deinit();
+        try std.testing.expectEqualStrings("refused\nA\n", r.out);
+        try expectIn(r.err, "permission denied");
+        try std.testing.expect(!s.exists("up/lib/.wh.keep"));
+    }
 }
 
 test "an up member goes on top of its stack whatever its order [upper-layers]" {
-    const e = try env(@src());
-    var s: Scratch = undefined;
-    try s.init();
-    defer s.deinit();
-    try layerTree(&s);
-    var pa: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    var pu: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
-    var ub: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    // The layer first in argv, a after it: a is still beneath the layer.
-    const r = try run(e, &.{ "--dir", e.root, "--dir", try std.fmt.bufPrint(&pu, "{s}:/:up", .{try under(&s, &ub, "up")}), "--dir", try under(&s, &pa, "a"), "--rc", "cat /lib/x; echo U >/lib/x; cat /lib/x" });
-    defer r.deinit();
-    errdefer std.debug.print("stderr: {s}\n", .{r.err});
-    try std.testing.expectEqualStrings("A\nU\n", r.out);
-    try expectFile(&s, "up/lib/x", "U\n");
-    try expectFile(&s, "a/lib/x", "A\n");
+    const all = try env(@src());
+    var each = engineList(all);
+    while (each.next()) |engine| {
+        const e = only(all, engine);
+        var s: Scratch = undefined;
+        try s.init();
+        defer s.deinit();
+        try layerTree(&s);
+        var pa: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        var pu: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+        var ub: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        // The layer first in argv, a after it: a is still beneath the layer.
+        const r = try run(e, &.{ "--dir", e.root, "--dir", try std.fmt.bufPrint(&pu, "{s}:/:up", .{try under(&s, &ub, "up")}), "--dir", try under(&s, &pa, "a"), "--rc", "cat /lib/x; echo U >/lib/x; cat /lib/x" });
+        defer r.deinit();
+        errdefer std.debug.print("stderr: {s}\n", .{r.err});
+        try std.testing.expectEqualStrings("A\nU\n", r.out);
+        try expectFile(&s, "up/lib/x", "U\n");
+        try expectFile(&s, "a/lib/x", "A\n");
+    }
 }
 
 test "up off a stack layers over what's at DST [upper-layers]" {
-    const e = try env(@src());
-    var s: Scratch = undefined;
-    try s.init();
-    defer s.deinit();
-    try writeTree(&s, &.{ .{ "n/f", "n\n" }, .{ "n/sub/g", "g\n" } });
-    try s.tmp.dir.createDirPath(std.testing.io, "l");
-    var pn: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
-    var pl: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
-    var b1: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    var b2: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const r = try run(e, &.{
-        "--dir",  try std.fmt.bufPrint(&pn, "{s}:/n/x", .{try under(&s, &b1, "n")}),
-        "--dir",  try std.fmt.bufPrint(&pl, "{s}:/n/x:up", .{try under(&s, &b2, "l")}),
-        "--rc",   "echo w >>/n/x/f; cat /n/x/f /n/x/sub/g; rm /n/x/sub/g; ls /n/x/sub | wc -l",
-    });
-    defer r.deinit();
-    errdefer std.debug.print("stderr: {s}\n", .{r.err});
-    try std.testing.expectEqualStrings("n\nw\ng\n      0\n", r.out);
-    try expectFile(&s, "l/f", "n\nw\n");
-    try std.testing.expect(s.exists("l/sub/.wh.g"));
-    try expectFile(&s, "n/f", "n\n");
+    const all = try env(@src());
+    var each = engineList(all);
+    while (each.next()) |engine| {
+        const e = only(all, engine);
+        var s: Scratch = undefined;
+        try s.init();
+        defer s.deinit();
+        try writeTree(&s, &.{ .{ "n/f", "n\n" }, .{ "n/sub/g", "g\n" } });
+        try s.tmp.dir.createDirPath(std.testing.io, "l");
+        var pn: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+        var pl: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+        var b1: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        var b2: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const r = try run(e, &.{
+            "--dir",  try std.fmt.bufPrint(&pn, "{s}:/n/x", .{try under(&s, &b1, "n")}),
+            "--dir",  try std.fmt.bufPrint(&pl, "{s}:/n/x:up", .{try under(&s, &b2, "l")}),
+            "--rc",   "echo w >>/n/x/f; cat /n/x/f /n/x/sub/g; rm /n/x/sub/g; ls /n/x/sub | wc -l",
+        });
+        defer r.deinit();
+        errdefer std.debug.print("stderr: {s}\n", .{r.err});
+        try std.testing.expectEqualStrings("n\nw\ng\n      0\n", r.out);
+        try expectFile(&s, "l/f", "n\nw\n");
+        try std.testing.expect(s.exists("l/sub/.wh.g"));
+        try expectFile(&s, "n/f", "n\n");
+    }
 }
 
 test "up conflicts, two up members, and up on a read-only source are usage errors [upper-layers]" {
@@ -9511,219 +9581,263 @@ test "ns prints an up instance as bind -u [upper-layers]" {
 }
 
 test "links and FIFOs are made in the layer [upper-layers]" {
-    var le: LinuxEnv = undefined;
-    try linuxEnv(@src(), &le);
-    var s: Scratch = undefined;
-    try s.init();
-    defer s.deinit();
-    try s.tmp.dir.createDirPath(std.testing.io, "up");
-    var p: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
-    const r = try runLinux(&le, false, &.{ "--dir", try std.fmt.bufPrint(&p, "{s}/up:#L:up", .{s.path}), "/bin/sh", "-c", "ln -s /etc/alpine-release /root/lnk && mkfifo /root/ff && cat /root/lnk >/dev/null && test -p /root/ff && echo ok" });
-    defer r.deinit();
-    errdefer std.debug.print("stderr: {s}\n", .{r.err});
-    try std.testing.expectEqualStrings("ok\n", r.out);
-    var lb: [64]u8 = undefined;
-    const n = try s.tmp.dir.readLink(std.testing.io, "up/root/lnk", &lb);
-    try std.testing.expectEqualStrings("/etc/alpine-release", lb[0..n]);
-    const st = try s.tmp.dir.statFile(std.testing.io, "up/root/ff", .{ .follow_symlinks = false });
-    try std.testing.expectEqual(std.Io.File.Kind.named_pipe, st.kind);
+    var all: LinuxEnv = undefined;
+    try linuxEnv(@src(), &all);
+    var each = std.mem.tokenizeScalar(u8, all.engines, ',');
+    while (each.next()) |engine| {
+        var le = all;
+        le.engines = engine;
+        var s: Scratch = undefined;
+        try s.init();
+        defer s.deinit();
+        try s.tmp.dir.createDirPath(std.testing.io, "up");
+        var p: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+        const r = try runLinux(&le, false, &.{ "--dir", try std.fmt.bufPrint(&p, "{s}/up:#L:up", .{s.path}), "/bin/sh", "-c", "ln -s /etc/alpine-release /root/lnk && mkfifo /root/ff && cat /root/lnk >/dev/null && test -p /root/ff && echo ok" });
+        defer r.deinit();
+        errdefer std.debug.print("stderr: {s}\n", .{r.err});
+        try std.testing.expectEqualStrings("ok\n", r.out);
+        var lb: [64]u8 = undefined;
+        const n = try s.tmp.dir.readLink(std.testing.io, "up/root/lnk", &lb);
+        try std.testing.expectEqualStrings("/etc/alpine-release", lb[0..n]);
+        const st = try s.tmp.dir.statFile(std.testing.io, "up/root/ff", .{ .follow_symlinks = false });
+        try std.testing.expectEqual(std.Io.File.Kind.named_pipe, st.kind);
+    }
 }
 
 test "a rename across directories copies up and renames in the layer [upper-layers]" {
-    var le: LinuxEnv = undefined;
-    try linuxEnv(@src(), &le);
-    var s: Scratch = undefined;
-    try s.init();
-    defer s.deinit();
-    try s.tmp.dir.createDirPath(std.testing.io, "up");
-    var p: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
-    // A staging rename, as package managers make, and one of a file from below.
-    const r = try runLinux(&le, false, &.{ "--dir", try std.fmt.bufPrint(&p, "{s}/up:#L:up", .{s.path}), "/bin/sh", "-c", "mkdir -p /app/tmp && echo hi >/app/tmp/x && mv /app/tmp/x /app/x && mv /etc/alpine-release /root/rel && cat /app/x && test ! -e /etc/alpine-release && cat /root/rel >/dev/null && echo moved" });
-    defer r.deinit();
-    errdefer std.debug.print("stderr: {s}\n", .{r.err});
-    try std.testing.expectEqualStrings("hi\nmoved\n", r.out);
-    try expectFile(&s, "up/app/x", "hi\n");
-    try std.testing.expect(!s.exists("up/app/tmp/x"));
-    try std.testing.expect(s.exists("up/root/rel"));
-    try std.testing.expect(s.exists("up/etc/.wh.alpine-release"));
+    var all: LinuxEnv = undefined;
+    try linuxEnv(@src(), &all);
+    var each = std.mem.tokenizeScalar(u8, all.engines, ',');
+    while (each.next()) |engine| {
+        var le = all;
+        le.engines = engine;
+        var s: Scratch = undefined;
+        try s.init();
+        defer s.deinit();
+        try s.tmp.dir.createDirPath(std.testing.io, "up");
+        var p: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+        // A staging rename, as package managers make, and one of a file from below.
+        const r = try runLinux(&le, false, &.{ "--dir", try std.fmt.bufPrint(&p, "{s}/up:#L:up", .{s.path}), "/bin/sh", "-c", "mkdir -p /app/tmp && echo hi >/app/tmp/x && mv /app/tmp/x /app/x && mv /etc/alpine-release /root/rel && cat /app/x && test ! -e /etc/alpine-release && cat /root/rel >/dev/null && echo moved" });
+        defer r.deinit();
+        errdefer std.debug.print("stderr: {s}\n", .{r.err});
+        try std.testing.expectEqualStrings("hi\nmoved\n", r.out);
+        try expectFile(&s, "up/app/x", "hi\n");
+        try std.testing.expect(!s.exists("up/app/tmp/x"));
+        try std.testing.expect(s.exists("up/root/rel"));
+        try std.testing.expect(s.exists("up/etc/.wh.alpine-release"));
+    }
 }
 
 test "a working directory from below sees what's changed in the layer since [upper-layers]" {
-    var le: LinuxEnv = undefined;
-    try linuxEnv(@src(), &le);
-    var s: Scratch = undefined;
-    try s.init();
-    defer s.deinit();
-    try s.tmp.dir.createDirPath(std.testing.io, "up");
-    var p: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
-    // /etc is only below when the shell cds there, as /app is when a build
-    // step's commands run in it: names relative to it are the layer's once
-    // the layer has the directory.
-    const r = try runLinux(&le, false, &.{ "--dir", try std.fmt.bufPrint(&p, "{s}/up:#L:up", .{s.path}), "/bin/sh", "-c", "cd /etc && echo new >motd && cat motd && rm alpine-release && ls | grep -c alpine-release; set -C && echo again >alpine-release && cat alpine-release" });
-    defer r.deinit();
-    errdefer std.debug.print("stderr: {s}\n", .{r.err});
-    try std.testing.expectEqualStrings("new\n0\nagain\n", r.out);
-    try expectFile(&s, "up/etc/motd", "new\n");
-    try expectFile(&s, "up/etc/alpine-release", "again\n");
-    try std.testing.expect(!s.exists("up/etc/.wh.alpine-release"));
+    var all: LinuxEnv = undefined;
+    try linuxEnv(@src(), &all);
+    var each = std.mem.tokenizeScalar(u8, all.engines, ',');
+    while (each.next()) |engine| {
+        var le = all;
+        le.engines = engine;
+        var s: Scratch = undefined;
+        try s.init();
+        defer s.deinit();
+        try s.tmp.dir.createDirPath(std.testing.io, "up");
+        var p: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+        // /etc is only below when the shell cds there, as /app is when a build
+        // step's commands run in it: names relative to it are the layer's once
+        // the layer has the directory.
+        const r = try runLinux(&le, false, &.{ "--dir", try std.fmt.bufPrint(&p, "{s}/up:#L:up", .{s.path}), "/bin/sh", "-c", "cd /etc && echo new >motd && cat motd && rm alpine-release && ls | grep -c alpine-release; set -C && echo again >alpine-release && cat alpine-release" });
+        defer r.deinit();
+        errdefer std.debug.print("stderr: {s}\n", .{r.err});
+        try std.testing.expectEqualStrings("new\n0\nagain\n", r.out);
+        try expectFile(&s, "up/etc/motd", "new\n");
+        try expectFile(&s, "up/etc/alpine-release", "again\n");
+        try std.testing.expect(!s.exists("up/etc/.wh.alpine-release"));
+    }
 }
 
 test "a working directory from below sees a directory made again over it as opaque [upper-layers]" {
-    var le: LinuxEnv = undefined;
-    try linuxEnv(@src(), &le);
-    var s: Scratch = undefined;
-    try s.init();
-    defer s.deinit();
-    try s.tmp.dir.createDirPath(std.testing.io, "up");
-    var p: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
-    // /etc/apk is only below when the shell cds there. Made again in the
-    // layer, it's opaque, so names from the old working directory are only
-    // what's new there, in a read or a walk.
-    const r = try runLinux(&le, false, &.{ "--dir", try std.fmt.bufPrint(&p, "{s}/up:#L:up", .{s.path}), "/bin/sh", "-c", "cd /etc/apk && rm -rf /etc/apk && mkdir /etc/apk && echo x >/etc/apk/new && ls && cat new && test ! -e arch && echo gone" });
-    defer r.deinit();
-    errdefer std.debug.print("stderr: {s}\n", .{r.err});
-    try std.testing.expectEqualStrings("new\nx\ngone\n", r.out);
-    try std.testing.expect(s.exists("up/etc/apk/.wh..wh..opq"));
-    try expectFile(&s, "up/etc/apk/new", "x\n");
+    var all: LinuxEnv = undefined;
+    try linuxEnv(@src(), &all);
+    var each = std.mem.tokenizeScalar(u8, all.engines, ',');
+    while (each.next()) |engine| {
+        var le = all;
+        le.engines = engine;
+        var s: Scratch = undefined;
+        try s.init();
+        defer s.deinit();
+        try s.tmp.dir.createDirPath(std.testing.io, "up");
+        var p: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+        // /etc/apk is only below when the shell cds there. Made again in the
+        // layer, it's opaque, so names from the old working directory are only
+        // what's new there, in a read or a walk.
+        const r = try runLinux(&le, false, &.{ "--dir", try std.fmt.bufPrint(&p, "{s}/up:#L:up", .{s.path}), "/bin/sh", "-c", "cd /etc/apk && rm -rf /etc/apk && mkdir /etc/apk && echo x >/etc/apk/new && ls && cat new && test ! -e arch && echo gone" });
+        defer r.deinit();
+        errdefer std.debug.print("stderr: {s}\n", .{r.err});
+        try std.testing.expectEqualStrings("new\nx\ngone\n", r.out);
+        try std.testing.expect(s.exists("up/etc/apk/.wh..wh..opq"));
+        try expectFile(&s, "up/etc/apk/new", "x\n");
+    }
 }
 
 test "a directory fd from below still names the directory once the layer has it [upper-layers]" {
-    var le: LinuxEnv = undefined;
-    try linuxEnv(@src(), &le);
-    var s: Scratch = undefined;
-    try s.init();
-    defer s.deinit();
-    try s.tmp.dir.createDirPath(std.testing.io, "up");
-    var p: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
-    // apk update opens /var/cache/apk, then creates and renames its
-    // indexes through that fd: the first create makes the directory in
-    // the layer, and the fd has to go on naming it.
-    try netCase(&le, &.{ "--dir", try std.fmt.bufPrint(&p, "{s}/up:#L:up", .{s.path}), "/mnt/term/cwd/files", "dirfd_copyup" }, "ok dirfd_copyup\n");
-    try std.testing.expect(s.exists("up/etc/apk"));
-    try std.testing.expect(!s.exists("up/etc/apk/x"));
+    var all: LinuxEnv = undefined;
+    try linuxEnv(@src(), &all);
+    var each = std.mem.tokenizeScalar(u8, all.engines, ',');
+    while (each.next()) |engine| {
+        var le = all;
+        le.engines = engine;
+        var s: Scratch = undefined;
+        try s.init();
+        defer s.deinit();
+        try s.tmp.dir.createDirPath(std.testing.io, "up");
+        var p: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+        // apk update opens /var/cache/apk, then creates and renames its
+        // indexes through that fd: the first create makes the directory in
+        // the layer, and the fd has to go on naming it.
+        try netCase(&le, &.{ "--dir", try std.fmt.bufPrint(&p, "{s}/up:#L:up", .{s.path}), "/mnt/term/cwd/files", "dirfd_copyup" }, "ok dirfd_copyup\n");
+        try std.testing.expect(s.exists("up/etc/apk"));
+        try std.testing.expect(!s.exists("up/etc/apk/x"));
+    }
 }
 
 test "names looked up again after a change in the layer see the change [upper-layers]" {
-    var le: LinuxEnv = undefined;
-    try linuxEnv(@src(), &le);
-    var s: Scratch = undefined;
-    try s.init();
-    defer s.deinit();
-    try s.tmp.dir.createDirPath(std.testing.io, "up");
-    var p: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
-    // A stack with a layer keeps what its walks found (the walk cache in
-    // devoverlay.c): each name is looked up before and after it changes,
-    // within the second an entry is kept, from the root and from a
-    // working directory, with a directory's names removed and renamed.
-    const r = try runLinux(&le, false, &.{ "--dir", try std.fmt.bufPrint(&p, "{s}/up:#L:up", .{s.path}), "/bin/sh", "-c",
-        "cd /usr/share && test ! -e new/a/b && mkdir -p new/a/b && test -d new/a/b && echo made && " ++
-        "rm -rf new && test ! -e new/a && test ! -e /usr/share/new/a/b && echo gone && " ++
-        "mkdir -p new/a && test ! -e new/a/b && echo again && " ++
-        "test -e /etc/alpine-release && rm /etc/alpine-release && test ! -e /etc/alpine-release && echo whited && " ++
-        "echo x >/etc/alpine-release && test -s /etc/alpine-release && echo back && " ++
-        "mkdir /app && echo f >/app/f1 && mkdir /app/d && echo g >/app/d/f && mv /app/d /app/e && " ++
-        "test ! -e /app/d/f && cat /app/e/f && mv /app/f1 /app/f2 && test ! -e /app/f1 && cat /app/f2" });
-    defer r.deinit();
-    errdefer std.debug.print("stderr: {s}\n", .{r.err});
-    try std.testing.expectEqualStrings("made\ngone\nagain\nwhited\nback\ng\nf\n", r.out);
-    try std.testing.expect(s.exists("up/usr/share/new/a"));
-    try std.testing.expect(!s.exists("up/usr/share/new/a/b"));
-    try expectFile(&s, "up/app/e/f", "g\n");
+    var all: LinuxEnv = undefined;
+    try linuxEnv(@src(), &all);
+    var each = std.mem.tokenizeScalar(u8, all.engines, ',');
+    while (each.next()) |engine| {
+        var le = all;
+        le.engines = engine;
+        var s: Scratch = undefined;
+        try s.init();
+        defer s.deinit();
+        try s.tmp.dir.createDirPath(std.testing.io, "up");
+        var p: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+        // A stack with a layer keeps what its walks found (the walk cache in
+        // devoverlay.c): each name is looked up before and after it changes,
+        // within the second an entry is kept, from the root and from a
+        // working directory, with a directory's names removed and renamed.
+        const r = try runLinux(&le, false, &.{ "--dir", try std.fmt.bufPrint(&p, "{s}/up:#L:up", .{s.path}), "/bin/sh", "-c",
+            "cd /usr/share && test ! -e new/a/b && mkdir -p new/a/b && test -d new/a/b && echo made && " ++
+            "rm -rf new && test ! -e new/a && test ! -e /usr/share/new/a/b && echo gone && " ++
+            "mkdir -p new/a && test ! -e new/a/b && echo again && " ++
+            "test -e /etc/alpine-release && rm /etc/alpine-release && test ! -e /etc/alpine-release && echo whited && " ++
+            "echo x >/etc/alpine-release && test -s /etc/alpine-release && echo back && " ++
+            "mkdir /app && echo f >/app/f1 && mkdir /app/d && echo g >/app/d/f && mv /app/d /app/e && " ++
+            "test ! -e /app/d/f && cat /app/e/f && mv /app/f1 /app/f2 && test ! -e /app/f1 && cat /app/f2" });
+        defer r.deinit();
+        errdefer std.debug.print("stderr: {s}\n", .{r.err});
+        try std.testing.expectEqualStrings("made\ngone\nagain\nwhited\nback\ng\nf\n", r.out);
+        try std.testing.expect(s.exists("up/usr/share/new/a"));
+        try std.testing.expect(!s.exists("up/usr/share/new/a/b"));
+        try expectFile(&s, "up/app/e/f", "g\n");
+    }
 }
 
 test "Alpine builds in layers that stack again as directories and archives (demo) [upper-layers]" {
-    var le: LinuxEnv = undefined;
-    try linuxEnv(@src(), &le);
-    var s: Scratch = undefined;
-    try s.init();
-    defer s.deinit();
-    try s.tmp.dir.createDirPath(std.testing.io, "deps");
-    try s.tmp.dir.createDirPath(std.testing.io, "app");
-    var b1: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
-    var b2: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
-    // Step 1 changes the base; apk needs the network, so a file stands in for python3.
-    const one = try runLinux(&le, false, &.{ "--dir", try std.fmt.bufPrint(&b1, "{s}/deps:#L:up", .{s.path}), "/bin/sh", "-c", "echo 3 >/usr/bin/python3-v && rm /etc/motd" });
-    defer one.deinit();
-    errdefer std.debug.print("stderr: {s}\n", .{one.err});
-    try std.testing.expectEqual(0, one.code);
-    const two = try runLinux(&le, false, &.{ "--dir", try std.fmt.bufPrint(&b1, "{s}/deps:#L", .{s.path}), "--dir", try std.fmt.bufPrint(&b2, "{s}/app:#L:up", .{s.path}), "/bin/sh", "-c", "mkdir -p /app/tmp && echo hi > /app/tmp/x && mv /app/tmp/x /app/x" });
-    defer two.deinit();
-    errdefer std.debug.print("stderr: {s}\n", .{two.err});
-    try std.testing.expectEqual(0, two.code);
-    const three = try runLinux(&le, false, &.{ "--dir", try std.fmt.bufPrint(&b1, "{s}/deps:#L", .{s.path}), "--dir", try std.fmt.bufPrint(&b2, "{s}/app:#L", .{s.path}), "/bin/sh", "-c", "cat /usr/bin/python3-v /app/x; test ! -e /etc/motd && echo nomotd" });
-    defer three.deinit();
-    errdefer std.debug.print("stderr: {s}\n", .{three.err});
-    try std.testing.expectEqualStrings("3\nhi\nnomotd\n", three.out);
-    try std.testing.expect(s.exists("deps/etc/.wh.motd"));
-    // The layers as archives, by the host's tar.
-    var cmd: [2 * std.Io.Dir.max_path_bytes + 64]u8 = undefined;
-    const tr = try runProcessWith(&.{ "sh", "-c", try std.fmt.bufPrint(&cmd, "cd '{s}' && tar -C deps -cf deps.tar . && tar -C app -cf app.tar .", .{s.path}) }, null, null, 30_000);
-    gpa.free(tr.stdout);
-    gpa.free(tr.stderr);
-    const four = try runLinux(&le, false, &.{ "--archive", try std.fmt.bufPrint(&b1, "{s}/deps.tar:#L", .{s.path}), "--archive", try std.fmt.bufPrint(&b2, "{s}/app.tar:#L", .{s.path}), "/bin/sh", "-c", "cat /app/x; test ! -e /etc/motd && echo nomotd" });
-    defer four.deinit();
-    errdefer std.debug.print("stderr: {s}\n", .{four.err});
-    try std.testing.expectEqualStrings("hi\nnomotd\n", four.out);
+    var all: LinuxEnv = undefined;
+    try linuxEnv(@src(), &all);
+    var each = std.mem.tokenizeScalar(u8, all.engines, ',');
+    while (each.next()) |engine| {
+        var le = all;
+        le.engines = engine;
+        var s: Scratch = undefined;
+        try s.init();
+        defer s.deinit();
+        try s.tmp.dir.createDirPath(std.testing.io, "deps");
+        try s.tmp.dir.createDirPath(std.testing.io, "app");
+        var b1: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+        var b2: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+        // Step 1 changes the base; apk needs the network, so a file stands in for python3.
+        const one = try runLinux(&le, false, &.{ "--dir", try std.fmt.bufPrint(&b1, "{s}/deps:#L:up", .{s.path}), "/bin/sh", "-c", "echo 3 >/usr/bin/python3-v && rm /etc/motd" });
+        defer one.deinit();
+        errdefer std.debug.print("stderr: {s}\n", .{one.err});
+        try std.testing.expectEqual(0, one.code);
+        const two = try runLinux(&le, false, &.{ "--dir", try std.fmt.bufPrint(&b1, "{s}/deps:#L", .{s.path}), "--dir", try std.fmt.bufPrint(&b2, "{s}/app:#L:up", .{s.path}), "/bin/sh", "-c", "mkdir -p /app/tmp && echo hi > /app/tmp/x && mv /app/tmp/x /app/x" });
+        defer two.deinit();
+        errdefer std.debug.print("stderr: {s}\n", .{two.err});
+        try std.testing.expectEqual(0, two.code);
+        const three = try runLinux(&le, false, &.{ "--dir", try std.fmt.bufPrint(&b1, "{s}/deps:#L", .{s.path}), "--dir", try std.fmt.bufPrint(&b2, "{s}/app:#L", .{s.path}), "/bin/sh", "-c", "cat /usr/bin/python3-v /app/x; test ! -e /etc/motd && echo nomotd" });
+        defer three.deinit();
+        errdefer std.debug.print("stderr: {s}\n", .{three.err});
+        try std.testing.expectEqualStrings("3\nhi\nnomotd\n", three.out);
+        try std.testing.expect(s.exists("deps/etc/.wh.motd"));
+        // The layers as archives, by the host's tar.
+        var cmd: [2 * std.Io.Dir.max_path_bytes + 64]u8 = undefined;
+        const tr = try runProcessWith(&.{ "sh", "-c", try std.fmt.bufPrint(&cmd, "cd '{s}' && tar -C deps -cf deps.tar . && tar -C app -cf app.tar .", .{s.path}) }, null, null, 30_000);
+        gpa.free(tr.stdout);
+        gpa.free(tr.stderr);
+        const four = try runLinux(&le, false, &.{ "--archive", try std.fmt.bufPrint(&b1, "{s}/deps.tar:#L", .{s.path}), "--archive", try std.fmt.bufPrint(&b2, "{s}/app.tar:#L", .{s.path}), "/bin/sh", "-c", "cat /app/x; test ! -e /etc/motd && echo nomotd" });
+        defer four.deinit();
+        errdefer std.debug.print("stderr: {s}\n", .{four.err});
+        try std.testing.expectEqualStrings("hi\nnomotd\n", four.out);
+    }
 }
 
 test "up on a 9P2000.L mount keeps the layer on the server [upper-layers]" {
-    const e = try env(@src());
-    // The web host has no TCP; "a port up layer takes the guest's
-    // writes" is this case there.
-    if (onWeb()) return error.SkipZigTest;
-    var d: Diod = undefined;
-    try d.start("true");
-    defer d.stop();
-    var s: Scratch = undefined;
-    try s.init();
-    defer s.deinit();
-    try writeTree(&s, &.{ .{ "n/f", "n\n" }, .{ "n/sub/g", "g\n" } });
-    var pn: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
-    var pu: [std.Io.Dir.max_path_bytes + 64]u8 = undefined;
-    const r = try run(e, &.{
-        "--dir", try std.fmt.bufPrint(&pn, "{s}/n:/n/x", .{s.path}),
-        "--url", try std.fmt.bufPrint(&pu, "{s}:/n/x:up,spec={s}", .{ d.url(), d.s.path }),
-        "--rc",  "echo w >>/n/x/f; rm /n/x/sub/g; cat /n/x/f; ls /n/x/sub | wc -l",
-    });
-    defer r.deinit();
-    errdefer std.debug.print("stderr: {s}\n", .{r.err});
-    try std.testing.expectEqualStrings("n\nw\n      0\n", r.out);
-    try std.testing.expect(d.s.exists("f"));
-    try std.testing.expect(d.s.exists("sub/.wh.g"));
-    try expectFile(&s, "n/f", "n\n");
+    const all = try env(@src());
+    var each = engineList(all);
+    while (each.next()) |engine| {
+        const e = only(all, engine);
+        // The web host has no TCP; "a port up layer takes the guest's
+        // writes" is this case there.
+        if (onWeb()) return error.SkipZigTest;
+        var d: Diod = undefined;
+        try d.start("true");
+        defer d.stop();
+        var s: Scratch = undefined;
+        try s.init();
+        defer s.deinit();
+        try writeTree(&s, &.{ .{ "n/f", "n\n" }, .{ "n/sub/g", "g\n" } });
+        var pn: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+        var pu: [std.Io.Dir.max_path_bytes + 64]u8 = undefined;
+        const r = try run(e, &.{
+            "--dir", try std.fmt.bufPrint(&pn, "{s}/n:/n/x", .{s.path}),
+            "--url", try std.fmt.bufPrint(&pu, "{s}:/n/x:up,spec={s}", .{ d.url(), d.s.path }),
+            "--rc",  "echo w >>/n/x/f; rm /n/x/sub/g; cat /n/x/f; ls /n/x/sub | wc -l",
+        });
+        defer r.deinit();
+        errdefer std.debug.print("stderr: {s}\n", .{r.err});
+        try std.testing.expectEqualStrings("n\nw\n      0\n", r.out);
+        try std.testing.expect(d.s.exists("f"));
+        try std.testing.expect(d.s.exists("sub/.wh.g"));
+        try expectFile(&s, "n/f", "n\n");
+    }
 }
 
 test "links are made in a 9P2000.L layer, and on a .L mount, by Tsymlink [upper-layers]" {
-    var le: LinuxEnv = undefined;
-    try linuxEnv(@src(), &le);
-    var d: Diod = undefined;
-    try d.start("true");
-    defer d.stop();
-    var pu: [std.Io.Dir.max_path_bytes + 64]u8 = undefined;
-    // A new link, and one from below copied up by a rename.
-    const r = try runLinux(&le, false, &.{
-        "--url",   try std.fmt.bufPrint(&pu, "{s}:#L:up,spec={s}", .{ d.url(), d.s.path }),
-        "/bin/sh", "-c",
-        "mkdir -p /root && ln -s /etc/alpine-release /root/lnk && readlink /root/lnk && cmp /root/lnk /etc/alpine-release && mv /bin/ls /root/ls && readlink /root/ls && test ! -e /bin/ls && echo ok",
-    });
-    defer r.deinit();
-    errdefer std.debug.print("stderr: {s}\n", .{r.err});
-    try std.testing.expectEqualStrings("/etc/alpine-release\n/bin/busybox\nok\n", r.out);
-    var lb: [64]u8 = undefined;
-    const n = try d.s.tmp.dir.readLink(std.testing.io, "root/lnk", &lb);
-    try std.testing.expectEqualStrings("/etc/alpine-release", lb[0..n]);
-    try std.testing.expect(d.s.exists("bin/.wh.ls"));
-    // A 9P2000.L mount that isn't a layer takes links the same way.
-    const m = try runLinux(&le, false, &.{
-        "--url",   try std.fmt.bufPrint(&pu, "{s}:/n/l:rw,spec={s}", .{ d.url(), d.s.path }),
-        "/bin/sh", "-c",
-        "ln -s lnk /9/n/l/two && readlink /9/n/l/two",
-    });
-    defer m.deinit();
-    errdefer std.debug.print("stderr: {s}\n", .{m.err});
-    try std.testing.expectEqualStrings("lnk\n", m.out);
-    const k = try d.s.tmp.dir.readLink(std.testing.io, "two", &lb);
-    try std.testing.expectEqualStrings("lnk", lb[0..k]);
+    var all: LinuxEnv = undefined;
+    try linuxEnv(@src(), &all);
+    var each = std.mem.tokenizeScalar(u8, all.engines, ',');
+    while (each.next()) |engine| {
+        var le = all;
+        le.engines = engine;
+        var d: Diod = undefined;
+        try d.start("true");
+        defer d.stop();
+        var pu: [std.Io.Dir.max_path_bytes + 64]u8 = undefined;
+        // A new link, and one from below copied up by a rename.
+        const r = try runLinux(&le, false, &.{
+            "--url",   try std.fmt.bufPrint(&pu, "{s}:#L:up,spec={s}", .{ d.url(), d.s.path }),
+            "/bin/sh", "-c",
+            "mkdir -p /root && ln -s /etc/alpine-release /root/lnk && readlink /root/lnk && cmp /root/lnk /etc/alpine-release && mv /bin/ls /root/ls && readlink /root/ls && test ! -e /bin/ls && echo ok",
+        });
+        defer r.deinit();
+        errdefer std.debug.print("stderr: {s}\n", .{r.err});
+        try std.testing.expectEqualStrings("/etc/alpine-release\n/bin/busybox\nok\n", r.out);
+        var lb: [64]u8 = undefined;
+        const n = try d.s.tmp.dir.readLink(std.testing.io, "root/lnk", &lb);
+        try std.testing.expectEqualStrings("/etc/alpine-release", lb[0..n]);
+        try std.testing.expect(d.s.exists("bin/.wh.ls"));
+        // A 9P2000.L mount that isn't a layer takes links the same way.
+        const m = try runLinux(&le, false, &.{
+            "--url",   try std.fmt.bufPrint(&pu, "{s}:/n/l:rw,spec={s}", .{ d.url(), d.s.path }),
+            "/bin/sh", "-c",
+            "ln -s lnk /9/n/l/two && readlink /9/n/l/two",
+        });
+        defer m.deinit();
+        errdefer std.debug.print("stderr: {s}\n", .{m.err});
+        try std.testing.expectEqualStrings("lnk\n", m.out);
+        const k = try d.s.tmp.dir.readLink(std.testing.io, "two", &lb);
+        try std.testing.expectEqualStrings("lnk", lb[0..k]);
+    }
 }
 
 test "--bind runs after every mount, in order [mounts]" {
@@ -12508,28 +12622,32 @@ test "bind -r merges directories below the bind point [mounts]" {
 }
 
 test "bind -r: creates go to the first -c member with the parent [mounts]" {
-    const e = try env(@src());
-    var s: Scratch = undefined;
-    try unionTrees(&s);
-    defer s.deinit();
-    const r = try run(e, &.{ "--cwd", s.path, "--ns", union_ns_c, "--rc", "echo top > /n/new; echo deep > /n/d/new; mkdir /n/d/e/sub >[2]/dev/null || echo refused; echo more >> /n/d/g" });
-    defer r.deinit();
-    errdefer std.debug.print("stderr: {s}\n", .{r.err});
-    try std.testing.expectEqual(0, r.code);
-    try std.testing.expectEqualStrings("refused\n", r.out);
-    try std.testing.expect(s.exists("a/new"));
-    try std.testing.expect(s.exists("a/d/new"));
-    // b's directory e has no counterpart in a, and b doesn't take
-    // creates, so a create under it is refused.
-    try std.testing.expect(!s.exists("b/d/e/sub"));
-    // A write goes to the member that holds the file.
-    var buf: [16]u8 = undefined;
-    try std.testing.expectEqualStrings("bg\nmore\n", try s.tmp.dir.readFile(std.testing.io, "b/d/g", &buf));
-    // Without a -c member, a create fails.
-    const no = try run(e, &.{ "--cwd", s.path, "--ns", union_ns, "--rc", "echo x > /n/other" });
-    defer no.deinit();
-    try std.testing.expect(no.code != 0);
-    try expectIn(no.err, "mounted directory forbids creation");
+    const all = try env(@src());
+    var each = engineList(all);
+    while (each.next()) |engine| {
+        const e = only(all, engine);
+        var s: Scratch = undefined;
+        try unionTrees(&s);
+        defer s.deinit();
+        const r = try run(e, &.{ "--cwd", s.path, "--ns", union_ns_c, "--rc", "echo top > /n/new; echo deep > /n/d/new; mkdir /n/d/e/sub >[2]/dev/null || echo refused; echo more >> /n/d/g" });
+        defer r.deinit();
+        errdefer std.debug.print("stderr: {s}\n", .{r.err});
+        try std.testing.expectEqual(0, r.code);
+        try std.testing.expectEqualStrings("refused\n", r.out);
+        try std.testing.expect(s.exists("a/new"));
+        try std.testing.expect(s.exists("a/d/new"));
+        // b's directory e has no counterpart in a, and b doesn't take
+        // creates, so a create under it is refused.
+        try std.testing.expect(!s.exists("b/d/e/sub"));
+        // A write goes to the member that holds the file.
+        var buf: [16]u8 = undefined;
+        try std.testing.expectEqualStrings("bg\nmore\n", try s.tmp.dir.readFile(std.testing.io, "b/d/g", &buf));
+        // Without a -c member, a create fails.
+        const no = try run(e, &.{ "--cwd", s.path, "--ns", union_ns, "--rc", "echo x > /n/other" });
+        defer no.deinit();
+        try std.testing.expect(no.code != 0);
+        try expectIn(no.err, "mounted directory forbids creation");
+    }
 }
 
 test "ns prints unions as bind -r lines that replay [mounts]" {
@@ -12556,15 +12674,19 @@ test "ns prints unions as bind -r lines that replay [mounts]" {
 }
 
 test "bind -r: removing an upper file uncovers the lower one [mounts]" {
-    const e = try env(@src());
-    var s: Scratch = undefined;
-    try unionTrees(&s);
-    defer s.deinit();
-    const r = try run(e, &.{ "--cwd", s.path, "--ns", union_ns, "--rc", "rm /n/f && cat /n/f" });
-    defer r.deinit();
-    errdefer std.debug.print("stderr: {s}\n", .{r.err});
-    try std.testing.expectEqualStrings("B\n", r.out);
-    try std.testing.expect(!s.exists("a/f"));
+    const all = try env(@src());
+    var each = engineList(all);
+    while (each.next()) |engine| {
+        const e = only(all, engine);
+        var s: Scratch = undefined;
+        try unionTrees(&s);
+        defer s.deinit();
+        const r = try run(e, &.{ "--cwd", s.path, "--ns", union_ns, "--rc", "rm /n/f && cat /n/f" });
+        defer r.deinit();
+        errdefer std.debug.print("stderr: {s}\n", .{r.err});
+        try std.testing.expectEqualStrings("B\n", r.out);
+        try std.testing.expect(!s.exists("a/f"));
+    }
 }
 
 test "bind -c '#O' over a union copies up and whites out [mounts]" {

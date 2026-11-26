@@ -129,26 +129,35 @@ h9_kern_interrupt(void *p)
 /*
  * sleep(ms): drawterm has no tsleep, so this sleeps in short slices and
  * stops early when the Proc is interrupted. Returns 0, or -1 with
- * "interrupted" as the error string.
+ * "interrupted" as the error string. What's left is measured against a
+ * deadline on the monotonic clock rather than counted down by slices:
+ * each osmsleep can overshoot (on a busy host or macOS's efficiency
+ * cores, several times over), and counting slices added every overshoot
+ * to the sleep, so a guest's sleep 4 took over 30 s.
  */
 int
 h9_kern_sleep(long ms)
 {
+	uvlong now, deadline;
 	long slice;
 
 	if(ms <= 0){
 		osyield();
 		return 0;
 	}
-	while(ms > 0){
+	deadline = h9_tnow() + (uvlong)ms*1000000ULL;
+	for(;;){
 		if(up->notepending){
 			up->notepending = 0;
 			kstrcpy(up->syserrstr, Eintr, ERRMAX);
 			return -1;
 		}
+		now = h9_tnow();
+		if(now >= deadline)
+			break;
+		ms = (long)((deadline - now + 999999) / 1000000);
 		slice = ms < 20 ? ms : 20;
 		osmsleep(slice);
-		ms -= slice;
 	}
 	return 0;
 }
