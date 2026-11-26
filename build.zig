@@ -151,6 +151,10 @@ const sema_fixtures = [_][]const u8{
     "rendezvous", "semacquire", "count", "badarg", "odd", "unmapped", "interrupt",
 };
 
+/// Programs in tests/fixtures/badptr, for tests/engines.zig; they include
+/// the segattach fixtures' lib.S.
+const badptr_fixtures = [_][]const u8{ "read", "write", "stat" };
+
 /// Programs in tests/fixtures/net, for tests/engines.zig. They share
 /// tests/fixtures/segattach/lib.S.
 const net_fixtures = [_][]const u8{ "ctl", "cs", "dns" };
@@ -1894,6 +1898,7 @@ pub fn build(b: *std.Build) void {
         .{ .dir = "fdmount", .prefix = "fdmount", .names = &fdmount_fixtures },
         .{ .dir = "htools", .prefix = "htools", .names = &htools_fixtures },
         .{ .dir = "sema", .prefix = "sema", .names = &sema_fixtures },
+        .{ .dir = "badptr", .prefix = "badptr", .names = &badptr_fixtures },
         .{ .dir = "net", .prefix = "net", .names = &net_fixtures },
         .{ .dir = "gfx", .prefix = "gfx", .names = &gfx_fixtures },
     }) |set| for (set.names) |name| {

@@ -99,7 +99,7 @@ No new reach for a guest. Real address checks close a class of bug where a guest
 - [x] `zig build conformance` runs a script of namespace operations (binds, unions, mounts, `..` across mounts, creates in unions, `ORCLOSE`, and flush) on h9 and on a 9front kernel under QEMU, and the transcripts match.
 - [ ] `git grep -l waserror src/` finds nothing, and the build compiles none of `chan.c`, `pgrp.c`, `dev.c`, `devmnt.c`, `qio.c`, `devpipe.c`, `devroot.c`, or `sysfile.c` from `third_party/drawterm/kern/`.
 - [ ] `test "two machines don't share /srv [kernel-port]"` and `test "two machines don't share devcmd conversations [kernel-port]"` pass with two machines in one process.
-- [ ] `test "a bad guest pointer is a fault, not a host crash [kernel-port]"` passes for read, write, and stat buffers.
+- [x] `test "a bad guest pointer is a fault, not a host crash [kernel-port]"` passes for read, write, and stat buffers.
 - [ ] `zig build bench` shows system call round trips within 5% of before the port.
 - [ ] [spec/kernel.md](../spec/kernel.md) describes the kernel as built, with no seam rules.
 
@@ -225,3 +225,7 @@ No new reach for a guest. Real address checks close a class of bug where a guest
 
 - **linux.zig's syncs no longer pose as a Devgen.** `h9_linux_syncfs` and `h9_linux_sync` called devfs's `h9_fs_syncfs` and `h9_fs_sync` through `callgen` to reach the shim's label; they're `raising` calls now.
 - **devmnt's test server indexed its fids by fid**, which is the kernel's chan number and grows with every chan the test process has made, so the `#ℓ` case crashed when it ran after enough others. It indexes them modulo its table.
+
+**2026-11-26, address checks and widths.** Every guest pointer already reached the kernel through one place, `src/guestmem.zig` under each ABI's address space (`segment.Space` and the Linux `Mm`), which checks a buffer against the mappings before any I/O and posts "sys: bad address in syscall" (or returns `EFAULT`); the kernel's C never sees a guest address, so drawterm's no-op `validaddr` is never reached. `test "a bad guest pointer is a fault, not a host crash [kernel-port]"` (tests/engines.zig, with programs in tests/fixtures/badptr) checks it for read, write, and stat buffers. The system call path's counts are 64 bits down to the kernel: `src/kern.zig`'s `pread`, `pwrite`, `stat`, `fstat`, `wstat`, and `fwstat` call `sysfile.zig`'s `h9_pread` and the rest, which take a `usize` count and return an `isize`, where they passed through C's `int`. Some things the port found:
+
+- **A device's count is still C's `int`.** The `Dev` table is drawterm's, shared with its C devices, so `sysfile.zig` clamps a count to `maxcount` (2 GiB - 1) where it meets the device, and a longer read or write is short, as Linux's are past `MAX_RW_COUNT`; that's what `src/kern.zig`'s clamp did before. The Plan 9 ABI still splits a call of more than 1 GiB, as it did. Below `sysfile.zig` (the device switch, qio, and the devices) counts stay `c_int` until the C devices are gone.

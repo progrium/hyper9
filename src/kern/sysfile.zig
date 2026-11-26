@@ -919,6 +919,47 @@ pub fn fwstat(fd: c_int, s: [*]u8, l: c_int) Error!c_int {
     return wstatChan(ch, s, l);
 }
 
+// The system call path's widths (design/kernel-port.md, Address checks
+// and widths). A guest's counts are 64 bits on Linux, and its buffers
+// are host slices by the time they get here (src/guestmem.zig checks
+// them against the address space first), so these take a slice and
+// return a usize. A device's count is drawterm's `long`, a C int, so
+// each clamps the count to `maxcount` where it meets the device: a
+// longer read or write is short, as Linux's are past MAX_RW_COUNT.
+
+/// The most one read or write moves.
+pub const maxcount: usize = std.math.maxInt(c_int);
+
+fn devcount(n: usize) c_int {
+    return @intCast(@min(n, maxcount));
+}
+
+/// pread with a slice: `off` -1 uses and advances the fd's offset.
+pub fn preadn(fd: c_int, buf: []u8, off: i64) Error!usize {
+    return @intCast(try pread(fd, buf.ptr, devcount(buf.len), off));
+}
+
+/// pwrite with a slice: `off` -1 uses and advances the fd's offset.
+pub fn pwriten(fd: c_int, buf: []const u8, off: i64) Error!usize {
+    return @intCast(try pwrite(fd, buf.ptr, devcount(buf.len), off));
+}
+
+pub fn statn(name: [*:0]const u8, buf: []u8) Error!usize {
+    return @intCast(try stat(name, buf.ptr, devcount(buf.len)));
+}
+
+pub fn fstatn(fd: c_int, buf: []u8) Error!usize {
+    return @intCast(try fstat(fd, buf.ptr, devcount(buf.len)));
+}
+
+pub fn wstatn(name: [*:0]const u8, buf: []u8) Error!usize {
+    return @intCast(try wstat(name, buf.ptr, devcount(buf.len)));
+}
+
+pub fn fwstatn(fd: c_int, buf: []u8) Error!usize {
+    return @intCast(try fwstat(fd, buf.ptr, devcount(buf.len)));
+}
+
 /// A call's start: no error label is pending (starterror).
 fn starterror() void {
     port.assert(up().nerrlab == 0);
@@ -1129,6 +1170,26 @@ fn c_sysiounit(fd: c_int) callconv(.c) c_uint {
 fn c_syswstat(name: [*:0]const u8, buf: [*]u8, n: c_int) callconv(.c) c_int {
     return call(wstat, .{ name, buf, n }, @as(c_int, -1));
 }
+// The calls with the system call path's widths, for src/kern.zig:
+// -1, or what the call returns, as the sys* adapters above.
+fn c_h9_pread(fd: c_int, buf: [*]u8, n: usize, off: i64) callconv(.c) isize {
+    return @bitCast(call(preadn, .{ fd, buf[0..n], off }, @as(usize, @bitCast(@as(isize, -1)))));
+}
+fn c_h9_pwrite(fd: c_int, buf: [*]const u8, n: usize, off: i64) callconv(.c) isize {
+    return @bitCast(call(pwriten, .{ fd, buf[0..n], off }, @as(usize, @bitCast(@as(isize, -1)))));
+}
+fn c_h9_stat(name: [*:0]const u8, buf: [*]u8, n: usize) callconv(.c) isize {
+    return @bitCast(call(statn, .{ name, buf[0..n] }, @as(usize, @bitCast(@as(isize, -1)))));
+}
+fn c_h9_fstat(fd: c_int, buf: [*]u8, n: usize) callconv(.c) isize {
+    return @bitCast(call(fstatn, .{ fd, buf[0..n] }, @as(usize, @bitCast(@as(isize, -1)))));
+}
+fn c_h9_wstat(name: [*:0]const u8, buf: [*]u8, n: usize) callconv(.c) isize {
+    return @bitCast(call(wstatn, .{ name, buf[0..n] }, @as(usize, @bitCast(@as(isize, -1)))));
+}
+fn c_h9_fwstat(fd: c_int, buf: [*]u8, n: usize) callconv(.c) isize {
+    return @bitCast(call(fwstatn, .{ fd, buf[0..n] }, @as(usize, @bitCast(@as(isize, -1)))));
+}
 fn c_errfmt(fmt: *c.Fmt) callconv(.c) c_int {
     return errfmt(fmt);
 }
@@ -1185,6 +1246,12 @@ pub fn exportC() void {
     @export(&c_syswrite, .{ .name = "syswrite" });
     @export(&c_sysiounit, .{ .name = "sysiounit" });
     @export(&c_syswstat, .{ .name = "syswstat" });
+    @export(&c_h9_pread, .{ .name = "h9_pread" });
+    @export(&c_h9_pwrite, .{ .name = "h9_pwrite" });
+    @export(&c_h9_stat, .{ .name = "h9_stat" });
+    @export(&c_h9_fstat, .{ .name = "h9_fstat" });
+    @export(&c_h9_wstat, .{ .name = "h9_wstat" });
+    @export(&c_h9_fwstat, .{ .name = "h9_fwstat" });
     @export(&c_errfmt, .{ .name = "__errfmt" });
     @export(&c_errstr, .{ .name = "errstr" });
     @export(&c_rerrstr, .{ .name = "rerrstr" });
