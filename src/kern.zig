@@ -284,6 +284,12 @@ const c_stub = struct {
     }
     fn h9_kern_setuser(_: [*:0]const u8) void {}
     fn h9_hstream_wake(_: c_ulong) void {}
+    fn h9_child_wake(_: c_ulong) void {}
+    fn h9_child_dropsrc(_: ?*anyopaque) void {}
+    fn h9_child_nserved(_: c_ulong) c_int {
+        return 0;
+    }
+    fn h9_child_unserve(_: c_ulong) void {}
     fn h9_hstream_fd(_: c_ulong) c_int {
         return -1;
     }
@@ -415,6 +421,10 @@ const c_real = struct {
     extern fn h9_kern_upuser() [*:0]const u8;
     extern fn h9_kern_setuser(name: [*:0]const u8) void;
     extern fn h9_hstream_wake(id: c_ulong) void;
+    extern fn h9_child_wake(id: c_ulong) void;
+    extern fn h9_child_dropsrc(ch: ?*anyopaque) void;
+    extern fn h9_child_nserved(id: c_ulong) c_int;
+    extern fn h9_child_unserve(id: c_ulong) void;
     extern fn h9_hstream_fd(id: c_ulong) c_int;
     extern fn h9_hstream_wait(id: c_ulong) c_int;
     extern fn h9_kserve_new(readonly: c_int, root: [*:0]const u8, ended: ?*const fn (?*anyopaque) callconv(.c) void, arg: ?*anyopaque) ?*anyopaque;
@@ -1291,6 +1301,31 @@ fn fdPtr(fd: std.posix.fd_t) ?*anyopaque {
 /// a kernel process, as `wakeConsole` is.
 pub fn hstreamWake(id: u32) void {
     c.h9_hstream_wake(id);
+}
+
+/// Wakes guest reads waiting on child machine conversation `id`
+/// (src/kern/dev/machine.zig, design/child-machines.md). Called from
+/// any thread.
+pub fn childWake(id: u32) void {
+    c.h9_child_wake(id);
+}
+
+/// Closes a channel the machine device walked for a child machine's
+/// namespace. On a kernel process.
+pub fn childDropSource(ch: *anyopaque) void {
+    c.h9_child_dropsrc(ch);
+}
+
+/// The servers of its caller's paths that child machine conversation
+/// `id` still has (src/kern/dev/machine.zig's source).
+pub fn childServed(id: u32) u32 {
+    return @intCast(c.h9_child_nserved(id));
+}
+
+/// Ends the connections of child machine conversation `id`'s servers
+/// of its caller's paths; they then end as childServed counts.
+pub fn childUnserve(id: u32) void {
+    c.h9_child_unserve(id);
 }
 
 /// Sleeps in the kernel until host stream `id` has connected or failed;

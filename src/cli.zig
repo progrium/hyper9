@@ -30,7 +30,7 @@ pub const usage =
     \\           [--gfx[=noclip|=headless]] [--gfx-scale N] [--gfx-size WxH]
     \\           [--serve unix!PATH|tcp!HOST!PORT|ws://HOST:PORT[/PATH]]...
     \\           [--serve-root PATH] [--serve-token @FILE] [--serve-origin ORIGIN]...
-    \\           [--serve-net]
+    \\           [--serve-net] [--children]
     \\           [--print] [--trace[=FILE]] [-v|--verbose]
     \\           [--] program [args...]
     \\       h9 [flags] --rc 'command' [args...]
@@ -113,6 +113,9 @@ pub const Config = struct {
     /// them, or `@FILE` for a host file (design/epoch-0/mounts.md).
     ns: []const []const u8 = &.{},
     host_fs: bool = false,
+    /// --children: the guest can start child machines
+    /// (design/child-machines.md).
+    children: bool = false,
     /// --no-guest-tools: leave out `#H/bin` and mask `#H`
     /// (design/epoch-0/guest-tools.md).
     guest_tools: bool = true,
@@ -201,6 +204,8 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
             c.host_fs = true;
         } else if (flag(a, "--no-guest-tools")) {
             c.guest_tools = false;
+        } else if (flag(a, "--children")) {
+            c.children = true;
         } else if (flag(a, "--gfx")) {
             gfx_window = true;
         } else if (flag(a, "--gfx=noclip")) {
@@ -408,6 +413,7 @@ pub fn flagSpec(c: Config) policy.Spec {
             .cpus = c.cpus,
             .cwd_writable = if (c.sandbox != null) true else c.cwd_writable,
             .host_fs = c.host_fs,
+            .children = c.children,
         },
         .guest_tools = c.guest_tools,
         .engine = if (c.engine == .auto) null else std.meta.stringToEnum(policy.EngineChoice, @tagName(c.engine)),
@@ -464,6 +470,7 @@ pub fn withPlan(gpa: std.mem.Allocator, c: Config, text: []const u8) Error!Confi
     r.pids = p.policy.pids;
     r.cpus = p.policy.cpus;
     r.host_fs = p.policy.host_fs;
+    r.children = p.policy.children;
     r.guest_tools = p.guest_tools;
     r.cwd = p.cwd;
     r.cwd_writable = p.policy.cwd_writable;

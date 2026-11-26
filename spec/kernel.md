@@ -7,6 +7,7 @@ This describes, as built, how Plan 9 processes are run and what h9's kernel is: 
 - [Process model](#process-model)
   - [Threads](#threads)
   - [Several machines per host process](#several-machines-per-host-process)
+  - [Child machines](#child-machines)
   - [Notes on blocked and running processes](#notes-on-blocked-and-running-processes)
   - [vCPU limits](#vcpu-limits)
 - [Kernel: drawterm `kern/` and the Zig seam](#kernel-drawterm-kern-and-the-zig-seam)
@@ -49,6 +50,12 @@ The boot also starts one kernel thread of its own, the timer kproc (`src/kern/ts
 ### Several machines per host process
 
 An embedder, or the test suite, can run several machines in one host process. Each run of a `Machine` has a kernel of its own, `kern.Kernel` (`src/kern.zig`, [kernel-port](../design/kernel-port.md)), made with `Kernel.init(gpa, host)` from the machine's `Host` and spawned into with `Kernel.spawn`: its process list, pids, note groups, `#s` board, and `/proc` are its processes' alone, and so are the settings #ℓ, #ι, and host streams look up for it (they were tables keyed by machine, of 64 entries). Its C half, `Hmach` (`src/kern/hproc.h`), is counted, so processes and host streams can outlive the `Kernel`, and find no settings once it's gone. Each machine's first Proc starts with a fresh Pgrp, Fgrp, and Egrp, so each has its own namespace, device mask, console, and environment. The host threads, the boot Proc, the device table, and the timer kproc are still the host process's, as are some C devices' tables, which every machine's entries share (`#ℓ`'s, `#ι`'s, and `#ℓ` streams' conversations, `#y`'s consoles, the ptys, and the Linux futex waits). The CLI always runs one.
+
+### Child machines
+
+A machine run with `--children` ([child-machines](../design/child-machines.md)) can start machines of its own through `#μ` (`src/kern/dev/machine.zig`, bound after `#c` on `/dev`), whose conversations `src/child.zig` keeps: `machine/clone`, and per child `ctl` (plan lines, then `exec`), `data` (the console), `stderr`, `wait`, `plan`, and `note`. `src/guest/bin/h9` is the client. A child is another `Machine` in the same host process (`Machine.initChild`), sharing its parent's engine (`Machine.Backend`) under a quota of its own (spec/engines.md), with a `cpupool.Pool` whose parent is the parent machine's, so each level's `--cpus` caps its running vCPUs. It runs on a host thread of its own, and has a `kern.Kernel` of its own like any machine; its `Job.parent_job` chain makes each new process count against every ancestor's `--pids`. The parent's `exec` compiles the child's plan with `policy.compile` in caller mode and `policy.fromCaller`, narrowed by `policy.narrow` against the caller's own plan with what's left of its limits.
+
+The child's namespace is built from the caller's: each source a host machine would bind from `#U` is instead a path in the caller's namespace. When `exec` is written, the device serves each path from the caller's namespace with kserve (`h9_kserve_new`, as the writing process, so the walks cross the caller's mounts and devfs checks its plan), over a pipe, and attaches it as a 9P mount (`devmnt.mntattach`); a channel alone would lose the mounts and unions under it. The child binds these as `#μsN`, and those it only reads under an `#O` overlay of its own. The servers end as the child's mounts go, and the child's thread waits for them, hanging them up after 100 ms, before its parent may end. A child's devfs rules are its parent's. Its `#c`, `#p`, `#s`, `#e`, and overlays are its own, as any machine's. The parent's run stops its children after its own processes have exited, and waits for them (`Job.endChildren`).
 
 ### Notes on blocked and running processes
 

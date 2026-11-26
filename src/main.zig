@@ -268,6 +268,7 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
         .cpus = cfg.cpus,
         .cwd_writable = if (cfg.sandbox != null) true else cfg.cwd_writable,
         .host_fs = cfg.host_fs,
+        .children = cfg.children,
     };
     var base: h9.Machine.Options = .{
         .engine = cfg.engine,

@@ -415,11 +415,11 @@ pub fn create(gpa: std.mem.Allocator, io: std.Io, want: Choice, opts: Options) C
 
 fn createKind(gpa: std.mem.Allocator, io: std.Io, k: Kind, opts: Options) CreateError!Engine {
     return switch (k) {
-        .hvf => .{ .hvf = try hvf.Engine.create(gpa, io, opts) },
-        .kvm => .{ .kvm = try kvm.Engine.create(gpa, io, opts) },
-        .whp => .{ .whp = try whp.Engine.create(gpa, io, opts) },
-        .hcpu => .{ .hcpu = try hcpu_engine.Engine.create(gpa, io, opts) },
-        .sud => .{ .sud = try sud.Engine.create(gpa, io, opts) },
+        .hvf => .{ .impl = .{ .hvf = try hvf.Engine.create(gpa, io, opts) } },
+        .kvm => .{ .impl = .{ .kvm = try kvm.Engine.create(gpa, io, opts) } },
+        .whp => .{ .impl = .{ .whp = try whp.Engine.create(gpa, io, opts) } },
+        .hcpu => .{ .impl = .{ .hcpu = try hcpu_engine.Engine.create(gpa, io, opts) } },
+        .sud => .{ .impl = .{ .sud = try sud.Engine.create(gpa, io, opts) } },
     };
 }
 
@@ -431,18 +431,67 @@ pub const hwcap_arm64_sha2: u64 = 1 << 6;
 pub const hwcap_arm64_crc32: u64 = 1 << 7;
 pub const hwcap_arm64_atomics: u64 = 1 << 8;
 
-pub const Engine = union(Kind) {
-    hvf: *hvf.Engine,
-    kvm: *kvm.Engine,
-    whp: *whp.Engine,
-    hcpu: *hcpu_engine.Engine,
-    sud: *sud.Engine,
+/// A machine's share of an engine's guest memory
+/// (design/child-machines.md): the bytes of pages it may hold from
+/// `allocPages` at once. Machines that share an engine each have one: a
+/// root machine's is its `--memory`, and a child's is reserved from its
+/// parent's when it starts, and given back when it ends.
+pub const Quota = struct {
+    limit: u64,
+    used: std.atomic.Value(u64) = .init(0),
+
+    /// Takes `n` bytes, or nothing if fewer are left.
+    pub fn take(q: *Quota, n: u64) bool {
+        var cur = q.used.load(.monotonic);
+        while (true) {
+            if (n > q.limit or cur > q.limit - n) return false;
+            cur = q.used.cmpxchgWeak(cur, cur + n, .acq_rel, .monotonic) orelse return true;
+        }
+    }
+
+    pub fn give(q: *Quota, n: u64) void {
+        _ = q.used.fetchSub(n, .acq_rel);
+    }
+
+    /// The bytes not taken.
+    pub fn left(q: *const Quota) u64 {
+        return q.limit -| q.used.load(.acquire);
+    }
+};
+
+/// An engine, as one machine uses it: the engine itself, which several
+/// machines in a process may share (design/child-machines.md), and the
+/// machine's quota on its memory, if it has one.
+pub const Engine = struct {
+    impl: Impl,
+    quota: ?*Quota = null,
+
+    pub const Impl = union(Kind) {
+        hvf: *hvf.Engine,
+        kvm: *kvm.Engine,
+        whp: *whp.Engine,
+        hcpu: *hcpu_engine.Engine,
+        sud: *sud.Engine,
+    };
 
     pub fn kind(b: Engine) Kind {
-        return b;
+        return b.impl;
+    }
+    /// What tables kept per engine are keyed by: the machine's quota when
+    /// it has one, so machines sharing an engine don't share them, and
+    /// otherwise the engine.
+    pub fn id(b: Engine) usize {
+        if (b.quota) |q| return @intFromPtr(q);
+        return switch (b.impl) {
+            inline else => |p| @intFromPtr(p),
+        };
+    }
+    /// The same engine, with another quota.
+    pub fn withQuota(b: Engine, q: ?*Quota) Engine {
+        return .{ .impl = b.impl, .quota = q };
     }
     pub fn destroy(b: Engine) void {
-        switch (b) {
+        switch (b.impl) {
             inline else => |p| p.destroy(),
         }
     }
@@ -452,7 +501,7 @@ pub const Engine = union(Kind) {
     /// SHA256. Hardware engines say none, and a program
     /// finds what the CPU has by trying.
     pub fn hwcaps(b: Engine, arch: Arch) u64 {
-        return switch (b) {
+        return switch (b.impl) {
             .hcpu => if (!have_hcpu) 0 else switch (arch) {
                 .arm64 => hwcap_arm64_aes | hwcap_arm64_pmull | hwcap_arm64_sha1 | hwcap_arm64_sha2 | hwcap_arm64_crc32 | hwcap_arm64_atomics,
                 else => 0,
@@ -466,37 +515,42 @@ pub const Engine = union(Kind) {
     /// on x86, which zeroes each vCPU's TSC offset. The emulators' count
     /// instructions.
     pub fn hostTsc(b: Engine) bool {
-        return switch (b) {
+        return switch (b.impl) {
             .sud => have_sud,
             .kvm => |p| if (comptime have_kvm and builtin.cpu.arch == .x86_64) p.host_tsc else false,
             else => false,
         };
     }
     pub fn maxVcpus(b: Engine) Error!u32 {
-        return switch (b) {
+        return switch (b.impl) {
             inline else => |p| p.maxVcpus(),
         };
     }
-    /// Returns zeroed, page-aligned memory that address spaces can map.
+    /// Returns zeroed, page-aligned memory that address spaces can map,
+    /// counted against the quota.
     pub fn allocPages(b: Engine, n: usize) Error![]align(page_size) u8 {
-        return switch (b) {
+        const bytes = @as(u64, n) * page_size;
+        if (b.quota) |q| if (!q.take(bytes)) return error.OutOfGuestMemory;
+        errdefer if (b.quota) |q| q.give(bytes);
+        return switch (b.impl) {
             inline else => |p| p.allocPages(n),
         };
     }
     /// Returns a whole allocation from `allocPages`, no longer mapped.
     pub fn freePages(b: Engine, mem: []align(page_size) u8) void {
-        switch (b) {
+        switch (b.impl) {
             inline else => |p| p.freePages(mem),
         }
+        if (b.quota) |q| q.give(mem.len);
     }
     pub fn newAddressSpace(b: Engine) CreateError!AddressSpace {
-        return switch (b) {
+        return switch (b.impl) {
             inline else => |p, k| @unionInit(AddressSpace, @tagName(k), try p.newAddressSpace()),
         };
     }
     /// Must be called on the thread that will run the vCPU.
     pub fn createVcpu(b: Engine) CreateError!Vcpu {
-        return switch (b) {
+        return switch (b.impl) {
             inline else => |p, k| @unionInit(Vcpu, @tagName(k), try p.createVcpu()),
         };
     }

@@ -72,6 +72,13 @@ h9 --net-allow 'tcp!api.example.com!443' ./client   # egress to one host only
 h9 --print --profile=tight mk                 # show the compiled plan and exit
 ```
 
+With `--children`, a machine runs its own `h9`, which starts a child machine
+inside it, bounded by the parent's files, network, and limits:
+
+```sh
+h9 --children --memory 1g --rc 'h9 --memory 256m --net disable --rc ''mk test'''
+```
+
 Run Linux programs, from a single static binary to a whole distribution:
 
 ```sh
