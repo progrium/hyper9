@@ -171,6 +171,22 @@ const Posix = struct {
         else => 0x20007461, // _IO('t', 97) on macOS and the BSDs
     };
 
+    /// libc's struct termios. On Linux, std.c.termios is the kernel's,
+    /// 44 bytes with 19 c_cc, but glibc's and musl's have 32 c_cc and the
+    /// speeds, 60 bytes, and their tcgetattr fills all of it: into a bare
+    /// std.c.termios it writes past the end, which ReleaseSafe's stack
+    /// protector catches as a SIGTRAP on arm64.
+    const Termios = extern struct {
+        t: c.termios,
+        pad: [if (builtin.os.tag == .linux) 32 else 0]u8 = undefined,
+    };
+
+    fn getattr(p: *Posix) ?c.termios {
+        var t: Termios = undefined;
+        if (c.tcgetattr(p.master, &t.t) != 0) return null;
+        return t.t;
+    }
+
     master: c_int,
     pid: c.pid_t,
 
@@ -277,26 +293,22 @@ const Posix = struct {
     }
 
     fn cooked(p: *Posix) bool {
-        var t: c.termios = undefined;
-        if (c.tcgetattr(p.master, &t) != 0) return false;
+        const t = p.getattr() orelse return false;
         return t.lflag.ICANON and t.lflag.ECHO;
     }
 
     fn noEcho(p: *Posix) bool {
-        var t: c.termios = undefined;
-        if (c.tcgetattr(p.master, &t) != 0) return false;
+        const t = p.getattr() orelse return false;
         return t.lflag.ICANON and !t.lflag.ECHO;
     }
 
     fn raw(p: *Posix) bool {
-        var t: c.termios = undefined;
-        if (c.tcgetattr(p.master, &t) != 0) return false;
+        const t = p.getattr() orelse return false;
         return !t.lflag.ICANON;
     }
 
     fn echo(p: *Posix) bool {
-        var t: c.termios = undefined;
-        if (c.tcgetattr(p.master, &t) != 0) return false;
+        const t = p.getattr() orelse return false;
         return t.lflag.ECHO;
     }
 

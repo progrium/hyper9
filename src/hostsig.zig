@@ -124,7 +124,7 @@ const Posix = struct {
     pipe: [2]posix.fd_t = .{ -1, -1 },
     thread: ?std.Thread = null,
     /// The terminal's mode before raw mode or echo off, while either is on.
-    saved: ?c.termios = null,
+    saved: ?Termios = null,
     raw: bool = false,
     no_echo: bool = false,
     /// Raw mode without ICRNL: Enter reaches the guest as CR.
@@ -133,6 +133,16 @@ const Posix = struct {
     old: [3]posix.Sigaction = undefined,
 
     const sigs = [_]posix.SIG{ .INT, .HUP, .TERM };
+
+    /// libc's struct termios. On Linux, std.c.termios is the kernel's,
+    /// 44 bytes with 19 c_cc, but glibc's and musl's have 32 c_cc and the
+    /// speeds, 60 bytes: their tcgetattr fills all of it, and tcsetattr
+    /// can read the speeds, so a bare std.c.termios is overrun.
+    const Termios = extern struct {
+        t: c.termios,
+        pad: [if (builtin.os.tag == .linux) 32 else 0]u8 = undefined,
+    };
+
     const ev_interrupt = 'i';
     const ev_hangup = 'h';
     const ev_term = 't';
@@ -258,17 +268,18 @@ const Posix = struct {
         if (!s.raw and !s.no_echo) {
             if (s.saved) |t| {
                 var tt = t;
-                _ = c.tcsetattr(fd, when, &tt);
+                _ = c.tcsetattr(fd, when, &tt.t);
                 s.saved = null;
             }
             return;
         }
         if (s.saved == null) {
-            var t: c.termios = undefined;
-            if (c.tcgetattr(fd, &t) != 0) return;
+            var t: Termios = undefined;
+            if (c.tcgetattr(fd, &t.t) != 0) return;
             s.saved = t;
         }
-        var t = s.saved.?;
+        var tio = s.saved.?;
+        const t = &tio.t;
         // Raw mode keeps echo unless it's off too: 9front's rawon turns
         // both off (src/kern.zig), a Linux program can ask for either.
         t.lflag.ECHO = !s.no_echo;
@@ -279,7 +290,7 @@ const Posix = struct {
             t.cc[@intFromEnum(c.V.MIN)] = 1;
             t.cc[@intFromEnum(c.V.TIME)] = 0;
         }
-        _ = c.tcsetattr(fd, when, &t);
+        _ = c.tcsetattr(fd, when, t);
     }
 };
 
