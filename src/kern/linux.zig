@@ -61,6 +61,7 @@ fn swapchan(ch: ?*Chan, which: bool) Error!?*Chan {
 // design/epoch-0/kernel-serve.md), held as its workers' slash. Only a
 // chroot's makes the process's root the Linux view. Not drawterm flags:
 // only this file sets or reads them, and clones don't copy them.
+// chan.zig's CSRVNAME is 0x2000.
 const CLROOT = 0x4000;
 const CSROOT = 0x8000;
 

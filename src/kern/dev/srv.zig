@@ -586,8 +586,7 @@ fn post(b: *Board, name: ?[*:0]const u8, qidpath: u64, c1: *Chan, srvname: ?[*:0
 
     sp.chan = c1;
 
-    if (c1.srvname == null) if (srvname) |s|
-        chan.kstrdup(@ptrCast(&c1.srvname), s);
+    if (srvname) |s| chan.setsrvname(c1, s);
 }
 
 fn srvwrite(ch: *Chan, va: ?*const anyopaque, n: c_int, off: i64) Error!c_int {

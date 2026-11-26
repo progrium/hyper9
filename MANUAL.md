@@ -678,7 +678,7 @@ run rc
 # profile:  default
 # enforces: env.scrub fs.read.scope fs.write.overlay fs.write.scope ipc.restrict kernel.isolation net.outbound
 # limits:   write=overlay net=outbound
-# devmask:  #C #U #b #i #m
+# devmask:  #C #U #ū #b #i #m
 # namespace:
 #   bind '#U/Users/me/src/hyper9/.local/9front/root-11952' / ro
 #   bind -c '#O' /                                         eph  # /Users/me/src/hyper9/.local/9front/root-11952
@@ -2732,7 +2732,7 @@ run mk
 # profile:  tight
 # enforces: env.scrub fs.read.scope fs.write.overlay fs.write.scope ipc.restrict kernel.isolation net.disable proc.timeout res.memory
 # limits:   write=overlay net=disable memory=512M timeout=1m
-# devmask:  #C #I #ℏ #U #b #i #m
+# devmask:  #C #I #ℏ #U #ū #b #i #m
 # namespace:
 #   bind '#U/Users/me/src/hyper9/.local/9front/root-11952' / ro
 #   bind -c '#O' /                                         eph  # /Users/me/src/hyper9/.local/9front/root-11952
@@ -2758,7 +2758,6 @@ run mk
 #   - hardlinks under writable paths can modify host files outside them
 #   - writes to writable paths are not capped (no res.disk)
 #   - paths are checked after resolving symlinks, so a host process renaming paths concurrently can race the check
-#   - /proc/n/ns shows the host paths of bound host trees
 #   - the h9 process itself is not host-sandboxed
 ```
 
