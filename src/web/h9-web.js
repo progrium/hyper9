@@ -820,6 +820,96 @@ export function mountFlag(m, src = m.src) {
   return parts.length ? `--${kind}=${parts.join(':')}` : `--${kind}`;
 }
 
+// Plans (design/plan-format.md) on the page: createMachine({ plan }) gives
+// h9 the text as a file for --plan, with its archive lines' sources
+// fetched as the mounts' are.
+
+const mountKinds = ['archive', 'url', 'dir', 'builtin', 'tmp'];
+
+/**
+ * A plan's lines as h9 splits them (src/policy.zig's parsePlan and
+ * src/newns.zig's split): a line that starts with `#` is a comment to its
+ * end, a `#` that starts a word is one to the next `;`, `'` quotes, `''`
+ * is a quote in quotes, and `;` or a newline ends a line. Each is
+ * { start, end, words }, `start` and `end` its offsets in `text`.
+ */
+export function planLines(text) {
+  const lines = [];
+  let i = 0;
+  while (i < text.length) {
+    const eol = text.indexOf('\n', i) < 0 ? text.length : text.indexOf('\n', i);
+    if (/^[ \t\r]*#/.test(text.slice(i, eol))) { i = eol + 1; continue; }
+    let start = i, words = [];
+    const end = () => { if (words.length) lines.push({ start, end: i, words }); words = []; };
+    while (i < eol) {
+      const c = text[i];
+      if (c === ' ' || c === '\t' || c === '\r') { i++; if (!words.length) start = i; continue; }
+      if (c === ';') { end(); i++; start = i; continue; }
+      if (c === '#') {
+        const semi = text.indexOf(';', i);
+        if (semi < 0 || semi > eol) { i = eol; break; }
+        end(); i = semi + 1; start = i; continue;
+      }
+      let w = '', quoted = false;
+      for (; i < eol; i++) {
+        const ch = text[i];
+        if (ch === "'") {
+          if (quoted && text[i + 1] === "'") { w += "'"; i++; } else quoted = !quoted;
+          continue;
+        }
+        if (!quoted && (ch === ' ' || ch === '\t' || ch === '\r' || ch === ';')) break;
+        w += ch;
+      }
+      if (quoted) throw new Error('plan: a quote that isn\'t closed');
+      words.push(w);
+    }
+    end();
+    i = eol + 1;
+  }
+  return lines;
+}
+
+/** A word as a plan writes it: quoted if it has to be. */
+export function planWord(w) {
+  return w !== '' && /^[^\s'#;]+$/.test(w) ? w : `'${w.replaceAll("'", "''")}'`;
+}
+
+/** Whether a plan has a mount line: dir, url, archive, builtin, or tmp. */
+export function planHasMounts(text) {
+  return planLines(text).some((l) => mountKinds.includes(l.words[0]));
+}
+
+/**
+ * `text` with each `archive VALUE` line's source replaced by what
+ * `f(src, index)` returns, `index` counting the archive lines; the line
+ * becomes `kind` (`dir`, for a tree unpacked into the Worker's files) if
+ * given. A value is a mount flag's (src/mount.zig): SRC:DST:OPTS, or the
+ * long form src=…,dst=…. Other lines, and line numbers, are unchanged.
+ */
+export function mapPlanArchives(text, f, kind = 'archive') {
+  const lines = planLines(text).filter((l) => l.words[0] === 'archive' && l.words.length === 2);
+  let out = '', at = 0;
+  lines.forEach((l, i) => {
+    const v = l.words[1];
+    let src, rest, long = false;
+    const lf = v.match(/^src=("(?:[^"]|"")*"|[^,]*)/);
+    if (lf) {
+      long = true;
+      src = lf[1].startsWith('"') ? lf[1].slice(1, -1).replaceAll('""', '"') : lf[1];
+      rest = v.slice(lf[0].length);
+    } else {
+      const d = dstStart(v);
+      src = d < 0 ? v : v.slice(0, d);
+      rest = d < 0 ? '' : v.slice(d);
+    }
+    const s = f(src, i);
+    const nv = long ? `src=${/[,"]/.test(s) ? `"${s.replaceAll('"', '""')}"` : s}${rest}` : s + rest;
+    out += text.slice(at, l.start) + `${kind} ${planWord(nv)}`;
+    at = l.end;
+  });
+  return out + text.slice(at);
+}
+
 function policyFlags(policy = {}) {
   const f = [];
   const one = { profile: '--profile', write: '--write', net: '--net', memory: '--memory', timeout: '--timeout', pids: '--pids', cpus: '--cpus' };
@@ -1055,6 +1145,15 @@ function attachCanvas(canvas, worker, { clipboard, scale, size, events }) {
  *   (design/epoch-0/serve.md), with no listener, origin, or token;
  *   machine.serve(port) adds one while it runs, to a machine made with
  *   serve. serveNet: true exports /net with it, as --serve-net does
+ * - plan: a plan's text (design/plan-format.md), which h9 runs as
+ *   --plan does, in place of mounts and binds, which are then an error.
+ *   An `archive` line's source is a URL, relative to the page, fetched
+ *   and unpacked as a mount's is; a `url port://NAME` line names one of
+ *   `ports`. A plan without mount lines gets root.h9a beside this file
+ *   as its first line, so the line numbers h9 reports are one more. The
+ *   other options are flags given with the plan, so they can only narrow
+ *   it: memory and policy lower or remove, and gfx needs the plan's gfx
+ *   window line. machine.run([]) runs the plan's run line
  * - credentials: async (url, failed, helper) => lines, the page's
  *   credential helper (design/epoch-0/credential-helpers.md), called in place
  *   of running a --cred helper, before each WebSocket handshake h9 makes:
@@ -1077,8 +1176,15 @@ function attachCanvas(canvas, worker, { clipboard, scale, size, events }) {
  * /dev/snarf that the page's clipboard refuses fires a `snarf` event
  * whose `text` is what was written.
  */
-export async function createMachine({ mounts, binds = [], memory, backend, arch, policy, terminal, tty = false, gfx, env, credentials, ports = {}, serve, serveNet = false } = {}) {
+export async function createMachine({ mounts, binds = [], plan, memory, backend, arch, policy, terminal, tty = false, gfx, env, credentials, ports = {}, serve, serveNet = false } = {}) {
   if (!haveJSPI) throw new Error('this browser lacks JavaScript Promise Integration');
+  if (plan != null && (mounts || binds.length)) throw new Error('createMachine: a plan has its own mount and bind lines, so mounts and binds go in it');
+  if (plan != null) {
+    // Archives by URL from the page, so the Worker can fetch them.
+    const root = new URL('root.h9a', import.meta.url);
+    if (!planHasMounts(plan)) plan = `archive ${planWord(String(root))}\n${plan}`;
+    plan = mapPlanArchives(String(plan), (src) => String(new URL(src, location.href)));
+  }
   if (gfx && typeof gfx.canvas?.transferControlToOffscreen !== 'function') throw new Error("this browser can't draw from a Worker");
   const clipboard = (gfx?.clipboard ?? 'page') !== 'private';
   const scale = Math.max(0, Math.min(255, gfx?.scale ?? 0) | 0);
@@ -1095,7 +1201,7 @@ export async function createMachine({ mounts, binds = [], memory, backend, arch,
     run(argv) {
       if (started) return Promise.reject(new Error('a machine runs once'));
       started = true;
-      const ms = (mounts ?? [{ archive: new URL('root.h9a', import.meta.url) }]).map((m) => mountOf(m, portMap));
+      const ms = plan != null ? [] : (mounts ?? [{ archive: new URL('root.h9a', import.meta.url) }]).map((m) => mountOf(m, portMap));
       const flags = [...(backend ? ['--engine', backend] : []), ...(arch ? ['--arch', arch] : []), ...(memory ? [`--memory=${memory}`] : []), ...policyFlags(policy)];
       let onGfx = () => false;
       let start = {}, transfer = [];
@@ -1130,7 +1236,7 @@ export async function createMachine({ mounts, binds = [], memory, backend, arch,
         for (const m of ms) if (m.kind === 'archive' || (m.kind === 'url' && /^https?:/i.test(m.src))) m.src = url(m.src);
         const bindFlags = binds.flatMap((b) => ['--bind', b]);
         const portList = [...Object.values(portMap), ...served];
-        worker.postMessage({ type: 'start', argv: [...flags, ...bindFlags, ...argv], mounts: ms, tty, env, credentials: typeof credentials === 'function', ports: portMap, serve: served, serving, serveNet: !!serveNet, ...start }, [...transfer, ...portList]);
+        worker.postMessage({ type: 'start', argv: [...flags, ...bindFlags, ...argv], mounts: ms, plan, tty, env, credentials: typeof credentials === 'function', ports: portMap, serve: served, serving, serveNet: !!serveNet, ...start }, [...transfer, ...portList]);
       });
     },
     addPort(name, port) {
