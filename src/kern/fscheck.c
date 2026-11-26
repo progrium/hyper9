@@ -646,12 +646,22 @@ h9_fs_findfirst(wchar_t *path, WIN32_FIND_DATAW *wfd)
 	return h;
 }
 
+/*
+ * src/host/dirs.c: the open, or the directory made, beneath the machine's
+ * handle that holds path (design/host-handles.md); 0 if there's no host,
+ * for the call by path.
+ */
+extern int h9_host_createfilew(const wchar_t *path, DWORD access, DWORD share, SECURITY_ATTRIBUTES *sa, DWORD disp, DWORD flags, HANDLE *out);
+extern int h9_host_createdirw(const wchar_t *path, SECURITY_ATTRIBUTES *sa, BOOL *ok);
+
 HANDLE
 h9_fs_createfile(wchar_t *path, DWORD access, DWORD share, SECURITY_ATTRIBUTES *sa, DWORD disp, DWORD flags, HANDLE tmpl)
 {
 	wchar_t *l;
 	HANDLE h;
 
+	if(tmpl == nil && h9_host_createfilew(path, access, share, sa, disp, flags, &h))
+		return h;
 	if((l = h9_fs_longw(path)) == nil)
 		return INVALID_HANDLE_VALUE;
 	h = CreateFileW(l, access, share, sa, disp, flags, tmpl);
@@ -665,6 +675,8 @@ h9_fs_createdir(wchar_t *path, SECURITY_ATTRIBUTES *sa)
 	wchar_t *l;
 	BOOL r;
 
+	if(h9_host_createdirw(path, sa, &r))
+		return r;
 	if((l = h9_fs_longw(path)) == nil)
 		return FALSE;
 	r = CreateDirectoryW(l, sa);

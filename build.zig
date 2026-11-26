@@ -617,6 +617,8 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.O
         .files = &.{ "procshim.c", "devtab.c", "devdup.c", "devhtools.c", "fscheck.c", "consx.c", "devshim.c", "werrstr.c" },
         .flags = flags,
     });
+    // devfs's opens beneath the host's directory handles (design/host-handles.md).
+    kern.root_module.addCSourceFiles(.{ .root = b.path("src/host"), .files = &.{"dirs.c"}, .flags = flags });
     // The Linux ABI (design/epoch-0/linux-personality.md) and its host
     // sockets (design/epoch-0/linux-net.md).
     if (web) {
@@ -637,6 +639,7 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.O
         kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{ "glue-win32.c", "hostsock-win32.c" }, .flags = flags });
         kern.root_module.linkSystemLibrary("ws2_32", .{});
         kern.root_module.linkSystemLibrary("advapi32", .{});
+        kern.root_module.linkSystemLibrary("ntdll", .{}); // NtCreateFile, src/host/dirs.c
     }
     if (os == .macos) addSdkPaths(b, kern.root_module);
     if (web) {
@@ -854,15 +857,18 @@ fn addNsKernel(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.la
         if (hostfs) {
             m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/kern"), .files = &.{"devfs-win32.c"}, .flags = flags });
             m.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"fscheck.c"}, .flags = flags });
+            m.addCSourceFiles(.{ .root = b.path("src/host"), .files = &.{"dirs.c"}, .flags = flags });
         }
         m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/posix-port"), .files = &kern_port, .flags = flags });
         m.linkSystemLibrary("ws2_32", .{});
         m.linkSystemLibrary("advapi32", .{});
+        if (hostfs) m.linkSystemLibrary("ntdll", .{});
     } else {
         m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/kern"), .files = &.{ "posix.c", "devlfd-posix.c" }, .flags = flags });
         if (hostfs) {
             m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/kern"), .files = &.{"devfs-posix.c"}, .flags = flags });
             m.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"fscheck.c"}, .flags = flags });
+            m.addCSourceFiles(.{ .root = b.path("src/host"), .files = &.{"dirs.c"}, .flags = flags });
         }
         m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/posix-port"), .files = &kern_port, .flags = flags });
         if (target.result.os.tag == .macos) addSdkPaths(b, m);
