@@ -138,9 +138,6 @@ void *h9_egrpcopy(void *e) { USED(e); return nil; }
 void h9_egrpincref(void *e) { USED(e); }
 void h9_egrpclose(void *e) { USED(e); }
 
-/* sema.c's: no guest semaphores. */
-void h9_semainit(void) {}
-
 /* linux.c's: no Linux processes, so no Linux view, links, or chroots. */
 int h9_linux_inview(void) { return 0; }
 int h9_fs_linkwalk(void) { return 0; }

@@ -486,7 +486,7 @@ fn serve(p: *Process, nr: Nr, a: Args) (gm.Error || std.mem.Allocator.Error)!Out
 /// call" and return null. A Plan 9 long is 32 bits, and an aligned one
 /// never crosses a page.
 ///
-/// The wait lists are keyed by the word's host address (src/kern/sema.c),
+/// The wait lists are keyed by the word's host address (src/kern/sema.zig),
 /// so its page mustn't move while the call blocks: the word's pages are
 /// the process's own, not shared copy-on-write with a fork, and held
 /// (`Mm.pin`) until the call returns, so an rfork meanwhile by an RFMEM

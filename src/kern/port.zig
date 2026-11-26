@@ -20,6 +20,7 @@
 //! And h9's own C, as it's ported:
 //!
 //! - `tsleep.zig`: tsleep.c, sleep with a timeout.
+//! - `sema.zig`: sema.c, semaphores and rendezvous for guests.
 //!
 //! This file is the root the kernel builds compile (build.zig's addKern,
 //! and src/nskernel.zig), and holds what the ported files share: the C
@@ -40,6 +41,7 @@ pub const devmnt = @import("devmnt.zig");
 pub const devpipe = @import("dev/pipe.zig");
 pub const devroot = @import("dev/root.zig");
 pub const tsleep = @import("tsleep.zig");
+pub const sema = @import("sema.zig");
 
 comptime {
     qio.exportC();
@@ -52,6 +54,7 @@ comptime {
     devpipe.exportC();
     devroot.exportC();
     tsleep.exportC();
+    sema.exportC();
 }
 
 test {
@@ -68,6 +71,7 @@ test {
     _ = devpipe;
     _ = devroot;
     _ = tsleep;
+    _ = sema;
 }
 
 /// A kernel error. The Plan 9 error string is on the process, in
