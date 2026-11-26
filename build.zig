@@ -614,7 +614,7 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.O
     });
     kern.root_module.addCSourceFiles(.{
         .root = b.path("src/kern"),
-        .files = &.{ "procshim.c", "devtab.c", "devdup.c", "devhtools.c", "fscheck.c", "consx.c", "devshim.c", "werrstr.c", "devdotl.c" },
+        .files = &.{ "procshim.c", "devtab.c", "devdup.c", "devhtools.c", "fscheck.c", "consx.c", "devshim.c", "werrstr.c" },
         .flags = flags,
     });
     // The Linux ABI (design/epoch-0/linux-personality.md) and its host
@@ -775,7 +775,7 @@ const nskern_sources = [_][]const u8{
 };
 const nskern_h9 = [_][]const u8{
     "procshim.c", "nstab.c",
-    "devdotl.c",  "devshim.c", "werrstr.c",
+    "devshim.c", "werrstr.c",
 };
 // libc's files the kernel subset uses, from kern_libs' list.
 const nskern_libc_skip = [_][]const u8{ "pushssl.c", "pushtls.c", "crypt.c", "dial.c" };

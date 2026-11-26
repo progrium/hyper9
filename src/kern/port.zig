@@ -55,6 +55,7 @@
 //! - `dev/env.zig`: devenv.c, #e, environment variables.
 //! - `dev/hstream.zig`: devhstream.c, #ℏ, host streams.
 //! - `dev/hidx.zig`: devhidx.c, #ι, metadata indexes for 9P mounts.
+//! - `dev/dotl.zig`: devdotl.c, h9's 9P2000.L translation device, `#ℓ`.
 //!
 //! This file is the root the kernel builds compile (build.zig's addKern,
 //! and src/nskernel.zig), and holds what the ported files share: the C
@@ -105,6 +106,7 @@ pub const devhidx = @import("dev/hidx.zig");
 /// design/epoch-0/namespace-kernel.md), which builds with H9_NSKERNEL and
 /// has none of h9's devices for running programs (#y, for one).
 pub const nskernel = @hasDecl(c, "H9_NSKERNEL");
+pub const devdotl = @import("dev/dotl.zig");
 
 comptime {
     qio.exportC();
@@ -144,6 +146,7 @@ comptime {
         devlinux.exportC();
         linux.exportC();
     }
+    devdotl.exportC();
 }
 
 test {
@@ -180,6 +183,7 @@ test {
     _ = devenv;
     _ = devhstream;
     _ = devhidx;
+    _ = devdotl;
 }
 
 /// A kernel error. The Plan 9 error string is on the process, in

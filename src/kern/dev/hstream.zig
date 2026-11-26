@@ -519,8 +519,7 @@ pub const Device = dev.Native(Hsdc, "hstream", .{
     .gens = &.{&hsgen},
 });
 
-// The C names: h9_hstream_dial raises, for devdotl.c; h9_hstream_wait
-// and h9_hstream_fd, for src/kern.zig and src/machine.zig, return -1 with
+// The C names: h9_hstream_wait and h9_hstream_fd, for src/kern.zig and src/machine.zig, return -1 with
 // the error in syserrstr.
 
 fn syserr() c_int {
@@ -537,10 +536,6 @@ fn h9_hstream_wait(id: c_ulong) callconv(.c) c_int {
     return 0;
 }
 
-fn h9_hstream_dial(mach: ?*anyopaque, url: [*:0]const u8) callconv(.c) *Chan {
-    return dial(mach, url) catch |e| port.raise(e);
-}
-
 fn h9_hstream_fd(id: c_ulong) callconv(.c) c_int {
     return hostfd(id) catch return syserr();
 }
@@ -549,7 +544,6 @@ pub fn exportC() void {
     @export(&Device.dev, .{ .name = "hstreamdevtab" });
     @export(&h9_hstream_wake, .{ .name = "h9_hstream_wake" });
     @export(&h9_hstream_wait, .{ .name = "h9_hstream_wait" });
-    @export(&h9_hstream_dial, .{ .name = "h9_hstream_dial" });
     @export(&h9_hstream_fd, .{ .name = "h9_hstream_fd" });
 }
 

@@ -1012,7 +1012,7 @@ fn widereply(t: u8) bool {
     };
 }
 
-// src/kern/devdotl.c and dev/hidx.zig.
+// src/kern/dev/dotl.zig and dev/hidx.zig.
 extern fn h9_dotl_wide(*Chan) c_int;
 extern fn h9_hidx_wide(*Chan) c_int;
 
@@ -1353,8 +1353,9 @@ test "fuzz: a directory read from a server is whole entries, or Esbadstat [kerne
 
 /// A 9P server for the cases, on a pipe's other end: / holds one file,
 /// hello.
-const Server = struct {
-    const hello = "hello, 9p\n";
+/// (Also dev/dotl.zig's cases' server.)
+pub const Server = struct {
+    pub const hello = "hello, 9p\n";
 
     fn dir(path: u64, buf: []u8) usize {
         var d: c.Dir = .{};
@@ -1378,7 +1379,7 @@ const Server = struct {
         return true;
     }
 
-    fn run(ch: *Chan) void {
+    pub fn run(ch: *Chan) void {
         var fids: [32]i64 = @splat(-1);
         var in: [8192 + 24]u8 = undefined;
         var out: [8192 + 24]u8 = undefined;
@@ -1449,10 +1450,10 @@ const Server = struct {
         done.store(true, .release);
     }
 
-    var done: std.atomic.Value(bool) = .init(false);
+    pub var done: std.atomic.Value(bool) = .init(false);
 
     /// Waits (up to a few seconds) for the server to see its hangup.
-    fn hungup() bool {
+    pub fn hungup() bool {
         var i: usize = 0;
         while (i < 5000) : (i += 1) {
             if (done.load(.acquire)) return true;
@@ -1482,7 +1483,7 @@ test "a 9P server's files are mounted, walked, read, and stated through devmnt [
     try testing.expect(Server.hungup());
 }
 
-fn mountcase(cfd: c_int) !void {
+pub fn mountcase(cfd: c_int) !void {
     const fds = [_]c_int{cfd};
 
     {

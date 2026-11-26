@@ -601,6 +601,7 @@ const natives = .{
     @import("dev/hstream.zig").Device,
     @import("dev/srv.zig").Device,
     @import("dev/overlay.zig").Device,
+    @import("dev/dotl.zig").Device,
 } ++ (if (port.options.nskernel) .{
     @import("dev/ns.zig").Device,
 } else .{

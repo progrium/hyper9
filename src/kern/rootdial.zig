@@ -212,8 +212,8 @@ pub fn setuser(name: [*:0]const u8) void {
     _ = c.strecpy(@ptrCast(u), @as([*c]u8, @ptrCast(u)) + u.len, @constCast(name));
 }
 
-// The C names. h9_unixchan raises, for devdotl.c; the dials, for
-// src/kern.zig, return -1 with the error in syserrstr.
+// The C names. The dials, for src/kern.zig, return -1 with the error in
+// syserrstr.
 
 fn syserr() c_int {
     const p = up().syserrstr;
@@ -222,9 +222,6 @@ fn syserr() c_int {
     return -1;
 }
 
-fn h9_unixchan(path: [*:0]const u8) callconv(.c) *Chan {
-    return unixchan(path) catch |e| port.raise(e);
-}
 fn h9_unixdial(path: [*:0]const u8) callconv(.c) c_int {
     return unixdial(path) catch return syserr();
 }
@@ -252,7 +249,6 @@ fn h9_kern_setuser(name: [*:0]const u8) callconv(.c) void {
 }
 
 pub fn exportC() void {
-    @export(&h9_unixchan, .{ .name = "h9_unixchan" });
     @export(&h9_unixdial, .{ .name = "h9_unixdial" });
     @export(&h9_hostfddial, .{ .name = "h9_hostfddial" });
     @export(&h9_hostwait_new, .{ .name = "h9_hostwait_new" });

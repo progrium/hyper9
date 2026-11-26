@@ -1745,7 +1745,7 @@ fn netPort(port: c_int) ?u16 {
 }
 
 /// The calling thread's plan, for a kernel thread that acts for a
-/// process, such as #ℓ's reader when it redials (src/kern/devdotl.c).
+/// process, such as #ℓ's reader when it redials (src/kern/dev/dotl.zig).
 fn h9_plan_get() callconv(.c) ?*const anyopaque {
     return fs_plan;
 }

@@ -1,6 +1,7 @@
-//! The leaves devdotl.c (`#ℓ`, design/epoch-0/dotl.md) calls the translator
-//! through: each takes and returns bytes and never raises, returning -1
-//! with the error in the caller's ERRMAX buffer. devdotl.c holds a lock
+//! The leaves `#ℓ` (src/kern/dev/dotl.zig, design/epoch-0/dotl.md) calls
+//! the translator through: each takes and returns bytes and never raises,
+//! returning -1
+//! with the error in the caller's ERRMAX buffer. The device holds a lock
 //! per translator around every call.
 //!
 //! Each machine's user map is registered here by the machine, keyed by
@@ -56,7 +57,7 @@ fn putErr(err: [*]u8, msg: []const u8) void {
 }
 
 /// A conversation's translator: the client side, for a mount, or the
-/// server side, between a `--serve` client and its exportfs. devdotl.c
+/// server side, between a `--serve` client and its exportfs. The device
 /// calls the side next to devmnt or exportfs the "mount" side, and the
 /// network connection the "server" side, either way.
 const Tr = struct {
