@@ -8,6 +8,8 @@
 //! - `qio.zig`: qio.c and allocb.c, queues and blocks.
 //! - `sync.zig`: qlock.c, rwlock.c, and sleep.c, the kernel's locks and
 //!   sleep and wakeup.
+//! - `dev.zig`: dev.c, the helpers devices are built from, and the
+//!   device switch, which calls C devices through src/kern/devshim.c.
 //!
 //! This file is the root the kernel builds compile (build.zig's addKern,
 //! and src/nskernel.zig), and holds what the ported files share: the C
@@ -20,10 +22,12 @@ const builtin = @import("builtin");
 pub const c = @import("kern_c");
 pub const qio = @import("qio.zig");
 pub const sync = @import("sync.zig");
+pub const dev = @import("dev.zig");
 
 comptime {
     qio.exportC();
     sync.exportC();
+    dev.exportC();
 }
 
 test {
@@ -32,6 +36,7 @@ test {
     _ = @import("h9ns");
     _ = qio;
     _ = sync;
+    _ = dev;
 }
 
 /// A kernel error. The Plan 9 error string is on the process, in
@@ -48,8 +53,59 @@ pub const ERRMAX = c.ERRMAX;
 
 // error.c's strings. They're arrays (char Eintr[]), which translate-c
 // reads as pointers, so they're declared here.
-pub extern const Eintr: [0:0]u8;
+pub extern const Enoerror: [0:0]u8;
+pub extern const Emount: [0:0]u8;
+pub extern const Eunmount: [0:0]u8;
+pub extern const Eunion: [0:0]u8;
+pub extern const Emountrpc: [0:0]u8;
+pub extern const Eshutdown: [0:0]u8;
+pub extern const Enocreate: [0:0]u8;
+pub extern const Enonexist: [0:0]u8;
+pub extern const Eexist: [0:0]u8;
+pub extern const Ebadsharp: [0:0]u8;
+pub extern const Enotdir: [0:0]u8;
+pub extern const Eisdir: [0:0]u8;
+pub extern const Ebadchar: [0:0]u8;
+pub extern const Efilename: [0:0]u8;
+pub extern const Eperm: [0:0]u8;
+pub extern const Ebadusefd: [0:0]u8;
+pub extern const Ebadarg: [0:0]u8;
+pub extern const Einuse: [0:0]u8;
+pub extern const Eio: [0:0]u8;
+pub extern const Etoobig: [0:0]u8;
+pub extern const Etoosmall: [0:0]u8;
+pub extern const Enoport: [0:0]u8;
 pub extern const Ehungup: [0:0]u8;
+pub extern const Ebadctl: [0:0]u8;
+pub extern const Enodev: [0:0]u8;
+pub extern const Eprocdied: [0:0]u8;
+pub extern const Enochild: [0:0]u8;
+pub extern const Eioload: [0:0]u8;
+pub extern const Enovmem: [0:0]u8;
+pub extern const Ebadfd: [0:0]u8;
+pub extern const Enofd: [0:0]u8;
+pub extern const Eisstream: [0:0]u8;
+pub extern const Ebadexec: [0:0]u8;
+pub extern const Etimedout: [0:0]u8;
+pub extern const Econrefused: [0:0]u8;
+pub extern const Econinuse: [0:0]u8;
+pub extern const Eintr: [0:0]u8;
+pub extern const Enomem: [0:0]u8;
+pub extern const Enoswap: [0:0]u8;
+pub extern const Esoverlap: [0:0]u8;
+pub extern const Emouseset: [0:0]u8;
+pub extern const Eshort: [0:0]u8;
+pub extern const Egreg: [0:0]u8;
+pub extern const Ebadspec: [0:0]u8;
+pub extern const Enoreg: [0:0]u8;
+pub extern const Enoattach: [0:0]u8;
+pub extern const Eshortstat: [0:0]u8;
+pub extern const Ebadstat: [0:0]u8;
+pub extern const Enegoff: [0:0]u8;
+pub extern const Ecmdargs: [0:0]u8;
+pub extern const Etoolong: [0:0]u8;
+pub extern const Edirseek: [0:0]u8;
+pub extern const Eismtpt: [0:0]u8;
 
 /// C's error(msg) for Zig: stores msg as the process's error string, and
 /// returns the error for the caller to return.

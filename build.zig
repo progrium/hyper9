@@ -8,14 +8,15 @@ const drawterm = "third_party/drawterm";
 // devenv.c (src/kern/ has our own), devpipe.c (built with kern_notes
 // below), devcmd.c (host commands live on the host-cmd branch while
 // design/host-cmd.md rethinks them), or the files ported to Zig
-// (design/kernel-port.md, src/kern/port.zig): allocb.c, qio.c, qlock.c,
-// rwlock.c, and sleep.c. Plus the OS files below.
+// (design/kernel-port.md, src/kern/port.zig): allocb.c, dev.c, qio.c,
+// qlock.c, rwlock.c, and sleep.c. Plus the OS files below.
 const kern_sources = [_][]const u8{
-    "alloc.c",         "chan.c",     "data.c",     "dev.c",      "devaudio.c",
-    "devaudio-none.c", "devcons.c",  "devdraw.c",  "devip.c",    "devkbd.c",
-    "devmnt.c",        "devmouse.c", "devroot.c",  "devssl.c",   "devtls.c",
-    "error.c",         "parse.c",    "pgrp.c",     "procinit.c", "stub.c",
-    "sysfile.c",       "term.c",     "waserror.c",
+    "alloc.c",         "chan.c",     "data.c",     "devaudio.c",
+    "devaudio-none.c", "devcons.c",  "devdraw.c",  "devip.c",
+    "devkbd.c",        "devmnt.c",   "devmouse.c", "devroot.c",
+    "devssl.c",        "devtls.c",   "error.c",    "parse.c",
+    "pgrp.c",          "procinit.c", "stub.c",     "sysfile.c",
+    "term.c",          "waserror.c",
 };
 // drawterm files that post notes, built so their notes reach h9's note
 // queue (src/kern/proc.c) instead of drawterm's postnote.
@@ -619,7 +620,7 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.O
     });
     kern.root_module.addCSourceFiles(.{
         .root = b.path("src/kern"),
-        .files = &.{ "glue.c", "proc.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "devproc.c", "devoverlay.c", "devsrv.c", "devhtools.c", "fscheck.c", "netcheck.c", "consx.c", "tsleep.c", "sema.c", "rootdial.c", "devhstream.c", "devdotl.c", "devhidx.c", "kserve.c", "ns.c" },
+        .files = &.{ "glue.c", "proc.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "devproc.c", "devoverlay.c", "devsrv.c", "devhtools.c", "fscheck.c", "netcheck.c", "consx.c", "tsleep.c", "devshim.c", "sema.c", "rootdial.c", "devhstream.c", "devdotl.c", "devhidx.c", "kserve.c", "ns.c" },
         .flags = flags,
     });
     // The Linux ABI (design/epoch-0/linux-personality.md) and its host
@@ -759,13 +760,13 @@ fn addWeb(b: *std.Build, optimize: std.lang.Optimize, parts: ModuleParts, gfx: G
 // programs. src/kern/nstab.c is its device table and stands in for what
 // the left-out files would define.
 const nskern_sources = [_][]const u8{
-    "alloc.c",    "chan.c",  "data.c", "dev.c",      "devmnt.c", "devroot.c",
-    "error.c",    "parse.c", "pgrp.c", "procinit.c", "stub.c",   "sysfile.c",
-    "waserror.c",
+    "alloc.c",   "chan.c",     "data.c", "devmnt.c",   "devroot.c",
+    "error.c",   "parse.c",    "pgrp.c", "procinit.c", "stub.c",
+    "sysfile.c", "waserror.c",
 };
 const nskern_h9 = [_][]const u8{
     "glue.c",    "proc.c",      "ns.c",     "devns.c", "nstab.c",    "devoverlay.c", "devsrv.c",
-    "devhstream.c", "devdotl.c", "kserve.c", "tsleep.c", "rootdial.c",
+    "devhstream.c", "devdotl.c", "kserve.c", "tsleep.c", "devshim.c", "rootdial.c",
 };
 // libc's files the kernel subset uses, from kern_libs' list.
 const nskern_libc_skip = [_][]const u8{ "pushssl.c", "pushtls.c", "crypt.c", "dial.c" };
@@ -1299,12 +1300,12 @@ pub fn build(b: *std.Build) void {
         },
     }) });
     ns_test_step.dependOn(&b.addRunArtifact(ns_tests).step);
-    // The kernel's Zig's own cases (src/kern/qio.zig and sync.zig), on the
+    // The kernel's Zig's own cases (src/kern/*.zig), on the
     // native namespace kernel, which they import for its C and the boot.
     const kport_ns = addNsKernel(b, target, optimize, false, false);
     kport_ns.port.addImport("h9ns", kport_ns.mod);
     const kport_tests = b.addTest(.{ .name = "kern-port", .root_module = kport_ns.port });
-    const kern_test_step = b.step("kern-test", "Run the kernel's Zig cases (src/kern/qio.zig and sync.zig, design/kernel-port.md)");
+    const kern_test_step = b.step("kern-test", "Run the kernel's Zig cases (src/kern/*.zig, design/kernel-port.md)");
     kern_test_step.dependOn(&b.addRunArtifact(kport_tests).step);
     const ns_node = b.addSystemCommand(&.{ "node", "tests/web/nskernel.mjs" });
     ns_node.addDirectoryArg2(b.graph.path(.install_prefix, "nskernel"), .{ .make_absolute = true });
