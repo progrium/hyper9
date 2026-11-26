@@ -42,7 +42,7 @@ var evdir = [_]Dirtab{
     dev.dirtab("epoll", .{ .path = Qepoll, .vers = 0, .type = 0 }, 0, 0o666),
 };
 
-var evid = std.atomic.Value(u64).init(0);
+var evid = std.atomic.Value(c_uint).init(0);
 
 fn evof(ch: *Chan) ?*Evfd {
     return @ptrCast(@alignCast(dev.aux(ch).*));
@@ -86,7 +86,7 @@ fn evopen(ch: *Chan, omode: c_int) Error!*Chan {
     const e: *Evfd = @ptrCast(@alignCast(port.malloc(@sizeOf(Evfd)) orelse return port.kerror(&port.Enomem)));
     e.* = .{ .sem = t == Qeventsem, .epoll = t == Qepoll };
     dev.aux(ch).* = e;
-    ch.qid.path = Qinst | ((evid.fetchAdd(1, .seq_cst) + 1) << 4);
+    ch.qid.path = Qinst | (@as(u64, evid.fetchAdd(1, .seq_cst) +% 1) << 4);
     ch.mode = @intCast(mode);
     ch.flag |= c.COPEN;
     ch.offset = 0;
