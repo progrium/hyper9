@@ -38,7 +38,7 @@ enum
 /* ns.c */
 extern void	pgrpcpy(Pgrp*, Pgrp*, int);
 
-/* devenv.c */
+/* src/kern/dev/env.zig */
 extern void	*h9_egrpnew(void);
 extern void	*h9_egrpcopy(void*);
 extern void	h9_egrpincref(void*);

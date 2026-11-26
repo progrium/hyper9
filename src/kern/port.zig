@@ -26,6 +26,7 @@
 //! - `dev/hcons.zig`: devhcons.c, #y, a machine's console.
 //! - `fifo.zig`: fifo.c, the Linux ABI's FIFOs.
 //! - `rootdial.zig`: rootdial.c, unix socket roots and host descriptors.
+//! - `dev/env.zig`: devenv.c, #e, environment variables.
 //!
 //! This file is the root the kernel builds compile (build.zig's addKern,
 //! and src/nskernel.zig), and holds what the ported files share: the C
@@ -51,6 +52,7 @@ pub const sema = @import("sema.zig");
 pub const devhcons = @import("dev/hcons.zig");
 pub const fifo = @import("fifo.zig");
 pub const rootdial = @import("rootdial.zig");
+pub const devenv = @import("dev/env.zig");
 
 /// Whether this is the namespace kernel (src/nskernel.zig,
 /// design/epoch-0/namespace-kernel.md), which builds with H9_NSKERNEL and
@@ -73,6 +75,7 @@ comptime {
     if (!nskernel) devhcons.exportC();
     fifo.exportC();
     rootdial.exportC();
+    if (!nskernel) devenv.exportC();
 }
 
 test {
@@ -94,6 +97,7 @@ test {
     _ = devhcons;
     _ = fifo;
     _ = rootdial;
+    _ = devenv;
 }
 
 /// A kernel error. The Plan 9 error string is on the process, in

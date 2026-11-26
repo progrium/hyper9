@@ -147,7 +147,7 @@ pprint(char *fmt, ...)
 	return h9_ns_log(buf, n);
 }
 
-/* devenv.c's environment groups: the namespace kernel has no environment. */
+/* src/kern/dev/env.zig's environment groups: the namespace kernel has no environment. */
 void *h9_egrpnew(void) { return nil; }
 void *h9_egrpcopy(void *e) { USED(e); return nil; }
 void h9_egrpincref(void *e) { USED(e); }

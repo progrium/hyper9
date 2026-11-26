@@ -5,7 +5,7 @@ const guesttree = @import("tools/guesttree.zig");
 const drawterm = "third_party/drawterm";
 
 // drawterm's kern/Makefile OFILES with AUDIO=none, without devtab.c and
-// devenv.c (src/kern/ has our own), procinit.c (src/kern/proc.c has it,
+// devenv.c (src/kern/dev/env.zig is our own), procinit.c (src/kern/proc.c has it,
 // for the one process record), devcmd.c (host commands live on the
 // host-cmd branch while design/host-cmd.md rethinks them), or the files
 // ported to Zig (design/kernel-port.md, src/kern/port.zig): allocb.c,
@@ -611,7 +611,7 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.O
     });
     kern.root_module.addCSourceFiles(.{
         .root = b.path("src/kern"),
-        .files = &.{ "glue.c", "proc.c", "devtab.c", "devenv.c", "devdup.c", "devproc.c", "devoverlay.c", "devsrv.c", "devhtools.c", "fscheck.c", "netcheck.c", "consx.c", "devshim.c", "werrstr.c", "devhstream.c", "devdotl.c", "devhidx.c", "kserve.c", "ns.c" },
+        .files = &.{ "glue.c", "proc.c", "devtab.c", "devdup.c", "devproc.c", "devoverlay.c", "devsrv.c", "devhtools.c", "fscheck.c", "netcheck.c", "consx.c", "devshim.c", "werrstr.c", "devhstream.c", "devdotl.c", "devhidx.c", "kserve.c", "ns.c" },
         .flags = flags,
     });
     // The Linux ABI (design/epoch-0/linux-personality.md) and its host

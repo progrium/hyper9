@@ -279,3 +279,16 @@ h9_shim_fs_chanisfifo(Chan *c, int *r)
 	poperror();
 	return 0;
 }
+
+/* And src/kern/dev/env.zig's: the process's Egrp, which proc.c raises without. */
+extern void *h9_upegrp(void);
+
+int
+h9_shim_upegrp(void **r)
+{
+	if(waserror())
+		return -1;
+	*r = h9_upegrp();
+	poperror();
+	return 0;
+}

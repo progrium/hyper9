@@ -86,7 +86,7 @@ We vendor 9front drawterm's `kern/`, its libraries (libc, libdraw, libmemdraw, l
 
 These are reused, as-is or as close translations in Zig (the chan, dev, and mount machinery, devroot, devmnt, and devpipe, below): chan/dev/mount machinery, devroot, devcons (for everything but `cons` itself), devmnt (the 9P client), devlfd (`#φ`, for unix socket servers and embedders' descriptors), devfs-posix, and devfs-win32 (the host filesystem, with h9's sandbox hook calls), devpipe (with a FIFO mode for the Linux ABI's named pipes: one queue that every open reads and writes, with opens counted by mode), devip (with h9's network hook calls), devtls, devssl, devdraw, devmouse, devaudio, and the auth code.
 
-We compile drawterm's `.c` files but not its `kern/devtab.c` or `kern/devenv.c`, whose own copies live in `src/kern/`, or the files [kernel-port](../design/kernel-port.md) has ported to Zig (see Ported to Zig). The vendored tree's few changes are small and marked: the sandbox hooks (see Sandbox policy) and `Chan.srvname`, which `kern/chan.c`'s `chanfree` frees, as on 9front.
+We compile drawterm's `.c` files but not its `kern/devtab.c` or `kern/devenv.c`, whose own versions are `src/kern/devtab.c` and `src/kern/dev/env.zig`, or the files [kernel-port](../design/kernel-port.md) has ported to Zig (see Ported to Zig). The vendored tree's few changes are small and marked: the sandbox hooks (see Sandbox policy) and `Chan.srvname`, which `kern/chan.c`'s `chanfree` frees, as on 9front.
 
 ### Added by us
 
@@ -104,7 +104,7 @@ The device table, listing drawterm's devices plus ours.
 
 drawterm's `#c/cons` reads and writes the host's fds 0 and 1 directly. `#y<id>`, a native device ([kernel-port](../design/kernel-port.md)), serves machine `id`'s `Stdio` through calls into `src/kern.zig` that return -1 rather than fail, and is bound before `#c` on `/dev`, so `/dev/cons` is ours and the rest of `#c` stays visible. It also has `/dev/stderr`, which the guest's fd 2 is opened on, so fd 2 reaches the host's stderr.
 
-#### devenv `#e`, from 9front (`src/kern/devenv.c`)
+#### devenv `#e`, from 9front (`src/kern/dev/env.zig`)
 
 drawterm's has one machine-wide environment and imports the host process's environment on first attach, which breaks `env.scrub`. 9front's keeps one environment per Egrp, which `RFENVG` needs anyway. drawterm's Proc has no `egrp`, so h9's (`src/kern/h9proc.h`) has one. `#ec` isn't supported.
 
