@@ -15,6 +15,8 @@ This describes, as built, h9's security stance and the sandbox policy: what a gu
   - [Default profile](#default-profile)
   - [Discarded root changes](#discarded-root-changes)
   - [The root overlay's cost](#the-root-overlays-cost)
+  - [Plans](#plans)
+  - [Pinned roots](#pinned-roots)
   - [Plan output](#plan-output)
   - [Ephemeral writes](#ephemeral-writes)
   - [Up layers](#up-layers)
@@ -145,44 +147,110 @@ Measured on the emulator (Linux x86_64, 4 cores, best of 7 runs, `--write=overla
 
 On HVF (M-series MacBook Pro), `zig build proposal -Dp=baseline` takes 27.29 s with the overlay against 27.05 s without (median of 3), under 1%, and the `du -a /sys/src` (9747 entries) and `ls -l` loop above takes 0.45 s with it against 0.44 s without (median of 3), within noise. No fast path in `#O` was needed.
 
+### Plans
+
+A plan ([plan-format](../design/plan-format.md)) is the whole of what a machine is, as text: its namespace, its policy, its limits, and what it runs. Every way of starting a machine takes one: `h9 --plan FILE`, the flags (which compile to one, and `--print` writes it), `Machine.Options.plan` (with `Options.toPlan` as its inverse), and the page's `createMachine({ plan })`. `src/policy.zig` has the format: `Spec` is a plan's contents, `parsePlan` reads one, `Spec.write` writes one, and `narrow` is the narrowing rule.
+
+The syntax is namespace files': a word and its arguments, separated by blanks, `'` quoting with `''` for a quote, and `;` or a newline between lines. A line that starts with `#` is a comment to its end, and a `#` that starts a word comments out the rest of its line up to a `;`. A line h9 doesn't know, or a value it can't take, is an error with the line number (`--plan` exits 2).
+
+| Line | Meaning |
+| --- | --- |
+| `dir VALUE`, `url VALUE`, `archive VALUE`, `builtin [VALUE]`, `tmp VALUE` | A mount, its value a mount flag's (`SRC:DST:OPTS`, or the long form `src=…,dst=…`); bare `builtin` is the bottom of `/`. Mount lines come first, in order |
+| `bind SRC:DST[:OPTS]` | A `--bind`, after the mounts |
+| `bind`, `mount` with two values or more, `unmount`, `cd`, `clear` | Namespace lines, replayed as `--ns` replays them, after the binds and in order |
+| `profile default\|tight` | The profile, and the defaults it sets |
+| `write none\|scope\|ephemeral\|overlay`, `net disable\|outbound\|enable`, `netallow PATTERN` | The write mode, the network mode, and each network pattern |
+| `allow read PATH`, `allow write PATH`, `deny read PATH` | `--readable`, `--writable`, and `--read-deny` |
+| `devices [host-fs] [guest-tools]` | All of `#U`, and `#H/bin`, h9's own commands; a word left out is off |
+| `memory SIZE`, `pids N`, `cpus N`, `timeout DURATION` | The limits |
+| `engine E`, `arch A` | The engine and the architecture |
+| `env NAME=VALUE` | A guest environment variable |
+| `cwd PATH rw\|ro` | The host directory at `/mnt/term/cwd`, and whether it's writable |
+| `gfx window [noclip] [scale=N]`, `gfx headless [WxH]` | A window or the headless screen |
+| `serve ADDR`, `serveroot PATH`, `servetoken @FILE`, `serveorigin ORIGIN`, `servenet` | Serving, as the `--serve` flags do; the token is named by its file, never written in |
+| `run PROG ARGS...` | What runs. Optional: a program on the command line replaces it |
+
+Host paths are taken as written, and the CLI resolves relative ones from its working directory, as it does a flag's. A mount line after a bind or namespace line, and a `bind SRC:DST` after a namespace line, are errors, since the order wouldn't be the one h9 runs them in.
+
+Flags given with `--plan` narrow it, and so will a child machine's plan under its parent's, with the same function, `policy.narrow(arena, base, by, why)`: a lower limit, a path or mount made read-only, a network pattern or mode taken away, a path denied, or a device left out is taken, and anything wider is `error.Widens`, with `why` naming the base's line (`memory 1G widens the plan's line 4: memory 256M`). [Flags as plan lines](cli.md#flags-as-plan-lines) lists what each flag may do.
+
+A URL's query and a header's inline value can hold a secret. A plan writes them as `…`, and `parsePlan` refuses a line with `…`, so a printed plan never runs a different machine quietly; a plan names a secret in a file (`header=@FILE`, `servetoken @FILE`) instead. An embedder's `.fd` connection can't be text either: `--print` writes it as a comment, and `Machine.Options.plan` takes it from the other options, beside the plan.
+
+### Pinned roots
+
+A `url` line can carry `b3=HASH`, the BLAKE3 hash, in hex, of the tree's index ([mount-index](../design/epoch-0/mount-index.md)), so a plan with every root pinned is the same machine wherever it runs. h9 hashes the index text it reads on the host before the tree is used: an `index=` file or URL, or a static tree's `/.fs/index`. One with another hash is exit 125 (`h9: root tcp!fs.example!564: b3=: its index has hash 5b52186b2ff15513…, not the pinned 0b52186b2ff15513…`), as is a pinned index that's too big or doesn't compile, which an unpinned one would ignore. A pinned index is read afresh, not taken compiled from the cache.
+
+A server's own `.fs/index` is read inside `#ι` once the connection is in use, so h9 can't check it first: a pinned mount with only that, or under `--index none`, is exit 125 rather than taken unchecked. Pin a 9P server's tree with `index=`, or serve it as a static tree. The pin covers the index, the tree's names, metadata, and file hashes; a static tree's files are checked against those hashes as they're read, and a 9P server's are what it serves.
+
 ### Plan output
 
-`--print` compiles the policy and exits without running. The namespace is printed in `newns` format, so it can be saved and replayed with `--ns`:
+`--print` compiles the flags and exits without running. It writes the plan they compile to, with every default spelled out, so `h9 --plan <(h9 FLAGS --print)` runs the same machine, and then what h9 builds from it, as comments a plan doesn't read back: the compiled policy, the namespace in `newns` format, the access rules, and the caveats. The namespace comment lines, without their `# `, can be saved and replayed with `--ns`:
 
 ```text
 $ h9 --print --profile=tight --writable ./out --memory 512m --timeout 1m mk
-profile:  tight
-enforces: env.scrub fs.read.scope fs.write.overlay fs.write.scope ipc.restrict kernel.isolation net.disable proc.timeout res.memory
-limits:   write=overlay net=disable memory=512M timeout=1m
-devmask:  #C #I #ℏ #U #ι #b #i #m
-namespace:
-  bind '#U/Users/me/h9root' /                             ro
-  bind -c '#O' /                                          eph  # /Users/me/h9root
-  bind '#c' /dev
-  bind -b '#y<id>' /dev
-  bind -c '#e' /env
-  bind '#d' /fd
-  bind '#p' /proc
-  bind -c '#s' /srv
-  bind '/arm64/bin' /bin
-  bind -a '/rc/bin' /bin
-  bind -a '#H/bin' /bin  # h9's commands
-  bind -c '#O' /tmp                                       eph  # /Users/me/h9root/tmp
-  bind '#U/Users/me/src/proj' /mnt/term/cwd                ro
-  bind -c '#U/Users/me/src/proj/out' /mnt/term/cwd/out     rw
-access:
-  eph  /Users/me/h9root
-  ro   /Users/me/src/proj
-  rw   /Users/me/src/proj/out
-caveats:
-  - writes to the root are kept in memory, count against --memory, and are lost when the machine ends; when memory runs out they fail with "file system full"
-  - a file opened for writing is copied into memory whole the first time
-  - hardlinks under writable paths can modify host files outside them
-  - writes to writable paths are not capped (no res.disk)
-  - paths are checked after resolving symlinks, so a host process renaming paths concurrently can race the check
-  - /proc/n/ns shows the host paths of bound host trees
-  - the h9 process itself is not host-sandboxed
+# h9 plan (design/plan-format.md): h9 --plan FILE runs it
+
+# namespace
+dir /Users/me/h9root:/
+
+# policy
+profile tight
+write overlay
+net disable
+allow write /Users/me/src/proj/out
+devices guest-tools
+
+# limits and the run
+memory 512M
+# pids: unlimited
+# cpus: as many as the engine runs
+timeout 1m
+engine auto
+arch arm64
+cwd /Users/me/src/proj ro
+run mk
+
+# What h9 builds from these lines (comments, not read back):
+# profile:  tight
+# enforces: env.scrub fs.read.scope fs.write.overlay fs.write.scope ipc.restrict kernel.isolation net.disable proc.timeout res.memory
+# limits:   write=overlay net=disable memory=512M timeout=1m
+# devmask:  #C #I #ℏ #U #ι #b #i #m
+# namespace:
+#   bind '#/' /  # the kernel's names: bin dev env fd net proc root srv
+#   bind -r '#U/Users/me/h9root' '#Oroot' ro
+#   bind -c '#O' '#Oroot'                                  eph
+#   bind -ac '#Oroot' /
+#   bind '#Oroot' /root  # $rootdir: the root stack without the namespace's binds
+#   bind -c '/root/mnt' /mnt
+#   bind '#c' /dev
+#   bind -b '#y<id>' /dev
+#   bind -c '#e' /env
+#   bind '#d' /fd
+#   bind '#p' /proc
+#   bind -c '#s' /srv
+#   bind -a '#ℓ' /net  # 9P2000.L mounts
+#   bind '/arm64/bin' /bin
+#   bind -a '/rc/bin' /bin
+#   bind -a '#H/bin' /bin  # h9's commands
+#   bind -b '#H/over' /bin  # h9's bind, with -r
+#   bind -c '#O' /tmp                                      eph
+#   bind '#U/Users/me/src/proj' /mnt/term/cwd ro
+#   bind -c '#U/Users/me/src/proj/out' /mnt/term/cwd/out rw
+# access:
+#   eph  /Users/me/h9root
+#   ro   /Users/me/src/proj
+#   rw   /Users/me/src/proj/out
+# caveats:
+#   - writes to the root are kept in memory, count against --memory, and are lost when the machine ends; when memory runs out they fail with "file system full"
+#   - a file opened for writing is copied into memory whole the first time
+#   - hardlinks under writable paths can modify host files outside them
+#   - writes to writable paths are not capped (no res.disk)
+#   - paths are checked after resolving symlinks, so a host process renaming paths concurrently can race the check
+#   - /proc/n/ns shows the host paths of bound host trees
+#   - the h9 process itself is not host-sandboxed
 ```
+
+The caveats come from one function, `policy.writeCaveats`, so a new one has one place to go. The paragraphs below describe the compiled namespace, the part after `# namespace:`.
 
 A 9P mount is printed as `mount 'URL' DST '<spec>'`, followed by its settings as namespace files take them (`'user=NAME'`, `'ca=FILE'`, and a `'header=@FILE'`), with `9p` in the access column and the connection (and `user=`, as `as NAME`) in a comment; on a stack, as `mount -r 'URL' '#Oroot'`. The URL is the one h9 connects to: `http://` and `https://` stay as given, so a replay probes again, and their comment adds "or a static tree". The spec is always written, `''` when empty, so a replay can tell it from the column; the line replays with `--ns`, which connects again.
 
@@ -196,7 +264,7 @@ A WebSocket mount's comment is its URL with the query elided (`?…`), its heade
 
 The built-in root is printed as `bind '#Hroot' /` with `builtin` in the access column and what it holds in a comment (`h9 v0.2.0, 9front 11952 slim`, or `skeleton only`). It's constant data, so it has no access rule, `--writable` can't name it, and it's read-only whatever the flags; the root's overlay and `/tmp` go over it as over a 9P root, as bare `#O`s. `--builtin=before` and `--builtin=after` print their `#Hroot/$cputype/bin` bind with `builtin` too. The lines replay with `--ns` as ordinary binds, so a plan printed over the built-in root replays on any h9 of the same build.
 
-`--net-allow` patterns are printed in a `net-allow:` section after `devmask:`.
+`--net-allow` patterns are printed in a `net-allow:` section after `devmask:`, as well as the plan's `netallow` lines.
 
 The root's overlay is printed as `bind -c '#O' /` with `eph` and, over a host tree, the root's path in a comment, and the root's access rule as `eph`. Replayed with `--ns`, the line overlays whatever `/` is at that point; binds made before it onto directories of the root (the builder's own, when replaying into a running plan) are hidden under it, and the replay's later lines redo them, except `#U` binds, which the device mask refuses. The guest's cwd stays where the builder put it.
 

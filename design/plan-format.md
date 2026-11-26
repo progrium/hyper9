@@ -6,7 +6,7 @@ created: 2026-11-21
 authors: [progrium]
 depends: [baseline-1, mounts, child-machines]
 areas: [cli, sandbox, kern, web, tests]
-branch: []
+branch: [dev, plan-format]
 ---
 
 # Proposal: The plan as a file, and the one way in
@@ -101,15 +101,15 @@ A plan file is as trusted as a command line: whoever writes it decides what the 
 
 ## Done criteria
 
-- [ ] `h9 --plan <(h9 --rc 'ls /bin | wc -l' --print)` prints what `h9 --rc 'ls /bin | wc -l'` prints.
-- [ ] `test "--print output round-trips through --plan for every policy case [plan-format]"` passes: the compiled plans are equal.
-- [ ] `test "a flag after --plan narrows, and a widening flag is exit 2 [plan-format]"` passes for memory, a writable path, and `--net`.
-- [ ] `test "an unknown plan line is an error with its line number [plan-format]"` passes.
-- [ ] `test "Machine.init from a plan equals Machine.init from Options [plan-format]"` passes.
-- [ ] `await test('createMachine({ plan }) runs rc [plan-format]', ...)` passes in `tests/web/`.
+- [x] `h9 --plan <(h9 --rc 'ls /bin | wc -l' --print)` prints what `h9 --rc 'ls /bin | wc -l'` prints.
+- [x] `test "--print output round-trips through --plan for every policy case [plan-format]"` passes: the compiled plans are equal.
+- [x] `test "a flag after --plan narrows, and a widening flag is exit 2 [plan-format]"` passes for memory, a writable path, and `--net`.
+- [x] `test "an unknown plan line is an error with its line number [plan-format]"` passes.
+- [x] `test "Machine.init from a plan equals Machine.init from Options [plan-format]"` passes.
+- [x] `await test('createMachine({ plan }) runs rc [plan-format]', ...)` passes in `tests/web/`.
 - [ ] `test "a child's ctl takes plan lines, bounded by its parent [plan-format]"` passes.
-- [ ] `test "a pinned root with a different index is refused [plan-format]"` passes.
-- [ ] [spec/cli.md](../spec/cli.md) documents each flag by its plan line, [spec/sandbox.md](../spec/sandbox.md) documents the format, and [docs/recipes.md](../docs/recipes.md) has each recipe as a plan.
+- [x] `test "a pinned root with a different index is refused [plan-format]"` passes.
+- [x] [spec/cli.md](../spec/cli.md) documents each flag by its plan line, [spec/sandbox.md](../spec/sandbox.md) documents the format, and [docs/recipes.md](../docs/recipes.md) has each recipe as a plan.
 
 ## Implementation
 
@@ -126,3 +126,14 @@ A plan file is as trusted as a command line: whoever writes it decides what the 
 - Whether `run` belongs in the plan or the plan describes only the machine. As written it's optional.
 - How a plan names handles that can't be text, such as a `MessagePort` on the page or an embedder's directory handle ([host-handles](host-handles.md)). As written, by a name the caller supplies beside the plan.
 - Where a registry of roots fits. The plan pins a tree by hash and doesn't say where trees come from.
+
+## Updates
+
+- 2026-11-26: Implemented on the `plan-format` branch, except a child's `ctl`, which comes with [child-machines](child-machines.md); `policy.narrow` is the rule it will call. Discoveries while implementing it:
+  - A mount line takes its flag's value, `dir SRC:DST:OPTS` or the long form, so `mount.Mount.parse` reads it and the flag and the line can't drift; the example's `dir ro ./src /src` is `dir ./src:/src:ro`. `bind` with one value, `SRC:DST[:OPTS]`, is `--bind`, and with two or more a namespace line, as `--ns` replays it.
+  - `--readable`, `--writable`, and `--read-deny` are `allow read PATH`, `allow write PATH`, and `deny read PATH`; `--host-fs` and guest tools are words of one `devices` line; serving is `serve`, `serveroot`, `servetoken @FILE`, `serveorigin`, and `servenet`; and the cwd is `cwd PATH rw|ro`.
+  - A line that starts with `#` is a comment to its end, unlike a namespace file's `#`, which ends at a `;`, so a caveat with a `;` in it stays a comment.
+  - `--print` writes the plan, then what h9 compiles it to, the old three sections, as comments. A URL's query and a header's inline value are written as `…`, as `--print` always elided them, and a plan refuses a line with `…`, so a printed plan never quietly runs a different machine. `env` lines are written in full, so `--print` now shows `--env` values.
+  - Narrowing an `engine`: the plan's, any under no `engine` line, and any but `sud` under `auto`. An `arch`: the plan's, or any under no `arch` line. A mount, bind, or namespace line given with `--plan` widens it, as h9 can't tell which add reach.
+  - Pinned roots: h9 checks the index it reads on the host before the tree is used, an `index=` file or URL or a static tree's `/.fs/index`. A 9P server's own `.fs/index` is read inside `#ι` once the connection is in use, so a pinned mount with only that, or under `--index none`, is refused rather than taken unchecked.
+  - `createMachine({ plan })` fetches the plan's `archive` URLs and rewrites each to a `dir` line in place, so line numbers stay the plan's; a plan with no mount lines gets `root.h9a` as a first line, so h9's line numbers are one more. `mounts` and `binds` beside a plan are an error, as they'd widen it.
