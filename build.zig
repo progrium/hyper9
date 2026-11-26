@@ -762,15 +762,26 @@ const asyncify_skip = "interp.*,jit.*,engine.hcpu.h86.*,engine.hcpu.ha64.*,engin
 /// are left as they are: a task parks or yields only between runs of
 /// guest code, never under them, and instrumented they're half the module
 /// and slow for the JS engine to compile. h9ns.wasm has none, and
-/// wasm-opt warns of patterns that match nothing. The build needs
-/// `wasm-opt` on PATH.
+/// wasm-opt warns of patterns that match nothing. The build takes
+/// `wasmOpt`'s.
 fn asyncifyWasm(b: *std.Build, exe: *std.Build.Step.Compile, optimize: std.lang.Optimize, cpus: bool) std.Build.LazyPath {
-    const run = b.addSystemCommand(&.{ "wasm-opt", "--enable-exception-handling", "--asyncify", "--pass-arg=asyncify-imports@asyncify.none", "-g" });
+    const run = b.addSystemCommand(&.{ wasmOpt(b), "--enable-exception-handling", "--asyncify", "--pass-arg=asyncify-imports@asyncify.none", "-g" });
     if (cpus) run.addArg("--pass-arg=asyncify-removelist@" ++ asyncify_skip);
     run.addArg(switch (optimize) { .debug => "-O1", .small => "-Oz", else => "-O2" });
     run.addArtifactArg(exe);
     run.addArg("-o");
     return run.addOutputFileArg(b.fmt("{s}.wasm", .{exe.name}));
+}
+
+/// Binaryen's wasm-opt: the pinned one `scripts/fetch.sh binaryen` puts
+/// in .local/binaryen if it's there, or else the one on PATH. Not every
+/// release reads the DWARF in a Debug build's module (133 stops at
+/// DW_LNE_define_file), so the pin is the one the web cases pass with.
+fn wasmOpt(b: *std.Build) []const u8 {
+    const bin = if (b.graph.host.result.os.tag == .windows) "wasm-opt.cmd" else "wasm-opt";
+    const pinned = pathFromRoot(b, b.fmt(".local/binaryen/node_modules/.bin/{s}", .{bin}));
+    std.Io.Dir.cwd().access(b.graph.io, pinned, .{}) catch return "wasm-opt";
+    return pinned;
 }
 
 const Web = struct {
@@ -1922,6 +1933,12 @@ pub fn build(b: *std.Build) void {
     b.step("isoroot", "Unpack a 9front release ISO into a root tree: zig build isoroot -- ISO DIR").dependOn(&run_isoroot.step);
 
     const mod_tests = b.addTest(.{ .root_module = test_mod.mod });
+    // The module's cases reach the engines' code, HVF's among them, so
+    // its test binary links the framework as h9 does.
+    if (os == .macos) {
+        addSdkPaths(b, mod_tests.root_module);
+        mod_tests.root_module.linkFramework("Hypervisor", .{});
+    }
     const exe_tests = b.addTest(.{ .root_module = exe.root_module });
     // Runs the same programs on every engine built in and compares them.
     const engine_tests = b.addTest(.{ .root_module = b.createModule(.{
@@ -2251,7 +2268,9 @@ fn addSchedTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
     step.dependOn(&run.step);
 
     const wasm = mk.tests(b, webTarget(b, false), optimize);
-    if (b.findProgram(.{ .names = &.{"wasm-opt"} })) |wasm_opt| {
+    const wasm_opt_path = wasmOpt(b);
+    const found: ?[]const u8 = if (!std.mem.eql(u8, wasm_opt_path, "wasm-opt")) wasm_opt_path else b.findProgram(.{ .names = &.{"wasm-opt"} });
+    if (found) |wasm_opt| {
         const asyncify = b.addSystemCommand(&.{ wasm_opt, "--asyncify" });
         for ([_][]const u8{ "bulk-memory", "mutable-globals", "sign-ext", "nontrapping-float-to-int", "multivalue", "reference-types" }) |f|
             asyncify.addArg(b.fmt("--enable-{s}", .{f}));

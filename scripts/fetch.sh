@@ -3,12 +3,14 @@
 # image, prebuilt Unicorn libraries (zig build lockstep's oracle), and the
 # Alpine roots into .local, and on request the release's 386 or amd64 ISO,
 # one architecture's Alpine root, the web host's Linux demo root, the
-# workloads' Linux root, diod, and ZeroFS.
+# workloads' Linux root, diod, ZeroFS, and Binaryen (the web build's
+# wasm-opt).
 #
 #   scripts/fetch.sh [part...]   (parts: src image unicorn
 #                                 alpine alpine-arm64 alpine-amd64
 #                                 alpine-386 iso386 isoamd64
-#                                 alpinearm64web workloads diod zerofs;
+#                                 alpinearm64web workloads diod zerofs
+#                                 binaryen;
 #                                 default src, image, unicorn, and
 #                                 alpine)
 #
@@ -22,7 +24,7 @@ mkdir -p "$H9_LOCAL"/{bin,src,cache,9front,unicorn}
 
 parts=" ${*:-src image unicorn alpine} "
 for p in $parts; do
-	case $p in src|image|unicorn|alpine|alpine-arm64|alpine-amd64|alpine-386|iso386|isoamd64|alpinearm64web|workloads|diod|zerofs) ;;
+	case $p in src|image|unicorn|alpine|alpine-arm64|alpine-amd64|alpine-386|iso386|isoamd64|alpinearm64web|workloads|diod|zerofs|binaryen) ;;
 	*) echo "fetch: unknown part '$p'" >&2; exit 2 ;; esac
 done
 want() { [[ $parts == *" $1 "* ]]; }
@@ -211,4 +213,16 @@ if [ "$(cat "$H9_LOCAL/zerofs/.h9-stamp" 2>/dev/null || true)" != "$ZEROFS_REV" 
 fi
 cp "$H9_LOCAL/zerofs/release/zerofs" "$H9_LOCAL/bin/zerofs"
 echo "zerofs: $ZEROFS_VERSION"
+fi
+
+# The web build's wasm-opt (build.zig's wasmOpt), from npm: Binaryen's
+# own build for Node, the same on every host.
+if want binaryen; then
+command -v npm >/dev/null || { echo "fetch: binaryen needs npm" >&2; exit 1; }
+if [ "$(cat "$H9_LOCAL/binaryen/.h9-stamp" 2>/dev/null || true)" != "$BINARYEN_VERSION" ]; then
+	rm -rf "$H9_LOCAL/binaryen" && mkdir -p "$H9_LOCAL/binaryen"
+	npm install --prefix "$H9_LOCAL/binaryen" --no-save --no-package-lock --silent "binaryen@$BINARYEN_VERSION"
+	echo "$BINARYEN_VERSION" >"$H9_LOCAL/binaryen/.h9-stamp"
+fi
+echo "binaryen: $("$H9_LOCAL/binaryen/node_modules/.bin/wasm-opt" --version)"
 fi
