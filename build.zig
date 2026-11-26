@@ -190,7 +190,7 @@ const Integration = struct {
 /// run of the same binary for each, which the build runner runs side by
 /// side: the cases mostly wait on h9, terminals, and sockets, so one run
 /// leaves most cores idle. `step` depends on every run.
-fn addIntegration(b: *std.Build, step: *std.Build.Step, shards: u32, optimize: std.lang.Optimize, filters: []const []const u8, it: Integration, root: []const u8, engines: []const u8, pending: bool, go: ?GoFixtures, guest_test: bool, src: ?[]const u8) []*std.Build.Step.Run {
+fn addIntegration(b: *std.Build, step: *std.Build.Step, shards: u32, optimize: std.lang.Optimize, filters: []const []const u8, it: Integration, root: []const u8, engines: []const u8, pending: bool, guest_test: bool, src: ?[]const u8) []*std.Build.Step.Run {
     // The paths the cases find by default: the install prefix isn't known
     // until the build runs, so they're build options, not environment
     // variables (tests/integration.zig's getenv).
@@ -198,12 +198,11 @@ fn addIntegration(b: *std.Build, step: *std.Build.Step, shards: u32, optimize: s
     paths.addOptionPathUntracked("H9_TEST_BIN", it.bin);
     paths.addOptionPathUntracked("H9_TEST_LINUX", b.graph.path(.install_prefix, "fixtures/linux"));
     if (it.server) |sv| paths.addOptionPathUntracked("H9_TEST_SERVER", sv);
-    if (go) |g| paths.addOptionPathUntracked("H9_TEST_GO", g.dir);
     const tests = integrationTests(b, b.graph.host, optimize, filters, paths);
     const n = @max(shards, 1);
     const runs = b.allocator.alloc(*std.Build.Step.Run, n) catch @panic("OOM");
     for (runs, 0..) |*r, i| {
-        r.* = addIntegrationRun(b, tests, it, root, engines, pending, go, guest_test, src);
+        r.* = addIntegrationRun(b, tests, it, root, engines, pending, guest_test, src);
         if (n > 1) {
             r.*.setName(b.fmt("integration {d}/{d}", .{ i + 1, n }));
             r.*.setEnvironmentVariable("H9_TEST_SHARD", b.fmt("{d}/{d}", .{ i, n }));
@@ -214,7 +213,7 @@ fn addIntegration(b: *std.Build, step: *std.Build.Step, shards: u32, optimize: s
 }
 
 /// One run of the integration binary `tests`, set up as addIntegration says.
-fn addIntegrationRun(b: *std.Build, tests: *std.Build.Step.Compile, it: Integration, root: []const u8, engines: []const u8, pending: bool, go: ?GoFixtures, guest_test: bool, src: ?[]const u8) *std.Build.Step.Run {
+fn addIntegrationRun(b: *std.Build, tests: *std.Build.Step.Compile, it: Integration, root: []const u8, engines: []const u8, pending: bool, guest_test: bool, src: ?[]const u8) *std.Build.Step.Run {
     const run = b.addRunArtifact(tests);
     // The self-host cases' source when the root has no /sys/src
     // (design/epoch-0/self-host.md).
@@ -225,11 +224,6 @@ fn addIntegrationRun(b: *std.Build, tests: *std.Build.Step.Compile, it: Integrat
     if (guest_test) run.setEnvironmentVariable("H9_TEST_GUEST_TOOLS", "1");
     if (it.arch) |a| run.setEnvironmentVariable("H9_TEST_ARCH", a);
     if (it.web) run.setEnvironmentVariable("H9_TEST_WEB", "1");
-    if (go) |g| {
-        run.step.dependOn(g.step);
-        // On the sud engine when it's in the list, else the emulator.
-        if (std.mem.indexOf(u8, engines, "sud") != null) run.setEnvironmentVariable("H9_TEST_GO_ENGINE", "sud");
-    }
     run.setEnvironmentVariable("H9_TEST_ROOT", root);
     run.setEnvironmentVariable("H9_TEST_ENGINES", engines);
     // The Linux fixtures and the Alpine roots from scripts/fetch.sh
@@ -250,31 +244,14 @@ fn addIntegrationRun(b: *std.Build, tests: *std.Build.Step.Compile, it: Integrat
     return run;
 }
 
-/// The Go fixtures (tests/fixtures/go, design/epoch-0/go-compat.md): plan9/amd64
-/// binaries built with the pinned Go toolchain into `dir` by `step`.
-const GoFixtures = struct { dir: std.Build.LazyPath, step: *std.Build.Step };
-
-/// The environment for building plan9/amd64 binaries with Go at the
-/// pinned version: GOTOOLCHAIN makes any installed Go fetch that exact
+/// The environment for building Go programs for `goos`/`goarch` with Go at
+/// the pinned version: GOTOOLCHAIN makes any installed Go fetch that exact
 /// toolchain, so every host builds the same binaries.
-fn goEnv(run: *std.Build.Step.Run, version: []const u8) void {
-    run.setEnvironmentVariable("GOOS", "plan9");
-    run.setEnvironmentVariable("GOARCH", "amd64");
+fn goEnv(run: *std.Build.Step.Run, version: []const u8, goos: []const u8, goarch: []const u8) void {
+    run.setEnvironmentVariable("GOOS", goos);
+    run.setEnvironmentVariable("GOARCH", goarch);
     run.setEnvironmentVariable("CGO_ENABLED", "0");
     run.setEnvironmentVariable("GOTOOLCHAIN", run.step.owner.fmt("go{s}", .{version}));
-}
-
-/// `go build` of every program in tests/fixtures/go into zig-out/fixtures/go.
-/// Go's own cache decides what to rebuild, so the step always runs.
-fn addGoFixtures(b: *std.Build, go: []const u8, version: []const u8) GoFixtures {
-    const dir = b.graph.path(.install_prefix, "fixtures/go");
-    const run = b.addSystemCommand(&.{ go, "-C", "tests/fixtures/go", "build", "-trimpath", "-o" });
-    run.addDirectoryArg2(dir, .{ .suffix = std.fs.path.sep_str, .make_absolute = true });
-    run.addArg("./...");
-    run.setCwd(b.path("."));
-    goEnv(run, version);
-    run.has_side_effects = true;
-    return .{ .dir = dir, .step = &run.step };
 }
 
 /// tests/integration.zig as a test binary. It links libc for the pty in
@@ -1661,23 +1638,17 @@ pub fn build(b: *std.Build) void {
     // Cases tagged with a proposal that isn't implemented skip unless
     // -Dpending is given.
     const run_pending = b.option(bool, "pending", "Also run integration cases of proposals that aren't implemented yet") orelse false;
-    // The Go fixtures run on the emulator, so they're built only with it.
+    // The Go fixtures (design/epoch-0/linux-threads.md), built with the
+    // pinned toolchain (GO_VERSION in scripts/pins.sh) into
+    // fixtures/linux/<arch>/go.
     const go_version = pin(pins, "GO_VERSION");
     const go_bin = b.findProgram(.{ .names = &.{"go"} });
-    const go_fixtures: ?GoFixtures = if (go_bin) |g| addGoFixtures(b, g, go_version) else null;
-    const go_fixtures_step = b.step("go-fixtures", "Build the Go fixtures in tests/fixtures/go (plan9/amd64, GO_VERSION from scripts/pins.sh)");
-    if (go_fixtures) |g| go_fixtures_step.dependOn(g.step) else go_fixtures_step.dependOn(&b.addFail("go-fixtures: no go on PATH").step);
-    const go_cases: ?GoFixtures = if (emu != .none or std.mem.indexOf(u8, engine_list, "sud") != null) go_fixtures else null;
-    // The Linux Go fixtures (design/epoch-0/linux-threads.md), with the same
-    // toolchain, into fixtures/linux/<arch>/go.
     if (go_bin) |g| for ([_][]const u8{ "arm64", "amd64", "386" }) |arch| {
         const run = b.addSystemCommand(&.{ g, "-C", "tests/fixtures/linux/go", "build", "-trimpath", "-o" });
         run.addDirectoryArg2(b.graph.path(.install_prefix, b.fmt("fixtures/linux/{s}/go", .{arch})), .{ .suffix = std.fs.path.sep_str, .make_absolute = true });
         run.addArg("./...");
         run.setCwd(b.path("."));
-        goEnv(run, go_version);
-        run.setEnvironmentVariable("GOOS", "linux");
-        run.setEnvironmentVariable("GOARCH", arch);
+        goEnv(run, go_version, "linux", arch);
         run.has_side_effects = true;
         linux_fixtures.dependOn(&run.step);
     };
@@ -1700,7 +1671,7 @@ pub fn build(b: *std.Build) void {
     const it_filters = b.option([]const []const u8, "filter", "Run only the integration cases whose names contain one of these") orelse &.{};
     const it_shards = b.option(u32, "shards", "Split the integration cases across this many runs at once (default 4; 1 runs them in one)") orelse 4;
     const integration_step = b.step("integration", "Run real 9front binaries from the root tree through h9");
-    for (addIntegration(b, integration_step, it_shards, optimize, it_filters, it, root, engine_list, run_pending, if (test_web) null else go_cases, guest_test, src_dir)) |run_integration| {
+    for (addIntegration(b, integration_step, it_shards, optimize, it_filters, it, root, engine_list, run_pending, guest_test, src_dir)) |run_integration| {
         if (!test_web) run_integration.step.dependOn(linux_fixtures);
         // -Djit-check checks every region against T0, one region at a time
         // across vCPUs: the cases' timeouts stretch (H9_TEST_SLOW, unless it's
@@ -1878,7 +1849,7 @@ pub fn build(b: *std.Build) void {
     if (b.option([]const u8, "p", "With zig build proposal: the proposal, by slug")) |ref| {
         const ps = proposals(b);
         if (frontmatter.resolve(ps, ref)) |i| {
-            for (addIntegration(b, proposal_step, 1, optimize, tagFilters(b, ps[i]), it, root, engine_list, true, if (test_web) null else go_cases, guest_test, src_dir)) |run_cases| {
+            for (addIntegration(b, proposal_step, 1, optimize, tagFilters(b, ps[i]), it, root, engine_list, true, guest_test, src_dir)) |run_cases| {
                 if (!test_web) run_cases.step.dependOn(linux_fixtures);
             }
             if (demos.get(ps[i].slug)) |steps| for (steps.items) |s| proposal_step.dependOn(s);

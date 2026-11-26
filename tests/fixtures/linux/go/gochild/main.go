@@ -1,7 +1,6 @@
 // Re-execs itself through os/exec with H9_GO_CHILD set, and prints the
 // child's output and exit status. The child prints its argument and exits
-// with status 7. Plan 9's exit status is a string, so Go's ExitCode is 1
-// for any failure; the wait message carries the "7".
+// with status 7.
 package main
 
 import (
@@ -9,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"syscall"
 )
 
 func main() {
@@ -26,5 +24,5 @@ func main() {
 		fmt.Println("err:", err)
 		os.Exit(1)
 	}
-	fmt.Println("status", ee.ExitCode(), ee.Sys().(*syscall.Waitmsg).Msg)
+	fmt.Println("status", ee.ExitCode())
 }

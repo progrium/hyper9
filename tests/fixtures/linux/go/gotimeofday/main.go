@@ -1,5 +1,5 @@
-// Prints the microseconds of syscall.Gettimeofday for several readings
-// 1 ms apart, then the host-comparable Unix seconds.
+// Prints how many distinct microsecond values syscall.Gettimeofday gave
+// in five readings 1 ms apart, then the last reading's Unix seconds.
 package main
 
 import (
@@ -11,13 +11,13 @@ import (
 
 func main() {
 	var tv syscall.Timeval
-	distinct := map[int32]bool{}
+	distinct := map[int64]bool{}
 	for i := 0; i < 5; i++ {
 		if err := syscall.Gettimeofday(&tv); err != nil {
 			fmt.Println("err:", err)
 			os.Exit(1)
 		}
-		distinct[tv.Usec] = true
+		distinct[int64(tv.Usec)] = true
 		time.Sleep(time.Millisecond)
 	}
 	fmt.Println(len(distinct), tv.Sec)

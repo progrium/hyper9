@@ -281,14 +281,14 @@ VM.
 [tests/fixtures/hello.zig](tests/fixtures/hello.zig)) because Zig no longer
 links Plan 9 a.out.
 
-The Go programs in [tests/fixtures/go](tests/fixtures/go) are built by
-`zig build go-fixtures` into `zig-out/fixtures/go`, as
-`GOOS=plan9 GOARCH=amd64` with `GOTOOLCHAIN=go$GO_VERSION` from
+The Go programs in [tests/fixtures/linux/go](tests/fixtures/linux/go) are
+built with the Linux fixtures into `zig-out/fixtures/linux/<arch>/go`, for
+arm64, amd64, and 386, with `GOTOOLCHAIN=go$GO_VERSION` from
 [scripts/pins.sh](scripts/pins.sh), so any installed Go fetches the same
 toolchain. `zig build integration` builds them when `go` is on `PATH`, and
-their cases run on sud when it's in the list, else on the emulator;
-without Go they skip. They don't need the root tree.
-`zig build go-stdtest` runs Go's own tests for `time`,
+their cases run through the Linux personality on every engine in the list;
+without Go they skip. No integration case runs a `plan9` Go binary.
+`zig build go-stdtest` runs Go's own `plan9/amd64` tests for `time`,
 `syscall`, `os`, and `runtime` on the emulator and prints pass, skip, and
 fail counts for each ([scripts/go-stdtest.sh](scripts/go-stdtest.sh), with
 the tests it skips in `scripts/go-stdtest.skip`; `zig build go-stdtest -- os`

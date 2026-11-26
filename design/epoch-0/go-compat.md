@@ -2,12 +2,13 @@
 issue: 7
 slug: go-compat
 title: Go compatibility
-status: implemented
+status: superseded
 created: 2026-11-03
 authors: [progrium]
 depends: [semaphores]
 areas: [kern, tests]
-branch: [main]
+branch: []
+superseded-by: linux-threads
 ---
 
 # Proposal: Go compatibility
@@ -251,3 +252,5 @@ The cases are tagged `[go-compat]`, built from `tests/fixtures/go/`, and run on 
 - **`go-stdtest` found** that the runtime's `TestPageAllocGrow` reserves more than `--memory` allows, so it's in the skip list; other failures are counted, not skipped. `syscall`'s `TestPlan9Syserr` needed the `mount` syscall, which [devsrv](devsrv.md) now serves, and passes.
 - **A note could miss a blocking call.** drawterm's call wrappers clear the "interrupt this call" flag when a call returns, so a note posted while one call was finishing was lost if the guest's next exit was a blocking call, such as Go's `semacquire` while `go: exit` notes go round; the program then hung about one run in four under load. The exit loop now interrupts a call it starts with a note flagged, and the note's kick is posted before its interrupt, so one of the two always reaches the call.
 - **rc's `exit 0` exits 0.** rc counts a status of only `0` and `|` as true and calls `exits("")` for it, so the rc case checks that `exit 0` gives 0; `exits("0")` itself still gives 1, which `src/cli.zig`'s tests cover. `exit 256` and `exit 03` give 1 and print, as Done when says.
+
+**Nov 26, 2026.** Superseded by [linux-threads](linux-threads.md). Go programs are now tested as Linux binaries, which are more stable and are what h9's Go work is about. Every Go case here was ported to a program in `tests/fixtures/linux/go`, tagged `[linux-threads]` and run through the Linux personality on every engine, and `tests/fixtures/go` and `zig build go-fixtures` were removed. The rc cases stay: the numeric exits case is tagged `[exit-status]` now, and the `/dev/bintime` case is untagged. What this proposal added to the kernel and the CLI stays on main, and `zig build go-stdtest` still runs Go's own `plan9/amd64` tests to find gaps.
