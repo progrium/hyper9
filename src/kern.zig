@@ -914,7 +914,7 @@ pub fn overlayNew(lower: ?[*:0]const u8) Error!u32 {
 /// The target of the host link that `path`'s last name is, through `#U`
 /// and an overlay over it, as the link has it written
 /// (design/epoch-0/symlinks-in-root.md). Fails with "not a symbolic link"
-/// for anything else. For the Linux personality's readlinkat; Plan 9
+/// for anything else. For the Linux ABI's readlinkat; Plan 9
 /// programs never see links.
 pub fn readlink(path: [*:0]const u8, buf: []u8) Error![]u8 {
     const n = try check(c.h9_fs_readlinkpath(path, buf.ptr, @intCast(@min(buf.len, std.math.maxInt(c_int)))));
@@ -923,7 +923,7 @@ pub fn readlink(path: [*:0]const u8, buf: []u8) Error![]u8 {
 
 /// Makes `path` a symbolic link to `target`: in memory in an overlay, or
 /// on the host in a devfs tree, where the new name is checked like a
-/// create. For the Linux personality's symlinkat; Plan 9 programs never
+/// create. For the Linux ABI's symlinkat; Plan 9 programs never
 /// see links.
 pub fn symlink(path: [*:0]const u8, target: [*:0]const u8) Error!void {
     _ = try check(c.h9_fs_symlinkpath(path, target));
@@ -931,7 +931,7 @@ pub fn symlink(path: [*:0]const u8, target: [*:0]const u8) Error!void {
 
 /// Makes `path` a FIFO with permissions `perm`: a node in memory in an
 /// overlay, or a host FIFO in a devfs tree, where the new name is checked
-/// like a create (design/epoch-0/linux-fifo.md). For the Linux personality's
+/// like a create (design/epoch-0/linux-fifo.md). For the Linux ABI's
 /// mknodat; Plan 9 programs see an empty file.
 pub fn mkfifo(path: [*:0]const u8, perm: u32) Error!void {
     _ = try check(c.h9_fs_mkfifopath(path, perm));
@@ -939,7 +939,7 @@ pub fn mkfifo(path: [*:0]const u8, perm: u32) Error!void {
 
 /// Moves `old` to `new` in another directory with the host's rename,
 /// when both are in host (devfs) trees; false if either isn't. For the
-/// Linux personality's renameat.
+/// Linux ABI's renameat.
 pub fn renameAcross(old: [*:0]const u8, new: [*:0]const u8) Error!bool {
     return try check(c.h9_fs_renamepath(old, new)) == 0;
 }
@@ -1116,7 +1116,7 @@ pub fn unixDial(path: [*:0]const u8) Error!u31 {
 /// Wraps host descriptors `rd` and `wr` (design/epoch-0/fd-mounts.md), which the
 /// kernel takes and closes, as channels, and returns fds on them: the
 /// one read from and, when `wr` isn't `rd`, the one written to. On
-/// failure both are closed. Fails on the browser host.
+/// failure both are closed. Fails on the web host.
 pub fn hostFdDial(rd: std.posix.fd_t, wr: std.posix.fd_t) Error!struct { u31, ?u31 } {
     var rfd: c_int = -1;
     var wfd: c_int = -1;

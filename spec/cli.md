@@ -52,7 +52,7 @@ A host program that starts with `#!` runs as a guest program by its guest path (
 
 | Flag | Meaning |
 | --- | --- |
-| `--backend auto\|hvf\|kvm\|native\|whp\|emu\|v86` | `auto` (the default) uses the host hypervisor, and otherwise falls back to the emulator with a warning; it never selects native (not a security boundary), which needs an explicit `--backend native`. `v86` is an alias of `emu` |
+| `--engine auto\|hvf\|kvm\|whp\|sud\|hcpu` | `auto` (the default) uses the host hypervisor, and otherwise falls back to hcpu with a warning; it never selects `sud` (not a security boundary), which needs an explicit `--engine sud`. For one release, `--backend` is accepted as an alias of `--engine`, and `native`, `emu`, and `v86` as aliases of `sud`, `hcpu`, and `hcpu` ([renames](../design/renames.md)); the usage text doesn't mention them, and `auto` never selects `sud` by either name |
 | `--arch arm64\|amd64\|386` | The architecture of the binaries to run, which also picks `/$cputype/bin`. Without it a host program runs as its header says, and a guest one as the host's architecture |
 | `--dir PATH[:DST[:OPTS]]` | A host directory or file, through `#U` ([mounts](../design/epoch-0/mounts.md)); its path joins the access rules, readable, or writable with `rw`. `contained` resolves its symlinks inside it, as on `#L` always. A missing path is exit 125 |
 | `--url URL[:DST[:OPTS]]` | A 9P server: `tcp://HOST:PORT[/SPEC]`, `unix:///PATH`, `ws://`, or `wss://`. `http://` and `https://` probe: a WebSocket if the server answers the upgrade with 101, and otherwise a static dotfs tree when `URL/.fs/index` answers 200 (see [Static trees](ninep.md#static-trees)); neither is exit 125, naming both. With no scheme, `http://` for a loopback host and `https://` for any other. A DST of `/srv/NAME` posts the connection without mounting it. `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY` choose an HTTP `CONNECT` proxy for the connections h9 makes. Under `--write=none`, exit 2. A failed connection or attach is exit 125 |
@@ -77,7 +77,7 @@ A host program that starts with `#!` runs as a guest program by its guest path (
 | `--write none\|scope\|ephemeral\|overlay` | Deny writes; persist only writable paths (`scope`); `scope` plus a copy-on-write overlay over the root, discarded at exit (`overlay`, the default); or make the root and writable paths overlays in memory, discarded at exit (`ephemeral`) |
 | `--net disable\|outbound\|enable` | Network policy: mask `#I`, refuse `announce` (the default profile's default), or allow it |
 | `--net-allow PATTERN` (repeatable) | Allows `connect` only to matching addresses, and `cs` lookups only of matching names (`proto!host!port`) |
-| `--serve unix!PATH\|tcp!HOST!PORT\|ws://HOST:PORT[/PATH]` (repeatable) | Serves the machine's namespace over 9P while the program runs, from the kernel's 9P server (see Serving). Port 0 picks a free port, printed as `serve: ADDR`. With no program, the run only serves. On the browser host, exit 2; an address that can't be listened on is exit 125 |
+| `--serve unix!PATH\|tcp!HOST!PORT\|ws://HOST:PORT[/PATH]` (repeatable) | Serves the machine's namespace over 9P while the program runs, from the kernel's 9P server (see Serving). Port 0 picks a free port, printed as `serve: ADDR`. With no program, the run only serves. On the web host, exit 2; an address that can't be listened on is exit 125 |
 | `--serve-root PATH` | The guest path each connection exports, absolute. `/` by default |
 | `--serve-token @FILE` | A token, the file's one word, that WebSocket listeners require as `Authorization: Bearer TOKEN` or `?token=TOKEN`. A missing file is exit 125 |
 | `--serve-origin ORIGIN` (repeatable) | An `Origin` WebSocket listeners accept; `*` for any, which needs `--serve-token`. A request with no `Origin` is accepted |
@@ -91,11 +91,11 @@ A host program that starts with `#!` runs as a guest program by its guest path (
 | `--sandbox DIR` | The tight profile with only DIR bound, read-write, as the cwd. Can't be combined with `--host-fs` |
 | `--trace[=FILE]` | ratrace-style syscall log, with the Ureg and a symbolized PC when the guest faults, to stderr by default |
 | `--gfx[=noclip]` | Gives the machine one host window (see Graphics), with `/dev/draw`, `/dev/mouse`, `/dev/cursor`, and `/dev/kbd` in it, and `/dev/snarf` as the host clipboard; `=noclip` keeps `/dev/snarf` in the h9 process instead. Exit 125 if this build has no GUI backend, there's no display, or another machine in the process has the window |
-| `--gfx=headless` | Gives the machine the headless screen, a screen in memory, instead of a window ([headless-screen](../design/headless-screen.md)), with the same files; `/dev/snarf` is a buffer in the h9 process. `--gfx`, `--gfx=noclip`, or `--gfx-scale` with it is a usage error. Exit 125 in a `-Dgfx=none` build or on the browser host |
+| `--gfx=headless` | Gives the machine the headless screen, a screen in memory, instead of a window ([headless-screen](../design/headless-screen.md)), with the same files; `/dev/snarf` is a buffer in the h9 process. `--gfx`, `--gfx=noclip`, or `--gfx-scale` with it is a usage error. Exit 125 in a `-Dgfx=none` build or on the web host |
 | `--gfx-scale N` | The window's scale, drawterm's `-x` (Cocoa only): 0 draws in backing pixels, 1 (the default) in points, N in backing pixels divided by N. Needs `--gfx` |
 | `--gfx-size WxH` | The headless screen's size, each from 1 to 16384, `1024x768` by default. Needs `--gfx=headless` |
-| `--check` | Runs a test program on each backend built in, or just `--backend`'s (on HVF this also checks the entitlement), reports the vCPU limit, and runs `/bin/echo` from the root tree, or from the built-in root when there's none (`root: built-in (9front 11952 slim, arm64; no tree found)`), then a 9P root's index notes. Exits 0, or 125 if h9 can't run programs from the root |
-| `--version` | Prints the h9 version (`git describe`, or `-Dversion` in releases), the pinned 9front release and drawterm revision, the backends built in, the GUI backend (`gfx:`, with `headless` after a window backend, such as `gfx: cocoa, headless`), and the built-in root's contents (`built-in root: 9front 11952 slim, arm64 amd64 386 (44 commands)`, or `skeleton only`) |
+| `--check` | Runs a test program on each engine built in, or just `--engine`'s (on HVF this also checks the entitlement), reports the vCPU limit, and runs `/bin/echo` from the root tree, or from the built-in root when there's none (`root: built-in (9front 11952 slim, arm64; no tree found)`), then a 9P root's index notes. Exits 0, or 125 if h9 can't run programs from the root |
+| `--version` | Prints the h9 version (`git describe`, or `-Dversion` in releases), the pinned 9front release and drawterm revision, the engines built in, the GUI backend (`gfx:`, with `headless` after a window backend, such as `gfx: cocoa, headless`), and the built-in root's contents (`built-in root: 9front 11952 slim, arm64 amd64 386 (44 commands)`, or `skeleton only`) |
 | `--help`, `-h` | Prints the usage to stdout and exits 0 (`-h` only as the only argument) |
 
 ### Default guest environment
@@ -123,7 +123,7 @@ A first process killed by a note exits as a host shell reports a death by signal
 | Note | Exit code | Printed |
 | --- | --- | --- |
 | One APE's `sigtab` (`/sys/src/ape/lib/ap/plan9/signal.c`) maps to a signal, by prefix: `interrupt` is SIGINT, `hangup` SIGHUP, `kill` and `die` SIGKILL, `sys: write on closed pipe` SIGPIPE, `sys: fp:` SIGFPE, and so on | 128 + the host's number, so 130 for `interrupt` | Nothing for `interrupt` and a closed pipe; otherwise `h9: prog: note` |
-| `linux: signal N` (from the Linux personality) | 128 + the host's number for Linux signal N, matched by name; 1 if the host has no such signal | As above |
+| `linux: signal N` (from the Linux ABI) | 128 + the host's number for Linux signal N, matched by name; 1 if the host has no such signal | As above |
 | Another `sys: trap: …` or `sys: bad address …` fault | 139 (SIGSEGV) | `h9: prog: note` |
 | `h9: timeout` | 124 | `h9: prog: h9: timeout` |
 | `h9: machine stopped` | 128 + the host signal that started the teardown (130, 129, or 143), or 125 if none did | `h9: prog: h9: machine stopped` |
@@ -166,8 +166,8 @@ On Windows the close handler waits out the grace period before returning, since 
 
 ```zig
 pub const Options = struct {
-    backend: vmm.BackendKind = .auto,
-    arch: ?vmm.Arch = null,             // null: the host's
+    engine: engine.Choice = .auto,
+    arch: ?engine.Arch = null,             // null: the host's
     mounts: []const Mount = &.{},       // the mount flags, in order: .dir, .url, .archive, .builtin, .tmp, or .fd (a host descriptor, with fd_write for a pipe pair), with dst and options
     binds: []const Bind = &.{},         // --bind lines, after every mount
     index: IndexMode = .auto,           // .none: no metadata index for any mount

@@ -31,7 +31,7 @@ const Job = struct {
     index_buf: [20]u8 = undefined,
     /// What happened, copied out of the machine before it's freed.
     result: []const u8 = "",
-    backend: []const u8 = "none",
+    engine: []const u8 = "none",
 
     fn run(j: *Job, gpa: std.mem.Allocator, io: std.Io) void {
         j.env = .{.{ .name = "machine", .value = std.fmt.bufPrint(&j.index_buf, "{d}", .{j.index}) catch unreachable }};
@@ -44,7 +44,7 @@ const Job = struct {
             return;
         };
         defer m.deinit();
-        j.backend = @tagName(m.backend.kind());
+        j.engine = @tagName(m.engine.kind());
 
         const status = m.run(j.prog, j.argv) catch |e| {
             // err_msg says why for NotFound, NotExecutable and NamespaceFailed.
@@ -88,7 +88,7 @@ pub fn main(init: std.process.Init) !u8 {
     // CLI does; anything else is looked up in the guest. The a.out's
     // header picks the architecture; a guest program runs the host's. On
     // Windows a host path may use `\` instead.
-    var arch: ?h9.vmm.Arch = null;
+    var arch: ?h9.engine.Arch = null;
     const seps = if (builtin.os.tag == .windows) "/\\" else "/";
     const prog: h9.Program = if (std.mem.startsWith(u8, argv[0], "./") or std.mem.startsWith(u8, argv[0], "../") or
         (builtin.os.tag == .windows and (std.mem.startsWith(u8, argv[0], ".\\") or std.mem.startsWith(u8, argv[0], "..\\"))) or
@@ -122,9 +122,9 @@ pub fn main(init: std.process.Init) !u8 {
     for (jobs, threads, 0..) |*j, *t, n| {
         var opts = base;
         // HVF allows one VM per host process, so machines after the first
-        // use the emulator; it fails with BackendNotBuilt on a target
+        // use the emulator; it fails with EngineNotBuilt on a target
         // without one (neither arm64 nor x86-64).
-        if (n > 0) opts.backend = .emu;
+        if (n > 0) opts.engine = .hcpu;
         j.* = .{ .index = n, .opts = opts, .prog = prog, .argv = argv, .out = .init(gpa) };
         t.* = try std.Thread.spawn(.{}, Job.run, .{ j, gpa, io });
     }
@@ -136,7 +136,7 @@ pub fn main(init: std.process.Init) !u8 {
     var failed = false;
     for (jobs) |*j| {
         defer j.out.deinit();
-        try w.print("machine {d} ({s}): {s}\n", .{ j.index, j.backend, j.result });
+        try w.print("machine {d} ({s}): {s}\n", .{ j.index, j.engine, j.result });
         const out = std.mem.trimEnd(u8, j.out.written(), "\n");
         var lines = std.mem.splitScalar(u8, out, '\n');
         if (out.len > 0) while (lines.next()) |line| try w.print("  {s}\n", .{line});

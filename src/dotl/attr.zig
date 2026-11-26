@@ -1,7 +1,7 @@
 //! Plan 9 errors and Dirs in Linux's terms, both ways: errno numbers from
 //! error strings and back, `stat`, `statx` and `d_type` from a `Dir`, a
 //! `Dir` from .L's `stat`, open modes, and users by name and number.
-//! Shared by the Linux personality (design/epoch-0/linux-personality.md,
+//! Shared by the Linux ABI (design/epoch-0/linux-personality.md,
 //! "Users and stat") and 9P2000.L (design/epoch-0/dotl.md), which names this
 //! file. The two share the mappings and `/etc/passwd` parsing here, not
 //! the policy: each decides which user is which number.

@@ -97,7 +97,7 @@ jobs:
       # diod, the 9P2000.L server the [dotl] cases run against, and the
       # amd64 Alpine root the Linux cases run in.
       - run: scripts/fetch.sh diod alpine-amd64
-      - run: zig build integration -Darch=amd64 -Dbackends=kvm -Droot="$PWD/.local/9front/rootamd64"
+      - run: zig build integration -Darch=amd64 -Dengines=kvm -Droot="$PWD/.local/9front/rootamd64"
 
   # The demo page and its canvas cases in Chromium, over the 386 root.
   web:
@@ -128,7 +128,7 @@ jobs:
       - run: zig build web-test -Doptimize=ReleaseSafe
 
   # hcpu's Done criteria (design/epoch-0/hcpu.md) on every host GitHub has: the
-  # roots once, then the unit and backend cases and the integration cases
+  # roots once, then the unit and engine cases and the integration cases
   # on the emulator, with the arm64 root, the 386 binaries, and the amd64
   # root. Only on "Run workflow", since a full pass takes a few hours.
   hcpu-roots:
@@ -189,18 +189,18 @@ jobs:
         run: zig build test
       - name: integration, arm64 root
         if: always()
-        run: zig build integration -Doptimize=ReleaseSafe -Darch=arm64 -Dbackends=emu -Droot="$PWD/.local/9front/root"
+        run: zig build integration -Doptimize=ReleaseSafe -Darch=arm64 -Dengines=hcpu -Droot="$PWD/.local/9front/root"
       - name: integration, 386
         if: always()
-        run: zig build integration -Doptimize=ReleaseSafe -Darch=386 -Dbackends=emu -Droot="$PWD/.local/9front/root386"
+        run: zig build integration -Doptimize=ReleaseSafe -Darch=386 -Dengines=hcpu -Droot="$PWD/.local/9front/root386"
       - name: integration, amd64 root
         if: always()
-        run: zig build integration -Doptimize=ReleaseSafe -Darch=amd64 -Dbackends=emu -Droot="$PWD/.local/9front/rootamd64"
+        run: zig build integration -Doptimize=ReleaseSafe -Darch=amd64 -Dengines=hcpu -Droot="$PWD/.local/9front/rootamd64"
 
   # The rest of hcpu's Done criteria that a hosted runner can show: an
   # hour of fuzzing and the litmus tests on an arm64 and an x86-64 host,
   # the bench, and the demos. A runner isn't an M3 Max,
-  # and its macOS has no HVF, so those numbers and the hvf,emu comparison
+  # and its macOS has no HVF, so those numbers and the hvf,hcpu comparison
   # are for a real Mac.
   hcpu-fuzz:
     if: github.event_name == 'workflow_dispatch'
@@ -249,8 +249,8 @@ jobs:
           set -x
           loop='i=0; while [ $i -lt 1000000 ]; do i=$((i+1)); done; echo $i'
           if [ "$(uname)" = Linux ]; then
-            time .local/h9-hcpu/bin/h9 --backend emu --dir .local/linux/alpine-arm64:#L /bin/busybox sh -c "$loop"
+            time .local/h9-hcpu/bin/h9 --engine hcpu --dir .local/linux/alpine-arm64:#L /bin/busybox sh -c "$loop"
           else
-            .local/h9-hcpu/bin/h9 --arch 386 --backend emu --dir .local/linux/alpine-386:#L /bin/busybox sh -c 'echo hello; ls /etc | wc -l'
-            .local/h9-hcpu/bin/h9 --arch amd64 --backend emu --dir .local/linux/alpine-amd64:#L /bin/busybox sh -c 'echo hello; ls /etc | wc -l'
+            .local/h9-hcpu/bin/h9 --arch 386 --engine hcpu --dir .local/linux/alpine-386:#L /bin/busybox sh -c 'echo hello; ls /etc | wc -l'
+            .local/h9-hcpu/bin/h9 --arch amd64 --engine hcpu --dir .local/linux/alpine-amd64:#L /bin/busybox sh -c 'echo hello; ls /etc | wc -l'
           fi

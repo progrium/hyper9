@@ -16,7 +16,7 @@
  *   guest memory, changed with host atomics. That memory is what the
  *   guest's own loads, stores and exclusives see.
  *
- * The callers (src/syscall.zig) have checked the address: it's aligned,
+ * The callers (src/abi/plan9/syscall.zig) have checked the address: it's aligned,
  * mapped and writable, and stays valid while the caller is blocked.
  *
  * rendezvous is 9front's sysrendezvous on drawterm's Rgrp and Proc fields,

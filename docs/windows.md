@@ -14,7 +14,7 @@ calls go to h9's Plan 9 kernel like any Linux program's.
 
 > **Warning.** This is new and lightly tested. Wine has run `cmd`
 > and small console programs in h9, not real applications. h9's
-> sandbox hasn't been audited, and the native backend isn't a security
+> sandbox hasn't been audited, and the sud engine isn't a security
 > boundary ([manual, chapter 23](../MANUAL.md#23-sandboxing)). Run Windows
 > programs you'd trust on the host.
 
@@ -29,8 +29,8 @@ calls go to h9's Plan 9 kernel like any Linux program's.
 ## 1. What you need
 
 - **An x86\_64 Linux host.** Wine runs x86\_64 Windows programs. It runs as
-  an amd64 Linux program, so it needs KVM or the native backend. On a host
-  without KVM, pass `--backend native`, as every example below does. Leave
+  an amd64 Linux program, so it needs KVM or the sud engine. On a host
+  without KVM, pass `--engine sud`, as every example below does. Leave
   it off where `/dev/kvm` works. macOS and Windows hosts aren't covered yet.
 - **64-bit programs.** Wine's WoW64 isn't set up, so a 32-bit `.exe`
   exits with status 1 and no output.
@@ -61,7 +61,7 @@ about half a minute:
 
 ```sh
 host$ mkdir ~/win && cd ~/win
-host$ h9 --backend native --dir "$WINEROOT":#L --env WINEPREFIX=/mnt/term/cwd/prefix \
+host$ h9 --engine sud --dir "$WINEROOT":#L --env WINEPREFIX=/mnt/term/cwd/prefix \
         sh -c 'wineboot -i; wineserver -w'
 host$ ln -s ../.. prefix/dosdevices/d:
 ```
@@ -83,7 +83,7 @@ does that, and sets the prefix:
 
 ```sh
 host$ win() {
-        h9 --backend native --dir "$WINEROOT":#L \
+        h9 --engine sud --dir "$WINEROOT":#L \
           --env WINEPREFIX=/mnt/term/cwd/prefix --env WINEDEBUG=-all \
           sh -c 'wine "$@"; s=$?; wineserver -w; exit $s' sh "$@"
       }

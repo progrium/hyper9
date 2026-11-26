@@ -1,5 +1,5 @@
 // Writes /f in the root's overlay, waits while another machine looks for
-// it, then reads it back (tests/backends.zig, design/epoch-0/overlay.md).
+// it, then reads it back (tests/engines.zig, design/epoch-0/overlay.md).
 
 #include "lib.S"
 

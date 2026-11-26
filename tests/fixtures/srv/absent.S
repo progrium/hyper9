@@ -1,5 +1,5 @@
 // Opens /srv/m, which only another machine has posted: it fails, and the
-// program exits with the error (tests/backends.zig).
+// program exits with the error (tests/engines.zig).
 
 #include "lib.S"
 

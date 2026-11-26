@@ -1,11 +1,11 @@
 # Test VMs
 
-Lima VMs for running h9 with the emu backend (`--backend emu`) on Linux,
+Lima VMs for running h9 with the hcpu engine (`--engine hcpu`) on Linux,
 macOS, and Windows. None but `linux-kvm` has a usable hypervisor (no
-`/dev/kvm`, no nested Hypervisor.framework, no WHP), which is the case emu
-is for. `linux-kvm` has nested virtualization, for the KVM backend
+`/dev/kvm`, no nested Hypervisor.framework, no WHP), which is the case hcpu
+is for. `linux-kvm` has nested virtualization, for the KVM engine
 ([kvm](../../design/epoch-0/kvm.md)): `vm test linux-kvm` runs the tests with
-`H9_TEST_BACKENDS=kvm,emu`. Nothing is
+`H9_TEST_ENGINES=kvm,hcpu`. Nothing is
 installed for building: cross-compile h9 on the host and copy it in.
 
 | OS | Build |
@@ -39,7 +39,7 @@ export LIMA_HOME=$PWD/.local/lima
 zig build -Dtarget=aarch64-linux-musl --prefix zig-out/linux
 scripts/lima/vm up linux                    # create (first time), start, provision
 scripts/lima/vm push linux zig-out/linux/bin/h9 zig-out/fixtures/hello  # into ~/h9
-scripts/lima/vm shell linux ./h9/h9 --backend emu ./h9/hello
+scripts/lima/vm shell linux ./h9/h9 --engine hcpu ./h9/hello
 scripts/lima/vm push-root linux             # 9front root tree into ~/h9/root
 scripts/lima/vm shell linux ./h9/h9 --dir h9/root /bin/cat /lib/namespace
 scripts/lima/vm shell windows 'cd h9 && h9.exe --dir root /bin/cat /lib/namespace'
@@ -62,7 +62,7 @@ page, not UTF-8).
 
 ## Tests
 
-`vm test <os>` runs the backend and integration tests in the guest on the
+`vm test <os>` runs the engine and integration tests in the guest on the
 emulator. Build them first with the same target as the table above, adding
 `install-tests`:
 
@@ -76,8 +76,8 @@ H9_TEST_ARCH=arm64 scripts/lima/vm test windows  # an x86_64 h9 running the arm6
 
 It pushes `h9` and the test binaries from `zig-out/<os>/bin`, runs
 `push-root`, then runs each set over ssh with `H9_TEST_BIN`,
-`H9_TEST_ROOT`, and `H9_TEST_BACKENDS=emu`. The root tree is arm64 only, so
-`linux-amd64` runs just the backend tests. `H9_TEST_SLOW` multiplies the
+`H9_TEST_ROOT`, and `H9_TEST_ENGINES=hcpu`. The root tree is arm64 only, so
+`linux-amd64` runs just the engine tests. `H9_TEST_SLOW` multiplies the
 interactive cases' timeouts; it defaults to 10 on `linux-amd64` and 3 on
 `windows`, where each guest process takes about 0.4 s to start.
 

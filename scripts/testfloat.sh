@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Checks src/interp/x86/f80.zig, the Zig port of SoftFloat's extF80,
+# Checks src/engine/hcpu/interp/x86/f80.zig, the Zig port of SoftFloat's extF80,
 # against Berkeley TestFloat: every function f80.zig has, in every rounding
 # mode, and for add, sub, mul, div, and sqrt in every rounding precision.
 # It builds SoftFloat 3e and TestFloat 3e (pinned below) into .local/src
@@ -8,7 +8,7 @@
 #
 #   scripts/testfloat.sh [-level 2] [function...]   (default: all)
 #
-# It also regenerates f80.zig's sample, src/interp/x86/f80-vectors.txt,
+# It also regenerates f80.zig's sample, src/engine/hcpu/interp/x86/f80-vectors.txt,
 # with `scripts/testfloat.sh --sample`.
 set -euo pipefail
 . "$(dirname "$0")/env.sh"
@@ -63,7 +63,7 @@ fi
 
 check="$H9_LOCAL/bin/f80_vectors"
 mkdir -p "$H9_LOCAL/bin"
-zig build-exe -OReleaseFast "$H9_ROOT/src/interp/x86/f80_vectors.zig" -femit-bin="$check"
+zig build-exe -OReleaseFast "$H9_ROOT/src/engine/hcpu/interp/x86/f80_vectors.zig" -femit-bin="$check"
 
 all=(extF80_add extF80_sub extF80_mul extF80_div extF80_sqrt extF80_rem extF80_roundToInt
 	extF80_eq extF80_le extF80_lt extF80_eq_signaling extF80_le_quiet extF80_lt_quiet
@@ -75,7 +75,7 @@ tfmode() { case $1 in min_mag) echo minMag ;; near_max_mag) echo near_maxMag ;; 
 
 # run func mode precision exact: one testfloat_gen run, checked (or, for
 # --sample, 32 cases spread through it appended to the sample under its header).
-out="$H9_ROOT/src/interp/x86/f80-vectors.txt"
+out="$H9_ROOT/src/engine/hcpu/interp/x86/f80-vectors.txt"
 run() {
 	local f=$1 m=$2 p=$3 e=$4 gf=$1
 	case $f in *_r_minMag) gf=${f%_r_minMag} ;; esac

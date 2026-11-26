@@ -1,6 +1,6 @@
 // Posts an fd on a host file opened ORCLOSE as /srv/f, closes its own fds
 // and exits. The file goes only when the machine closes what's posted on
-// its /srv as it ends (tests/backends.zig, design/epoch-0/devsrv.md).
+// its /srv as it ends (tests/engines.zig, design/epoch-0/devsrv.md).
 
 #include "lib.S"
 

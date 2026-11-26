@@ -11,7 +11,7 @@
  * lists the process's open fds. A qid path holds the table index in its
  * low byte, the fd above it and the pid above that; devices under /dev
  * also set Qchr, so stat reports them as character devices
- * (src/linux/sys.zig).
+ * (src/abi/linux/sys.zig).
  *
  * Text files are made when they're opened, by h9_linux_gen (Zig) or
  * here, and read from that copy.

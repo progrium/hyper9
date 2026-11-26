@@ -127,35 +127,35 @@ const kern_flags_win32 = kern_flags_common ++ [_][]const u8{ "-DWINDOWS", "-DUNI
 
 /// Zig's own macOS SDK detection runs xcodebuild, which fails in some
 /// environments; SDKROOT (set by scripts/env.sh) is used when present.
-/// Programs in tests/fixtures/segattach, for tests/backends.zig.
+/// Programs in tests/fixtures/segattach, for tests/engines.zig.
 const segattach_fixtures = [_][]const u8{
     "shared_rfork", "memory_rfork", "place",  "sixth",     "detach",
     "segbrk",       "segfree",      "ronly",  "execfault", "headroom",
     "brkstop",      "exec_a",       "exec_b", "sibling",   "procseg",
 };
-/// Programs in tests/fixtures/overlay, for tests/backends.zig. They use the
+/// Programs in tests/fixtures/overlay, for tests/engines.zig. They use the
 /// segattach fixtures' lib.S.
 const overlay_fixtures = [_][]const u8{ "tmp_own", "tmp_absent", "copyup_reader", "root_own", "root_absent" };
-/// Programs in tests/fixtures/srv, for tests/backends.zig, with the same lib.S.
+/// Programs in tests/fixtures/srv, for tests/engines.zig, with the same lib.S.
 const srv_fixtures = [_][]const u8{ "board", "hold", "absent", "orclose" };
 const fdmount_fixtures = [_][]const u8{ "cat", "create" };
-/// Programs in tests/fixtures/htools, for tests/backends.zig, with the same lib.S.
+/// Programs in tests/fixtures/htools, for tests/engines.zig, with the same lib.S.
 const htools_fixtures = [_][]const u8{ "tree", "masked" };
 
-/// Programs in tests/fixtures/sema, for tests/backends.zig; they include
+/// Programs in tests/fixtures/sema, for tests/engines.zig; they include
 /// the segattach fixtures' lib.S.
 const sema_fixtures = [_][]const u8{
     "rendezvous", "semacquire", "count", "badarg", "odd", "unmapped", "interrupt",
 };
 
-/// Programs in tests/fixtures/net, for tests/backends.zig. They share
+/// Programs in tests/fixtures/net, for tests/engines.zig. They share
 /// tests/fixtures/segattach/lib.S.
 const net_fixtures = [_][]const u8{ "ctl", "cs" };
 /// C programs in tests/fixtures/linux, built static for Linux on arm64 and
 /// amd64, for the linux-personality cases in tests/integration.zig.
 const linux_fixture_names = [_][]const u8{ "hello", "probe", "die", "sigreturn", "net", "threads", "files", "tls386", "bigexe", "pty", "fifo", "cowfork", "symlink", "chroot" };
 
-/// Programs in tests/fixtures/gfx, for tests/backends.zig's [gfx] cases on
+/// Programs in tests/fixtures/gfx, for tests/engines.zig's [gfx] cases on
 /// the headless backend, with the same lib.S.
 const gfx_fixtures = [_][]const u8{ "binds", "drawnew", "draw", "kbd", "mouse", "snarf", "sleep" };
 
@@ -182,7 +182,7 @@ const Integration = struct {
 /// run of the same binary for each, which the build runner runs side by
 /// side: the cases mostly wait on h9, terminals, and sockets, so one run
 /// leaves most cores idle. `step` depends on every run.
-fn addIntegration(b: *std.Build, step: *std.Build.Step, shards: u32, optimize: std.lang.Optimize, filters: []const []const u8, it: Integration, root: []const u8, backends: []const u8, pending: bool, go: ?GoFixtures, guest_test: bool, src: ?[]const u8) []*std.Build.Step.Run {
+fn addIntegration(b: *std.Build, step: *std.Build.Step, shards: u32, optimize: std.lang.Optimize, filters: []const []const u8, it: Integration, root: []const u8, engines: []const u8, pending: bool, go: ?GoFixtures, guest_test: bool, src: ?[]const u8) []*std.Build.Step.Run {
     // The paths the cases find by default: the install prefix isn't known
     // until the build runs, so they're build options, not environment
     // variables (tests/integration.zig's getenv).
@@ -195,7 +195,7 @@ fn addIntegration(b: *std.Build, step: *std.Build.Step, shards: u32, optimize: s
     const n = @max(shards, 1);
     const runs = b.allocator.alloc(*std.Build.Step.Run, n) catch @panic("OOM");
     for (runs, 0..) |*r, i| {
-        r.* = addIntegrationRun(b, tests, it, root, backends, pending, go, guest_test, src);
+        r.* = addIntegrationRun(b, tests, it, root, engines, pending, go, guest_test, src);
         if (n > 1) {
             r.*.setName(b.fmt("integration {d}/{d}", .{ i + 1, n }));
             r.*.setEnvironmentVariable("H9_TEST_SHARD", b.fmt("{d}/{d}", .{ i, n }));
@@ -206,7 +206,7 @@ fn addIntegration(b: *std.Build, step: *std.Build.Step, shards: u32, optimize: s
 }
 
 /// One run of the integration binary `tests`, set up as addIntegration says.
-fn addIntegrationRun(b: *std.Build, tests: *std.Build.Step.Compile, it: Integration, root: []const u8, backends: []const u8, pending: bool, go: ?GoFixtures, guest_test: bool, src: ?[]const u8) *std.Build.Step.Run {
+fn addIntegrationRun(b: *std.Build, tests: *std.Build.Step.Compile, it: Integration, root: []const u8, engines: []const u8, pending: bool, go: ?GoFixtures, guest_test: bool, src: ?[]const u8) *std.Build.Step.Run {
     const run = b.addRunArtifact(tests);
     // The self-host cases' source when the root has no /sys/src
     // (design/epoch-0/self-host.md).
@@ -219,11 +219,11 @@ fn addIntegrationRun(b: *std.Build, tests: *std.Build.Step.Compile, it: Integrat
     if (it.web) run.setEnvironmentVariable("H9_TEST_WEB", "1");
     if (go) |g| {
         run.step.dependOn(g.step);
-        // On the native backend when it's in the list, else the emulator.
-        if (std.mem.indexOf(u8, backends, "native") != null) run.setEnvironmentVariable("H9_TEST_GO_BACKEND", "native");
+        // On the sud engine when it's in the list, else the emulator.
+        if (std.mem.indexOf(u8, engines, "sud") != null) run.setEnvironmentVariable("H9_TEST_GO_ENGINE", "sud");
     }
     run.setEnvironmentVariable("H9_TEST_ROOT", root);
-    run.setEnvironmentVariable("H9_TEST_BACKENDS", backends);
+    run.setEnvironmentVariable("H9_TEST_ENGINES", engines);
     // The Linux fixtures and the Alpine roots from scripts/fetch.sh
     // (design/epoch-0/linux-personality.md).
     run.setEnvironmentVariable("H9_TEST_LINUX_ROOT", pathFromRoot(b, ".local/linux"));
@@ -365,7 +365,7 @@ fn addSdkPaths(b: *std.Build, m: *std.Build.Module) void {
     m.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr/lib" }) });
 }
 
-/// The emulator, h9's own CPUs (src/vmm/hcpu.zig on src/hcpu.zig): ha64
+/// The emulator, h9's own CPUs (src/engine/hcpu/engine.zig on src/engine/hcpu/hcpu.zig): ha64
 /// for arm64 guests, h86 for 386, and hx64 for amd64. It's built in on
 /// every target that has a JIT for it (arm64 and x86-64, and the web
 /// host, which sets it itself) and left out elsewhere
@@ -583,7 +583,7 @@ fn builtinArches(target: std.Target, emu: Emu) []const []const u8 {
 }
 
 /// drawterm's kern and the libraries it uses, as a static library for
-/// `target`. `web` builds it for the browser host
+/// `target`. `web` builds it for the web host
 /// (design/epoch-0/browser-host.md): wasm32-wasi, with src/kern/os-wasm.c in
 /// place of posix.c, the coroutines it runs on (src/web/coro.c), and
 /// setjmp/longjmp on wasm exception handling.
@@ -619,7 +619,7 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.O
         .files = &.{ "glue.c", "proc.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "devproc.c", "devoverlay.c", "devsrv.c", "devhtools.c", "fscheck.c", "netcheck.c", "consx.c", "tsleep.c", "sema.c", "rootdial.c", "devhstream.c", "devdotl.c", "devhidx.c", "kserve.c", "ns.c" },
         .flags = flags,
     });
-    // The Linux personality (design/epoch-0/linux-personality.md) and its host
+    // The Linux ABI (design/epoch-0/linux-personality.md) and its host
     // sockets (design/epoch-0/linux-net.md).
     kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{ "linux.c", "devlinux.c", "linuxnet.c", "devpty.c", "fifo.c" }, .flags = flags });
     if (web) {
@@ -688,8 +688,8 @@ fn addWeb(b: *std.Build, optimize: std.lang.Optimize, parts: ModuleParts, gfx: G
     var p = parts;
     p.target = target;
     p.optimize = optimize;
-    // h9's own CPUs (`--backend emu`, or `v86`, its old name). The JIT
-    // tier here is the wasm one (src/jit/wasm_t1.zig and emit/wasm.zig),
+    // h9's own CPUs (`--engine hcpu`). The JIT
+    // tier here is the wasm one (src/engine/hcpu/jit/wasm_t1.zig and emit/wasm.zig),
     // not the native code cache, which hcpu leaves out on the web.
     p.emu = .hcpu;
     p.jit = true;
@@ -711,7 +711,7 @@ fn addWeb(b: *std.Build, optimize: std.lang.Optimize, parts: ModuleParts, gfx: G
     });
     exe.import_memory = true;
     // The function table too, so h9-web.js can grow it: the JIT installs
-    // its regions there (src/jit/emit/wasm.zig).
+    // its regions there (src/engine/hcpu/jit/emit/wasm.zig).
     exe.import_table = true;
     // The main coroutine's stack; kernel processes get their own.
     exe.stack_size = 1 << 20;
@@ -890,7 +890,7 @@ pub const Gfx = enum {
     win32,
     /// drawterm's gui-cocoa, built with the macOS SDK.
     cocoa,
-    /// A page's canvas, on the browser host (src/kern/gfx-web.c,
+    /// A page's canvas, on the web host (src/kern/gfx-web.c,
     /// design/epoch-0/browser-gfx.md).
     web,
 
@@ -912,7 +912,7 @@ pub const Gfx = enum {
             .cocoa => if (t.os.tag != .macos) "Cocoa is macOS only" else null,
             .win32 => if (t.os.tag != .windows) "Win32 is Windows only" else null,
             .x11 => if (t.os.tag != .linux) "X11 is built for Linux only" else if (t.abi.isMusl()) "X11 needs a glibc target, such as -Dtarget=x86_64-linux-gnu, to link the system's libX11" else null,
-            .web => if (t.os.tag != .wasi) "web is the browser host's backend (zig build web)" else null,
+            .web => if (t.os.tag != .wasi) "web is the web host's backend (zig build web)" else null,
         };
     }
 };
@@ -925,17 +925,17 @@ const ModuleParts = struct {
     /// With hcpu: build the JIT tier, not just the interpreter.
     jit: bool,
     /// With hcpu: run every region through the T1-against-T0 check
-    /// (src/jit/check/vmm.zig).
+    /// (src/engine/hcpu/jit/check/engine.zig).
     jit_check: bool,
     /// With hcpu: ir.verify each region after lifting and after opt
     /// (opt.verify), even where the hcpu module has no runtime safety.
     jit_verify: bool,
-    /// How src/interp/ and src/jit/ (the hcpu module) are optimized.
+    /// How src/engine/hcpu/interp/ and src/engine/hcpu/jit/ (the hcpu module) are optimized.
     hcpu_optimize: std.lang.Optimize,
     shim: std.Build.LazyPath,
     shim_amd64: std.Build.LazyPath,
-    /// The native backend's stub, for Linux x86_64 hosts.
-    native_stub: std.Build.LazyPath,
+    /// The sud engine's stub, for Linux x86_64 hosts.
+    sud_stub: std.Build.LazyPath,
     guest_tree: std.Build.LazyPath,
     /// The built-in root (design/epoch-0/builtin-root.md).
     builtin_root: std.Build.LazyPath,
@@ -959,17 +959,17 @@ fn addH9Module(b: *std.Build, p: ModuleParts, gfx: Gfx, exported: bool) H9Module
         .target = target,
     };
     const mod = if (exported) b.addModule("h9", opts) else b.createModule(opts);
-    // The emulator's CPUs (src/hcpu.zig), as a module of their own, so
+    // The emulator's CPUs (src/engine/hcpu/hcpu.zig), as a module of their own, so
     // they can be optimized when the rest of h9 isn't.
     mod.addImport("hcpu", b.createModule(.{
-        .root_source_file = b.path("src/hcpu.zig"),
+        .root_source_file = b.path("src/engine/hcpu/hcpu.zig"),
         .target = target,
         .optimize = p.hcpu_optimize,
     }));
     mod.addAnonymousImport("shim_arm64", .{ .root_source_file = p.shim });
     mod.addAnonymousImport("shim_amd64", .{ .root_source_file = p.shim_amd64 });
     if (os == .linux and target.result.cpu.arch == .x86_64)
-        mod.addAnonymousImport("native_stub", .{ .root_source_file = p.native_stub });
+        mod.addAnonymousImport("sud_stub", .{ .root_source_file = p.sud_stub });
 
     const web = os == .wasi;
     // The web host's kern turns on wasm exception handling, for setjmp
@@ -1068,7 +1068,7 @@ pub fn build(b: *std.Build) void {
     }
     // T0 in a Debug build runs several times slower than in a release one,
     // enough for long integration cases to time out.
-    const hcpu_debug = b.option(bool, "hcpu-debug", "Build src/interp and src/jit with -Doptimize too, not ReleaseFast, in Debug builds (for debugging the emulator's CPUs)") orelse false;
+    const hcpu_debug = b.option(bool, "hcpu-debug", "Build src/engine/hcpu/interp and src/engine/hcpu/jit with -Doptimize too, not ReleaseFast, in Debug builds (for debugging the emulator's CPUs)") orelse false;
     const hcpu_optimize: std.lang.Optimize = if (optimize == .debug and !hcpu_debug) .fast else optimize;
     const jit_check = b.option(bool, "jit-check", "Check every region against T0 as it runs (slow; for zig build integration)") orelse false;
     const jit_verify = b.option(bool, "jit-verify", "Verify every region after lifting and after opt, panicking on a bad one (default: on in Debug and ReleaseSafe builds)") orelse
@@ -1077,7 +1077,7 @@ pub fn build(b: *std.Build) void {
 
     const gfx_opt = b.option(Gfx, "gfx", "GUI backend for --gfx (design/epoch-0/gfx.md): cocoa, win32, x11, web, headless (only --gfx=headless) or none (default: cocoa on macOS, win32 on Windows, web for zig build web, headless elsewhere); the window backends also link the headless screen");
     const gfx = gfx_opt orelse Gfx.default(target.result);
-    // zig build web's: web, the browser host's only GUI backend, unless
+    // zig build web's: web, the web host's only GUI backend, unless
     // -Dgfx=none leaves graphics out (design/epoch-0/browser-gfx.md).
     const web_gfx: Gfx = if (gfx_opt == .none) .none else .web;
     if (gfx.unsupported(target.result)) |why| b.getInstallStep().dependOn(&b.addFail(b.fmt("-Dgfx={t}: {s}", .{ gfx, why })).step);
@@ -1103,13 +1103,13 @@ pub fn build(b: *std.Build) void {
     shim_amd64_obj.root_module.addAssemblyFile(b.path("src/arch/amd64/shim.S"));
     const shim_amd64_bin = b.addObjCopy(shim_amd64_obj.getEmittedBin(), .{ .format = .binary, .only_section = ".text" });
 
-    // The native backend's stub (design/epoch-0/native-backend.md): a freestanding
+    // The sud engine's stub (design/epoch-0/native-backend.md): a freestanding
     // static program, linked high so the guest's whole layout is free, and
     // embedded in h9.
-    const native_stub = b.addExecutable(.{
+    const sud_stub = b.addExecutable(.{
         .name = "h9-stub",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/vmm/native_stub.zig"),
+            .root_source_file = b.path("src/engine/sud_stub.zig"),
             .target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .none }),
             .optimize = .small,
             .single_threaded = true,
@@ -1118,8 +1118,8 @@ pub fn build(b: *std.Build) void {
             .code_model = .large,
         }),
     });
-    native_stub.pie = false;
-    native_stub.image_base = 0x6000_0000_0000; // native_abi.stub_base
+    sud_stub.pie = false;
+    sud_stub.image_base = 0x6000_0000_0000; // sud_abi.stub_base
 
     const kern_step = b.step("kern", "Compile drawterm's kern");
     const have_drawterm = if (b.root.root_dir.handle.access(b.graph.io, drawterm ++ "/kern/sysfile.c", .{})) true else |_| false;
@@ -1153,7 +1153,7 @@ pub fn build(b: *std.Build) void {
         .hcpu_optimize = hcpu_optimize,
         .shim = shim_bin.getOutput(),
         .shim_amd64 = shim_amd64_bin.getOutput(),
-        .native_stub = native_stub.getEmittedBin(),
+        .sud_stub = sud_stub.getEmittedBin(),
         .guest_tree = guest_tree.file,
         .builtin_root = builtin_root,
         .builtin_dir = builtin_dir,
@@ -1169,14 +1169,14 @@ pub fn build(b: *std.Build) void {
     // so a window backend's build runs them beside its window.
     const test_mod = if (gfx != .none and gfx != .web) mod else addH9Module(b, parts, .headless, false);
 
-    // The browser host (design/epoch-0/browser-host.md): h9 for wasm32-wasi
+    // The web host (design/epoch-0/browser-host.md): h9 for wasm32-wasi
     // with its JS host and a demo page, in zig-out/web.
-    const web_step = b.step("web", "Build the browser host into zig-out/web (design/epoch-0/browser-host.md)");
+    const web_step = b.step("web", "Build the web host into zig-out/web (design/epoch-0/browser-host.md)");
     const web = addWeb(b, optimize, parts, web_gfx);
     web_step.dependOn(web.install);
     // The demo page's root archive, from a 386 root tree and the paths
     // src/web/root.list names; left out without one.
-    const web_root = b.option([]const u8, "web-root", "386 root tree for the browser host's root archive (default .local/9front/root386)") orelse
+    const web_root = b.option([]const u8, "web-root", "386 root tree for the web host's root archive (default .local/9front/root386)") orelse
         pathFromRoot(b, ".local/9front/root386");
     if (std.Io.Dir.cwd().access(b.graph.io, b.pathJoin(&.{ web_root, "386/bin/rc" }), .{})) {
         const webroot = b.addExecutable(.{
@@ -1192,7 +1192,7 @@ pub fn build(b: *std.Build) void {
     // The demo page's Linux root archive for ?linux, from the arm64 Alpine
     // root `scripts/fetch.sh alpinearm64web` makes and src/web/linux.list;
     // left out without one.
-    const web_linux_root = b.option([]const u8, "web-linux-root", "arm64 Linux root tree for the browser host's Linux archive (default .local/linux/alpine-arm64-web)") orelse
+    const web_linux_root = b.option([]const u8, "web-linux-root", "arm64 Linux root tree for the web host's Linux archive (default .local/linux/alpine-arm64-web)") orelse
         pathFromRoot(b, ".local/linux/alpine-arm64-web");
     if (std.Io.Dir.cwd().access(b.graph.io, b.pathJoin(&.{ web_linux_root, "bin/busybox" }), .{})) {
         const webroot = b.addExecutable(.{
@@ -1236,7 +1236,7 @@ pub fn build(b: *std.Build) void {
     web_gfx_test.has_side_effects = true;
     web_gfx_test.expectExitCode(0);
     web_gfx_test.step.dependOn(web.install);
-    const web_test_step = b.step("web-test", "Run the browser host's demo page, its canvas cases, and the namespace kernel's machine cases in Chromium with Playwright (needs a 386 root for root.h9a)");
+    const web_test_step = b.step("web-test", "Run the web host's demo page, its canvas cases, and the namespace kernel's machine cases in Chromium with Playwright (needs a 386 root for root.h9a)");
     web_test_step.dependOn(&web_test.step);
 
     // The namespace kernel (design/namespace-kernel.md): h9ns.wasm and its
@@ -1294,7 +1294,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "h9", .module = mod.mod },
-                // --check runs the hello fixture on each backend.
+                // --check runs the hello fixture on each engine.
                 .{ .name = "hello", .module = b.createModule(.{ .root_source_file = b.path("tests/fixtures/hello.zig"), .target = target }) },
             },
         }),
@@ -1335,7 +1335,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("tests/fixtures/mkhello.zig"),
             .target = b.graph.host,
             .imports = &.{
-                .{ .name = "aout", .module = b.createModule(.{ .root_source_file = b.path("src/aout.zig"), .target = b.graph.host }) },
+                .{ .name = "aout", .module = b.createModule(.{ .root_source_file = b.path("src/abi/plan9/aout.zig"), .target = b.graph.host }) },
                 .{ .name = "hello", .module = b.createModule(.{ .root_source_file = b.path("tests/fixtures/hello.zig"), .target = b.graph.host }) },
             },
         }),
@@ -1360,7 +1360,7 @@ pub fn build(b: *std.Build) void {
             // Segments aligned to 64K on every architecture, as arm64's
             // linkers align them by default, so the [cow-fork] sharing
             // case's blob sits at its offset's place in h9's chunks
-            // (src/linux/pagecache.zig) on amd64 too.
+            // (src/abi/linux/pagecache.zig) on amd64 too.
             if (std.mem.eql(u8, name, "bigexe")) fx.link_z_max_page_size = 64 << 10;
             const inst = b.addInstallArtifact(fx, .{ .dest_dir = .{ .override = .{ .custom = b.fmt("fixtures/linux/{s}", .{arch}) } } });
             linux_fixtures.dependOn(&inst.step);
@@ -1376,7 +1376,7 @@ pub fn build(b: *std.Build) void {
     addWebCases(b, &demos, "tests/web/nskernel-browser.mjs", &ns_browser.step);
     if (web_gfx != .none) addWebCases(b, &demos, "tests/web/gfx.mjs", &web_gfx_test.step);
 
-    // Baseline demos: the host architecture's hello on the default backend,
+    // Baseline demos: the host architecture's hello on the default engine,
     // and on the emulator when it's built in.
     const host_hello = if (target.result.cpu.arch == .x86_64) hellos[1] else hellos[0];
     const hello_demo = runH9(b, h9, signed_step, &.{});
@@ -1385,13 +1385,13 @@ pub fn build(b: *std.Build) void {
     hello_demo.step.dependOn(signed_step);
     addDemo(b, &demos, "baseline", &hello_demo.step);
     if (emu != .none) {
-        const emu_demo = runH9(b, h9, signed_step, &.{ "--backend", "emu" });
+        const emu_demo = runH9(b, h9, signed_step, &.{ "--engine", "hcpu" });
         emu_demo.addFileArg(host_hello);
         emu_demo.expectStdOutEqual("hello\n");
         emu_demo.step.dependOn(signed_step);
         addDemo(b, &demos, "baseline", &emu_demo.step);
         // 386 runs on the emulator on every host.
-        const i386_demo = runH9(b, h9, signed_step, &.{ "--backend", "emu" });
+        const i386_demo = runH9(b, h9, signed_step, &.{ "--engine", "hcpu" });
         i386_demo.addFileArg(hellos[2]);
         i386_demo.expectStdOutEqual("hello\n");
         i386_demo.step.dependOn(signed_step);
@@ -1471,7 +1471,7 @@ pub fn build(b: *std.Build) void {
         addDemo(b, &demos, "self-host", &acid_demo.step);
     }
 
-    // Each integration case runs on every backend built in that runs the
+    // Each integration case runs on every engine built in that runs the
     // cases' architecture here. -Darch runs them with another
     // architecture's binaries from the root (/386/bin, /amd64/bin).
     const test_arch = b.option([]const u8, "arch", "Architecture of the root's binaries for the integration cases: arm64, amd64 or 386 (default the host's)");
@@ -1481,17 +1481,17 @@ pub fn build(b: *std.Build) void {
         else => null,
     };
     const cases_arch = test_arch orelse native_arch orelse "arm64";
-    var backends: std.ArrayList(u8) = .empty;
+    var engines: std.ArrayList(u8) = .empty;
     // A macOS VM has no HVF (kern.hv_support is 0), so h9 can't run there on hvf.
     if (os == .macos and std.mem.eql(u8, cases_arch, "arm64") and target.result.cpu.arch == .aarch64 and
         (b.graph.host.result.os.tag != .macos or hostHasHvf(b)))
-        backends.appendSlice(b.allocator, "hvf,") catch @panic("OOM");
+        engines.appendSlice(b.allocator, "hvf,") catch @panic("OOM");
     // KVM runs the host's architecture, when this user can open /dev/kvm.
     if (os == .linux and b.graph.host.result.os.tag == .linux and native_arch != null and std.mem.eql(u8, cases_arch, native_arch.?) and
         target.result.cpu.arch == b.graph.host.result.cpu.arch)
     {
         if (std.Io.Dir.accessAbsolute(b.graph.io, "/dev/kvm", .{ .read = true, .write = true })) |_|
-            backends.appendSlice(b.allocator, "kvm,") catch @panic("OOM")
+            engines.appendSlice(b.allocator, "kvm,") catch @panic("OOM")
         else |_| {}
     }
     // WHP runs amd64 on Windows x86_64, when the Windows Hypervisor Platform
@@ -1500,24 +1500,24 @@ pub fn build(b: *std.Build) void {
         std.mem.eql(u8, cases_arch, "amd64"))
     {
         if (std.Io.Dir.accessAbsolute(b.graph.io, "C:\\Windows\\System32\\WinHvPlatform.dll", .{})) |_|
-            backends.appendSlice(b.allocator, "whp,") catch @panic("OOM")
+            engines.appendSlice(b.allocator, "whp,") catch @panic("OOM")
         else |_| {}
     }
-    // The native backend (design/epoch-0/native-backend.md) runs amd64 on Linux
+    // The sud engine (design/epoch-0/native-backend.md) runs amd64 on Linux
     // x86_64 when the kernel has Syscall User Dispatch and seccomp; h9
-    // skips it where it can't run, as it does a backend that isn't built.
+    // skips it where it can't run, as it does an engine that isn't built.
     if (os == .linux and b.graph.host.result.os.tag == .linux and target.result.cpu.arch == .x86_64 and
         b.graph.host.result.cpu.arch == .x86_64 and std.mem.eql(u8, cases_arch, "amd64"))
-        backends.appendSlice(b.allocator, "native,") catch @panic("OOM");
-    if (emu != .none) backends.appendSlice(b.allocator, "emu,") catch @panic("OOM");
-    // -Dbackends picks the backends instead, such as only `native` for a
+        engines.appendSlice(b.allocator, "sud,") catch @panic("OOM");
+    if (emu != .none) engines.appendSlice(b.allocator, "hcpu,") catch @panic("OOM");
+    // -Dengines picks the engines instead, such as only `sud` for a
     // quick run where there's no KVM.
-    const want_backends = b.option([]const u8, "backends", "Backends to run the integration cases on, comma-separated (default: every one built in that runs here)");
+    const want_engines = b.option([]const u8, "engines", "Engines to run the integration cases on, comma-separated (default: every one built in that runs here)");
     // -Dweb runs them on the web host under Node instead: h9-node on h9's
     // own 386 CPU (h86), with the root's 386 binaries
     // (design/epoch-0/browser-host.md), or with -Darch=arm64 on ha64.
     const test_web = b.option(bool, "web", "Run the integration cases on the web host under Node (386, or arm64 with -Darch=arm64)") orelse false;
-    const backend_list = if (test_web) want_backends orelse "emu" else if (want_backends) |w| w else if (backends.items.len > 0) backends.items else "auto";
+    const engine_list = if (test_web) want_engines orelse "hcpu" else if (want_engines) |w| w else if (engines.items.len > 0) engines.items else "auto";
     const it: Integration = if (test_web) .{
         .bin = b.graph.path(.install_prefix, "web/h9-node"),
         .arch = test_arch orelse "386",
@@ -1539,7 +1539,7 @@ pub fn build(b: *std.Build) void {
     const go_fixtures: ?GoFixtures = if (go_bin) |g| addGoFixtures(b, g, go_version) else null;
     const go_fixtures_step = b.step("go-fixtures", "Build the Go fixtures in tests/fixtures/go (plan9/amd64, GO_VERSION from scripts/pins.sh)");
     if (go_fixtures) |g| go_fixtures_step.dependOn(g.step) else go_fixtures_step.dependOn(&b.addFail("go-fixtures: no go on PATH").step);
-    const go_cases: ?GoFixtures = if (emu != .none or std.mem.indexOf(u8, backend_list, "native") != null) go_fixtures else null;
+    const go_cases: ?GoFixtures = if (emu != .none or std.mem.indexOf(u8, engine_list, "sud") != null) go_fixtures else null;
     // The Linux Go fixtures (design/epoch-0/linux-threads.md), with the same
     // toolchain, into fixtures/linux/<arch>/go.
     if (go_bin) |g| for ([_][]const u8{ "arm64", "amd64", "386" }) |arch| {
@@ -1572,7 +1572,7 @@ pub fn build(b: *std.Build) void {
     const it_filters = b.option([]const []const u8, "filter", "Run only the integration cases whose names contain one of these") orelse &.{};
     const it_shards = b.option(u32, "shards", "Split the integration cases across this many runs at once (default 4; 1 runs them in one)") orelse 4;
     const integration_step = b.step("integration", "Run real 9front binaries from the root tree through h9");
-    for (addIntegration(b, integration_step, it_shards, optimize, it_filters, it, root, backend_list, run_pending, if (test_web) null else go_cases, guest_test, src_dir)) |run_integration| {
+    for (addIntegration(b, integration_step, it_shards, optimize, it_filters, it, root, engine_list, run_pending, if (test_web) null else go_cases, guest_test, src_dir)) |run_integration| {
         if (!test_web) run_integration.step.dependOn(linux_fixtures);
         // -Djit-check checks every region against T0, one region at a time
         // across vCPUs: the cases' timeouts stretch (H9_TEST_SLOW, unless it's
@@ -1583,7 +1583,7 @@ pub fn build(b: *std.Build) void {
     // The workloads (tests/workloads): real programs on real roots, in
     // parallel, timed, by scripts/workloads.sh. Too slow for every PR, so
     // a workflow runs them every two days (.github/workflows/workloads.yml).
-    // -Darch and -Dbackends pick the roots' architecture and the backend
+    // -Darch and -Dengines pick the roots' architecture and the engine
     // (the first one listed), and arguments after -- pick cases by name.
     const workloads_step = b.step("workloads", "Run the workloads in tests/workloads: real programs on real roots, timed (scripts/fetch.sh workloads for the Linux root)");
     const run_workloads = b.addSystemCommand(&.{ "bash", "scripts/workloads.sh" });
@@ -1596,7 +1596,7 @@ pub fn build(b: *std.Build) void {
         .x86 => "386",
         else => "arm64",
     });
-    if (want_backends) |w| run_workloads.setEnvironmentVariable("H9_WL_BACKEND", std.mem.sliceTo(w, ','));
+    if (want_engines) |w| run_workloads.setEnvironmentVariable("H9_WL_ENGINE", std.mem.sliceTo(w, ','));
     run_workloads.has_side_effects = true;
     run_workloads.stdio = .inherit;
     run_workloads.step.dependOn(signed_step);
@@ -1620,8 +1620,8 @@ pub fn build(b: *std.Build) void {
             .target = b.graph.host,
             .optimize = .safe,
             .imports = &.{
-                .{ .name = "a64decode", .module = b.createModule(.{ .root_source_file = b.path("src/interp/a64/decode.zig") }) },
-                .{ .name = "aout", .module = b.createModule(.{ .root_source_file = b.path("src/aout.zig") }) },
+                .{ .name = "a64decode", .module = b.createModule(.{ .root_source_file = b.path("src/engine/hcpu/interp/a64/decode.zig") }) },
+                .{ .name = "aout", .module = b.createModule(.{ .root_source_file = b.path("src/abi/plan9/aout.zig") }) },
             },
         }),
     });
@@ -1642,8 +1642,8 @@ pub fn build(b: *std.Build) void {
             .target = b.graph.host,
             .optimize = .safe,
             .imports = &.{
-                .{ .name = "hcpu", .module = b.createModule(.{ .root_source_file = b.path("src/hcpu.zig") }) },
-                .{ .name = "aout", .module = b.createModule(.{ .root_source_file = b.path("src/aout.zig") }) },
+                .{ .name = "hcpu", .module = b.createModule(.{ .root_source_file = b.path("src/engine/hcpu/hcpu.zig") }) },
+                .{ .name = "aout", .module = b.createModule(.{ .root_source_file = b.path("src/abi/plan9/aout.zig") }) },
             },
         }),
     });
@@ -1664,8 +1664,8 @@ pub fn build(b: *std.Build) void {
             .target = b.graph.host,
             .optimize = .safe,
             .imports = &.{
-                .{ .name = "hcpu", .module = b.createModule(.{ .root_source_file = b.path("src/hcpu.zig") }) },
-                .{ .name = "aout", .module = b.createModule(.{ .root_source_file = b.path("src/aout.zig") }) },
+                .{ .name = "hcpu", .module = b.createModule(.{ .root_source_file = b.path("src/engine/hcpu/hcpu.zig") }) },
+                .{ .name = "aout", .module = b.createModule(.{ .root_source_file = b.path("src/abi/plan9/aout.zig") }) },
             },
         }),
     });
@@ -1726,7 +1726,7 @@ pub fn build(b: *std.Build) void {
     if (b.option([]const u8, "p", "With zig build proposal: the proposal, by slug")) |ref| {
         const ps = proposals(b);
         if (frontmatter.resolve(ps, ref)) |i| {
-            for (addIntegration(b, proposal_step, 1, optimize, tagFilters(b, ps[i]), it, root, backend_list, true, if (test_web) null else go_cases, guest_test, src_dir)) |run_cases| {
+            for (addIntegration(b, proposal_step, 1, optimize, tagFilters(b, ps[i]), it, root, engine_list, true, if (test_web) null else go_cases, guest_test, src_dir)) |run_cases| {
                 if (!test_web) run_cases.step.dependOn(linux_fixtures);
             }
             if (demos.get(ps[i].slug)) |steps| for (steps.items) |s| proposal_step.dependOn(s);
@@ -1786,9 +1786,9 @@ pub fn build(b: *std.Build) void {
 
     const mod_tests = b.addTest(.{ .root_module = test_mod.mod });
     const exe_tests = b.addTest(.{ .root_module = exe.root_module });
-    // Runs the same programs on every backend built in and compares them.
-    const backend_tests = b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("tests/backends.zig"),
+    // Runs the same programs on every engine built in and compares them.
+    const engine_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/engines.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
@@ -1797,11 +1797,11 @@ pub fn build(b: *std.Build) void {
         },
     }) });
     if (os == .macos) {
-        addSdkPaths(b, backend_tests.root_module);
-        backend_tests.root_module.linkFramework("Hypervisor", .{});
+        addSdkPaths(b, engine_tests.root_module);
+        engine_tests.root_module.linkFramework("Hypervisor", .{});
     }
     // The segattach, overlay, srv, fdmount, htools, sema, net and gfx fixtures, assembled freestanding as the shim is, and
-    // embedded as raw text for tests/backends.zig to wrap in an a.out.
+    // embedded as raw text for tests/engines.zig to wrap in an a.out.
     for ([_]struct { dir: []const u8, prefix: []const u8, names: []const []const u8 }{
         .{ .dir = "segattach", .prefix = "seg", .names = &segattach_fixtures },
         .{ .dir = "overlay", .prefix = "ov", .names = &overlay_fixtures },
@@ -1822,11 +1822,11 @@ pub fn build(b: *std.Build) void {
         obj.root_module.addAssemblyFile(b.path(b.fmt("tests/fixtures/{s}/{s}.S", .{ set.dir, name })));
         obj.root_module.addIncludePath(b.path("tests/fixtures/segattach"));
         const bin = b.addObjCopy(obj.getEmittedBin(), .{ .format = .binary, .only_section = ".text" });
-        backend_tests.root_module.addAnonymousImport(b.fmt("{s}_{s}", .{ set.prefix, name }), .{ .root_source_file = bin.getOutput() });
+        engine_tests.root_module.addAnonymousImport(b.fmt("{s}_{s}", .{ set.prefix, name }), .{ .root_source_file = bin.getOutput() });
     };
-    const test_step = b.step("test", "Run unit tests and the backend tests (not the integration cases)");
+    const test_step = b.step("test", "Run unit tests and the engine tests (not the integration cases)");
     test_step.dependOn(&b.addRunArtifact(mod_tests).step);
-    // h9.wasm too, so a change to the shared vmm or JIT code that breaks
+    // h9.wasm too, so a change to the shared engine or JIT code that breaks
     // wasm32 (64-bit atomics, threads) is caught where it's made.
     test_step.dependOn(&web.exe.step);
     addHcpuTests(b, test_step, target, optimize);
@@ -1850,27 +1850,27 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = isoroot_tool.root_module })).step);
     test_step.dependOn(&b.addRunArtifact(exe_tests).step);
     // HVF needs the entitlement, so the test binary is signed like h9.
-    const run_backend_tests = b.addRunArtifact(backend_tests);
+    const run_engine_tests = b.addRunArtifact(engine_tests);
     // The [gfx] cases that run rio and acme take them from the root tree.
-    run_backend_tests.setEnvironmentVariable("H9_TEST_ROOT", root);
+    run_engine_tests.setEnvironmentVariable("H9_TEST_ROOT", root);
     // The Alpine roots from scripts/fetch.sh, for the [linux-fifo] case that
     // runs two Linux machines in one process.
-    run_backend_tests.setEnvironmentVariable("H9_TEST_LINUX_ROOT", pathFromRoot(b, ".local/linux"));
+    run_engine_tests.setEnvironmentVariable("H9_TEST_LINUX_ROOT", pathFromRoot(b, ".local/linux"));
     if (os == .macos and b.graph.host.result.os.tag == .macos) {
         const sign = b.addSystemCommand(&.{ "codesign", "--force", "--sign", "-", "--entitlements" });
         sign.addFileArg(b.path("h9.entitlements"));
-        sign.addFileArg(backend_tests.getEmittedBin());
-        run_backend_tests.step.dependOn(&sign.step);
+        sign.addFileArg(engine_tests.getEmittedBin());
+        run_engine_tests.step.dependOn(&sign.step);
     }
-    test_step.dependOn(&run_backend_tests.step);
-    // With hcpu, the backend cases run on each tier: T1 (the default)
+    test_step.dependOn(&run_engine_tests.step);
+    // With hcpu, the engine cases run on each tier: T1 (the default)
     // above, and T0 here (design/epoch-0/hcpu.md).
     if (emu == .hcpu and !no_jit) {
-        const run_t0 = b.addRunArtifact(backend_tests);
-        run_t0.setName("run test backends (hcpu T0)");
+        const run_t0 = b.addRunArtifact(engine_tests);
+        run_t0.setName("run test engines (hcpu T0)");
         run_t0.setEnvironmentVariable("H9_TEST_ROOT", root);
-        run_t0.setEnvironmentVariable("H9_EMU_TIER", "t0");
-        run_t0.step.dependOn(&run_backend_tests.step);
+        run_t0.setEnvironmentVariable("H9_HCPU_TIER", "t0");
+        run_t0.step.dependOn(&run_engine_tests.step);
         test_step.dependOn(&run_t0.step);
     }
     // The integration cases are their own step, `zig build integration`, so
@@ -1893,8 +1893,8 @@ pub fn build(b: *std.Build) void {
     }
     const install_embed = b.addInstallArtifact(embed_example, .{});
     b.step("embed", "Build docs/embedding/embed.zig, the embedding guide's example, as zig-out/bin/embed").dependOn(&install_embed.step);
-    // zig build test runs it on the hello fixture where a backend can: the
-    // default backend (auto: HVF on an arm64 Mac that has it, signed like h9,
+    // zig build test runs it on the hello fixture where an engine can: the
+    // default engine (auto: HVF on an arm64 Mac that has it, signed like h9,
     // else the emulator) for one machine, and the emulator for the second.
     // HVF allows one VM per host process.
     const hvf_host = os == .macos and target.result.cpu.arch == .aarch64 and b.graph.host.result.os.tag == .macos;
@@ -1910,15 +1910,15 @@ pub fn build(b: *std.Build) void {
         const machines: []const u8 = if (emu != .none) "2" else "1";
         run_embed.addArgs(&.{ "-j", machines });
         run_embed.addFileArg(host_hello);
-        // Machine 0's backend isn't named: auto picks it when it runs.
+        // Machine 0's engine isn't named: auto picks it when it runs.
         run_embed.addCheck(.{ .expect_stdout_match = "machine 0 (" });
         run_embed.addCheck(.{ .expect_stdout_match = "): exited \"\"\n  hello\n" });
-        if (emu != .none) run_embed.addCheck(.{ .expect_stdout_match = "machine 1 (emu): exited \"\"\n  hello\n" });
+        if (emu != .none) run_embed.addCheck(.{ .expect_stdout_match = "machine 1 (hcpu): exited \"\"\n  hello\n" });
         run_embed.addCheck(.{ .expect_term = .{ .exited = 0 } });
         test_step.dependOn(&run_embed.step);
     }
 
-    // ha64's [hcpu] cases, through the vmm interface on
+    // ha64's [hcpu] cases, through the engine interface on
     // T0 and T1; they skip without the emulator.
     const a64_jit = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("tests/a64.zig"),
@@ -1960,12 +1960,12 @@ pub fn build(b: *std.Build) void {
         sign.addFileArg(bench.getEmittedBin());
         run_bench.step.dependOn(&sign.step);
     }
-    b.step("bench", "Time a compute loop, pwrite round trips, and the compute benchmarks on every backend built in (-- compute: those only; the emulator on T0 and T1)").dependOn(&run_bench.step);
+    b.step("bench", "Time a compute loop, pwrite round trips, and the compute benchmarks on every engine built in (-- compute: those only; the emulator on T0 and T1)").dependOn(&run_bench.step);
 
-    // For running the tests in a VM (scripts/lima/vm test): the backend
+    // For running the tests in a VM (scripts/lima/vm test): the engine
     // tests and the integration tests, built for the target.
-    const install_tests_step = b.step("install-tests", "Install the backend and integration tests as zig-out/bin/backend-tests and integration-tests");
-    install_tests_step.dependOn(&b.addInstallArtifact(backend_tests, .{ .dest_sub_path = b.fmt("backend-tests{s}", .{target.result.exeFileExt()}) }).step);
+    const install_tests_step = b.step("install-tests", "Install the engine and integration tests as zig-out/bin/engine-tests and integration-tests");
+    install_tests_step.dependOn(&b.addInstallArtifact(engine_tests, .{ .dest_sub_path = b.fmt("engine-tests{s}", .{target.result.exeFileExt()}) }).step);
     install_tests_step.dependOn(&b.addInstallArtifact(integrationTests(b, target, optimize, &.{}, b.addOptions()), .{ .dest_sub_path = b.fmt("integration-tests{s}", .{target.result.exeFileExt()}) }).step);
 }
 
@@ -2032,7 +2032,7 @@ fn addX64check(b: *std.Build, hcpu: *std.Build.Module) void {
     step.dependOn(&cmp.step);
 }
 
-/// The JIT's test tools (src/jit/README.md, "Test tools"): lockstep against
+/// The JIT's test tools (src/engine/hcpu/jit/README.md, "Test tools"): lockstep against
 /// Unicorn (tools/lockstep.zig, with the prebuilt library fetched), the
 /// fuzzers, and the litmus tests.
 fn addJitTestTools(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) void {
@@ -2059,8 +2059,8 @@ fn addJitTestTools(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
         lockstep_step.dependOn(&b.addRunArtifact(t).step);
     } else lockstep_step.dependOn(&b.addFail(b.fmt("lockstep: no oracle: {s}", .{oracle_missing})).step);
 
-    const fuzz_hcpu = b.createModule(.{ .root_source_file = b.path("src/hcpu.zig"), .target = target, .optimize = fuzz_optimize });
-    const fuzzer_hcpu = if (oracle) |o| b.createModule(.{ .root_source_file = b.path("src/hcpu.zig"), .target = o.target, .optimize = fuzz_optimize }) else fuzz_hcpu;
+    const fuzz_hcpu = b.createModule(.{ .root_source_file = b.path("src/engine/hcpu/hcpu.zig"), .target = target, .optimize = fuzz_optimize });
+    const fuzzer_hcpu = if (oracle) |o| b.createModule(.{ .root_source_file = b.path("src/engine/hcpu/hcpu.zig"), .target = o.target, .optimize = fuzz_optimize }) else fuzz_hcpu;
     const fuzz_lockstep: ?*std.Build.Module = if (oracle) |o| b.createModule(.{
         .root_source_file = b.path("tools/lockstep.zig"),
         .target = o.target,
@@ -2134,24 +2134,24 @@ fn addJitTestTools(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
     b.step("litmus", "Run the threading litmus tests on every tier, with their outcome tallies (-- --iters N --tier T --only NAME)").dependOn(&litmus_run.step);
 }
 
-/// src/hcpu.zig's tests, split into parts by name filter: the three slow
+/// src/engine/hcpu/hcpu.zig's tests, split into parts by name filter: the three slow
 /// groups (the emitters', the checkers' with the litmus tests, and the 386
 /// JIT's, each about 20 s in Debug), and the rest. A test's name starts
 /// with its file's path under src/, dots for slashes, so the rest is every
-/// other file and directory in src/jit, src/interp, and src/hcpu.zig
+/// other file and directory in src/engine/hcpu/jit, src/engine/hcpu/interp, and src/engine/hcpu/hcpu.zig
 /// itself, listed from the tree so a new file lands in a part. A test in
-/// a file elsewhere that src/hcpu.zig reaches would be in no part: add
+/// a file elsewhere that src/engine/hcpu/hcpu.zig reaches would be in no part: add
 /// its prefix here.
 fn hcpuTestParts(b: *std.Build) []const []const []const u8 {
     const slow = [_][]const u8{ "emit", "check", "x86" };
     var rest: std.ArrayList([]const u8) = .empty;
     rest.appendSlice(b.allocator, &.{ "hcpu.", "interp." }) catch @panic("OOM");
     const io = b.graph.io;
-    var dir = b.root.root_dir.handle.openDir(io, "src/jit", .{ .iterate = true }) catch |err|
-        std.debug.panic("build.zig: can't list src/jit: {t}", .{err});
+    var dir = b.root.root_dir.handle.openDir(io, "src/engine/hcpu/jit", .{ .iterate = true }) catch |err|
+        std.debug.panic("build.zig: can't list src/engine/hcpu/jit: {t}", .{err});
     defer dir.close(io);
     var it = dir.iterate();
-    while (it.next(io) catch |err| std.debug.panic("build.zig: can't list src/jit: {t}", .{err})) |entry| {
+    while (it.next(io) catch |err| std.debug.panic("build.zig: can't list src/engine/hcpu/jit: {t}", .{err})) |entry| {
         const stem = switch (entry.kind) {
             .directory => entry.name,
             .file => if (std.mem.endsWith(u8, entry.name, ".zig")) entry.name[0 .. entry.name.len - 4] else continue,
@@ -2167,17 +2167,17 @@ fn hcpuTestParts(b: *std.Build) []const []const []const u8 {
     return parts.items;
 }
 
-/// The emulator's own CPUs (src/hcpu.zig): the JIT layer's unit tests,
+/// The emulator's own CPUs (src/engine/hcpu/hcpu.zig): the JIT layer's unit tests,
 /// natively, and the wasm emitter's under Node when Node is installed
 /// (tests/jit/run.mjs). `zig build hcpu` runs just these. `zig build
 /// hcpu-web`, and `web-test` with it, runs the wasm emitter's in Chromium.
 fn addHcpuTests(b: *std.Build, test_step: *std.Build.Step, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) void {
-    const step = b.step("hcpu", "Run the emulator CPU and JIT tests (src/hcpu.zig), natively and under Node");
+    const step = b.step("hcpu", "Run the emulator CPU and JIT tests (src/engine/hcpu/hcpu.zig), natively and under Node");
     // A test binary runs its tests one at a time, and these take about a
     // minute, so they're split by name into a few binaries the build
     // runner runs side by side (hcpuTestParts).
     const hcpu_mod = b.createModule(.{
-        .root_source_file = b.path("src/hcpu.zig"),
+        .root_source_file = b.path("src/engine/hcpu/hcpu.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -2194,7 +2194,7 @@ fn addHcpuTests(b: *std.Build, test_step: *std.Build.Step, target: std.Build.Res
         .target = target,
         .optimize = optimize,
         .imports = &.{.{ .name = "hcpu", .module = b.createModule(.{
-            .root_source_file = b.path("src/hcpu.zig"),
+            .root_source_file = b.path("src/engine/hcpu/hcpu.zig"),
             .target = target,
             .optimize = optimize,
         }) }},
@@ -2210,7 +2210,7 @@ fn addHcpuTests(b: *std.Build, test_step: *std.Build.Step, target: std.Build.Res
         .target = target,
         .optimize = optimize,
         .imports = &.{.{ .name = "hcpu", .module = b.createModule(.{
-            .root_source_file = b.path("src/hcpu.zig"),
+            .root_source_file = b.path("src/engine/hcpu/hcpu.zig"),
             .target = target,
             .optimize = optimize,
         }) }},
@@ -2227,7 +2227,7 @@ fn addHcpuTests(b: *std.Build, test_step: *std.Build.Step, target: std.Build.Res
         .target = target,
         .optimize = if (optimize == .debug) .safe else optimize,
         .imports = &.{.{ .name = "hcpu", .module = b.createModule(.{
-            .root_source_file = b.path("src/hcpu.zig"),
+            .root_source_file = b.path("src/engine/hcpu/hcpu.zig"),
             .target = target,
             .optimize = if (optimize == .debug) .safe else optimize,
         }) }},
@@ -2244,7 +2244,7 @@ fn addHcpuTests(b: *std.Build, test_step: *std.Build.Step, target: std.Build.Res
         .target = target,
         .optimize = if (optimize == .debug) .safe else optimize,
         .imports = &.{.{ .name = "hcpu", .module = b.createModule(.{
-            .root_source_file = b.path("src/hcpu.zig"),
+            .root_source_file = b.path("src/engine/hcpu/hcpu.zig"),
             .target = target,
             .optimize = if (optimize == .debug) .safe else optimize,
         }) }},
@@ -2261,7 +2261,7 @@ fn addHcpuTests(b: *std.Build, test_step: *std.Build.Step, target: std.Build.Res
             .target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding }),
             // Debug: optimizing the stand-in T0's dispatch for wasm takes minutes.
             .optimize = .debug,
-            .imports = &.{.{ .name = "hcpu", .module = b.createModule(.{ .root_source_file = b.path("src/hcpu.zig") }) }},
+            .imports = &.{.{ .name = "hcpu", .module = b.createModule(.{ .root_source_file = b.path("src/engine/hcpu/hcpu.zig") }) }},
         }),
     });
     runtime.entry = .disabled;

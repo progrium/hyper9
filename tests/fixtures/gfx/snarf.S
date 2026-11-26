@@ -1,4 +1,4 @@
-// /dev/snarf (tests/backends.zig, design/epoch-0/gfx.md): writes what it
+// /dev/snarf (tests/engines.zig, design/epoch-0/gfx.md): writes what it
 // reads to stdout, then "|", then writes "guest" to it, and writes what
 // it reads back to stdout.
 

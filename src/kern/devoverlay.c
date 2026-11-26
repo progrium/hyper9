@@ -16,7 +16,7 @@
  *	Nwhite	a name removed from the lower tree
  *	Nmark	a lower directory with changed children in memory; its Dir is
  *		a snapshot of the lower one's and its qid is the lower qid
- *	Nlink	a symbolic link made by the Linux personality (h9_overlay_symlink),
+ *	Nlink	a symbolic link made by the Linux ABI (h9_overlay_symlink),
  *		holding its target. A walk follows it, as devfs follows a contained
  *		tree's links: an absolute target from the instance root, a
  *		relative one from the link's directory. The chan keeps the link
@@ -26,7 +26,7 @@
  *		has H9_QTSYMLINK. A Linux process's walk doesn't follow it,
  *		or a lower tree's link: it stops there, for the kernel's walk
  *		to follow from the process's root (design/epoch-0/linux-symlinks.md).
- *	Nfifo	a FIFO made by the Linux personality (h9_overlay_mkfifo,
+ *	Nfifo	a FIFO made by the Linux ABI (h9_overlay_mkfifo,
  *		design/epoch-0/linux-fifo.md): a file with no data, whose Dir has
  *		H9_DMFIFO. A Linux open of it joins a pipe (src/kern/fifo.c);
  *		a Plan 9 program reads it as empty and can't write it.
@@ -77,7 +77,7 @@ extern vlong h9_clock_mono(void);
 
 enum
 {
-	Pgsize	= 4096,		/* vmm.page_size */
+	Pgsize	= 4096,		/* engine.page_size */
 	Ndirect	= 8,		/* data blocks held in the node */
 	Perpage	= Pgsize/sizeof(void*),
 	Minclass	= 5,	/* 32 bytes */
@@ -1426,7 +1426,7 @@ ovnulldir(Dir *d)
 
 /*
  * Makes name in the directory c a symbolic link to target, for the
- * Linux personality's symlinkat. c is an overlay chan, which this closes.
+ * Linux ABI's symlinkat. c is an overlay chan, which this closes.
  */
 void
 h9_overlay_symlink(Chan *c, char *name, char *target)
@@ -1507,7 +1507,7 @@ h9_overlay_readlink(Chan *c, char *buf, int nbuf)
 }
 
 /*
- * Makes name in the directory c a FIFO, for the Linux personality's
+ * Makes name in the directory c a FIFO, for the Linux ABI's
  * mknodat. c is an overlay chan, which this closes.
  */
 void
@@ -5740,7 +5740,7 @@ ovrename(Chan *c, Node *n, char *name)
 
 /*
  * Moves c's name into the directory dc as name, for the Linux
- * personality's renameat across directories (h9_fs_renamepath in
+ * ABI's renameat across directories (h9_fs_renamepath in
  * src/kern/fscheck.c), as ovrename does within one. Both are overlay
  * chans; returns 1 if they're in different instances, or c is a
  * directory still in the lower tree (Linux's overlayfs refuses that

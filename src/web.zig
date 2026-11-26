@@ -1,5 +1,5 @@
 //! The web host (design/epoch-0/browser-host.md): h9 on wasm32-wasi, in a
-//! Web Worker or under Node, with h9's own 386 CPU (h86) as its backend.
+//! Web Worker or under Node, with h9's own 386 CPU (h86) as its engine.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -9,7 +9,7 @@ pub const enabled = builtin.os.tag == .wasi;
 
 pub const coro = @import("web/coro.zig");
 
-/// The web host's allocator (std.heap.page_allocator there, and the vmm's).
+/// The web host's allocator (std.heap.page_allocator there, and the engine's).
 pub const heap = @import("web/heap.zig");
 
 /// A host thread: a coroutine on the web host.

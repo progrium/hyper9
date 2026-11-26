@@ -1,4 +1,4 @@
-// Sleeps for a minute, for the window to be closed (tests/backends.zig,
+// Sleeps for a minute, for the window to be closed (tests/engines.zig,
 // design/epoch-0/gfx.md).
 
 #include "lib.S"

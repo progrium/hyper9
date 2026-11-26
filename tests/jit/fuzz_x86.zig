@@ -1,4 +1,4 @@
-//! zig build fuzz-x86 [-- options]: random 386 programs (src/jit/check/
+//! zig build fuzz-x86 [-- options]: random 386 programs (src/engine/hcpu/jit/check/
 //! gen_x86.zig) run on h86's T0 and, with Unicorn's prebuilt library
 //! fetched, checked against Unicorn an instruction at a time: registers, EIP, the EFLAGS bits the
 //! instruction defines, memory, and the exit; and, region by region, the

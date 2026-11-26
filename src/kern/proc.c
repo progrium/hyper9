@@ -323,7 +323,7 @@ h9_kern_postnote(ulong pid, char *msg, int flag)
 /*
  * The calling process's record, with a reference, which h9_kern_unref
  * releases; for a note posted later from anywhere, as an interval
- * timer's (src/linux/itimer.zig). nil if the caller isn't an h9 process.
+ * timer's (src/abi/linux/itimer.zig). nil if the caller isn't an h9 process.
  */
 void*
 h9_kern_selfref(void)

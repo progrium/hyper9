@@ -1,6 +1,6 @@
 //! 386 Plan 9 user ABI (9front 386/include/ureg.h, 9/pc/trap.c, pc/mem.h).
 //!
-//! Backend-independent: a backend that runs 386 code in compatibility mode
+//! Engine-independent: an engine that runs 386 code in compatibility mode
 //! under a 64-bit shim uses this as the emulator does.
 
 /// Plan 9 Ureg: 19 32-bit words. `nsp` is the kernel's pushal copy of SP
@@ -112,9 +112,9 @@ pub const NULLSEL: u32 = 0;
 
 /// pc/io.h VectorSYSCALL: INT $64, which 9front puts in Ureg.trap.
 pub const vector_syscall = 64;
-/// Linux's int 0x80 (design/epoch-0/linux-i386.md). Backends report both as a
+/// Linux's int 0x80 (design/epoch-0/linux-i386.md). Engines report both as a
 /// `.syscall` exit with the vector in Ureg.trap, and the process model
-/// takes each personality's own.
+/// takes each ABI's own.
 pub const vector_linux = 0x80;
 
 comptime {

@@ -434,12 +434,12 @@ fn h9Binary(c: Ctx) []const u8 {
 }
 
 /// Dies unless h9 can run the tree's arm64 compilers: on an arm64 host any
-/// backend can, elsewhere only the emulator, which `h9 --check` lists.
+/// engine can, elsewhere only the emulator, which `h9 --check` lists.
 fn checkH9(c: Ctx) void {
     const h9 = h9Binary(c);
     if (archOf(builtin.cpu.arch) == arm64) return;
     const r = std.process.run(c.gpa, c.io, .{ .argv = &.{ h9, "--check" } }) catch |e| die("{s} --check: {t}", .{ h9, e });
-    if (std.mem.indexOf(u8, r.stdout, "\nbackend emu: ok") != null) return;
+    if (std.mem.indexOf(u8, r.stdout, "\nengine hcpu: ok") != null) return;
     die("{s} has no emulator, which building /{s} needs on this host to run the tree's arm64 compilers; build h9 for this host with zig build (it has hcpu built in), or pass one as $H9", .{ h9, arches[archOf(builtin.cpu.arch)] });
 }
 

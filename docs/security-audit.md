@@ -13,7 +13,7 @@ built.
 > audited. The manual says so ([MANUAL.md, chapter 23](../MANUAL.md#23-sandboxing)),
 > and so do [docs/comparison.md](comparison.md) and
 > [docs/containers.md](containers.md). One internal review (Nov 9, 2026)
-> found that the native backend can't contain a guest (see
+> found that the sud engine can't contain a guest (see
 > [Known gaps](#10-known-gaps-and-accepted-risks)), and `auto` stopped choosing
 > it.
 
@@ -54,10 +54,10 @@ only route from a guest to the host's files, network, and devices.
  │   access rules, net rules,                devices (src/kern/*.c)       │
  │   resolved-name table                     devfs #U ──▶ host files      │
  │                                           devip #I ──▶ host sockets    │
- │ Syscall decode: src/syscall.zig (9front),  devmnt+#ℓ+#ι ──▶ 9P servers  │
- │   src/linux/*.zig (Linux personality)     #ℏ ──▶ WebSockets (TLS)      │
+ │ ABIs: src/abi/plan9/ (9front),            devmnt+#ℓ+#ι ──▶ 9P servers  │
+ │   src/abi/linux/ (Linux)                  #ℏ ──▶ WebSockets (TLS)      │
  │                                                                       │
- │ vmm (src/vmm.zig): hvf | kvm | whp | native | emu (hcpu, JIT)          │
+ │ engine (src/engine.zig): hvf | kvm | whp | sud | hcpu (JIT)           │
  └──────────────▲───────────────────────────────────────────▲────────────┘
                 │ doorbell exit (MMIO store / OUT)           │ guest memory
  ┌──────────────┴───────────────────────────────────────────┴────────────┐
@@ -73,7 +73,7 @@ Read [SPEC.md](../SPEC.md) for the overview and decisions, and
 
 These are the properties h9 means to hold, so they're the ones an audit
 should try to break. "Guest" means any code running in the machine, 9front
-or Linux, on any security-boundary backend (HVF, KVM, WHP, or the emulator).
+or Linux, on any security-boundary engine (HVF, KVM, WHP, or the emulator).
 
 1. **No host system calls.** Guest code can't make a host system call, ioctl,
    or other host-kernel request directly. Every call is served by h9's
@@ -140,7 +140,7 @@ escape.
 | A3 | A network peer of a `--serve` listener (unix, TCP, or `ws://`) | Connection bytes, HTTP upgrade headers, `Origin`, 9P2000 or 9P2000.L requests | The served namespace beyond what the token and root allow, code execution in h9 |
 | A4 | Another machine in the same host process | The same as A1, inside its own machine | Another machine's processes, files, and posts |
 | A5 | A host process racing h9 on the file system | Renames, symlink swaps, and hardlinks in directories the plan binds | Turning a guest operation into one on a path outside the plan |
-| A6 | A web page or the network, against the browser host | Messages to the Worker, WebSocket servers | The page's origin beyond the machine's grant |
+| A6 | A web page or the network, against the web host | Messages to the Worker, WebSocket servers | The page's origin beyond the machine's grant |
 
 ### Trusted, and out of the model
 
@@ -154,22 +154,22 @@ escape.
   (CPUID, system registers, page tables) are in.
 - **The 9front and Linux binaries in a trusted root**, unless the audit
   takes the root itself as A2's.
-- **The native backend.** It's documented as not a boundary and needs
-  `--backend native`; findings there are informational.
+- **The sud engine.** It's documented as not a boundary and needs
+  `--engine sud`; findings there are informational.
 
 ## 4. Trust boundaries
 
 | # | Boundary | Where it's enforced | Crossed by |
 | --- | --- | --- | --- |
-| B1 | Guest CPU and memory vs. the h9 process | The hypervisor's stage-2 tables and h9's page tables (`src/vmm/{hvf,kvm,whp}.zig`, `pt_arm64.zig`, `pt_amd64.zig`, `gphys.zig`); on the emulator, hcpu's software TLB and region checks (`src/interp/mem.zig`, `src/jit/`) | Every exit, every page fault, `AddressSpace.translate` and `copy` |
-| B2 | Guest kernel mode (the shim) vs. guest user mode | The shim's entry and restore paths (`src/arch/{amd64,arm64}/shim.S`), the host-set CPU state (`src/vmm/x86.zig`), `arch.sanitize` (`src/arch/*.zig`) | Syscalls, faults, notes, `noted`, `rt_sigreturn`, `/proc/n/regs` writes |
-| B3 | Syscall arguments vs. the kernel | `src/syscall.zig` (9front) and `src/linux/sys.zig`, `mm.zig`, `signal.zig`, and the rest of `src/linux/`; `GuestBuf` (see [kernel.md, seam rule 7](../spec/kernel.md#zigc-seam-rules)) | Every syscall |
+| B1 | Guest CPU and memory vs. the h9 process | The hypervisor's stage-2 tables and h9's page tables (`src/engine/{hvf,kvm,whp}.zig`, `pt_arm64.zig`, `pt_amd64.zig`, `gphys.zig`); on the emulator, hcpu's software TLB and region checks (`src/engine/hcpu/interp/mem.zig`, `src/engine/hcpu/jit/`) | Every exit, every page fault, `AddressSpace.translate` and `copy` |
+| B2 | Guest kernel mode (the shim) vs. guest user mode | The shim's entry and restore paths (`src/arch/{amd64,arm64}/shim.S`), the host-set CPU state (`src/engine/x86.zig`), `arch.sanitize` (`src/arch/*.zig`) | Syscalls, faults, notes, `noted`, `rt_sigreturn`, `/proc/n/regs` writes |
+| B3 | Syscall arguments vs. the kernel | `src/abi/plan9/syscall.zig` (9front) and `src/abi/linux/sys.zig`, `mm.zig`, `signal.zig`, and the rest of `src/abi/linux/`; `GuestBuf` (see [kernel.md, seam rule 7](../spec/kernel.md#zigc-seam-rules)) | Every syscall |
 | B4 | The guest's namespace vs. the host's file system | The namespace builder (`src/newns.zig`, `src/mount.zig`, `src/machine.zig`), the device mask, and devfs's hooks into `src/kern/fscheck.c` and `h9_policy_check` in `src/policy.zig` | Walks, opens, creates, removes, renames, wstats, directory reads on `#U` |
 | B5 | The guest's network vs. the host's | devip's hooks (`h9_net_check`, `h9_net_lookup`, `h9_net_resolved`) into `src/kern/netcheck.c` and `src/policy.zig`; devhstream's connect check; the Linux socket layer (`src/kern/linuxnet.c`) | `connect`, `announce`, `cs` lookups, `sendto`, `/net/ws` |
 | B6 | Remote servers' bytes vs. h9's parsers | `src/dotl/` (`wire.zig`, `client.zig`, `server.zig`, `attr.zig`), `src/rootindex/`, `src/rootindex.zig`, `src/statictree.zig`, `src/hstream.zig`, `src/ws.zig`, and drawterm's devmnt | Every 9P reply, index, event record, HTTP response, and WebSocket frame |
 | B7 | Network clients vs. a served machine | `src/serve.zig`, `src/ws.zig`'s server side, `src/dotl/server.zig`, exportfs in the guest | Connections to `--serve` listeners |
 | B8 | One machine vs. another in the same process | Per-machine lookups in devproc, devsrv, `#O`, `#ℏ`, `#ℓ`, the console, and devenv (`src/kern/`) | Any path that names a pid, a post, a union number, or a conversation |
-| B9 | The browser host's Worker vs. the page | wasm's memory safety, `src/web/`, the JS host (`h9-web.js`, `worker.js`) | Worker messages, imports |
+| B9 | The web host's Worker vs. the page | wasm's memory safety, `src/web/`, the JS host (`h9-web.js`, `worker.js`) | Worker messages, imports |
 
 ## 5. The sandbox policy and the plan
 
@@ -178,7 +178,7 @@ network rules, and limits. The CLI compiles flags into it, `--print` prints
 the result (the plan) and exits, and the machine enforces it. The model
 follows isobox's named capabilities, profiles, and caveats, but enforcement
 lives in the shared kernel, so the capability set is the same on every
-backend.
+engine.
 
 - **Capabilities, default profile, `tight`, and `--sandbox DIR`:**
   [spec/sandbox.md](../spec/sandbox.md#sandbox-policy) and
@@ -214,20 +214,20 @@ caveats:
 
 ## 6. Attack surface
 
-### 6.1 Execution backends
+### 6.1 Execution engines
 
-`vmm.create` picks a backend: `auto` tries the host's hypervisor, then the
-emulator, and never picks native. See [spec/engines.md](../spec/engines.md).
+`engine.create` picks an engine: `auto` tries the host's hypervisor, then
+hcpu, and never picks sud. See [spec/engines.md](../spec/engines.md).
 
-| Backend | Host | Isolation | Host-facing code | What to look at |
+| Engine | Host | Isolation | Host-facing code | What to look at |
 | --- | --- | --- | --- | --- |
-| HVF | macOS arm64 | Hypervisor.framework; EL1 shim, TTBR0 user and TTBR1 kernel halves | `src/vmm/hvf.zig`, `pt_arm64.zig`, `gphys.zig`, `src/arch/arm64/shim.S` | System register values the host sets, the kernel half's mappings (the shim, the doorbell page, the per-vCPU shared pages) and whether any is user-accessible, `codeChanged` and I-cache flushes, unmap and remap of released ranges |
-| KVM | Linux x86\_64 and arm64 | `/dev/kvm`, one memory slot at 2 GiB, no in-kernel irqchip | `src/vmm/kvm.zig`, `kvm_abi.zig`, `pt_amd64.zig`, `x86.zig`, `src/arch/amd64/shim.S` | CR0/CR4/EFER, SMEP and SMAP, the GDT/TSS/IDT and IST, `STAR`/`LSTAR`/`SFMASK`, `SWAPGS` handling, CPUID masking, vCPU recycling (a parked vCPU's full reset), the kick signal (`SIGRTMIN + 1`) and `immediate_exit`, `KVM_SET_ONE_REG` on arm64, TSC offset |
-| WHP | Windows x86\_64 | Windows Hypervisor Platform, KVM's shim and page tables | `src/vmm/whp.zig`, `whp_abi.zig` | The same CPU state set through `WHvSetVirtualProcessorRegisters`, the cancel and flag kick, vCPU reset, the runtime-loaded `WinHvPlatform.dll` |
-| emu (hcpu) | Every host, and the browser | Software: no guest kernel mode, no MMU; every access bounds-checked against the arena | `src/vmm/hcpu.zig`, `arena.zig`, `h86.zig`, `ha64.zig`, `hx64.zig`, `src/interp/`, `src/jit/` | The software TLB (a fill is the permission check), T1's inline TLB check and slow paths, code-page invalidation races, W^X code memory (`src/jit/codemem.zig`: `MAP_JIT` on macOS, a dual-mapped memfd on Linux, one RWX mapping only under a binary translator), the JIT's region and chain-cell handling, the wasm emitter on the web |
-| native | Linux x86\_64 | **None that holds.** A stub process per address space, Syscall User Dispatch, and a seccomp backstop | `src/vmm/native.zig`, `native_stub.zig`, `native_abi.zig` | Informational only: see Known gaps |
+| HVF | macOS arm64 | Hypervisor.framework; EL1 shim, TTBR0 user and TTBR1 kernel halves | `src/engine/hvf.zig`, `pt_arm64.zig`, `gphys.zig`, `src/arch/arm64/shim.S` | System register values the host sets, the kernel half's mappings (the shim, the doorbell page, the per-vCPU shared pages) and whether any is user-accessible, `codeChanged` and I-cache flushes, unmap and remap of released ranges |
+| KVM | Linux x86\_64 and arm64 | `/dev/kvm`, one memory slot at 2 GiB, no in-kernel irqchip | `src/engine/kvm.zig`, `kvm_abi.zig`, `pt_amd64.zig`, `x86.zig`, `src/arch/amd64/shim.S` | CR0/CR4/EFER, SMEP and SMAP, the GDT/TSS/IDT and IST, `STAR`/`LSTAR`/`SFMASK`, `SWAPGS` handling, CPUID masking, vCPU recycling (a parked vCPU's full reset), the kick signal (`SIGRTMIN + 1`) and `immediate_exit`, `KVM_SET_ONE_REG` on arm64, TSC offset |
+| WHP | Windows x86\_64 | Windows Hypervisor Platform, KVM's shim and page tables | `src/engine/whp.zig`, `whp_abi.zig` | The same CPU state set through `WHvSetVirtualProcessorRegisters`, the cancel and flag kick, vCPU reset, the runtime-loaded `WinHvPlatform.dll` |
+| hcpu | Every host, and the browser | Software: no guest kernel mode, no MMU; every access bounds-checked against the arena | `src/engine/hcpu/engine.zig`, `h86.zig`, `ha64.zig`, `hx64.zig`, `interp/`, `jit/`, and `src/engine/arena.zig` | The software TLB (a fill is the permission check), T1's inline TLB check and slow paths, code-page invalidation races, W^X code memory (`src/engine/hcpu/jit/codemem.zig`: `MAP_JIT` on macOS, a dual-mapped memfd on Linux, one RWX mapping only under a binary translator), the JIT's region and chain-cell handling, the wasm emitter on the web |
+| sud | Linux x86\_64 | **None that holds.** A stub process per address space, Syscall User Dispatch, and a seccomp backstop | `src/engine/sud.zig`, `sud_stub.zig`, `sud_abi.zig` | Informational only: see Known gaps |
 
-The interface's contract is in Plan 9 terms, so the code above the vmm layer
+The interface's contract is in Plan 9 terms, so the code above the engine layer
 is shared. [spec/jit.md](../spec/jit.md), [spec/h86.md](../spec/h86.md),
 [spec/hx64.md](../spec/hx64.md), and [spec/ha64.md](../spec/ha64.md) describe
 the CPUs.
@@ -242,13 +242,13 @@ the CPUs.
 - **Register state the guest controls.** `arch.sanitize`
   (`src/arch/{amd64,arm64,i386}.zig`) bounds what a note handler's `noted`
   and a debugger's `regs` write can set: on amd64 the user selectors, the
-  low flag byte, and a masked PC. The Linux personality's `rt_sigreturn`
+  low flag byte, and a masked PC. The Linux ABI's `rt_sigreturn`
   restores only NZCV on arm64, and on amd64 the user flags with `cs` and
   `ss` kept and a canonical `rip` ([abi-linux.md, Signals](../spec/abi-linux.md#signals)).
   `arch_prctl` sets FS and GS bases (`X86Extra`).
 - **CPUID.** KVM's shim hides XSAVE, AVX, AVX-512, AMX, and AVX10, so only
   FXSAVE state crosses vCPUs. The emulators answer for themselves. The
-  native backend can't hide CPUID.
+  sud engine can't hide CPUID.
 - **Debugging.** devproc's `mem`, `regs`, `fpregs`, and `text` and the
   `ctl` stop messages let one guest process read and write another's
   memory and registers within the machine, as on 9front. Writes into text
@@ -256,7 +256,7 @@ the CPUs.
 
 ### 6.3 9front system calls
 
-- **Decode and memory.** `src/syscall.zig` decodes 9front's table (numbers
+- **Decode and memory.** `src/abi/plan9/syscall.zig` decodes 9front's table (numbers
   0 to 53; unknown and old calls post "sys: bad sys call"). drawterm's
   `validaddr` is a no-op, so `GuestBuf` is the only check that a guest
   buffer is mapped: contiguous buffers are passed in place, others bounce,
@@ -264,7 +264,7 @@ the CPUs.
   strings are copied into bounded host buffers first so another guest thread
   can't change them mid-call. Any unmapped byte posts "sys: bad address in
   syscall".
-- **Loading.** `src/aout.zig` and `src/loader.zig` parse the a.out header
+- **Loading.** `src/abi/plan9/aout.zig` and `src/abi/plan9/loader.zig` parse the a.out header
   (40 bytes on 64-bit magics, 32 on 386) and map text, data, and bss
   ([abi-plan9.md](../spec/abi-plan9.md#aout-loading-host-side)).
 - **Processes and memory.** `src/segment.zig` and `src/machine.zig`: rfork
@@ -273,24 +273,24 @@ the CPUs.
   hands Ureg and FP state between process and pool threads past the vCPU
   limit.
 - **Semaphores and rendezvous.** `src/kern/sema.c`: wait lists keyed by the
-  host address of the guest word, with `src/syscall.zig` checking the word
+  host address of the guest word, with `src/abi/plan9/syscall.zig` checking the word
   is aligned, mapped, and in a writable segment.
 - **mount.** A guest may `mount` any 9P server it has an fd for (a posted
   channel, its own pipe, or a network connection the policy allowed), so
   devmnt's client is guest-reachable with guest-chosen servers (see 6.8).
 
-### 6.4 The Linux personality
+### 6.4 The Linux ABI
 
-The largest single surface: `src/linux/sys.zig` (about 7,000 lines) and its
+The largest single surface: `src/abi/linux/sys.zig` (about 7,000 lines) and its
 neighbours. See [spec/abi-linux.md](../spec/abi-linux.md).
 
-- **Loading** (`src/linux/elf.zig`, `exec.zig`): static and dynamic ELF for
+- **Loading** (`src/abi/linux/elf.zig`, `exec.zig`): static and dynamic ELF for
   arm64, amd64, and i386, `PT_INTERP` read in the Linux view, lazily filled
-  file mappings, the vDSO and the read-only clock page (`src/linux/vclock.zig`).
-- **Memory** (`src/linux/mm.zig`, `pagecache.zig`, `shmfile.zig`,
+  file mappings, the vDSO and the read-only clock page (`src/abi/linux/vclock.zig`).
+- **Memory** (`src/abi/linux/mm.zig`, `pagecache.zig`, `shmfile.zig`,
   `sysvshm.zig`): VMAs, lazy 64 KiB chunks, copy-on-write fork, shared file
   mappings kept coherent with `read` and `write`, a page cache shared by
-  every Mm of every machine on a backend, System V shared memory, and
+  every Mm of every machine on an engine, System V shared memory, and
   shootdowns before freeing. Look for use-after-free across threads and
   forks, reference counts on shared chunks, and the `--memory` accounting.
 - **Identity.** A Linux process starts as uid 0 and the `set*id` calls work
@@ -310,8 +310,8 @@ neighbours. See [spec/abi-linux.md](../spec/abi-linux.md).
   (`EPERM`); `clone` flags outside glibc's, musl's, and Go's sets
   (`EINVAL`); `WAKE_OP` and PI futexes (`ENOSYS`); inotify (`ENOSYS`, until
   file-watch).
-- **Signals** (`src/linux/signal.zig`): frame layout, `rt_sigreturn`,
-  `sigaltstack`, signalfd, itimers (`src/linux/itimer.zig`).
+- **Signals** (`src/abi/linux/signal.zig`): frame layout, `rt_sigreturn`,
+  `sigaltstack`, signalfd, itimers (`src/abi/linux/itimer.zig`).
 - **Threads**: `clone`, futexes in `src/kern/linux.c`, robust lists,
   `clear_child_tid`, `exit_group`, `execve` from a non-leader.
 - **Terminals**: the console's termios, and pseudoterminals in
@@ -321,7 +321,7 @@ neighbours. See [spec/abi-linux.md](../spec/abi-linux.md).
   the process's namespace, so devip's policy applies. `sendto` is checked
   against the connect policy. `AF_UNIX` sockets are pipes posted in `#s`,
   `SCM_RIGHTS` passes fds within one machine, and `AF_NETLINK` answers link
-  and address dumps from the host's interfaces (`src/linux/netlink.zig`).
+  and address dumps from the host's interfaces (`src/abi/linux/netlink.zig`).
 - **`/proc` and `/sys`** are synthesized by `#L` (`src/kern/devlinux.c`).
 
 ### 6.5 Kernel devices
@@ -482,12 +482,12 @@ and (soon) child machines run several, sharing one drawterm kernel. Each
 machine has its own Pgrp, Fgrp, Egrp, device mask, console, `/srv` board,
 pid space, and union numbers. Some tables are shared on purpose: record
 locks, FIFOs, the Linux page cache and shared-file table, System V shared
-memory (per backend), semaphore wait lists (keyed by host address), and
+memory (per engine), semaphore wait lists (keyed by host address), and
 devip's static conversation tables.
 
-### 6.13 The browser host
+### 6.13 The web host
 
-On wasm32-wasi ([spec/host-js.md](../spec/host-js.md)) every guest runs on
+On wasm32-wasi ([spec/host-web.md](../spec/host-web.md)) every guest runs on
 h86 or ha64 inside the wasm instance, in a Worker. `#C` and `#I` are always
 masked and the network is WebSockets only. Under Node, `h9-node` preopens the
 host's `/`, so the policy in h9's wasm code is the only thing between a
@@ -508,7 +508,7 @@ from `walkl` in `chan.c`). It can never widen past the Linux view, uid 0
 grants nothing, and `mount`, `umount2`, `pivot_root`, `unshare`, and `setns`
 stay refused. Code: `h9_linux_chroot`, `h9_linux_setslash`, and
 `h9_linux_dotfd` in `src/kern/linux.c`, the `walkl` change in the vendored
-`chan.c`, and `src/linux/sys.zig`. Cases: `[linux-chroot]` in
+`chan.c`, and `src/abi/linux/sys.zig`. Cases: `[linux-chroot]` in
 `tests/integration.zig`.
 
 Things to check: that no path (`..` through a link, a directory fd from
@@ -561,7 +561,7 @@ New surface once it lands: host watcher threads that act on host-reported
 paths (a race and path-mapping surface like A5's), event-record parsing from
 9P servers (A2), a guest-visible change stream whose filtering through
 unions and whiteouts must match what a walk would show, and inotify's syscall
-and queue code in the Linux personality.
+and queue code in the Linux ABI.
 
 ### 7.4 Other drafts that change the sandbox
 
@@ -584,11 +584,11 @@ and queue code in the Linux personality.
 | Area | Paths |
 | --- | --- |
 | Policy, plan, and namespace | `src/policy.zig`, `src/newns.zig`, `src/mount.zig`, `src/machine.zig`, `src/cli.zig`, `src/main.zig`, `src/root.zig` |
-| Guest memory and syscalls | `src/syscall.zig`, `src/segment.zig`, `src/guestmem.zig`, `src/aout.zig`, `src/loader.zig`, `src/cpupool.zig`, `src/hcpu.zig`, `src/kern.zig` |
-| Backends | `src/vmm.zig`, `src/vmm/{hvf,kvm,kvm_abi,whp,whp_abi,gphys,pt_arm64,pt_amd64,x86,arena,hcpu,h86,ha64,hx64}.zig` |
+| Guest memory and syscalls | `src/abi/plan9/syscall.zig`, `src/segment.zig`, `src/guestmem.zig`, `src/abi/plan9/aout.zig`, `src/abi/plan9/loader.zig`, `src/cpupool.zig`, `src/engine/hcpu/hcpu.zig`, `src/kern.zig` |
+| Engines | `src/engine.zig`, `src/engine/{hvf,kvm,kvm_abi,whp,whp_abi,gphys,pt_arm64,pt_amd64,x86,arena,hcpu,h86,ha64,hx64}.zig` |
 | Shims and register state | `src/arch/amd64/shim.S`, `src/arch/arm64/shim.S`, `src/arch/{amd64,arm64,i386}.zig` |
-| Emulator CPUs | `src/interp/` (especially `mem.zig`), `src/jit/` (especially `codemem.zig`, `cache.zig`, `dispatch.zig`, the emitters' memory paths), `src/web/` for wasm |
-| Linux personality | `src/linux/`, `src/kern/linux.c`, `src/kern/linuxnet.c`, `src/kern/devlinux.c`, `src/kern/devpty.c`, `src/kern/fifo.c` |
+| Emulator CPUs | `src/engine/hcpu/interp/` (especially `mem.zig`), `src/engine/hcpu/jit/` (especially `codemem.zig`, `cache.zig`, `dispatch.zig`, the emitters' memory paths), `src/web/` for wasm |
+| Linux ABI | `src/abi/linux/`, `src/kern/linux.c`, `src/kern/linuxnet.c`, `src/kern/devlinux.c`, `src/kern/devpty.c`, `src/kern/fifo.c` |
 | h9's kernel code | `src/kern/*.c` and `*.h` (hooks, devices, process model) |
 | Vendored kernel, as changed or reached | `third_party/drawterm/kern/` (devfs, devip, devmnt, chan, sysfile, qio, devpipe, devtls), and the libraries it calls from guest-reachable paths (`libsec`, `libip`, `libc`) |
 | 9P, indexes, and streams | `src/dotl/`, `src/rootindex/`, `src/rootindex.zig`, `src/statictree.zig`, `src/hstream.zig`, `src/ws.zig`, `src/cred.zig` |
@@ -597,7 +597,7 @@ and queue code in the Linux personality.
 
 ### Out of scope, or informational
 
-- `src/vmm/native*.zig` (not a boundary; findings are informational).
+- `src/engine/sud*.zig` (not a boundary; findings are informational).
 - Hypervisor and CPU bugs, and side channels.
 - `third_party/drawterm` code not compiled into h9 or not reachable from a
   guest, and drawterm's GUI backends beyond the clipboard and input paths.
@@ -615,7 +615,7 @@ Grouped by boundary, with where each is described.
 
 - **B1, B2.** One guest-physical region mapped once, with pages handed out
   by h9's allocator; released ranges are given back to the host and fresh
-  pages mapped over them ([engines.md](../spec/engines.md#hypervisor-layer-vmm)).
+  pages mapped over them ([engines.md](../spec/engines.md#the-engine-interface-engine)).
   SMEP and SMAP where the CPU has them, NX, and per-vCPU GDT and TSS with an
   IST stack on amd64. CPUID hides state FXSAVE can't carry. The shim holds no
   policy. `arch.sanitize` and `rt_sigreturn` restore only user-settable
@@ -653,9 +653,9 @@ Grouped by boundary, with where each is described.
   default.
 - **B8.** devproc, devsrv, `#O`, `#ℏ`, and the console look everything up in
   the caller's machine.
-- **The native backend's audit (Nov 9, 2026).** The guest can write the
-  stub's control page and jump into stub code, so the backend can't contain
-  it; `auto` no longer selects it and `--backend native` warns
+- **The sud engine's audit (Nov 9, 2026).** The guest can write the
+  stub's control page and jump into stub code, so the engine can't contain
+  it; `auto` no longer selects it and `--engine sud` warns
   ([native-backend Updates](../design/epoch-0/native-backend.md#updates)).
 - **Recent fixes with a security flavour:** linux-chroot narrowing only (#289),
   locked `getdents64` buffers (#284), and races in `F_DUPFD` and
@@ -669,7 +669,7 @@ Grouped by boundary, with where each is described.
    is the plan; macOS research shows Seatbelt works after `hv_vm_create`.
 2. **drawterm's `validaddr` is a no-op.** `GuestBuf` is the only check, so
    any syscall path that reaches guest memory without it is a bug.
-3. **The native backend isn't a boundary.** Inherent to running guest code
+3. **The sud engine isn't a boundary.** Inherent to running guest code
    in h9's address space with address-keyed gates.
 4. **TOCTOU against host processes.** Checks resolve and then act; a host
    process renaming paths concurrently can race them (except where an
@@ -680,7 +680,7 @@ Grouped by boundary, with where each is described.
    trees ([hide-host-paths](../design/epoch-0/hide-host-paths.md)); the user name is
    the host user's; `ls -l` shows host owners and modes; Linux netlink
    answers with the host's interfaces; `cpuinfo` and `sysstat` show the
-   host's CPUs; on native, CPUID shows the host's.
+   host's CPUs; on sud, CPUID shows the host's.
 8. **The default network is wide.** `outbound` reaches the host's loopback
    and LAN; link-local is the only default refusal. virtual-loopback closes
    the loopback part. Link-local DNS servers are allowed on port 53.
@@ -703,10 +703,10 @@ Grouped by boundary, with where each is described.
 In rough order of expected value:
 
 1. **Guest memory handling in the kernel seam**: every place a guest
-   address or length reaches C or Zig code (`src/syscall.zig`,
-   `src/linux/sys.zig`, `GuestBuf`, `AddressSpace.translate` and `copy`,
+   address or length reaches C or Zig code (`src/abi/plan9/syscall.zig`,
+   `src/abi/linux/sys.zig`, `GuestBuf`, `AddressSpace.translate` and `copy`,
    devproc's `mem`), including concurrent unmaps from other threads.
-2. **The Linux personality's memory manager** (`src/linux/mm.zig`, shared
+2. **The Linux ABI's memory manager** (`src/abi/linux/mm.zig`, shared
    chunks, copy-on-write, shootdowns, the page cache), for use-after-free
    across threads and forks.
 3. **Untrusted 9P and index parsing** (`src/dotl/`, `src/rootindex/`,
@@ -752,7 +752,7 @@ phases 3 and 4.
     VM), each logging any connection;
   - a host environment variable holding a token;
   - a second machine in the same process (through the embedding API or
-    `tests/backends.zig`'s harness) holding its own token in `/tmp` and
+    `tests/engines.zig`'s harness) holding its own token in `/tmp` and
     `/srv`;
   - for code execution in h9, a host file h9 would have to create
     (`/tmp/pwned`) that no guest path maps to.
@@ -771,7 +771,7 @@ phases 3 and 4.
 
 1. Build h9 on each host in Debug and ReleaseSafe, fetch the roots, and run
    `zig build test`, `zig build integration`, and `zig build proposal
-   -Dp=baseline` on every backend, so failures later are ours and not the
+   -Dp=baseline` on every engine, so failures later are ours and not the
    environment's. Record `h9 --check` on each host.
 2. Build an instrumented h9 on Linux x86\_64: check whether the C kernel is
    already built with UBSan (Zig enables C's undefined-behaviour checks in
@@ -790,13 +790,13 @@ agreed threat model.
 
 ### Phase 1: map and model (week 1)
 
-1. **Read the seam.** Trace a syscall end to end on each backend: the
-   shim's entry, the exit, `src/machine.zig`'s loop, `src/syscall.zig` or
-   `src/linux/sys.zig`, `GuestBuf`, the `sys*` wrapper in `sysfile.c`, the
+1. **Read the seam.** Trace a syscall end to end on each engine: the
+   shim's entry, the exit, `src/machine.zig`'s loop, `src/abi/plan9/syscall.zig` or
+   `src/abi/linux/sys.zig`, `GuestBuf`, the `sys*` wrapper in `sysfile.c`, the
    device, and back. Note every place a guest value becomes a host pointer,
    a length, an index, or a path.
 2. **Enumerate guest-reachable entry points**: the 9front syscall table,
-   the Linux table in `src/linux/nr.zig` (marking each call as served,
+   the Linux table in `src/abi/linux/nr.zig` (marking each call as served,
    refused, or `ENOSYS`), every device's walk, open, read, write, and wstat,
    every `ctl` message (`#ℓ`, `#ℏ`, `#O`'s clone, devproc, devip), and every
    ioctl the Linux layer serves.
@@ -866,8 +866,8 @@ section 2 with the cases that test it.
   under 9front in QEMU, and look at where results differ around memory,
   signals, and errors: a difference there is often a missing check.
 - **Manual review**, in the order of section 11: `GuestBuf` and every caller
-  that bypasses it; `src/linux/mm.zig`'s chunk reference counts, copy-on-write
-  and shootdown ordering; `src/linux/signal.zig`'s frames and
+  that bypasses it; `src/abi/linux/mm.zig`'s chunk reference counts, copy-on-write
+  and shootdown ordering; `src/abi/linux/signal.zig`'s frames and
   `rt_sigreturn`; `src/kern/devoverlay.c`'s allocator and node lifetimes;
   devproc's `mem` and `regs` against a running target; and the
   `src/cpupool.zig` handoff.
@@ -875,7 +875,7 @@ section 2 with the cases that test it.
   try to read and write the kernel half, the doorbell, and the per-vCPU
   shared page; that fault inside the shim's paths (a bad stack, a
   non-canonical return address, a pending trap flag); and that race a kick
-  against a syscall. Read the CPU state the host sets (`src/vmm/x86.zig`,
+  against a syscall. Read the CPU state the host sets (`src/engine/x86.zig`,
   `pt_amd64.zig`, `pt_arm64.zig`) against the architecture manuals for
   anything user mode can change or see.
 - **The emulator.** Extend the existing lockstep fuzzers toward memory:
@@ -917,7 +917,7 @@ test fixture.
 1. Review the drafts that change the sandbox (virtual-loopback, file-watch,
    plan-format, host-sandbox, and linux-dns) against the threat model, and
    write what each should test before it lands.
-2. Retest every fix the maintainer made during the audit, on every backend
+2. Retest every fix the maintainer made during the audit, on every engine
    it touches.
 3. Write the report: a summary for a reader who won't read the rest; each
    finding with its boundary, adversary, severity, preconditions, proof of
@@ -930,16 +930,16 @@ test fixture.
 
 ### What we'd leave out, and say so
 
-The hypervisors and CPUs themselves, side channels, the native backend
+The hypervisors and CPUs themselves, side channels, the sud engine
 beyond confirming its documented status, guest binaries in the root, the
-sibling repositories, and the browser host beyond a review of the Worker's
+sibling repositories, and the web host beyond a review of the Worker's
 message handling and h9-node's preopen. The report would list each
 exclusion so a later audit can pick it up.
 
 ### How we'd know we were done
 
 - Every promise in section 2 has at least one case that would fail if it
-  broke, run on every backend that's a boundary.
+  broke, run on every engine that's a boundary.
 - Every entry point in the phase 1 inventory has been fuzzed, reviewed, or
   listed as not covered, with a reason.
 - The guest fuzzer and the hostile server have run for an agreed time with
@@ -957,12 +957,12 @@ exclusion so a later audit can pick it up.
 ./scripts/fetch.sh         # pinned 9front source and image, Alpine roots, and test dependencies
 zig build                  # zig-out/bin/h9 (ad-hoc signed with h9.entitlements on macOS)
 zig build mkroot           # the 9front root tree in .local/9front/root (needs QEMU)
-h9 --check                 # which backends work here, and the vCPU limit
+h9 --check                 # which engines work here, and the vCPU limit
 ```
 
 Host requirements: macOS arm64 with Xcode (HVF; the binary needs the
 `com.apple.security.hypervisor` entitlement); Linux with read and write on
-`/dev/kvm` (KVM), or any Linux x86\_64 for the emulator and native; Windows
+`/dev/kvm` (KVM), or any Linux x86\_64 for hcpu and sud; Windows
 x86\_64 with the Windows Hypervisor Platform feature (WHP). Without a
 hypervisor, `auto` uses the emulator, so every check below runs anywhere,
 slower. `scripts/lima/` sets up Linux test VMs from a Mac.
@@ -973,13 +973,13 @@ slower. `scripts/lima/` sets up Linux test VMs from a Mac.
 h9 --print [flags] PROGRAM          # the compiled plan: profile, enforces, devmask, namespace, access, caveats
 h9 --trace [flags] PROGRAM          # every syscall with arguments, result, and error, and faults with the Ureg
 h9 --profile=tight --rc 'cat /proc/$pid/ns'
-h9 --backend emu|kvm|hvf|whp ...    # force a backend
+h9 --engine hcpu|kvm|hvf|whp ...    # force an engine
 ```
 
 **Tests:**
 
 ```sh
-zig build test                       # unit tests, and the backend cases on every backend built in
+zig build test                       # unit tests, and the engine cases on every engine built in
 zig build integration                # real binaries through the CLI (needs the root tree)
 zig build integration -Darch=amd64   # amd64 cases on KVM and the emulator
 zig build integration -Dweb          # the same cases through h9-node on h86
@@ -1001,10 +1001,10 @@ cases can be run by slug. The ones most relevant to the sandbox:
 | `linux-chroot` | chroot narrowing, `..`, fds from before, refused calls |
 | `websocket-9p` | `/net/ws` under each mode |
 | `guest-tools`, `gfx` | `#H` and graphics devices masked |
-| `native-backend` (in `tests/backends.zig`) | Every AX value traps; a jump into the stub can't open a host file |
+| `native-backend` (in `tests/engines.zig`) | Every AX value traps; a jump into the stub can't open a host file |
 
-`tests/backends.zig` also has the memory-cap, fault, kick, note, and
-register-zeroing cases on every backend built in. The fuzzers for the
+`tests/engines.zig` also has the memory-cap, fault, kick, note, and
+register-zeroing cases on every engine built in. The fuzzers for the
 emulator CPUs and the 9P codec are built by `zig build` targets described
 in [spec/jit.md](../spec/jit.md#testing) and `build.zig`.
 
@@ -1018,14 +1018,15 @@ branches.
 | --- | --- |
 | The whole system | [SPEC.md](../SPEC.md) |
 | Security stance, policy, access rules, `--print` | [spec/sandbox.md](../spec/sandbox.md) |
-| Backends and shims | [spec/engines.md](../spec/engines.md) |
+| Engines and shims | [spec/engines.md](../spec/engines.md) |
 | Kernel, process model, seam rules | [spec/kernel.md](../spec/kernel.md) |
 | 9front ABI | [spec/abi-plan9.md](../spec/abi-plan9.md) |
-| Linux personality | [spec/abi-linux.md](../spec/abi-linux.md) |
+| Linux ABI | [spec/abi-linux.md](../spec/abi-linux.md) |
 | Mounts, 9P dialects, indexes, serving | [spec/ninep.md](../spec/ninep.md) |
 | Boot sequence and device mask | [spec/machine.md](../spec/machine.md) |
 | CLI flags and exit codes | [spec/cli.md](../spec/cli.md) |
-| Browser host | [spec/host-js.md](../spec/host-js.md) |
+| Web host | [spec/host-web.md](../spec/host-web.md) |
+| Namespace kernel | [spec/nskernel.md](../spec/nskernel.md) |
 | Emulator CPUs | [spec/jit.md](../spec/jit.md), [spec/h86.md](../spec/h86.md), [spec/hx64.md](../spec/hx64.md), [spec/ha64.md](../spec/ha64.md) |
 | User-facing sandbox docs | [MANUAL.md, chapter 23](../MANUAL.md#23-sandboxing), [docs/comparison.md](comparison.md) |
 | Proposals and their status | [design/README.md](../design/README.md), [design/STATUS.md](../design/STATUS.md) |
@@ -1036,3 +1037,13 @@ Written against `main` at c0f71ec (Nov 24, 2026), after linux-chroot
 (#289), with virtual-loopback (#287) and file-watch (#288) still drafts.
 Update this brief when a change crosses a boundary in section 4, and give
 the auditor the commit it describes.
+
+Updated for [renames](../design/renames.md), which changed names and nothing
+else ([design/README.md](../design/README.md#old-names) has the table of old
+names): the ABIs are in `src/abi/plan9/` and `src/abi/linux/`, the engines in
+`src/engine.zig` and `src/engine/`, with hcpu's CPUs and JIT under
+`src/engine/hcpu/`, and the web host and the namespace kernel are described in
+[spec/host-web.md](../spec/host-web.md) and
+[spec/nskernel.md](../spec/nskernel.md). The CLI's old spellings stay
+accepted as aliases for one release, and `auto` never selects the sud engine
+by either of its names.

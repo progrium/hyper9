@@ -14,7 +14,7 @@
 //! the regions' `tso` flag makes them LDAR and STLR, which is what MP
 //! checks. Each test is a program per thread at its own code page, run
 //! from a spin barrier, many times. D3's shared harness
-//! (src/jit/check/litmus.zig) is the place to fold these into later.
+//! (src/engine/hcpu/jit/check/litmus.zig) is the place to fold these into later.
 
 const std = @import("std");
 const hcpu = @import("hcpu");

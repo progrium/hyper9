@@ -40,7 +40,7 @@
 
 <p>
 h9 runs Linux ELF binaries in the same machine as 9front ones.
-A process's personality is picked when it execs, by the binary's format:
+A process's ABI is picked when it execs, by the binary's format:
 an a.out is a 9front process, and an ELF is a Linux process.
 A Linux process's system calls go to a second syscall table in h9,
 translated onto the same drawterm kernel that serves 9front's.
@@ -66,7 +66,7 @@ or on h9's emulator where there is none.
 <h2 id="demo">Demo</h2>
 
 <p>
-Below is h9's browser host running Alpine Linux's own arm64 binaries:
+Below is h9's web host running Alpine Linux's own arm64 binaries:
 busybox's shell, jq, and sqlite3, unchanged, on ha64, h9's own arm64 CPU,
 in a Web Worker,
 with a small Linux root loaded into memory.
@@ -145,14 +145,14 @@ Linux traps with the same instructions as 9front:
 <tt>SVC</tt> on arm64 and <tt>SYSCALL</tt> on amd64.
 So a Linux system call already reaches h9 as the same vCPU exit,
 with every register the Linux ABI uses,
-and h9 dispatches it by the process's personality.
+and h9 dispatches it by the process's ABI.
 </p>
 
 <ul>
 <li><b>Loading.</b> An ELF loader for static and dynamic programs,
   with musl's <tt>ld-musl</tt> read from the Linux view,
   and a stack of argv, envp, and auxv.</li>
-<li><b>Memory.</b> VMAs over the vmm's regions, with pages faulted in on first touch,
+<li><b>Memory.</b> VMAs over the engine's regions, with pages faulted in on first touch,
   <tt>mmap</tt>, <tt>mprotect</tt>, and <tt>mremap</tt>,
   and shared file mappings that stay coherent with <tt>read</tt> and <tt>write</tt>.</li>
 <li><b>Signals are notes.</b> <tt>interrupt</tt> is <tt>SIGINT</tt>,
@@ -172,12 +172,12 @@ and h9 dispatches it by the process's personality.
 </ul>
 
 <p>
-The <a href="https://github.com/progrium/hyper9/blob/main/design/epoch-0/linux-personality.md">Linux personality proposal</a>
+The <a href="https://github.com/progrium/hyper9/blob/main/design/epoch-0/linux-personality.md">linux-personality proposal</a>
 has the design, with
 <a href="https://github.com/progrium/hyper9/blob/main/design/epoch-0/linux-threads.md">threads</a> and
 <a href="https://github.com/progrium/hyper9/blob/main/design/epoch-0/linux-net.md">networking</a>
 in proposals of their own.
-The <a href="https://github.com/progrium/hyper9/blob/main/spec/abi-linux.md#linux-personality">design document</a>
+The <a href="https://github.com/progrium/hyper9/blob/main/spec/abi-linux.md#linux-abi">design document</a>
 describes what's built.
 </p>
 

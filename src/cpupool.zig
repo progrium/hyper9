@@ -11,18 +11,18 @@
 //! always makes progress.
 //!
 //! `--cpus` caps how many vCPUs run guest code at the same moment, owned
-//! or pooled, on every backend: a process waits for a slot before each run,
+//! or pooled, on every engine: a process waits for a slot before each run,
 //! in ticket order, and a waiter kicks the longest run after a slice.
 //!
 //! On the emulator there's no vCPU limit (each engine is host memory), nor
-//! on the native backend (each vCPU is a thread in its address space's
+//! on the sud engine (each vCPU is a thread in its address space's
 //! stub process), so every process owns one.
 
 const std = @import("std");
-const vmm = @import("vmm.zig");
+const engine = @import("engine.zig");
 const web = @import("web.zig");
 
-/// Pooled vCPUs kept back from the backend's limit for processes that
+/// Pooled vCPUs kept back from the engine's limit for processes that
 /// can't own one.
 pub const reserve: u32 = 8;
 
@@ -33,8 +33,8 @@ const slice_ns = 5 * std.time.ns_per_ms;
 pub const Pool = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
-    backend: vmm.Backend,
-    /// How many vCPUs processes may own; the rest of the backend's limit is
+    engine: engine.Engine,
+    /// How many vCPUs processes may own; the rest of the engine's limit is
     /// the pool. Null means unlimited (no pool).
     own_limit: ?u32,
     /// Guards the counts and the queue below.
@@ -66,15 +66,15 @@ pub const Pool = struct {
 
     /// `own_limit`, if given, overrides how many vCPUs processes may own
     /// (for tests of the pool).
-    pub fn init(gpa: std.mem.Allocator, io: std.Io, backend: vmm.Backend, cpus: ?u32, own_limit_override: ?u32) vmm.Error!Pool {
-        const own_limit: ?u32 = switch (backend.kind()) {
-            .emu, .native => null,
+    pub fn init(gpa: std.mem.Allocator, io: std.Io, eng: engine.Engine, cpus: ?u32, own_limit_override: ?u32) engine.Error!Pool {
+        const own_limit: ?u32 = switch (eng.kind()) {
+            .hcpu, .sud => null,
             .hvf, .kvm, .whp => blk: {
-                const max = try backend.maxVcpus();
+                const max = try eng.maxVcpus();
                 break :blk if (max > reserve) max - reserve else 1;
             },
         };
-        return .{ .gpa = gpa, .io = io, .backend = backend, .own_limit = own_limit_override orelse own_limit, .cpus = cpus };
+        return .{ .gpa = gpa, .io = io, .engine = eng, .own_limit = own_limit_override orelse own_limit, .cpus = cpus };
     }
 
     /// Stops the pool threads. Every process must be done with the pool.
@@ -94,7 +94,7 @@ pub const Pool = struct {
 
     /// Gets a process a way to run: its own vCPU if one is free, or a lease
     /// on the pool. Call on the process's thread.
-    pub fn acquire(p: *Pool, l: *Lease) vmm.CreateError!void {
+    pub fn acquire(p: *Pool, l: *Lease) engine.CreateError!void {
         l.* = .{ .pool = p };
         const own = blk: {
             p.lockSpin();
@@ -104,7 +104,7 @@ pub const Pool = struct {
             break :blk true;
         };
         if (own) {
-            l.vcpu = p.backend.createVcpu() catch |e| {
+            l.vcpu = p.engine.createVcpu() catch |e| {
                 p.lockSpin();
                 p.owned -= 1;
                 p.lock.unlock();
@@ -118,7 +118,7 @@ pub const Pool = struct {
         return p.startPooled(l);
     }
 
-    fn startPooled(p: *Pool, l: *Lease) vmm.CreateError!void {
+    fn startPooled(p: *Pool, l: *Lease) engine.CreateError!void {
         l.owned = false;
         p.lockSpin();
         defer p.lock.unlock();
@@ -183,7 +183,7 @@ pub const Pool = struct {
     }
 
     fn worker(p: *Pool) void {
-        var vcpu = p.backend.createVcpu() catch {
+        var vcpu = p.engine.createVcpu() catch {
             p.failQueued();
             return;
         };
@@ -226,17 +226,17 @@ pub const Pool = struct {
 pub const Lease = struct {
     pool: *Pool,
     owned: bool = false,
-    vcpu: vmm.Vcpu = undefined,
-    as: ?vmm.AddressSpace = null,
+    vcpu: engine.Vcpu = undefined,
+    as: ?engine.AddressSpace = null,
     /// Registers to run from, and after a run, as it left them.
-    ureg: vmm.Ureg = undefined,
-    extra: vmm.Extra = .{ .arm64 = .{} },
+    ureg: engine.Ureg = undefined,
+    extra: engine.Extra = .{ .arm64 = .{} },
     extra_dirty: bool = true,
     /// A pooled run's result, handed back by the pool thread.
-    result: vmm.Error!vmm.Exit = .interrupted,
+    result: engine.Error!engine.Exit = .interrupted,
     done: std.atomic.Value(u32) = .init(0),
     /// The pool vCPU running this lease, for `kick`. Guarded by `kick_lock`.
-    running_on: ?*vmm.Vcpu = null,
+    running_on: ?*engine.Vcpu = null,
     kicked: bool = false,
     kick_lock: std.atomic.Mutex = .unlocked,
 
@@ -256,32 +256,32 @@ pub const Lease = struct {
         p.lock.unlock();
     }
 
-    pub fn setAddressSpace(l: *Lease, as: vmm.AddressSpace) vmm.Error!void {
+    pub fn setAddressSpace(l: *Lease, as: engine.AddressSpace) engine.Error!void {
         l.as = as;
         if (l.owned) try l.vcpu.setAddressSpace(as);
     }
 
-    pub fn setUreg(l: *Lease, u: *const vmm.Ureg) void {
+    pub fn setUreg(l: *Lease, u: *const engine.Ureg) void {
         l.ureg = u.*;
     }
 
-    pub fn getUreg(l: *Lease, u: *vmm.Ureg) void {
+    pub fn getUreg(l: *Lease, u: *engine.Ureg) void {
         u.* = l.ureg;
     }
 
     /// The FP/SIMD registers and thread pointer, as of the last exit.
-    pub fn getExtra(l: *Lease, x: *vmm.Extra) vmm.Error!void {
+    pub fn getExtra(l: *Lease, x: *engine.Extra) engine.Error!void {
         if (l.owned and !l.extra_dirty) try l.vcpu.getExtra(&l.extra);
         x.* = l.extra;
     }
 
-    pub fn setExtra(l: *Lease, x: *const vmm.Extra) void {
+    pub fn setExtra(l: *Lease, x: *const engine.Extra) void {
         l.extra = x.*;
         l.extra_dirty = true;
     }
 
     /// Runs the guest until its next exit.
-    pub fn run(l: *Lease) vmm.Error!vmm.Exit {
+    pub fn run(l: *Lease) engine.Error!engine.Exit {
         const p = l.pool;
         p.enter(l);
         defer p.leave(l);
@@ -310,11 +310,11 @@ pub const Lease = struct {
     }
 
     /// On a pool thread: runs the lease's guest code once on `v`.
-    fn serve(l: *Lease, v: *vmm.Vcpu) void {
+    fn serve(l: *Lease, v: *engine.Vcpu) void {
         l.finish(l.runOn(v));
     }
 
-    fn runOn(l: *Lease, v: *vmm.Vcpu) vmm.Error!vmm.Exit {
+    fn runOn(l: *Lease, v: *engine.Vcpu) engine.Error!engine.Exit {
         try v.setAddressSpace(l.as orelse return error.BadAddress);
         // Pool vCPUs pass from process to process, so the whole user state
         // goes with each run.
@@ -336,7 +336,7 @@ pub const Lease = struct {
         return exit;
     }
 
-    fn finish(l: *Lease, r: vmm.Error!vmm.Exit) void {
+    fn finish(l: *Lease, r: engine.Error!engine.Exit) void {
         l.result = r;
         l.done.store(1, .release);
         l.pool.io.futexWake(u32, &l.done.raw, 1);

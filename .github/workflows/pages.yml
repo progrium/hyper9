@@ -1,5 +1,5 @@
 # Publishes the project pages (site/*.html) to GitHub Pages, with the
-# browser host (design/epoch-0/browser-host.md) built from main in demo/ as
+# web host (design/epoch-0/browser-host.md) built from main in demo/ as
 # the page's live demo.
 #
 # The demo's root archive needs a 386 root. Building one with
@@ -13,7 +13,7 @@
 #
 # The Wine page (site/wine.html) is on main, but winedraw and its demo
 # live on the wine-draw branch (design/wine-draw.md), so its demo, in
-# wine-demo/, is that branch's browser host over its wine.h9a: Alpine's
+# wine-demo/, is that branch's web host over its wine.h9a: Alpine's
 # 32-bit Wine with winedraw on h86 and a prefix made ahead of time by h9
 # on the emulator (the branch's scripts/wine-web.sh, a few minutes),
 # cached until the branch's scripts, pins, or driver change. It's built
@@ -24,7 +24,7 @@
 # The demo page's browser test gates the deploy.
 #
 # The build is slow, so pushes to main run it only when the site or the
-# browser host's own files change. Anything else that reaches the demo,
+# web host's own files change. Anything else that reaches the demo,
 # such as a kernel or hcpu change, deploys when someone runs it by hand:
 # "Run workflow" in the Actions tab, or `gh workflow run pages`.
 name: pages

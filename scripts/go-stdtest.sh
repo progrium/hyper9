@@ -50,7 +50,7 @@ for p in "${pkgs[@]}"; do
 	skip=$(skips "$p")
 	[ -n "$skip" ] && args+=(-test.skip "$skip")
 	rc=0
-	(cd "$out" && "$h9" --backend emu --arch amd64 --dir "$root" --memory 4G --timeout 30m \
+	(cd "$out" && "$h9" --engine hcpu --arch amd64 --dir "$root" --memory 4G --timeout 30m \
 		--cwd "$goroot/src/$p" "./$p.test" "${args[@]}") >"$out/$p.out" 2>&1 || rc=$?
 	pass=$(grep -c '^--- PASS' "$out/$p.out" || true)
 	skipped=$(grep -c '^--- SKIP' "$out/$p.out" || true)

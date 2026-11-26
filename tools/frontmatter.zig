@@ -491,7 +491,7 @@ test "parse a proposal" {
         \\---
         \\issue: 42
         \\slug: linux-personality
-        \\title: Linux personality
+        \\title: Linux ABI
         \\status: accepted
         \\created: 2026-11-03
         \\authors: [progrium]
@@ -500,7 +500,7 @@ test "parse a proposal" {
         \\superseded-by:
         \\---
         \\
-        \\# Proposal: Linux personality
+        \\# Proposal: Linux ABI
         \\
     , &d);
     try std.testing.expectEqual(@as(usize, 0), d.errors.items.len);

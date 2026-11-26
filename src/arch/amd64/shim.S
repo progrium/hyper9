@@ -1,5 +1,5 @@
 // h9 amd64 guest shim. Runs in ring 0 from the kernel half of the address
-// space (PML4 entry 511), in long mode the host set up (src/vmm/x86.zig).
+// space (PML4 entry 511), in long mode the host set up (src/engine/x86.zig).
 //
 // Each vCPU has a shared page: a Plan 9 Ureg at its start, the vCPU's GDT
 // and TSS, and at its top the stack exceptions switch to (IST1). While the
@@ -16,7 +16,7 @@
 //
 // A vCPU's first run starts at `restore` too.
 //
-// Keep in sync with src/vmm/x86.zig (offsets, shared page layout).
+// Keep in sync with src/engine/x86.zig (offsets, shared page layout).
 
 .equ U_AX,     0
 .equ U_BX,     8

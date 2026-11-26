@@ -1,4 +1,4 @@
-// The browser host's demo page in Chromium (design/epoch-0/browser-host.md):
+// The web host's demo page in Chromium (design/epoch-0/browser-host.md):
 // serves zig-out/web, opens index.html and drives rc through its terminal.
 //
 //     node tests/web/browser.mjs [zig-out/web]
@@ -105,9 +105,9 @@ try {
   };
   const test = step;
 
-  // rc on h9's own 386 CPU (h86): the default, and ?backend=v86, the old
-  // backend's name, which runs the same.
-  for (const backend of ['emu', 'v86']) {
+  // rc on h9's own 386 CPU (h86): the default, and ?backend=v86, an old
+  // name for hcpu, which runs the same.
+  for (const backend of ['hcpu', 'v86']) {
     await page.goto(`${url}?backend=${backend}`);
     const on = (name, f) => step(`${backend}: ${name}`, f);
     await on('rc prompts', () => expect(/% $/, 0, 60_000));

@@ -1,6 +1,6 @@
 //! zig build a64-jit (and test): ha64's cases, tagged
-//! [hcpu], each run through the vmm interface on h9's own
-//! emulator (hcpu and ha64), on T0 and on T1 (H9_EMU_TIER at create).
+//! [hcpu], each run through the engine interface on h9's own
+//! emulator (hcpu and ha64), on T0 and on T1 (H9_HCPU_TIER at create).
 //! T1 is this host's emitter: the x86-64 one here, the arm64 one on an
 //! arm64 Mac. On a target without the emulator they skip.
 //!
@@ -10,13 +10,13 @@
 
 const std = @import("std");
 const h9 = @import("h9");
-const vmm = h9.vmm;
+const engine = h9.engine;
 const testing = std.testing;
 
 const code_va: u64 = 0x10000;
 const data_va: u64 = 0x20000;
 const bad_va: u64 = 0x50000;
-const page = vmm.page_size;
+const page = engine.page_size;
 
 const Tier = enum { t0, t1 };
 
@@ -35,33 +35,33 @@ fn unsetEnv(name: [*:0]const u8) void {
     _ = if (@import("builtin").os.tag == .windows) _putenv_s(name, "") else unsetenv(name);
 }
 
-/// Settings read when a backend is created.
+/// Settings read when an engine is created.
 const Env = struct {
     cache: ?[:0]const u8 = null,
     deterministic: bool = false,
 };
 
-/// A backend on one tier with the code and data pages mapped.
+/// An engine on one tier with the code and data pages mapped.
 const M = struct {
-    b: vmm.Backend,
-    as: vmm.AddressSpace,
+    b: engine.Engine,
+    as: engine.AddressSpace,
     code: []align(page) u8,
     data: []align(page) u8,
 
     /// Null where there's no hcpu with a JIT to test.
     fn init(t: Tier, prog: []const u32, env: Env) !?M {
         var buf: [32]u8 = undefined;
-        const v = vmm.emuVersion(&buf) orelse return null;
+        const v = engine.hcpuVersion(&buf) orelse return null;
         if (!std.mem.eql(u8, v, "hcpu (jit)")) return null;
-        setEnv("H9_EMU_TIER", @tagName(t));
-        if (env.cache) |c| setEnv("H9_EMU_CACHE", c);
-        if (env.deterministic) setEnv("H9_EMU_DETERMINISTIC", "1");
+        setEnv("H9_HCPU_TIER", @tagName(t));
+        if (env.cache) |c| setEnv("H9_HCPU_CACHE", c);
+        if (env.deterministic) setEnv("H9_HCPU_DETERMINISTIC", "1");
         defer {
-            unsetEnv("H9_EMU_TIER");
-            unsetEnv("H9_EMU_CACHE");
-            unsetEnv("H9_EMU_DETERMINISTIC");
+            unsetEnv("H9_HCPU_TIER");
+            unsetEnv("H9_HCPU_CACHE");
+            unsetEnv("H9_HCPU_DETERMINISTIC");
         }
-        const b = try vmm.create(testing.allocator, testing.io, .emu, .{ .arch = .arm64, .memory = 64 << 20 });
+        const b = try engine.create(testing.allocator, testing.io, .hcpu, .{ .arch = .arm64, .memory = 64 << 20 });
         errdefer b.destroy();
         const as = try b.newAddressSpace();
         errdefer as.destroy();
@@ -85,11 +85,11 @@ const M = struct {
 
     /// A vCPU at the start of the code, x0 the data page, and `regs` in
     /// x1 on.
-    fn vcpu(m: *M, regs: []const u64) !vmm.Vcpu {
+    fn vcpu(m: *M, regs: []const u64) !engine.Vcpu {
         var v = try m.b.createVcpu();
         errdefer v.destroy();
         try v.setAddressSpace(m.as);
-        var u: vmm.arm64.Ureg = .{ .pc = code_va, .sp = data_va + page };
+        var u: engine.arm64.Ureg = .{ .pc = code_va, .sp = data_va + page };
         u.r[0] = data_va;
         for (regs, 1..) |r, i| u.r[i] = r;
         v.setUreg(&.{ .arm64 = u });
@@ -101,13 +101,13 @@ const M = struct {
     }
 };
 
-fn uregOf(v: *vmm.Vcpu) vmm.arm64.Ureg {
-    var u: vmm.Ureg = undefined;
+fn uregOf(v: *engine.Vcpu) engine.arm64.Ureg {
+    var u: engine.Ureg = undefined;
     v.getUreg(&u);
     return u.arm64;
 }
 
-fn setPc(v: *vmm.Vcpu, pc: u64, regs: []const u64) void {
+fn setPc(v: *engine.Vcpu, pc: u64, regs: []const u64) void {
     var u = uregOf(v);
     u.pc = pc;
     for (regs, 1..) |r, i| u.r[i] = r;
@@ -188,7 +188,7 @@ fn mrsCntvct(rt: u32) u32 {
     return 0xd53be040 | rt;
 }
 
-fn expectFault(e: vmm.Exit, addr: u64) !void {
+fn expectFault(e: engine.Exit, addr: u64) !void {
     switch (e) {
         .fault => |f| try testing.expectEqual(addr, f.addr),
         else => {
@@ -219,7 +219,7 @@ test "a store to a page of compiled code takes effect at the next instruction [h
         defer v.destroy();
         for (2..6) |n| {
             setPc(&v, code_va, &.{movz(2, @intCast(n))});
-            try testing.expectEqual(vmm.Exit.syscall, try v.run());
+            try testing.expectEqual(engine.Exit.syscall, try v.run());
             try testing.expectEqual(@as(u64, n), uregOf(&v).r[2]);
         }
     }
@@ -252,8 +252,8 @@ test "a fault in a compiled region reports the exact PC and registers [hcpu]" {
 }
 
 const Runner = struct {
-    v: vmm.Vcpu,
-    exit: vmm.Exit = .halted,
+    v: engine.Vcpu,
+    exit: engine.Exit = .halted,
     interrupts: u32 = 0,
     stop: std.atomic.Value(bool) = .init(false),
 
@@ -307,7 +307,7 @@ fn counterTest(prog: []const u32) !void {
         var threads: [4]std.Thread = undefined;
         for (&threads, &runners) |*th, *r| th.* = try std.Thread.spawn(.{}, Runner.main, .{r});
         for (threads) |th| th.join();
-        for (runners) |r| try testing.expectEqual(vmm.Exit.syscall, r.exit);
+        for (runners) |r| try testing.expectEqual(engine.Exit.syscall, r.exit);
         try testing.expectEqual(@as(u64, 4 * counter_n), m.word(0).*);
     }
 }
@@ -413,7 +413,7 @@ test "a full code cache flushes while other vCPUs run [hcpu]" {
         while (true) {
             const e = try v.run();
             if (e == .interrupted) continue;
-            try testing.expectEqual(vmm.Exit.syscall, e);
+            try testing.expectEqual(engine.Exit.syscall, e);
             break;
         }
         try testing.expectEqual(@as(u64, rounds * pairs), uregOf(&v).r[7]);
@@ -469,9 +469,9 @@ test "FP results and FPSR are the same bits on T0 and T1 [hcpu]" {
         for (inputs, 0..) |in, k| {
             setPc(&v, code_va, &.{ @bitCast(in[0]), @bitCast(in[1]) });
             // FPSR's sticky bits start clear each time.
-            var x: vmm.Extra = .{ .arm64 = .{} };
+            var x: engine.Extra = .{ .arm64 = .{} };
             try v.setExtra(&x);
-            try testing.expectEqual(vmm.Exit.syscall, try v.run());
+            try testing.expectEqual(engine.Exit.syscall, try v.run());
             for (0..7) |j| out[ti][k][j] = m.word(8 * j).*;
         }
     }
@@ -508,7 +508,7 @@ test "deterministic mode counts the same instructions on T0 and T1 [hcpu]" {
         defer m.deinit();
         var v = try m.vcpu(&.{});
         defer v.destroy();
-        try testing.expectEqual(vmm.Exit.syscall, try v.run());
+        try testing.expectEqual(engine.Exit.syscall, try v.run());
         got[ti] = uregOf(&v).r[9];
     }
     try testing.expectEqual(got[0], got[1]);

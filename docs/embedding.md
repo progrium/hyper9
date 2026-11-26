@@ -21,7 +21,7 @@ builds with `zig build embed` and runs in `zig build test`.
 4. [Running programs](#running-programs)
 5. [Standard I/O, traces, and signals](#standard-io-traces-and-signals)
 6. [The sandbox policy](#the-sandbox-policy)
-7. [Backends](#backends)
+7. [Engines](#engines)
 8. [Several machines in one process](#several-machines-in-one-process)
 9. [Connecting files, devices, and 9P servers](#connecting-files-devices-and-9p-servers)
 10. [Rules for embedders](#rules-for-embedders)
@@ -61,7 +61,7 @@ It prints `exited "": hello from h9`. The empty string is success, as in
 9front.
 
 The steps are always the same: `Machine.init` compiles the options into a
-namespace plan and creates the backend's VM, `Machine.run` runs one program
+namespace plan and creates the engine's VM, `Machine.run` runs one program
 until its first process exits, and `Machine.deinit` frees the VM. One
 machine can run any number of programs, one after another; each run gets a
 fresh namespace and process tree, so nothing carries over between runs
@@ -71,7 +71,7 @@ except what was written to the host.
 
 The repository's `build.zig` exports a module named `h9`. It links
 drawterm's kernel (`kern`) into anything that imports it, so a consumer only
-adds the backend's own libraries.
+adds the engine's own libraries.
 
 **In this repository.** The example is wired up this way in `build.zig`
 (`embed_example`): a `b.addExecutable` whose root module imports `mod`,
@@ -101,7 +101,7 @@ const exe = b.addExecutable(.{ .name = "app", .root_module = b.createModule(.{
 if (target.result.os.tag == .macos) exe.root_module.linkFramework("Hypervisor", .{});
 ```
 
-That builds in the host's hypervisor backend and h9's own emulator, hcpu,
+That builds in the host's hypervisor engine and h9's own emulator, hcpu,
 which is always built in on arm64 and x86-64 targets and needs no other
 libraries. Everything that goes into the program is MIT licensed, apart
 from drawterm's kernel, which is under drawterm's own license
@@ -131,8 +131,8 @@ Every field but `stdio` has a default:
 
 | Field | Type | Default | What it does |
 | --- | --- | --- | --- |
-| `backend` | `vmm.BackendKind` | `.auto` | `.auto`, `.hvf`, `.kvm`, `.whp`, `.native`, `.emu`, `.v86` (an alias of `.emu`); one not built for this host fails with `BackendNotBuilt`. See [Backends](#backends). |
-| `arch` | `?vmm.Arch` | host's | `.arm64`, `.amd64`, or `.i386`. Read it from an a.out with `h9.aout.parse(bytes).arch`. |
+| `engine` | `engine.Choice` | `.auto` | `.auto`, `.hvf`, `.kvm`, `.whp`, `.sud`, or `.hcpu`; one not built for this host fails with `EngineNotBuilt`. See [Engines](#engines). |
+| `arch` | `?engine.Arch` | host's | `.arm64`, `.amd64`, or `.i386`. Read it from an a.out with `h9.aout.parse(bytes).arch`. |
 | `mounts` | `[]const Machine.Mount` | `&.{}` | The mount flags, in order ([mounts](../design/epoch-0/mounts.md)): each a `.kind` (`.dir`, `.url`, `.archive`, `.builtin`, `.tmp`, or `.fd` for a 9P connection you already hold), a `.src`, and a `.dst` (`/` by default), with `.access`, `.order`, `.create`, `.recursive`, a `.url`'s `.spec`, `.user`, `.headers`, `.ca`, and `.index`, and an `.fd` mount's `.fd`, a host descriptor (a POSIX fd or a Windows `HANDLE`) that h9 duplicates for each run and you keep, and `.fd_write`, the descriptor written to for a pipe pair ([fd-mounts](../design/epoch-0/fd-mounts.md)). Mounts on `/` stack into the root, and mounts on `#L` into the Linux tree. `Machine.Mount.parse` takes a flag's `SRC:DST[:OPTS]` text. With nothing on `/`, the root is an empty tree in memory, so only `.bytes` programs run. |
 | `binds` | `[]const Machine.Bind` | `&.{}` | `--bind` lines, run after every mount, in order: `.src` and `.dst` guest paths, with `.order`, `.create`, and `.recursive`. `Machine.Bind.parse` takes `SRC:DST[:OPTS]`. |
 | `index` | `Machine.IndexMode` | `.auto` | `.none` turns off metadata indexes ([mount-index](../design/epoch-0/mount-index.md)), as `--index none` does. |
@@ -147,7 +147,7 @@ Every field but `stdio` has a default:
 | `guest_tools` | `bool` | `true` | Binds h9's own commands (`#H/bin`, such as `wsmount`) after `/bin`. `false` leaves them out and masks `#H`, as `--no-guest-tools` does. |
 | `trace` | `?*std.Io.Writer` | none | Receives a ratrace-style line per syscall and, on a fault, the registers and a symbolized PC. |
 | `ns` | `[]const []const u8` | `&.{}` | Namespaces to replay in order after the mounts and binds: each is newns text, with `;` between lines. The CLI reads `--ns @FILE` on the host and passes its text. |
-| `owned_vcpus` | `?u32` | backend's | For tests of the vCPU pool; leave it alone. |
+| `owned_vcpus` | `?u32` | engine's | For tests of the vCPU pool; leave it alone. |
 | `gfx` | `?Machine.Gfx` | none | A host window for this machine, as `--gfx` gives: `.{}`, or `.{ .clipboard = false }` for `--gfx=noclip` and `.scale` for `--gfx-scale`. Only one machine in the process can have it. See [Graphics](#graphics). |
 | `signals` | `?*Machine.Signals` | none | Lets you deliver Ctrl-C and hangup to a running machine. |
 | `stdio` | `Machine.Stdio` | required | The console's host side: `in`, `out`, `err`, and callbacks. |
@@ -155,8 +155,8 @@ Every field but `stdio` has a default:
 The machine keeps the `Options` value as you passed it, so every slice in
 it (paths, `env`, policy lists) must outlive the machine, not just `init`.
 
-`Machine.init` fails with `vmm.CreateError` (the backend couldn't make a VM:
-`HypervisorUnavailable`, `BackendNotBuilt`, `WrongArch`, `OutOfGuestMemory`,
+`Machine.init` fails with `engine.CreateError` (the engine couldn't make a VM:
+`HypervisorUnavailable`, `EngineNotBuilt`, `WrongArch`, `OutOfGuestMemory`,
 and so on), `PolicyConflict`, or one of `h9.gfx.Error` for `gfx` (`GfxNotBuilt`, `GfxInUse`, `GfxUnavailable`). For the reason behind a conflict, call
 `Machine.initExplained(gpa, io, opts, &msg)` instead.
 
@@ -216,7 +216,7 @@ interrupts blocking kernel calls, and returns `.killed = "h9: timeout"`.
 
 A process can be in a host call that can't be interrupted, such as a read of
 `stdio.in` with no `in_cancel`. Then `run` returns anyway after a short
-grace period and sets `m.stuck`. The backend, the plan, and the run's state
+grace period and sets `m.stuck`. The engine, the plan, and the run's state
 are leaked rather than freed under the process, and that process may still
 touch `argv`, the program bytes, the `Stdio` streams, and the trace writer
 when its call returns. Keep those alive, or exit the host process, which is
@@ -302,15 +302,15 @@ resolved. Use `std.Io.Dir.cwd().realPathFileAlloc` on them, as the CLI does
 such as `write = .none` with `writable` paths or `net = .disable` with
 `net_allow` patterns, fail `init` with `PolicyConflict`.
 
-## Backends
+## Engines
 
-| `BackendKind` | Host | Runs | Built |
+| `engine.Choice` | Host | Runs | Built |
 | --- | --- | --- | --- |
 | `.hvf` | macOS on Apple Silicon | arm64 | always, on that host |
 | `.kvm` | Linux on arm64 or x86\_64, with access to `/dev/kvm` | the host's: arm64 or amd64 | always, on those hosts ([kvm](../design/epoch-0/kvm.md)) |
-| `.native` | Linux x86\_64, 5.11 or later | amd64 | always, on that host ([native-backend](../design/epoch-0/native-backend.md)) |
+| `.sud` | Linux x86\_64, 5.11 or later | amd64 | always, on that host ([native-backend](../design/epoch-0/native-backend.md)) |
 | `.whp` | Windows x86\_64, with the Windows Hypervisor Platform feature | amd64 | always, on that host ([whp](../design/epoch-0/whp.md)) |
-| `.emu` | any | arm64, amd64, 386 | on arm64 and x86-64 targets ([hcpu](../design/epoch-0/hcpu.md)) |
+| `.hcpu` | any | arm64, amd64, 386 | on arm64 and x86-64 targets ([hcpu](../design/epoch-0/hcpu.md)) |
 
 On KVM, h9 blocks `SIGRTMIN + 1` in the threads that run vCPUs and sends it
 to kick them out of the guest. Leave that signal to h9: don't unblock it or
@@ -321,11 +321,11 @@ the hypervisor is unavailable or can't run `arch`, it falls back to the
 emulator if that's built in, and otherwise returns the error. It never
 picks `.native`, which shares the host process and isn't a security
 boundary, so ask for that one by name for a guest you trust. It doesn't
-fall back on any other failure. Check `m.backend.kind()` after `init` to
+fall back on any other failure. Check `m.engine.kind()` after `init` to
 see which one you got; the CLI warns when `.auto` lands on `.emu`.
 
-`h9.vmm.Kind.built(.hvf)`, `.built(.kvm)`, and `.built(.emu)` tell you at run time what's
-compiled in, and `h9.vmm.host_arch` is the architecture that runs natively.
+`h9.engine.Kind.built(.hvf)`, `.built(.kvm)`, and `.built(.emu)` tell you at run time what's
+compiled in, and `h9.engine.host_arch` is the architecture that runs natively.
 
 ### Graphics
 
@@ -376,9 +376,9 @@ $ zig build embed
 $ zig-out/bin/embed -j 3 --dir .local/9front/root rc -c 'echo $machine'
 machine 0 (hvf): exited ""
   0
-machine 1 (emu): exited ""
+machine 1 (hcpu): exited ""
   1
-machine 2 (emu): exited ""
+machine 2 (hcpu): exited ""
   2
 ```
 
@@ -387,7 +387,7 @@ The limits:
 - **One HVF machine per host process.** Hypervisor.framework allows one VM
   per process, so on a Mac only one machine can exist on `.hvf` at a time;
   `init` for a second fails. Use `.emu` for the others, as the example and
-  the backend tests do, or run machines one after another, or run one
+  the engine tests do, or run machines one after another, or run one
   process per machine.
 - **64 running machines.** Each run takes a console slot, and there are 64
   (`max_consoles` in [src/kern.zig](../src/kern.zig)). The 65th concurrent
@@ -467,7 +467,7 @@ between runs. An `.fd` mount takes any `.dst` a `.url` one does, with
 holds the machine's writable layer. `.fd` without `.kind = .fd`, or an
 `.fd` mount without `.fd`, is `PolicyConflict`. It has no address, so
 `--print`'s plan shows it as a comment, `# mount: an embedder's connection
-on /n/ui`, and the rest of the plan still replays. The browser host has
+on /n/ui`, and the rest of the plan still replays. The web host has
 no host descriptors: a page uses a `MessagePort` there.
 
 **More 9P servers, from a namespace.** `ns` takes namespace text (manual

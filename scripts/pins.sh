@@ -8,7 +8,7 @@ NINEFRONT_RELEASE=11952 # "THIS WAS SUPPOSED TO BE FUN", Aug 2026
 NINEFRONT_REV=602faae9a52f342a40b086d10b23c71c82dd52d7
 NINEFRONT_ISO_URL=https://9front.org/iso
 # The release's 386 ISO, unpacked (zig build isoroot) into the 386 root
-# the Pages workflow packs the browser host's demo archive from. The hash
+# the Pages workflow packs the web host's demo archive from. The hash
 # is of the ISO after gunzip.
 NINEFRONT_386_ISO_SHA256=068e8ff723a3e5b8c6fdec4862f53e0b7d04e04b3b54baca022b9d2fe869035f
 # The release's amd64 ISO, unpacked the same way into the amd64 root CI
@@ -31,7 +31,7 @@ aarch64-linux-musl musllinux_1_2_aarch64 35ac021ead8c992b15a511be73bf703429e5d34
 x86_64-linux-musl musllinux_1_2_x86_64 73d2eb557cc0255f18c55b15951c46dff1c07f996588df4cea1b1bdc5d69b184
 "
 
-# An Alpine root for the Linux personality's tests (design/epoch-0/linux-personality.md):
+# An Alpine root for the Linux ABI's tests (design/epoch-0/linux-personality.md):
 # the alpine:3.22.2 image's single layer from Docker Hub, by digest, unpacked
 # into .local/linux/alpine-<arch> by `scripts/fetch.sh alpine-<arch>`
 # (or alpine, for all three).
@@ -44,7 +44,7 @@ amd64 2d35ebdb57d9971fea0cac1582aa78935adf8058b2cc32db163c98822e5dfa1b
 386 13c6e95c06ae06f126f5e940d6d88c2fec0da715c80878ad225c76ad48d0a31e
 "
 
-# Alpine 3.22's aarch64 packages for the browser host's Linux demo
+# Alpine 3.22's aarch64 packages for the web host's Linux demo
 # (src/web/linux.list), which runs on ha64, h9's own arm64 CPU. They're
 # added to a copy of the arm64 root as .local/linux/alpine-arm64-web by
 # `scripts/fetch.sh alpinearm64web`. Alpine's mirrors keep only each

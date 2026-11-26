@@ -5,7 +5,7 @@ status: draft
 created: 2026-11-03
 authors: [progrium]
 depends: [kvm, whp, hcpu, host-handles]
-areas: [sandbox, vmm, cli, tests]
+areas: [sandbox, engine, cli, tests]
 branch: []
 ---
 

@@ -18,7 +18,7 @@
 # The environment picks the rest:
 #
 #   H9_WL_ARCH        the roots' architecture (default amd64)
-#   H9_WL_BACKEND     the backend (default auto)
+#   H9_WL_ENGINE     the engine (default auto)
 #   H9_WL_JOBS        cases at once (default the CPU count)
 #   H9_WL_LINUX_ROOT  default .local/linux/workloads-<arch>
 #                     (scripts/fetch.sh workloads)
@@ -75,7 +75,7 @@ if [ "${1:-}" = --one ]; then
 		return "$code"
 	}
 	t0=$(now)
-	limit "${timeout:-120}" "$h9" --backend "$H9_WL_BACKEND" --arch "$H9_WL_ARCH" \
+	limit "${timeout:-120}" "$h9" --engine "$H9_WL_ENGINE" --arch "$H9_WL_ARCH" \
 		--dir "$mount" --cwd "$cases" "${cmd[@]}" >"$out/$name.out" 2>"$out/$name.err" </dev/null
 	code=$?
 	secs=$(awk -v a="$t0" -v b="$(now)" 'BEGIN{printf "%.2f", b-a}')
@@ -100,7 +100,7 @@ h9=${1:?usage: workloads.sh H9 OUTDIR [name...]}
 out=${2:?usage: workloads.sh H9 OUTDIR [name...]}
 shift 2
 export H9_WL_ARCH=${H9_WL_ARCH:-amd64}
-export H9_WL_BACKEND=${H9_WL_BACKEND:-auto}
+export H9_WL_ENGINE=${H9_WL_ENGINE:-auto}
 export H9_WL_LINUX_ROOT=${H9_WL_LINUX_ROOT:-$H9_LOCAL/linux/workloads-$H9_WL_ARCH}
 if [ -z "${H9_WL_NINE_ROOT:-}" ]; then
 	H9_WL_NINE_ROOT=$H9_LOCAL/9front/root$H9_WL_ARCH
@@ -124,7 +124,7 @@ for f in "$H9_ROOT"/tests/workloads/*.sh "$H9_ROOT"/tests/workloads/*.rc; do
 done
 [ ${#files[@]} -gt 0 ] || { echo "workloads: no cases" >&2; exit 1; }
 
-echo "workloads: ${#files[@]} cases, $jobs at once, $H9_WL_ARCH on $H9_WL_BACKEND"
+echo "workloads: ${#files[@]} cases, $jobs at once, $H9_WL_ARCH on $H9_WL_ENGINE"
 t0=$(date +%s)
 printf '%s\0' "${files[@]}" | xargs -0 -P "$jobs" -n 1 "$0" --one "$h9" "$out"
 cat "$out"/*.result | sort >"$out/results.tsv"
@@ -139,7 +139,7 @@ echo "workloads: $(awk -F'\t' '{n[$2]++} END{for (r in n) printf "%s %d, ", r, n
 
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
 	{
-		echo "### Workloads: $H9_WL_ARCH on $H9_WL_BACKEND"
+		echo "### Workloads: $H9_WL_ARCH on $H9_WL_ENGINE"
 		echo
 		echo "| Case | Result | Seconds | Note |"
 		echo "| --- | --- | ---: | --- |"

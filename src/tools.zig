@@ -5,26 +5,26 @@ const std = @import("std");
 const builtin = @import("builtin");
 const h9 = @import("h9");
 const hello = @import("hello");
-const vmm = h9.vmm;
+const engine = h9.engine;
 const build_options = h9.build_info;
 
 /// Exit status of a check that found a problem: h9 itself can't work.
 pub const exit_failed = 125;
 
 /// Prints the version, the pinned 9front and drawterm revisions and the
-/// backends built in.
+/// engines built in.
 pub fn version(w: *std.Io.Writer) std.Io.Writer.Error!void {
     try w.print("h9 {s}\n", .{build_options.version});
     try w.print("9front {s} ({s})\n", .{ build_options.ninefront_release, short(build_options.ninefront_rev) });
     try w.print("drawterm {s}\n", .{short(build_options.drawterm_rev)});
-    try w.writeAll("backends:");
+    try w.writeAll("engines:");
     var any = false;
-    inline for (comptime std.enums.values(vmm.Kind)) |k| {
+    inline for (comptime std.enums.values(engine.Kind)) |k| {
         if (k.built()) {
             try w.print(" {t}", .{k});
-            if (k == .emu) {
+            if (k == .hcpu) {
                 var buf: [32]u8 = undefined;
-                try w.print(" ({s})", .{vmm.emuVersion(&buf) orelse "?"});
+                try w.print(" ({s})", .{engine.hcpuVersion(&buf) orelse "?"});
             }
             any = true;
         }
@@ -72,11 +72,11 @@ fn short(rev: []const u8) []const u8 {
 }
 
 pub const CheckOptions = struct {
-    /// Which backend to check; `.auto` checks every one built in and then
+    /// Which engine to check; `.auto` checks every one built in and then
     /// the one `auto` picks.
-    backend: vmm.BackendKind = .auto,
+    engine: engine.Choice = .auto,
     /// The guest architecture (--arch), or null for the host's.
-    arch: ?vmm.Arch = null,
+    arch: ?engine.Arch = null,
     memory: ?u64 = null,
     /// The mounts the CLI resolved (design/epoch-0/mounts.md), the root's among
     /// them: with only the built-in root on `/`, it's checked.
@@ -95,46 +95,46 @@ pub const CheckOptions = struct {
     index_cache: ?[]const u8 = null,
 };
 
-/// Probes the backends (creating a VM and running a tiny program on each,
+/// Probes the engines (creating a VM and running a tiny program on each,
 /// which on macOS also checks the hypervisor entitlement), reports the
 /// hypervisor's vCPU limit, and checks the root tree by running /bin/echo from it.
 /// Prints one line per item and returns 0, or `exit_failed` if h9 can't
 /// run 9front programs from the root here.
 pub fn check(gpa: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, o: CheckOptions) std.Io.Writer.Error!u8 {
     try w.print("h9 {s} on {t} {t}\n", .{ build_options.version, builtin.os.tag, builtin.cpu.arch });
-    const arch = o.arch orelse vmm.host_arch orelse {
+    const arch = o.arch orelse engine.host_arch orelse {
         try w.writeAll("host: no 9front architecture for this CPU\n");
         return exit_failed;
     };
 
     var failed = false;
-    const kinds: []const vmm.BackendKind = switch (o.backend) {
-        .auto => &.{ .hvf, .kvm, .whp, .native, .emu, .auto },
-        else => &.{o.backend},
+    const kinds: []const engine.Choice = switch (o.engine) {
+        .auto => &.{ .hvf, .kvm, .whp, .sud, .hcpu, .auto },
+        else => &.{o.engine},
     };
     for (kinds) |k| {
         const r = probe(gpa, io, k, arch, o.memory);
-        // Backends that aren't built in are listed only when asked for.
-        if (o.backend == .auto and k != .auto and r == .err and r.err == error.BackendNotBuilt) continue;
-        try w.print("backend {t}: ", .{k});
+        // Engines that aren't built in are listed only when asked for.
+        if (o.engine == .auto and k != .auto and r == .err and r.err == error.EngineNotBuilt) continue;
+        try w.print("engine {t}: ", .{k});
         switch (r) {
             .ok => |p| {
                 try w.print("ok", .{});
                 if (k == .auto) try w.print(" (uses {t})", .{p.kind});
-                if (k == .emu) {
+                if (k == .hcpu) {
                     var buf: [32]u8 = undefined;
-                    if (vmm.emuVersion(&buf)) |v| try w.print(" ({s})", .{v});
+                    if (engine.hcpuVersion(&buf)) |v| try w.print(" ({s})", .{v});
                 }
                 if (p.max_vcpus) |n| try w.print(", {d} vCPUs", .{n});
                 try w.print(", hello in {d}.{d} ms\n", .{ p.us / 1000, p.us % 1000 / 100 });
             },
             .err => |e| {
                 try w.print("{s}\n", .{explain(k, e)});
-                if (k == o.backend) failed = true;
+                if (k == o.engine) failed = true;
             },
             .wrong, .failed => |msg| {
                 try w.print("ran, but {s}\n", .{msg});
-                if (k == o.backend) failed = true;
+                if (k == o.engine) failed = true;
             },
         }
     }
@@ -154,7 +154,7 @@ pub fn check(gpa: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, o: CheckOpti
         try w.print("root: built-in (9front {s} {s}, {s}): ", .{ br.release, br.set, arch.name() });
     } else try w.print("root {s}: ", .{o.root_arg.?});
     if (failed) {
-        try w.writeAll("not checked, no usable backend\n");
+        try w.writeAll("not checked, no usable engine\n");
         return exit_failed;
     }
     var why: [256]u8 = undefined;
@@ -192,7 +192,7 @@ pub fn check(gpa: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, o: CheckOpti
 }
 
 const Probe = union(enum) {
-    ok: struct { kind: vmm.Kind, max_vcpus: ?u32, us: u64 },
+    ok: struct { kind: engine.Kind, max_vcpus: ?u32, us: u64 },
     err: anyerror,
     /// The program ran with the wrong result.
     wrong: []const u8,
@@ -200,8 +200,8 @@ const Probe = union(enum) {
     failed: []const u8,
 };
 
-/// Creates a machine on backend `k` and runs the hello fixture on it.
-fn probe(gpa: std.mem.Allocator, io: std.Io, k: vmm.BackendKind, arch: vmm.Arch, memory: ?u64) Probe {
+/// Creates a machine on engine `k` and runs the hello fixture on it.
+fn probe(gpa: std.mem.Allocator, io: std.Io, k: engine.Choice, arch: engine.Arch, memory: ?u64) Probe {
     var buf: [h9.aout.header_size]u8 = undefined;
     const hdr = buf[0..arch.headerSize()];
     const text: []const u8 = switch (arch) {
@@ -219,7 +219,7 @@ fn probe(gpa: std.mem.Allocator, io: std.Io, k: vmm.BackendKind, arch: vmm.Arch,
     defer err.deinit();
     const start: std.Io.Timestamp = .now(io, .awake);
     var m = h9.Machine.init(gpa, io, .{
-        .backend = k,
+        .engine = k,
         .arch = arch,
         .policy = .{ .memory = memory },
         .stdio = .{ .out = &out.writer, .err = &err.writer },
@@ -229,27 +229,27 @@ fn probe(gpa: std.mem.Allocator, io: std.Io, k: vmm.BackendKind, arch: vmm.Arch,
     const us: u64 = @intCast(@max(0, @divTrunc(start.durationTo(.now(io, .awake)).toNanoseconds(), std.time.ns_per_us)));
     if (st != .exited or st.exited.len != 0) return .{ .wrong = "the test program didn't exit cleanly" };
     if (!std.mem.eql(u8, out.written(), hello.msg)) return .{ .wrong = "the test program's output was wrong" };
-    const kind = m.backend.kind();
+    const kind = m.engine.kind();
     return .{
         .ok = .{
             .kind = kind,
-            // The emulator and the native backend have no vCPU limit.
-            .max_vcpus = if (kind != .emu and kind != .native) m.backend.maxVcpus() catch null else null,
+            // The emulator and the sud engine have no vCPU limit.
+            .max_vcpus = if (kind != .hcpu and kind != .sud) m.engine.maxVcpus() catch null else null,
             .us = us,
         },
     };
 }
 
-/// Runs `/bin/echo ok` from the root tree on the backend `o.backend` picks.
+/// Runs `/bin/echo ok` from the root tree on the engine `o.engine` picks.
 /// A `.failed` message is in `why`.
 /// The root's index notes, without their "h9: ", go to `notes`.
-fn runRoot(gpa: std.mem.Allocator, io: std.Io, o: CheckOptions, arch: vmm.Arch, why: []u8, notes: *std.Io.Writer) Probe {
+fn runRoot(gpa: std.mem.Allocator, io: std.Io, o: CheckOptions, arch: engine.Arch, why: []u8, notes: *std.Io.Writer) Probe {
     var out: std.Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     var err: std.Io.Writer.Allocating = .init(gpa);
     defer err.deinit();
     var m = h9.Machine.init(gpa, io, .{
-        .backend = o.backend,
+        .engine = o.engine,
         .arch = arch,
         .mounts = o.mounts,
         .proxy = o.proxy,
@@ -276,19 +276,19 @@ fn runRoot(gpa: std.mem.Allocator, io: std.Io, o: CheckOptions, arch: vmm.Arch, 
     };
     if (st != .exited or st.exited.len != 0) return .{ .wrong = "it failed" };
     if (!std.mem.eql(u8, out.written(), "ok\n")) return .{ .wrong = "its output was wrong" };
-    return .{ .ok = .{ .kind = m.backend.kind(), .max_vcpus = null, .us = 0 } };
+    return .{ .ok = .{ .kind = m.engine.kind(), .max_vcpus = null, .us = 0 } };
 }
 
-/// Why backend `want` can't be used, for the CLI's messages.
-pub fn explain(want: vmm.BackendKind, err: anyerror) []const u8 {
+/// Why engine `want` can't be used, for the CLI's messages.
+pub fn explain(want: engine.Choice, err: anyerror) []const u8 {
     return switch (err) {
-        error.HypervisorUnavailable => if (vmm.whyUnavailable(want)) |why| why else switch (builtin.os.tag) {
+        error.HypervisorUnavailable => if (engine.whyUnavailable(want)) |why| why else switch (builtin.os.tag) {
             .macos => "no usable hypervisor (is h9 signed with h9.entitlements?)",
             .windows => "no usable hypervisor (enable the Windows Hypervisor Platform feature: Settings > Optional features, or `DISM /Online /Enable-Feature /FeatureName:HypervisorPlatform`, then restart)",
             else => "no usable hypervisor",
         },
-        error.BackendNotBuilt => switch (want) {
-            .emu, .auto => "the emulator isn't built into this h9 (it's built for arm64 and x86-64 targets)",
+        error.EngineNotBuilt => switch (want) {
+            .hcpu, .auto => "the emulator isn't built into this h9 (it's built for arm64 and x86-64 targets)",
             else => "not built into this h9",
         },
         error.WrongArch => "can't run this architecture",

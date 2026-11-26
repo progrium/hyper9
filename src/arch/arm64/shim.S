@@ -11,7 +11,7 @@
 // A vCPU's first run starts at `enter` (vectors + 0x800) at EL1, which
 // always flushes and then loads the Ureg the same way.
 //
-// Keep in sync with src/vmm/hvf.zig (shared page layout and kernel VAs).
+// Keep in sync with src/engine/hvf.zig (shared page layout and kernel VAs).
 
 .equ UREG_SP,     248
 .equ UREG_PC,     256
