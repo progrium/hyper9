@@ -1384,8 +1384,10 @@ pub const Machine = struct {
         }
 
         /// Posts a host-side note, if the first process has started.
-        fn post(j: *Job, to: kern.Mach.To, msg: [*:0]const u8) void {
-            if (j.mach.load(.acquire)) |mc| _ = mc.post(to, msg);
+        /// Returns whether the note reached a process.
+        fn post(j: *Job, to: kern.Mach.To, msg: [*:0]const u8) bool {
+            const mc = j.mach.load(.acquire) orelse return false;
+            return mc.post(to, msg) > 0;
         }
 
         /// Whose a new process is: the program's, or serving's: the server
@@ -1500,30 +1502,38 @@ pub const Machine = struct {
             while (true) {
                 const seq = @atomicLoad(u32, futex, .acquire);
                 if (j.first_done.isSet()) break;
+                // A note sent before the first process is up reaches
+                // nobody: it stays pending, and is tried again shortly.
+                var held: u8 = 0;
                 if (sig) |s| {
                     const bits = s.pending.swap(0, .acq_rel);
                     if (bits & Signals.stop_bit != 0) break;
-                    if (bits & Signals.interrupt_bit != 0) j.post(.foreground, "interrupt");
+                    if (bits & Signals.interrupt_bit != 0 and !j.post(.foreground, "interrupt")) held |= Signals.interrupt_bit;
                     if (bits & Signals.note_bit != 0) {
                         var nb: [kern.ERRMAX]u8 = undefined;
                         while (!s.note_lock.tryLock()) std.atomic.spinLoopHint();
                         const msg = std.fmt.bufPrintSentinel(&nb, "{s}", .{s.note_buf[0..s.note_len]}, 0) catch "interrupt";
                         s.note_lock.unlock();
-                        j.post(.foreground, msg);
+                        if (!j.post(.foreground, msg)) held |= Signals.note_bit;
                     }
                     if (bits & Signals.hangup_bit != 0 and !hung_up) {
                         hung_up = true;
-                        j.post(.all, "hangup");
+                        _ = j.post(.all, "hangup");
                         deadline = std.Io.Timestamp.now(io, .awake).addDuration(.fromMilliseconds(hangup_grace_ms));
                     }
+                    if (held != 0) _ = s.pending.fetchOr(held, .acq_rel);
                 }
+                const retry: std.Io.Duration = .fromMilliseconds(10);
                 const d = deadline orelse {
-                    io.futexWaitUncancelable(u32, futex, seq);
+                    if (held != 0) {
+                        io.futexWaitTimeout(u32, futex, seq, .{ .duration = .{ .raw = retry, .clock = .awake } }) catch {};
+                    } else io.futexWaitUncancelable(u32, futex, seq);
                     continue;
                 };
                 const left = std.Io.Timestamp.now(io, .awake).durationTo(d);
                 if (left.nanoseconds > 0) {
-                    io.futexWaitTimeout(u32, futex, seq, .{ .duration = .{ .raw = left, .clock = .awake } }) catch {};
+                    const wait = if (held != 0 and left.nanoseconds > retry.nanoseconds) retry else left;
+                    io.futexWaitTimeout(u32, futex, seq, .{ .duration = .{ .raw = wait, .clock = .awake } }) catch {};
                     continue;
                 }
                 // The grace period after a hangup is over.
@@ -1531,7 +1541,7 @@ pub const Machine = struct {
                 // The timeout: hangup first, then the grace period.
                 hung_up = true;
                 j.timed_out.store(true, .release);
-                j.post(.all, "hangup");
+                _ = j.post(.all, "hangup");
                 deadline = std.Io.Timestamp.now(io, .awake).addDuration(.fromMilliseconds(hangup_grace_ms));
             }
             return j.timed_out.load(.acquire);

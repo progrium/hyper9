@@ -113,11 +113,19 @@ fn unlock() void {
     lock_.unlock();
 }
 
-/// Wakes the device's readers and the child's threads.
+/// Wakes the device's readers and the child's threads. Not under the
+/// lock: the device's sleep holds its Rendez's lock while it asks
+/// h9_child_ready, which takes this one.
 fn wake(cv: *Conv) void {
+    wakeChild(cv);
+    kern.childWake(@intCast(cv.id()));
+}
+
+/// Wakes the child's threads only, which may be done under the lock: for
+/// what only they wait on, its input and room for its output.
+fn wakeChild(cv: *Conv) void {
     _ = cv.seq.fetchAdd(1, .release);
     if (cv.state != .free) cv.io.futexWake(u32, &cv.seq.raw, std.math.maxInt(u32));
-    kern.childWake(@intCast(cv.id()));
 }
 
 fn setErr(err: [*]u8, msg: []const u8) c_int {
@@ -619,7 +627,7 @@ fn h9_child_close(id: c_ulong, kind: c_int) callconv(.c) void {
         cv.writers -= 1;
         if (cv.writers == 0) {
             cv.in.closed = true;
-            wake(cv);
+            wakeChild(cv);
         }
     }
     putLocked(cv);
@@ -818,7 +826,7 @@ fn h9_child_read(id: c_ulong, kind: c_int, buf: [*]u8, n: c_long, off: i64, err:
             const k = @min(len, p.buf.items.len);
             @memcpy(buf[0..k], p.buf.items[0..k]);
             p.buf.replaceRangeAssumeCapacity(0, k, &.{});
-            wake(cv);
+            wakeChild(cv);
             return @intCast(k);
         },
         Kwait => {
@@ -850,11 +858,12 @@ fn h9_child_write(id: c_ulong, kind: c_int, buf: [*]const u8, n: c_long, err: [*
             if (cv.state == .done or cv.in.closed) return setErr(err, "the child's input is closed");
             // A write of nothing ends the child's input, as on a pipe.
             if (b.len == 0) cv.in.closed = true else cv.in.buf.appendSlice(cv.gpa, b) catch return setErr(err, "no memory");
-            wake(cv);
+            wakeChild(cv);
             return n;
         },
         Knote => {
-            if (cv.state != .running) return setErr(err, "the child isn't running");
+            // One sent before the exec waits for the child's first process.
+            if (cv.state == .done) return setErr(err, "the child isn't running");
             const msg = std.mem.trimEnd(u8, b, "\n");
             if (std.mem.eql(u8, msg, "interrupt")) cv.signals.interrupt(cv.io) else if (std.mem.eql(u8, msg, "hangup")) cv.signals.hangup(cv.io) else if (std.mem.eql(u8, msg, "kill")) cv.signals.stop(cv.io) else cv.signals.note(cv.io, msg);
             return n;

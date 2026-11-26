@@ -13652,11 +13652,12 @@ test "a child's memory is reserved from the parent's and returned at exit [child
     defer r.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{r.err});
     try std.testing.expectEqualStrings("a\nb\n", r.out);
-    // Two at once don't.
-    const two = try run(e, &.{ "--children", "--memory", "512m", "--rc", "h9 --memory 300m --rc 'sleep 3' & sleep 1; h9 --memory 300m --rc 'echo b'; echo $status; wait" });
+    // Two at once don't: the second starts once the first is up.
+    const two = try run(e, &.{ "--children", "--memory", "512m", "--rc", "cd /tmp; h9 --memory 300m --rc 'touch up; sleep 5' & while(! test -e up) sleep 0.1; h9 --memory 300m --rc 'echo b' || echo refused; wait" });
     defer two.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ two.out, two.err });
     try expectIn(two.err, "memory");
-    try std.testing.expect(std.mem.indexOf(u8, two.out, "b\n") == null);
+    try std.testing.expectEqualStrings("refused\n", two.out);
     // Without --memory, a child gets half of what's left.
     const half = try run(e, &.{ "--children", "--memory", "512m", "--rc", "h9 --print --rc date | grep '^memory'" });
     defer half.deinit();
@@ -13677,10 +13678,15 @@ test "a child that wants more memory than is left fails at exec [child-machines]
 
 test "a child's processes count against the parent's pids [child-machines]" {
     const e = try env(@src());
-    const r = try run(e, &.{ "--children", "--pids", "6", "--rc", "h9 --rc 'sleep 2 & sleep 2 & sleep 2 & sleep 2 & sleep 2 & sleep 2 & wait' >[2=1]" });
-    defer r.deinit();
-    errdefer std.debug.print("stdout: {s}\n", .{r.out});
-    try expectIn(r.out, "no procs");
+    // Which fork fails depends on when the parent's own processes start,
+    // so each engine's output is checked alone.
+    var it = std.mem.tokenizeScalar(u8, e.engines, ',');
+    while (it.next()) |engine| {
+        const r = try runOn(e, engine, &.{ "--children", "--pids", "6", "--rc", "h9 --rc 'sleep 2 & sleep 2 & sleep 2 & sleep 2 & sleep 2 & sleep 2 & wait' >[2=1]" }, null);
+        defer r.deinit();
+        errdefer std.debug.print("engine {s} stdout: {s}\n", .{ engine, r.out });
+        try expectIn(r.out, "no procs");
+    }
     // Its own limit is what the parent has left.
     const p = try run(e, &.{ "--children", "--pids", "20", "--rc", "h9 --print --rc date | grep '^pids'" });
     defer p.deinit();
@@ -13729,7 +13735,12 @@ test "a child can't write what the caller can't [child-machines]" {
     try s.init();
     defer s.deinit();
     var at_buf: [std.Io.Dir.max_path_bytes + 16]u8 = undefined;
-    const at = try std.fmt.bufPrint(&at_buf, "/mnt/term{s}", .{s.path});
+    // On Windows, /mnt/term/C:/... with / for each \.
+    const at = if (builtin.os.tag == .windows) blk: {
+        const w = try std.fmt.bufPrint(&at_buf, "/mnt/term/{s}", .{s.path});
+        std.mem.replaceScalar(u8, w, '\\', '/');
+        break :blk w;
+    } else try std.fmt.bufPrint(&at_buf, "/mnt/term{s}", .{s.path});
     // The caller reads the scratch directory only: --writable doesn't make
     // it writable in the child, and a child's write without it stays in
     // the child's memory. The caller's cwd it can write.
@@ -13751,8 +13762,9 @@ test "a child can't write what the caller can't [child-machines]" {
 
 test "an interrupt reaches the child, and the parent's exit kills it [child-machines]" {
     const e = try env(@src());
-    // The interrupt h9's rc gets goes to the child, which exits by it.
-    const r = try run(e, &.{ "--children", "--rc", "h9 --rc 'sleep 100' & p=$apid; sleep 1; echo interrupt >/proc/$p/notepg; wait; echo after" });
+    // The interrupt h9's rc gets goes to the child, which exits by it:
+    // once the child is up, as an rc still starting can swallow one.
+    const r = try run(e, &.{ "--children", "--rc", "cd /tmp; h9 --rc 'touch up; sleep 100' & p=$apid; while(! test -e up) sleep 0.1; echo interrupt >/proc/$p/notepg; wait; echo after" });
     defer r.deinit();
     try std.testing.expectEqualStrings("after\n", r.out);
     // A child never outlives its machine: this ends long before 100s.

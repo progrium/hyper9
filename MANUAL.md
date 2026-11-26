@@ -2497,6 +2497,9 @@ Tools:
 | Hangup | SIGHUP or SIGTERM: `hangup` to every process, stop 2 s later | Closing the console, logoff, or shutdown: the same, with a shorter grace period because Windows ends the process soon after |
 | Raw mode | termios: no line editing, echo, or signals | Console mode: the same |
 
+A machine that still hasn't stopped 45 s after a hangup or a second Ctrl-C
+is ended anyway: h9 exits with 128 plus the signal's number.
+
 ### 22. Sharing files with the host
 
 **The current directory.** The host directory you run h9 from, or `--cwd

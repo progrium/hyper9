@@ -196,9 +196,22 @@ const Posix = struct {
         }
     }
 
+    /// How long a machine has to end after a hangup or a stop before the
+    /// process exits without it: its grace period and teardown, and then
+    /// some. A wedged machine still ends when it's told to.
+    const stop_limit_ms = 45_000;
+
     fn watch(s: *Posix, h: *Host) void {
         var buf: [64]u8 = undefined;
         while (true) {
+            if (h.stoppedBy()) |sig| {
+                var pfd = [_]posix.pollfd{.{ .fd = s.pipe[0], .events = posix.POLL.IN, .revents = 0 }};
+                if (c.poll(&pfd, 1, stop_limit_ms) == 0) {
+                    restoreTerminal();
+                    std.debug.print("h9: machine didn't stop; exiting\n", .{});
+                    std.process.exit(128 + @as(u8, @intCast(@intFromEnum(sig))));
+                }
+            }
             const n = c.read(s.pipe[0], &buf, buf.len);
             if (n < 0) {
                 if (c._errno().* == @intFromEnum(posix.E.INTR)) continue;
