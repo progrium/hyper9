@@ -375,6 +375,13 @@ pub const testing = struct {
     /// Each call starts the namespace again.
     pub fn namespace() !*c.Proc {
         const p = try begin();
+        try namespaceOf(p);
+        return p;
+    }
+
+    /// namespace's, for p, which must be `up` (a process on a
+    /// continuation, as sync.zig's cases run).
+    pub fn namespaceOf(p: *c.Proc) !void {
         if (@as(?*c.Pgrp, p.pgrp)) |old| pgrp.closepgrp(old);
         p.pgrp = try pgrp.newpgrp();
         p.fgrp = try pgrp.dupfgrp(null);
@@ -386,7 +393,6 @@ pub const testing = struct {
         slash.path = chan.newpath("/");
         p.slash = slash;
         p.dot = try chan.cclone(slash);
-        return p;
     }
 };
 
