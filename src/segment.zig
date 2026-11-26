@@ -312,8 +312,7 @@ pub const Space = struct {
     pub fn pin(s: *const Space, va: u64, len: u64, write_: bool) ?Pin {
         const m = s.mmFor(va);
         if (s.mmFor(va +% (len -| 1)) != m) return null;
-        m.touch(va, len, write_) catch return null;
-        return .{ .mm = m, .p = m.pin(va, len, write_) orelse return null };
+        return .{ .mm = m, .p = m.touchPin(va, len, write_) orelse return null };
     }
 
     pub fn unpin(_: *const Space, pn: *Pin) void {

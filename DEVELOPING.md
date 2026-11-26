@@ -161,6 +161,7 @@ zig build test                                   # tests/engines.zig on T1 and o
 zig build integration -Dengines=hcpu             # the integration cases on hcpu
 zig build integration -Dengines=hcpu -Djit-check # every compiled region checked against T0
 zig build bench                                  # compute and syscall speed, hcpu against the hypervisor
+zig build bench -- syscall --engine hcpu --arch arm64  # only those system call rows (also compute, loop, --repeat N)
 ```
 
 Unicorn is kept as a test oracle only: `zig build lockstep`

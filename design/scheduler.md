@@ -125,3 +125,5 @@ None for the guest's reach. The scheduler is new code in the trusted base, and a
 - **CPU time is the process's.** `getrusage` and `/proc/n/status` count a thread's time across executors, through `cputime.task_hook`.
 
 Steps 6 and 7 are left. The web build needs Binaryen's `wasm-opt` for Asyncify, and the pool, the per-process threads, and the coroutines go only once the web host runs on an executor.
+
+**2026-11-26, no clock reads per run.** On the `syscall-perf` branch, an executor no longer reads the monotonic clock in `leaseRun` and as it enters and leaves guest code, which made a `pwrite` round trip on hcpu about 20% slower on this Linux host. It counts its state changes and task switches, and the monitor times them from when it first sees each, so it may see a run or a call up to a tick short, never long; when a task has had its slice and another waits, it sets `yield_due`, which `leaseRun` checks. `nsec` round trips are still about 15% over main's here, from the rest of the executor's work per run.

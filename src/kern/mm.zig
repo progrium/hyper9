@@ -443,7 +443,12 @@ pub const Mm = struct {
             return;
         }
         if (p.refs.fetchSub(1, .acq_rel) != 1) return;
-        // Another thread's vCPU may still reach them until `settle`.
+        m.doom(p);
+    }
+
+    /// Frees pages no one holds once `settle` has made sure no vCPU
+    /// reaches them: another thread's may until then.
+    fn doom(m: *Mm, p: *Pages) void {
         m.doomed.append(m.gpa, p) catch {
             m.shootdownAll();
             m.freeP(p);
@@ -507,7 +512,26 @@ pub const Mm = struct {
         /// The contiguous host slice backing the range, as
         /// `guestmem.contiguous` returns it.
         s: []u8,
-        held: std.ArrayList(*Pages) = .empty,
+        /// The pages held: the first few in place, since a system call's
+        /// buffer is nearly always in one or two chunks and a pin is taken
+        /// on every read and write, and any past them in `more`.
+        few: [few_held]*Pages = undefined,
+        n: u8 = 0,
+        more: std.ArrayList(*Pages) = .empty,
+
+        const few_held = 4;
+
+        fn add(pn: *Pinned, gpa: std.mem.Allocator, p: *Pages) Error!void {
+            if (pn.n < few_held) {
+                pn.few[pn.n] = p;
+                pn.n += 1;
+            } else try pn.more.append(gpa, p);
+        }
+
+        /// How many references the pin holds.
+        pub fn count(pn: *const Pinned) usize {
+            return pn.n + pn.more.items.len;
+        }
     };
 
     /// Resolves guest [va, va+len) to one contiguous host slice and holds a
@@ -524,6 +548,17 @@ pub const Mm = struct {
     /// copy-on-write; a fork while the pin is held copies them rather than
     /// sharing them, as Linux copies pinned pages.
     pub fn pin(m: *Mm, va: u64, len: u64, write: bool) ?Pinned {
+        return m.pinWith(va, len, write, false);
+    }
+
+    /// `touch`, then `pin`, under one hold of the lock: for a 9front
+    /// process, whose pages are filled on demand, so a buffer's pages
+    /// are there to pin. A bad address is null, as for `pin`.
+    pub fn touchPin(m: *Mm, va: u64, len: u64, write: bool) ?Pinned {
+        return m.pinWith(va, len, write, true);
+    }
+
+    fn pinWith(m: *Mm, va: u64, len: u64, write: bool, comptime fill: bool) ?Pinned {
         if (len == 0) return null;
         var copied = false;
         defer if (copied) m.settle(false);
@@ -532,7 +567,33 @@ pub const Mm = struct {
             copied = m.cow_old.items.len > 0;
             m.lock.unlock();
         }
+        if (m.pinOneChunk(va, len, write)) |pn| return pn;
+        if (fill) m.touchLocked(va, len, write) catch return null;
         return m.pinLocked(va, len, write) catch null;
+    }
+
+    /// The pin of a system call's usual buffer, with nothing to fill,
+    /// copy, or translate: [va, va+len) in one VMA that allows the access
+    /// and isn't past a lazy mapping's file end, in one chunk that's
+    /// present, has no overlays, and for `write` isn't copy-on-write. Its
+    /// host slice is then the chunk's own memory, as the address space maps
+    /// it. Null for anything else, which `touchLocked` and `pinLocked` take
+    /// the long way, to the same end.
+    fn pinOneChunk(m: *Mm, va: u64, len: u64, write: bool) ?Pinned {
+        const end = std.math.add(u64, va, len) catch return null;
+        const ci = va / chunk_size;
+        if ((end - 1) / chunk_size != ci) return null;
+        const v = m.find(va) orelse return null;
+        if (end > v.liveEnd()) return null;
+        if (if (write) !v.prot.write else v.prot.perms() == null) return null;
+        const c = m.chunks.get(ci) orelse return null;
+        if (c.overlays.items.len != 0 or (write and c.cow)) return null;
+        _ = c.pages.refs.fetchAdd(1, .acq_rel);
+        const off: usize = @intCast(va - ci * chunk_size);
+        var pn: Pinned = .{ .s = c.mem[off..][0..@intCast(len)] };
+        pn.few[0] = c.pages;
+        pn.n = 1;
+        return pn;
     }
 
     fn pinLocked(m: *Mm, va: u64, len: u64, write: bool) Error!Pinned {
@@ -541,12 +602,13 @@ pub const Mm = struct {
             while (ci * chunk_size < va + len) : (ci += 1) if (m.chunks.get(ci)) |c| try m.own(ci, c);
         }
         const s = gm.contiguous(m.as, va, len) orelse return error.BadAddress;
-        var held: std.ArrayList(*Pages) = .empty;
+        var pn: Pinned = .{ .s = s };
         // On failure, give back the references already taken; each page
         // still has its chunk's reference, so a plain drop can't free it.
         errdefer {
-            for (held.items) |p| _ = p.refs.fetchSub(1, .acq_rel);
-            held.deinit(m.gpa);
+            for (pn.few[0..pn.n]) |p| _ = p.refs.fetchSub(1, .acq_rel);
+            for (pn.more.items) |p| _ = p.refs.fetchSub(1, .acq_rel);
+            pn.more.deinit(m.gpa);
         }
         const end = va + len;
         var ci = va / chunk_size;
@@ -555,27 +617,45 @@ pub const Mm = struct {
             const cs = ci * chunk_size;
             const lo = @max(va, cs) - cs;
             const hi = @min(end, cs + chunk_size) - cs;
-            try held.append(m.gpa, c.pages);
+            try pn.add(m.gpa, c.pages);
             _ = c.pages.refs.fetchAdd(1, .acq_rel);
             for (c.overlays.items) |o| {
                 if (o.hi <= lo or o.lo >= hi) continue;
-                try held.append(m.gpa, o.pages);
+                try pn.add(m.gpa, o.pages);
                 _ = o.pages.refs.fetchAdd(1, .acq_rel);
             }
         }
-        return .{ .s = s, .held = held };
+        return pn;
     }
 
     /// Releases a pin from `pin`, freeing any pages whose last reference it
-    /// held (the range was unmapped while it was pinned).
+    /// held (the range was unmapped while it was pinned). Only then is
+    /// there anything to settle: with the mapping still there, dropping
+    /// the pin's references frees nothing and narrows nothing.
     pub fn unpin(m: *Mm, pn: *Pinned) void {
-        defer pn.held = .empty;
-        if (pn.held.items.len == 0) return;
-        defer m.settle(false);
+        if (pn.count() == 0) return;
+        // The usual pin, of one chunk's anonymous pages that a chunk still
+        // holds: dropping a reference that isn't the last needs no lock,
+        // since only adding one must be ordered with `own` and fork, which
+        // count references under it. The last one is doomed under the lock.
+        if (pn.n == 1 and pn.more.items.len == 0 and pn.few[0].release == null) {
+            const p = pn.few[0];
+            pn.n = 0;
+            if (p.refs.fetchSub(1, .acq_rel) != 1) return;
+            m.lockSpin();
+            m.doom(p);
+            m.lock.unlock();
+            return m.settle(false);
+        }
         m.lockSpin();
-        defer m.lock.unlock();
-        for (pn.held.items) |p| m.dropRef(p);
-        pn.held.deinit(m.gpa);
+        for (pn.few[0..pn.n]) |p| m.dropRef(p);
+        for (pn.more.items) |p| m.dropRef(p);
+        pn.more.deinit(m.gpa);
+        pn.n = 0;
+        pn.more = .empty;
+        const owed = m.doomed.items.len > 0 or m.unmapped_files.items.len > 0;
+        m.lock.unlock();
+        if (owed) m.settle(false);
     }
 
     /// Adds a chunk over `p` (taking a reference) at index `ci`, mapped,
@@ -2078,7 +2158,7 @@ test "pin holds a guest buffer's pages across a concurrent unmap" {
     // Releasing the pin drops its reference; only now are the pages doomed.
     // (unpin would free them through the engine; here the last reference
     // is dropped by hand so the stack-allocated Pages isn't destroyed.)
-    pinned.held.deinit(gpa);
+    try testing.expectEqual(@as(usize, 1), pinned.count());
     m.dropRef(&pages);
     try testing.expectEqual(@as(u32, 0), pages.refs.load(.acquire));
     try testing.expectEqual(@as(usize, 1), m.doomed.items.len);
@@ -2108,7 +2188,40 @@ test "unpin releases its reference and frees nothing when the mapping stays" {
     m.unpin(&pinned);
     try testing.expectEqual(@as(u32, 1), pages.refs.load(.acquire));
     try testing.expectEqual(@as(usize, 0), m.doomed.items.len);
-    try testing.expectEqual(@as(usize, 0), pinned.held.items.len);
+    try testing.expectEqual(@as(usize, 0), pinned.count());
+}
+
+test "pin of a buffer in one mapped chunk allocates nothing" {
+    const gpa = testing.allocator;
+    const mem = try gpa.alignedAlloc(u8, .fromByteUnits(page), page);
+    defer gpa.free(mem);
+    @memset(mem, 0);
+    const va: u64 = chunk_size;
+
+    var fake: FakeAs = undefined;
+    var m: Mm = undefined;
+    var chunk: Chunk = undefined;
+    var pages: Pages = undefined;
+    try pinFixture(&m, &fake, &chunk, &pages, va, mem);
+    defer m.chunks.deinit(gpa);
+    defer m.doomed.deinit(gpa);
+    try m.vmas.append(gpa, .{ .start = va, .end = va + page, .prot = .rw });
+    defer m.vmas.deinit(gpa);
+
+    // A system call's pin is taken on every read and write: it mustn't
+    // allocate, so an allocator that fails every call is enough.
+    var none: std.testing.FailingAllocator = .init(gpa, .{ .fail_index = 0 });
+    m.gpa = none.allocator();
+    var pinned = m.pin(va + 8, 16, true) orelse return error.PinFailed;
+    try testing.expectEqual(mem.ptr + 8, pinned.s.ptr);
+    try testing.expectEqual(@as(usize, 16), pinned.s.len);
+    try testing.expectEqual(@as(usize, 1), pinned.count());
+    try testing.expectEqual(@as(u32, 2), pages.refs.load(.acquire));
+    m.unpin(&pinned);
+    try testing.expectEqual(@as(u32, 1), pages.refs.load(.acquire));
+    try testing.expectEqual(@as(usize, 0), pinned.count());
+    try testing.expectEqual(@as(usize, 0), none.allocations);
+    m.gpa = gpa;
 }
 
 test "pin returns null for a buffer that isn't one contiguous mapped run" {

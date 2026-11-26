@@ -546,6 +546,7 @@ fn devbreadOpt(ch: *Chan, n: c_int, offset: c_uint) Error!?*Block {
 pub fn Native(comptime dc: c_int, comptime name: [:0]const u8, comptime o: Ops) type {
     return struct {
         pub const ops = o;
+        pub const char = dc;
 
         fn c_reset() callconv(.c) void {
             o.reset();
@@ -654,11 +655,29 @@ const natives = .{
 
 /// d's functions, if it's native.
 fn nativeOps(d: *Dev) ?*const Ops {
-    inline for (natives) |N| {
-        if (d == &N.dev) return &N.ops;
-    }
-    return null;
+    const e = native_slots[@as(u32, @bitCast(d.dc)) % native_slots.len] orelse return null;
+    return if (e.dev == d) e.ops else null;
 }
+
+/// The natives by device character, in a table with no two in one slot,
+/// so every call through the switch finds its device's functions with one
+/// lookup, not a search of the list.
+const NativeSlot = struct { dev: *Dev, ops: *const Ops };
+const native_slots = blk: {
+    @setEvalBranchQuota(100_000);
+    for (natives, 0..) |N, i| for (natives, 0..) |M, j| if (j < i and M.char == N.char)
+        @compileError("two native devices are #" ++ std.unicode.utf8EncodeComptime(@intCast(N.char)));
+    var size: u32 = natives.len;
+    while (true) : (size += 1) {
+        var t: [size]?NativeSlot = @splat(null);
+        const fits = for (natives) |N| {
+            const i = @as(u32, @bitCast(N.char)) % size;
+            if (t[i] != null) break false;
+            t[i] = .{ .dev = &N.dev, .ops = &N.ops };
+        } else true;
+        if (fits) break :blk t;
+    }
+};
 
 // third_party/drawterm-glue/catch.c: f(arg), or -1 if it raised, with
 // the error string on the process.
