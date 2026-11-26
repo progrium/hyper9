@@ -370,7 +370,7 @@ pub const Device = dev.Native('|', "pipe", .{
 });
 
 /// h9: the queue a read of c takes from (wr == 0) or a write to c adds
-/// to, for Linux poll (src/kern/linuxnet.c); nil if c isn't a data file.
+/// to, for Linux poll (src/kern/linuxnet.zig); nil if c isn't a data file.
 pub fn h9_pipeq(ch: *Chan, wr: c_int) callconv(.c) ?*Queue {
     const p: *Pipe = @ptrCast(@alignCast(dev.aux(ch).* orelse return null));
     if (p.fifo and NETTYPE(ch.qid.path) != Qdir)

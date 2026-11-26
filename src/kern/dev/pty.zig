@@ -52,7 +52,7 @@ const Queue = qio.Queue;
 extern fn h9_kern_mach() ?*anyopaque;
 extern fn h9_kern_putmach(m: ?*anyopaque) void;
 
-const Tau = 0x3C4;
+pub const Tau = 0x3C4;
 
 const Qdir = 0;
 const Qptmx = 1;
@@ -741,7 +741,7 @@ pub const Device = dev.Native(Tau, "pty", .{
 });
 
 /// The queue a read of ch takes from (wr == 0) or a write to ch adds
-/// to, for Linux poll (src/kern/linuxnet.c); nil if ch isn't an open side.
+/// to, for Linux poll (src/kern/linuxnet.zig); nil if ch isn't an open side.
 pub fn h9_ptyq(ch: *Chan, wr: c_int) callconv(.c) ?*Queue {
     const p: *Pty = @ptrCast(@alignCast(dev.aux(ch).* orelse return null));
     if (ch.flag & c.COPEN == 0)

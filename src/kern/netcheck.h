@@ -44,7 +44,7 @@ int	h9_net_proto(char *name);
  * a probe.
  */
 int	h9_net_redirect(int proto, uchar *addr, int *port, int *sfd, int *opts);
-/* h9_net_redirect for a sendto on host socket sfd (src/kern/linuxnet.c). */
+/* h9_net_redirect for a sendto on host socket sfd (src/kern/linuxnet.zig). */
 int	h9_net_redirectto(int proto, int sfd, uchar *addr, int *port);
 /* Gives a reply from the resolver on sfd the address the guest dialled. */
 void	h9_net_unredirect(int proto, int sfd, uchar *addr, ushort *port);

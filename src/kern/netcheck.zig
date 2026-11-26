@@ -119,7 +119,7 @@ fn probemark(sfd: c_int, on: bool) c_int {
     return r;
 }
 
-fn h9_net_send(sfd: c_int) callconv(.c) c_int {
+pub fn h9_net_send(sfd: c_int) callconv(.c) c_int {
     if (sfd == -1)
         return 0;
     c.lock(&probes.lk);
@@ -171,7 +171,7 @@ fn h9_net_redirect(proto: c_int, addr: *[IPaddrlen]u8, p: *c_int, sfd: *c_int, o
     return redirect(proto, addr, p, sfd, opts) catch |e| port.raise(e);
 }
 
-fn h9_net_redirectto(proto: c_int, sfd: c_int, addr: *[IPaddrlen]u8, p: *c_int) callconv(.c) c_int {
+pub fn h9_net_redirectto(proto: c_int, sfd: c_int, addr: *[IPaddrlen]u8, p: *c_int) callconv(.c) c_int {
     var orig: [IPaddrlen]u8 = addr.*;
     const oport = p.*;
     const r = h9_dns_target(proto, addr, p);
@@ -182,7 +182,7 @@ fn h9_net_redirectto(proto: c_int, sfd: c_int, addr: *[IPaddrlen]u8, p: *c_int) 
     return 1;
 }
 
-fn h9_net_unredirect(proto: c_int, sfd: c_int, addr: *[IPaddrlen]u8, p: *u16) callconv(.c) void {
+pub fn h9_net_unredirect(proto: c_int, sfd: c_int, addr: *[IPaddrlen]u8, p: *u16) callconv(.c) void {
     var laddr: [IPaddrlen]u8 = undefined;
     var lport: u16 = 0;
     if (h9_dns_self(proto, addr, p.*) == 0)

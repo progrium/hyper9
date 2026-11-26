@@ -312,7 +312,8 @@ h9_shim_srvpost(void *board, char *name, Chan *c, ulong perm)
 
 #ifndef H9_NSKERNEL
 /*
- * devip's host-socket calls, which raise, for src/kern/netcheck.zig:
+ * devip's host-socket calls, which raise, for src/kern/netcheck.zig
+ * and linuxnet.zig:
  * 0, or -1 with the error string set.
  */
 #include "devip.h"
@@ -344,6 +345,19 @@ h9_shim_so_socket(int proto, uchar *addr, int *opts, int *r)
 	if(waserror())
 		return -1;
 	*r = h9so_socket(proto, addr, opts);
+	poperror();
+	return 0;
+}
+
+/* devip's ctl for the Linux socket calls, for src/kern/linuxnet.zig. */
+extern long	h9_ip_ctl(Chan*, char*);
+
+int
+h9_shim_ip_ctl(Chan *c, char *msg)
+{
+	if(waserror())
+		return -1;
+	h9_ip_ctl(c, msg);
 	poperror();
 	return 0;
 }

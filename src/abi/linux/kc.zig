@@ -264,7 +264,7 @@ pub fn setPtySig(f: PtySig) void {
     c.h9_pty_setsig(f);
 }
 
-/// Linux's struct pollfd, which h9_poll fills in (src/kern/linuxnet.c).
+/// Linux's struct pollfd, which h9_poll fills in (src/kern/linuxnet.zig).
 pub const PollFd = extern struct { fd: i32, events: i16, revents: i16 };
 
 pub const POLLIN = 1;
@@ -387,7 +387,7 @@ pub fn soError(fd: i32) u32 {
 }
 
 /// Attaches a conversation from a mounted /net (not devip's), open on
-/// `data` and `ctl`, to the kernel's read-ahead (src/kern/linuxnet.c),
+/// `data` and `ctl`, to the kernel's read-ahead (src/kern/rconv.zig),
 /// under the Linux layer's `id`. `open`: it's connected already.
 pub fn rattach(data: i32, ctl: i32, id: u32, udp: bool, open: bool) Error!void {
     _ = try check(c.h9_linux_rattach(data, ctl, @intCast(id), @intFromBool(udp), @intFromBool(open)));

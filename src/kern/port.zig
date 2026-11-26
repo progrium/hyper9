@@ -21,6 +21,9 @@
 //! - `dev/ns.zig`: h9's src/kern/devns.c, the namespace kernel's #N.
 //! - `fscheck.zig`: the kernel's half of h9's src/kern/fscheck.c, links,
 //!   renames, and FIFOs by path for the Linux ABI.
+//! - `linuxnet.zig`, `dev/eventfd.zig`, and `rconv.zig`: h9's
+//!   src/kern/linuxnet.c, the Linux ABI's readiness and socket calls, #ε,
+//!   and the read-ahead for remote conversations.
 //!
 //! The files only the full kernel has (devip's hooks, the Linux ABI, and
 //! the screen) export their C names only there: `options.nskernel` says
@@ -49,6 +52,9 @@ pub const devpty = @import("dev/pty.zig");
 pub const netcheck = @import("netcheck.zig");
 pub const fscheck = @import("fscheck.zig");
 pub const devns = @import("dev/ns.zig");
+pub const linuxnet = @import("linuxnet.zig");
+pub const rconv = @import("rconv.zig");
+pub const deveventfd = @import("dev/eventfd.zig");
 
 comptime {
     qio.exportC();
@@ -63,6 +69,7 @@ comptime {
     devpty.exportC();
     if (!options.nskernel) {
         netcheck.exportC();
+        linuxnet.exportC();
     }
     // Without devfs, nstab.c stands in for these.
     if (options.hostfs) fscheck.exportC();
@@ -86,6 +93,9 @@ test {
     _ = netcheck;
     _ = fscheck;
     _ = devns;
+    _ = linuxnet;
+    _ = rconv;
+    _ = deveventfd;
 }
 
 /// A kernel error. The Plan 9 error string is on the process, in

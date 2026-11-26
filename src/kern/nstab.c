@@ -147,7 +147,7 @@ int h9_fs_linkwalk(void) { return 0; }
 int h9_fs_atroot(Chan *c) { USED(c); return 0; }
 void h9_fs_markroot(Chan *c, int lx) { USED(c, lx); }
 
-/* linuxnet.c's: no Linux sockets to wake. */
+/* linuxnet.zig's: no Linux sockets to wake. */
 void h9_qwake(Queue *q) { USED(q); }
 
 #ifndef H9_NSKERNEL_HOSTFS
