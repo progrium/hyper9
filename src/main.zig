@@ -667,8 +667,8 @@ fn proxyFrom(env: *const std.process.Environ.Map) h9.Machine.Proxy {
 }
 
 /// The host's DNS servers, from its /etc/resolv.conf, for a Linux root
-/// (design/epoch-0/linux-net.md). A host without one (Windows) or naming
-/// none gets Google's public servers, as Docker does.
+/// (design/epoch-0/linux-net.md), or on Windows from GetNetworkParams.
+/// A host that names none gets Google's public servers, as Docker does.
 fn testNameservers(arena: std.mem.Allocator, v: []const u8) error{OutOfMemory}![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
     var it = std.mem.tokenizeScalar(u8, v, ',');
@@ -678,6 +678,10 @@ fn testNameservers(arena: std.mem.Allocator, v: []const u8) error{OutOfMemory}![
 
 fn hostNameservers(arena: std.mem.Allocator, io: std.Io) error{OutOfMemory}![]const []const u8 {
     const fallback: []const []const u8 = &.{ "8.8.8.8", "8.8.4.4" };
+    if (builtin.os.tag == .windows) {
+        const got = try windowsNameservers(arena);
+        return if (got.len > 0) got else fallback;
+    }
     const text = std.Io.Dir.cwd().readFileAlloc(io, "/etc/resolv.conf", arena, .limited(64 << 10)) catch return fallback;
     var out: std.ArrayList([]const u8) = .empty;
     var lines = std.mem.splitScalar(u8, text, '\n');
@@ -692,6 +696,43 @@ fn hostNameservers(arena: std.mem.Allocator, io: std.Io) error{OutOfMemory}![]co
         try out.append(arena, a);
     }
     return if (out.items.len > 0) out.items else fallback;
+}
+
+/// The host's DNS servers on Windows, which has no /etc/resolv.conf: the
+/// IPv4 ones GetNetworkParams lists, which are every adapter's, in the
+/// order the host asks them. IPv4 only, as `#Letc`'s resolv.conf and the
+/// machine's resolver (design/linux-dns.md) need nothing more, and a
+/// Windows IPv6 socket doesn't reach IPv4 by default.
+fn windowsNameservers(arena: std.mem.Allocator) error{OutOfMemory}![]const []const u8 {
+    const W = struct {
+        const IpAddrString = extern struct { next: ?*IpAddrString, addr: [16]u8, mask: [16]u8, context: u32 };
+        const FixedInfo = extern struct {
+            host: [132]u8,
+            domain: [132]u8,
+            current: ?*IpAddrString,
+            list: IpAddrString,
+            node_type: u32,
+            scope: [260]u8,
+            routing: u32,
+            proxy: u32,
+            dns: u32,
+        };
+        extern "iphlpapi" fn GetNetworkParams(info: ?*anyopaque, len: *u32) callconv(.winapi) u32;
+    };
+    var len: u32 = 0;
+    _ = W.GetNetworkParams(null, &len);
+    len = @max(len, @sizeOf(W.FixedInfo));
+    const buf = try arena.alignedAlloc(u8, .of(W.FixedInfo), len);
+    if (W.GetNetworkParams(buf.ptr, &len) != 0) return &.{};
+    const fi: *const W.FixedInfo = @ptrCast(buf.ptr);
+    var out: std.ArrayList([]const u8) = .empty;
+    var it: ?*const W.IpAddrString = &fi.list;
+    while (it) |a| : (it = a.next) {
+        const s = std.mem.sliceTo(&a.addr, 0);
+        if (s.len == 0 or std.mem.eql(u8, s, "0.0.0.0") or h9.policy.parseIp(s) == null) continue;
+        try out.append(arena, try arena.dupe(u8, s));
+    }
+    return out.items;
 }
 
 /// The `index=` of the first 9P member of `/`, which is the root's
