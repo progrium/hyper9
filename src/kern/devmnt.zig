@@ -1380,7 +1380,9 @@ pub const Server = struct {
     }
 
     pub fn run(ch: *Chan) void {
-        var fids: [32]i64 = @splat(-1);
+        // devmnt numbers fids across the h9 process, not per mount, so a
+        // run of other cases before this one leaves them well above 0.
+        var fids: [4096]i64 = @splat(-1);
         var in: [8192 + 24]u8 = undefined;
         var out: [8192 + 24]u8 = undefined;
         var data: [512]u8 = undefined;
@@ -1393,7 +1395,11 @@ pub const Server = struct {
             var r: Fcall = .{};
             r.type = f.type + 1;
             r.tag = f.tag;
-            switch (f.type) {
+            const nofid = f.type == c.Tversion or f.type == c.Tflush;
+            if (!nofid and (f.fid >= fids.len or (f.type == c.Twalk and f.newfid >= fids.len))) {
+                r.type = c.Rerror;
+                r.ename = @constCast("fid out of range on the test server");
+            } else switch (f.type) {
                 c.Tversion => {
                     r.msize = f.msize;
                     r.version = @constCast("9P2000");
