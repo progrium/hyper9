@@ -17,6 +17,8 @@
 //! - `devmnt.zig`: devmnt.c, the 9P client.
 //! - `dev/pipe.zig` and `dev/root.zig`: devpipe.c and devroot.c.
 //! - `dev/srv.zig`: h9's devsrv.c, the service registry.
+//! - `dev/linux.zig`: h9's devlinux.c, the Linux view's root (the kern
+//!   library's only: the namespace kernel has no Linux view).
 //!
 //! This file is the root the kernel builds compile (build.zig's addKern,
 //! and src/nskernel.zig), and holds what the ported files share: the C
@@ -37,6 +39,11 @@ pub const devmnt = @import("devmnt.zig");
 pub const devpipe = @import("dev/pipe.zig");
 pub const devroot = @import("dev/root.zig");
 pub const devsrv = @import("dev/srv.zig");
+pub const devlinux = @import("dev/linux.zig");
+
+/// Whether this is the namespace kernel (src/nskernel.zig), which has
+/// no Linux ABI: src/kern/nstab.c stands in for it.
+pub const nskernel = @hasDecl(c, "H9_NSKERNEL");
 
 comptime {
     qio.exportC();
@@ -49,6 +56,9 @@ comptime {
     devpipe.exportC();
     devroot.exportC();
     devsrv.exportC();
+    if (!nskernel) {
+        devlinux.exportC();
+    }
 }
 
 test {
