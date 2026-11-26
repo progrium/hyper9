@@ -53,9 +53,6 @@
 //! (h9_hostwait, src/kern/rootdial.c): an embedder's descriptor
 //! (design/epoch-0/fd-mounts.md) stays open after the run, and a reader
 //! left in its read would take the next run's replies.
-//!
-//! The C it calls that can raise, rootdial.c's unix socket dial and
-//! devhstream.c's WebSocket dial, it calls through src/kern/dotlshim.c.
 
 const std = @import("std");
 const port = @import("../port.zig");
@@ -64,6 +61,8 @@ const dev = @import("../dev.zig");
 const chan = @import("../chan.zig");
 const pgrp = @import("../pgrp.zig");
 const sysfile = @import("../sysfile.zig");
+const rootdial = @import("../rootdial.zig");
+const hstream = @import("hstream.zig");
 const c = port.c;
 const up = port.up;
 const Error = port.Error;
@@ -76,19 +75,13 @@ const Qid = c.Qid;
 const Pgrp = c.Pgrp;
 const Proc = c.Proc;
 
-// proc.c
+// src/kern/proc.zig
 extern fn h9_kprocdetach() void;
-
-// src/kern/dotlshim.c: rootdial.c's h9_unixchan and devhstream.c's
-// h9_hstream_dial (a host-made WebSocket's channel, connected), which
-// raise.
-extern fn h9_shim_unixchan(path: [*:0]const u8, r: *?*Chan) c_int;
-extern fn h9_shim_hstream_dial(mach: ?*anyopaque, url: [*:0]const u8, r: *?*Chan) c_int;
 
 // src/kern.zig: the calling thread's sandbox plan.
 extern fn h9_plan_get() ?*anyopaque;
 extern fn h9_plan_set(plan: ?*anyopaque) void;
-// rootdial.c
+// src/kern/rootdial.zig
 extern fn h9_hostwait_new(fd: ?*anyopaque) ?*anyopaque;
 extern fn h9_hostwait(w: ?*anyopaque) c_int;
 extern fn h9_hostwait_wake(w: ?*anyopaque) void;
@@ -369,9 +362,7 @@ fn dialaddr(mach: ?*anyopaque, addr: [*:0]const u8) Error!*Chan {
     if (hasprefix(addr, "unix!")) {
         if (h9_plan_get() != null)
             return port.kerror("dial: unix sockets are for roots");
-        var r: ?*Chan = null;
-        try dev.caught(h9_shim_unixchan(addr + 5, &r));
-        return r.?;
+        return rootdial.unixchan(addr + 5);
     }
     // A WebSocket h9 makes itself (a root's or a namespace file's mount),
     // through hstream with the machine's handshake options, so a
@@ -379,9 +370,8 @@ fn dialaddr(mach: ?*anyopaque, addr: [*:0]const u8) Error!*Chan {
     if (hasprefix(addr, "ws://") or hasprefix(addr, "wss://")) {
         if (h9_plan_get() != null)
             return port.kerror("dial: WebSockets are for h9's own mounts");
-        var r: ?*Chan = null;
-        try dev.caught(h9_shim_hstream_dial(mach, addr, &r));
-        return r.?;
+        // a host-made WebSocket's channel, connected
+        return hstream.dial(mach, addr);
     }
     if (!hasprefix(addr, "tcp!") and !hasprefix(addr, "net!"))
         return port.kerror("dial: only tcp addresses");
@@ -578,7 +568,8 @@ fn reader(a: ?*anyopaque) callconv(.c) void {
     cv.kpgone = true;
     c.unlock(&cv.lk);
     convdecref(cv);
-    c.pexit(@constCast(""), 0);
+    // It ends by returning, after which the kproc's trampoline calls
+    // pexit.
 }
 
 fn readable(a: ?*anyopaque) callconv(.c) c_int {

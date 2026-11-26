@@ -2779,7 +2779,7 @@ fn isListeningUnix(d: *const attr.Dir) bool {
 }
 
 /// devlinux's device character and the qid bit it sets on its devices
-/// (src/kern/devlinux.c).
+/// (src/kern/dev/linux.zig).
 pub const devlinux_dc: u16 = 'L';
 pub const devlinux_chr_bit: u64 = 1 << 40;
 
@@ -2990,7 +2990,7 @@ fn synced(p: *Process, fd: i32, n: i64) i64 {
     return if (r < 0) r else n;
 }
 
-/// syncfs: the host file system behind fd's channel (src/kern/linux.c).
+/// syncfs: the host file system behind fd's channel (src/kern/linux.zig).
 fn syncfs(fd: i32) i64 {
     if (fd < 0) return -E.BADF;
     const info = kc.fdInfo(fd) catch return -E.BADF;
@@ -3472,7 +3472,7 @@ fn defaultTermios() [60]u8 {
     return b;
 }
 
-// Pseudoterminals (design/epoch-0/linux-pty.md): #τ, src/kern/devpty.c, keeps
+// Pseudoterminals (design/epoch-0/linux-pty.md): #τ, src/kern/dev/pty.zig, keeps
 // each pair's queues and state, and applies its termios as a line
 // discipline; the ioctls are served here from it, and VMIN 0 reads.
 
@@ -4891,7 +4891,7 @@ fn frameCheck(p: *Process, u: *engine.Ureg, x: *engine.Extra, f: sig.Frame) !voi
 // they do for 9front programs. What Linux needs beyond the files goes
 // through control messages (connect, nbconnect, announce, shutdown,
 // sockopt) or straight to the host socket (recvfrom and sendto with
-// flags and addresses, SO_ERROR), in src/kern/linuxnet.c.
+// flags and addresses, SO_ERROR), in src/kern/linuxnet.zig.
 
 const AF_UNSPEC = 0;
 const AF_UNIX = 1;
@@ -4977,7 +4977,7 @@ fn convOf(fd: i32) ?u32 {
 }
 
 /// The bit that marks a conversation from a /net mounted from another
-/// machine (devmnt's, not devip's), which src/kern/linuxnet.c reads ahead.
+/// machine (devmnt's, not devip's), which src/kern/rconv.zig reads ahead.
 const conv_remote: u32 = 1 << 30;
 
 fn protoOf(conv: u32) u32 {
@@ -6728,7 +6728,7 @@ fn selectCall(p: *Process, s: Sys, c: Call) Err!i64 {
     return ready;
 }
 
-// eventfd and epoll, on #ε instances (src/kern/linuxnet.c).
+// eventfd and epoll, on #ε instances (src/kern/dev/eventfd.zig).
 
 const EFD_SEMAPHORE = 1;
 const ev_dc: u21 = 0x3b5; // 'ε'

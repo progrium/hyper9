@@ -682,7 +682,7 @@ fn ccloneAt(ch: *Chan, pc: usize) Error!*Chan {
     return nc;
 }
 
-// h9: src/kern/devoverlay.c
+// h9: src/kern/dev/overlay.zig
 extern fn h9_overlay_lowerdev(c_int, c_int, Qid, *c_int, *c_int) c_int;
 // h9: devfs-posix.c and devfs-win32.c (src/kern/fscheck.h), through
 // src/kern/devshim.c, since they raise.
@@ -690,7 +690,7 @@ extern fn h9_shim_fs_anchor(*Chan) c_int;
 // h9: Linux symlinks (design/epoch-0/linux-symlinks.md, src/kern/fscheck.h)
 extern fn h9_fs_linkwalk() c_int;
 extern fn h9_fs_nofollowing() c_int;
-extern fn h9_fs_atroot(*Chan) c_int; // h9: src/kern/linux.c
+extern fn h9_fs_atroot(*Chan) c_int; // h9: src/kern/linux.zig
 const Qtsymlink = 0x02; // H9_QTSYMLINK
 const Maxlinks = 40; // H9_MAXLINKS
 const Linkbuf = 4096;
@@ -726,7 +726,7 @@ pub fn findmount(cp: *?*Chan, mp: ?*?*Mhead, type_: c_int, dev_: c_int, qid: Qid
     }
     sync.runlock(&pg.ns);
     // h9: a lower directory seen through a #O overlay keeps the mounts
-    // made on it before the overlay (src/kern/devoverlay.c), as when a
+    // made on it before the overlay (src/kern/dev/overlay.zig), as when a
     // namespace file's overlay goes over / after other binds.
     if (samepath and h9_overlay_lowerdev(@"type", devn, qid, &@"type", &devn) != 0)
         return findmount(cp, mp, @"type", devn, qid);
@@ -1288,7 +1288,7 @@ pub fn namecx(aname_: [*:0]const u8, amode: c_int, omode: c_int, perm: c_uint, n
                 return port.kerror(&port.Enoattach);
 
             ch = try dev.attach(dev.table()[@intCast(t)].?, @ptrCast(&p.genbuf[n]));
-            // h9: #L, the Linux view's root (src/kern/devlinux.c), is a
+            // h9: #L, the Linux view's root (src/kern/dev/linux.zig), is a
             // union with the Linux root tree bound after it, so a walk
             // from it crosses mounts, as one from / does.
             if (r == 'L')

@@ -4,7 +4,7 @@
 //! writes its master from host threads, while a program in the machine
 //! runs on the slave, `/dev/pts/N` in the Linux view (`#τ/N`).
 //!
-//! The pair is the machine's like any other (src/kern/devpty.c): it's
+//! The pair is the machine's like any other (src/kern/dev/pty.zig): it's
 //! opened by a kernel process of the machine, so its number is the
 //! machine's, and the line discipline, `SIGWINCH`, `SIGHUP` and
 //! controlling terminals work as they do for a guest's own pty. No host

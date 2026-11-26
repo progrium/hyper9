@@ -55,7 +55,7 @@ IMPORT(gfx_cursor) void js_gfx_cursor(uchar *c);
 uintptr h9_get_sp(void);
 void h9_set_sp(uintptr);
 
-extern void h9_kbdkey(Rune, int);	/* gfx.c */
+extern void h9_kbdkey(Rune, int);	/* src/kern/dev/gfx.zig */
 
 /* The events gfx_wait returns, four ints each (h9-web.js's GfxEv). */
 enum {

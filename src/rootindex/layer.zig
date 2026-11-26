@@ -4,7 +4,7 @@
 //! and sends opens, reads, and writes on to the server.
 //!
 //! Like the 9P2000.L translator (src/dotl/client.zig) it has no I/O of
-//! its own: `#ι` (src/kern/devhidx.c) feeds it what devmnt writes
+//! its own: `#ι` (src/kern/dev/hidx.zig) feeds it what devmnt writes
 //! (`fromMount`) and what the server sends (`fromServer`), and sends on
 //! what it queues (`toServer`, `toMount`). The host cache is reached
 //! through `Hooks`, so the tests run it against a server in memory.

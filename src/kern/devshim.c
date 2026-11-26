@@ -253,3 +253,98 @@ h9_shim_fs_anchor(Chan *c)
 	return 0;
 }
 
+/*
+ * What src/kern/fscheck.zig and src/kern/dev/overlay.zig call that raises:
+ * devfs's FIFOs (or nstab.c's stand-in for them).
+ */
+extern void h9_fs_mkfifo(Chan*, char*, ulong);
+
+int
+h9_shim_fs_mkfifo(Chan *c, char *name, ulong perm)
+{
+	if(waserror())
+		return -1;
+	h9_fs_mkfifo(c, name, perm);
+	poperror();
+	return 0;
+}
+
+/*
+ * ns.c's pgrpcpy and devsrv.c's h9_srvpost, which raise, for
+ * src/kern/dev/ns.zig.
+ */
+extern void pgrpcpy(Pgrp*, Pgrp*, int);
+extern void h9_srvpost(void*, char*, Chan*, ulong);
+
+int
+h9_shim_pgrpcpy(Pgrp *to, Pgrp *from, int flag)
+{
+	if(waserror())
+		return -1;
+	pgrpcpy(to, from, flag);
+	poperror();
+	return 0;
+}
+
+int
+h9_shim_srvpost(void *board, char *name, Chan *c, ulong perm)
+{
+	if(waserror())
+		return -1;
+	h9_srvpost(board, name, c, perm);
+	poperror();
+	return 0;
+}
+
+#ifndef H9_NSKERNEL
+/*
+ * devip's host-socket calls, which raise, for src/kern/netcheck.zig
+ * and linuxnet.zig:
+ * 0, or -1 with the error string set.
+ */
+#include "devip.h"
+#include "hostsock.h"
+
+int
+h9_shim_so_getsockname(int fd, uchar *laddr, ushort *lport)
+{
+	if(waserror())
+		return -1;
+	so_getsockname(fd, laddr, lport);
+	poperror();
+	return 0;
+}
+
+int
+h9_shim_so_bind(int fd, int su, ushort port, uchar *addr)
+{
+	if(waserror())
+		return -1;
+	so_bind(fd, su, port, addr);
+	poperror();
+	return 0;
+}
+
+int
+h9_shim_so_socket(int proto, uchar *addr, int *opts, int *r)
+{
+	if(waserror())
+		return -1;
+	*r = h9so_socket(proto, addr, opts);
+	poperror();
+	return 0;
+}
+
+/* devip's ctl for the Linux socket calls, for src/kern/linuxnet.zig. */
+extern long	h9_ip_ctl(Chan*, char*);
+
+int
+h9_shim_ip_ctl(Chan *c, char *msg)
+{
+	if(waserror())
+		return -1;
+	h9_ip_ctl(c, msg);
+	poperror();
+	return 0;
+}
+#endif

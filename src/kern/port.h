@@ -11,3 +11,11 @@
 #include "error.h"
 #include "tsleep.h"
 #include "devx.h"
+#include "hproc.h"
+#if !defined(WINDOWS) && !defined(H9_WEB)
+/* glue.zig's host user and timer */
+#include <pthread.h>
+#include <time.h>
+#include <unistd.h>
+#include <pwd.h>
+#endif

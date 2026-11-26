@@ -5,17 +5,17 @@ const guesttree = @import("tools/guesttree.zig");
 const drawterm = "third_party/drawterm";
 
 // drawterm's kern/Makefile OFILES with AUDIO=none, without devtab.c and
-// devenv.c (src/kern/ has our own), procinit.c (src/kern/proc.c has it,
+// devenv.c (src/kern/dev/env.zig is our own), procinit.c (src/kern/proc.c has it,
 // for the one process record), devcmd.c (host commands live on the
 // host-cmd branch while design/host-cmd.md rethinks them), or the files
 // ported to Zig (design/kernel-port.md, src/kern/port.zig): allocb.c,
 // chan.c, dev.c, devmnt.c, devpipe.c, devroot.c, pgrp.c, qio.c, qlock.c,
 // rwlock.c, sleep.c, and sysfile.c. Plus the OS files below.
 const kern_sources = [_][]const u8{
-    "alloc.c",    "data.c",     "devaudio.c", "devaudio-none.c",
-    "devcons.c",  "devdraw.c",  "devip.c",    "devkbd.c",
-    "devmouse.c", "devssl.c",   "devtls.c",   "error.c",
-    "parse.c",    "stub.c",     "term.c",     "waserror.c",
+    "alloc.c",    "data.c",    "devaudio.c", "devaudio-none.c",
+    "devcons.c",  "devdraw.c", "devip.c",    "devkbd.c",
+    "devmouse.c", "devssl.c",  "devtls.c",   "error.c",
+    "parse.c",    "stub.c",    "term.c",     "waserror.c",
 };
 // OS=posix (Make.unix), and OS=win32 with FS=fs-win32 (Make.win64).
 const kern_posix = [_][]const u8{ "devfs-posix.c", "devip-posix.c", "devlfd-posix.c", "posix.c" };
@@ -101,6 +101,9 @@ const kern_flags_common = [_][]const u8{
     "-Wno-missing-braces",
     "-D_THREAD_SAFE",
     "-fno-sanitize=undefined",
+    // drawterm's names (error, print, lock, panic) stay inside h9, so in
+    // libh9 (src/capi.zig), a shared library, they don't bind to libc's.
+    "-fvisibility=hidden",
 };
 // PTHREAD, as Make.linux, makes libc/lock.c's Lock a pthread mutex. Without
 // it unlock is a plain store with no release ordering, so on arm64 another
@@ -593,7 +596,7 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.O
     const kern = b.addLibrary(.{
         .name = if (gfx == .headless and !exported) "kern-headless" else "kern",
         .linkage = .static,
-        .root_module = kernPort(b, target, optimize, flags),
+        .root_module = kernPort(b, target, optimize, flags, gfx != .none),
     });
     kern.root_module.addIncludePath(b.path(drawterm));
     kern.root_module.addIncludePath(b.path(drawterm ++ "/include"));
@@ -611,12 +614,11 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.O
     });
     kern.root_module.addCSourceFiles(.{
         .root = b.path("src/kern"),
-        .files = &.{ "glue.c", "proc.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "devproc.c", "devoverlay.c", "devsrv.c", "devhtools.c", "fscheck.c", "netcheck.c", "consx.c", "tsleep.c", "devshim.c", "werrstr.c", "sema.c", "rootdial.c", "devhstream.c", "dotlshim.c", "devhidx.c", "kserve.c", "ns.c" },
+        .files = &.{ "procshim.c", "devtab.c", "devdup.c", "devhtools.c", "fscheck.c", "consx.c", "devshim.c", "werrstr.c" },
         .flags = flags,
     });
     // The Linux ABI (design/epoch-0/linux-personality.md) and its host
     // sockets (design/epoch-0/linux-net.md).
-    kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{ "linux.c", "devlinux.c", "linuxnet.c", "devpty.c", "fifo.c" }, .flags = flags });
     if (web) {
         kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"hostsock-wasm.c"}, .flags = flags });
     } else if (os != .windows) kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{ "hostsock-posix.c", "hostif-posix.c" }, .flags = flags });
@@ -664,7 +666,7 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.O
 /// of the drawterm files ported so far, with the C kernel's types
 /// translated from src/kern/port.h under the same macros as the C files
 /// it's linked with (`flags`), so the two agree on every layout.
-fn kernPort(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, flags: []const []const u8) *std.Build.Module {
+fn kernPort(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, flags: []const []const u8, gfx: bool) *std.Build.Module {
     const tc = b.addTranslateC(.{ .root_source_file = b.path("src/kern/port.h"), .target = target, .optimize = optimize });
     // On the web, wasi-libc's setjmp.h (for Label) wants exception
     // handling, which the C kernel is built with (webTarget) and
@@ -677,12 +679,30 @@ fn kernPort(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.
     for (flags) |f| if (std.mem.startsWith(u8, f, "-D")) tc.defineCMacroRaw(f[2..]);
     if (target.result.os.tag == .macos) if (b.graph.environ_map.get("SDKROOT")) |sdk|
         tc.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr/include" }) });
+    // Which kernel the Zig is built into, for the files only one of them
+    // has: the namespace kernel leaves out devip, the Linux ABI, and the
+    // screen.
+    const options = b.addOptions();
+    var nskernel = false;
+    var hostfs = false;
+    for (flags) |f| {
+        nskernel = nskernel or std.mem.eql(u8, f, "-DH9_NSKERNEL");
+        hostfs = hostfs or std.mem.eql(u8, f, "-DH9_NSKERNEL_HOSTFS");
+    }
+    options.addOption(bool, "nskernel", nskernel);
+    // devfs (#U), which the full kernel always has.
+    options.addOption(bool, "hostfs", hostfs or !nskernel);
+    // A screen (src/kern/gfx.c and src/kern/dev/gfx.zig), not nogfx.c.
+    options.addOption(bool, "gfx", gfx);
     return b.createModule(.{
         .root_source_file = b.path("src/kern/port.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{.{ .name = "kern_c", .module = tc.createModule() }},
+        .imports = &.{
+            .{ .name = "kern_c", .module = tc.createModule() },
+            .{ .name = "kern_options", .module = options.createModule() },
+        },
     });
 }
 
@@ -754,8 +774,8 @@ const nskern_sources = [_][]const u8{
     "alloc.c", "data.c", "error.c", "parse.c", "stub.c", "waserror.c",
 };
 const nskern_h9 = [_][]const u8{
-    "glue.c",       "proc.c",     "ns.c",     "devns.c",  "nstab.c",   "devoverlay.c", "devsrv.c",
-    "devhstream.c", "dotlshim.c", "kserve.c", "tsleep.c", "devshim.c", "werrstr.c",    "rootdial.c",
+    "procshim.c", "nstab.c",
+    "devshim.c", "werrstr.c",
 };
 // libc's files the kernel subset uses, from kern_libs' list.
 const nskern_libc_skip = [_][]const u8{ "pushssl.c", "pushtls.c", "crypt.c", "dial.c" };
@@ -796,7 +816,7 @@ fn addNsKernel(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.la
     const flags = std.mem.concat(b.allocator, []const u8, &.{ base, extra }) catch @panic("OOM");
     // The kernel's Zig (src/kern/port.zig), which src/nskernel.zig
     // imports.
-    const port = kernPort(b, root.resolved_target.?, optimize, flags);
+    const port = kernPort(b, root.resolved_target.?, optimize, flags, false);
     root.addImport("kern_port", port);
     m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/kern"), .files = &nskern_sources, .flags = flags });
     m.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &nskern_h9, .flags = flags });
@@ -1944,6 +1964,36 @@ pub fn build(b: *std.Build) void {
     // running both doesn't run them twice; `zig build test integration`
     // runs everything.
 
+    // libh9 (src/capi.zig): machines behind a C ABI, as a shared library,
+    // with its header, in zig-out/libh9 (docs/embedding.md, "From C and
+    // other languages").
+    const libh9 = b.addLibrary(.{
+        .name = "h9",
+        .linkage = .dynamic,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/capi.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            // Debug info is most of a release build's size (30 MB of 36).
+            .strip = if (optimize == .debug) null else true,
+            .imports = &.{.{ .name = "h9", .module = mod.mod }},
+        }),
+    });
+    if (os == .macos) {
+        addSdkPaths(b, libh9.root_module);
+        libh9.root_module.linkFramework("Hypervisor", .{});
+    }
+    if (target.result.ofmt == .elf) libh9.setVersionScript(b.path("src/capi/libh9.map"));
+    const libh9_dir: std.Build.InstallDir = .{ .custom = "libh9" };
+    const libh9_step = b.step("libh9", "Build libh9, h9 behind a C ABI (src/capi/h9.h), into zig-out/libh9");
+    libh9_step.dependOn(&b.addInstallArtifact(libh9, .{
+        .dest_dir = .{ .override = libh9_dir },
+        .implib_dir = if (os == .windows) .{ .override = libh9_dir } else .disabled,
+        .pdb_dir = .disabled,
+    }).step);
+    libh9_step.dependOn(&b.addInstallFileWithDir(b.path("src/capi/h9.h"), libh9_dir, "h9.h").step);
+
     // docs/embedding/embed.zig, docs/embedding.md's example of embedding h9.
     const embed_example = b.addExecutable(.{
         .name = "embed",
@@ -1983,6 +2033,27 @@ pub fn build(b: *std.Build) void {
         if (emu != .none) run_embed.addCheck(.{ .expect_stdout_match = "machine 1 (hcpu): exited \"\"\n  hello\n" });
         run_embed.addCheck(.{ .expect_term = .{ .exited = 0 } });
         test_step.dependOn(&run_embed.step);
+    }
+
+    // docs/embedding/hello.c, libh9 from C. zig build test runs it on the
+    // hello fixture where the embed example runs, with the emulator, so
+    // it needs no entitlement.
+    const libh9_example = b.addExecutable(.{
+        .name = "libh9-hello",
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
+    });
+    libh9_example.root_module.addCSourceFile(.{ .file = b.path("docs/embedding/hello.c") });
+    libh9_example.root_module.addIncludePath(b.path("src/capi"));
+    libh9_example.root_module.linkLibrary(libh9);
+    b.step("libh9-example", "Build docs/embedding/hello.c, libh9 from C, as zig-out/bin/libh9-hello").dependOn(&b.addInstallArtifact(libh9_example, .{}).step);
+    if (emu != .none and runs_here) {
+        const run_c = b.addRunArtifact(libh9_example);
+        run_c.addFileArg(host_hello);
+        run_c.addArgs(&.{ "--engine", "hcpu" });
+        run_c.addCheck(.{ .expect_stdout_match = "engine hcpu, arch " });
+        run_c.addCheck(.{ .expect_stdout_match = "hello\nexited \"\"\n" });
+        run_c.addCheck(.{ .expect_term = .{ .exited = 0 } });
+        test_step.dependOn(&run_c.step);
     }
 
     // ha64's [hcpu] cases, through the engine interface on
