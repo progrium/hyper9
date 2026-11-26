@@ -27,6 +27,7 @@ const builtin = @import("builtin");
 const Term = @import("term.zig").Term;
 const wsrelay = @import("wsrelay.zig");
 const deadline = @import("deadline.zig");
+const dnsstub = @import("dnsstub.zig");
 const design = @import("design");
 const test_paths = @import("test_paths");
 const DotlServer = @import("dotlserver.zig").DotlServer;
@@ -6998,6 +6999,11 @@ fn linuxEnv(comptime src: std.builtin.SourceLocation, le: *LinuxEnv) !void {
 /// Runs `h9 --dir <alpine>:#L [--dir <9front>] --cwd <fixtures> args...` on
 /// each engine, checking they agree, as `run` does.
 fn runLinux(le: *const LinuxEnv, with_nine: bool, args: []const []const u8) !Result {
+    return runLinuxEnv(le, with_nine, args, null);
+}
+
+/// runLinux, with the environment `environ` if it isn't null.
+fn runLinuxEnv(le: *const LinuxEnv, with_nine: bool, args: []const []const u8, environ: ?*const std.process.Environ.Map) !Result {
     if (with_nine and le.nine == null) return error.SkipZigTest;
     var first: ?Result = null;
     errdefer if (first) |f| f.deinit();
@@ -7009,7 +7015,7 @@ fn runLinux(le: *const LinuxEnv, with_nine: bool, args: []const []const u8) !Res
         if (with_nine) try argv.appendSlice(gpa, &.{ "--dir", le.nine.? });
         try argv.appendSlice(gpa, &.{ "--cwd", le.fixtures });
         try argv.appendSlice(gpa, args);
-        const p = try runProcessWith(argv.items, null, null, 120_000);
+        const p = try runProcessWith(argv.items, null, environ, 120_000);
         const code = switch (p.term) {
             .exited => |c| c,
             else => {
@@ -7747,6 +7753,153 @@ test "a Linux root without resolv.conf gets the host's DNS servers, and a UDP cl
     defer r.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{r.err});
     try std.testing.expectEqualStrings("dns\nsize\netc\n1\nmade\n0\n", r.out);
+}
+
+// The machine's resolver (design/linux-dns.md): busybox's nc and nslookup
+// on the Alpine root, with the stub DNS server (tests/dnsstub.zig) in the
+// place of the host's, through H9_TEST_NAMESERVERS, and a service on the
+// host's loopback for nc to reach.
+
+const DnsCase = struct {
+    le: LinuxEnv,
+    stub: dnsstub.Stub,
+    svc: dnsstub.Service = .{},
+    pat_buf: [64]u8 = undefined,
+    cmd_buf: [512]u8 = undefined,
+
+    fn init(d: *DnsCase, comptime src: std.builtin.SourceLocation, records: []const dnsstub.Record, truncate: []const []const u8) !void {
+        if (!dnsstub.supported) return error.SkipZigTest;
+        try linuxEnv(src, &d.le);
+        d.stub = .{ .records = records, .truncate = truncate };
+        d.svc = .{};
+        try d.stub.start();
+        errdefer d.stub.stop();
+        try d.svc.start();
+    }
+
+    fn deinit(d: *DnsCase) void {
+        d.svc.stop();
+        d.stub.stop();
+    }
+
+    /// `tcp!NAME!PORT`, for the service's port.
+    fn allow(d: *DnsCase, name: []const u8) ![]const u8 {
+        return std.fmt.bufPrint(&d.pat_buf, "tcp!{s}!{d}", .{ name, d.svc.port });
+    }
+
+    /// A script with {port} in place of the service's port, through sh.
+    fn script(d: *DnsCase, comptime fmt: []const u8) ![]const u8 {
+        return std.fmt.bufPrint(&d.cmd_buf, fmt, .{ .port = d.svc.port });
+    }
+
+    fn run(d: *DnsCase, args: []const []const u8) !Result {
+        var environ = try std.testing.environ.createMap(gpa);
+        defer environ.deinit();
+        try environ.put("H9_TEST_NAMESERVERS", d.stub.nameserver());
+        return runLinuxEnv(&d.le, false, args, &environ);
+    }
+
+    fn expect(d: *DnsCase, args: []const []const u8, want: []const u8) !void {
+        const r = try d.run(args);
+        defer r.deinit();
+        errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+        try std.testing.expectEqualStrings(want, r.out);
+    }
+};
+
+const svc_records = [_]dnsstub.Record{.{ .name = "svc.test", .a = .{ 127, 0, 0, 1 } }};
+
+test "a Linux program's lookup of an allowed name connects [linux-dns]" {
+    var d: DnsCase = undefined;
+    try d.init(@src(), &svc_records, &.{});
+    defer d.deinit();
+    try d.expect(&.{ "--net-allow", try d.allow("svc.test"), "sh", "-c", try d.script("nc svc.test {[port]d}") }, "hello\n");
+    try std.testing.expect(d.svc.conns.load(.acquire) > 0);
+    try std.testing.expect(d.stub.queries() > 0);
+}
+
+test "a name outside --net-allow gets REFUSED, and isn't forwarded [linux-dns]" {
+    var d: DnsCase = undefined;
+    try d.init(@src(), &svc_records, &.{});
+    defer d.deinit();
+    try d.expect(&.{ "--net-allow", try d.allow("svc.test"), "sh", "-c", "nslookup other.test > /tmp/o 2>&1; grep -q REFUSED /tmp/o && echo refused; nc other.test 80 2>/dev/null || echo failed" }, "refused\nfailed\n");
+    try std.testing.expectEqual(0, d.stub.queries());
+}
+
+test "a connect by address without a lookup is refused [linux-dns]" {
+    var d: DnsCase = undefined;
+    try d.init(@src(), &svc_records, &.{});
+    defer d.deinit();
+    try d.expect(&.{ "--net-allow", try d.allow("svc.test"), "sh", "-c", try d.script("nc 127.0.0.1 {[port]d} 2>/dev/null || echo refused") }, "refused\n");
+    try std.testing.expectEqual(0, d.svc.conns.load(.acquire));
+}
+
+test "a CNAME's addresses are recorded under the question's name [linux-dns]" {
+    var d: DnsCase = undefined;
+    try d.init(@src(), &.{
+        .{ .name = "alias.test", .cname = "edge.cdn.test" },
+        .{ .name = "edge.cdn.test", .a = .{ 127, 0, 0, 1 } },
+    }, &.{});
+    defer d.deinit();
+    // Only the question's name has a pattern; the CDN's name has none.
+    try d.expect(&.{ "--net-allow", try d.allow("alias.test"), "sh", "-c", try d.script("nc alias.test {[port]d}") }, "hello\n");
+}
+
+test "a truncated answer retries over TCP through the resolver [linux-dns]" {
+    var d: DnsCase = undefined;
+    try d.init(@src(), &.{.{ .name = "big.test", .a = .{ 127, 0, 0, 1 } }}, &.{"big.test"});
+    defer d.deinit();
+    try d.expect(&.{ "--net-allow", try d.allow("big.test"), "sh", "-c", try d.script("nc big.test {[port]d}") }, "hello\n");
+    try std.testing.expect(d.stub.tcp_queries.load(.acquire) > 0);
+}
+
+test "a root's own resolv.conf server is redirected too [linux-dns]" {
+    var d: DnsCase = undefined;
+    try d.init(@src(), &svc_records, &.{});
+    defer d.deinit();
+    // 192.0.2.53 is a documentation address nothing answers at. The root
+    // gets it through a member on /etc, not by writing /etc/resolv.conf:
+    // Alpine's minirootfs has none, so the one there is #Letc's, which
+    // can't be written, and a failed write would leave the host's
+    // servers to answer.
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try writeTree(&s, &.{.{ "etc/resolv.conf", "nameserver 192.0.2.53\n" }});
+    var p: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+    try d.expect(&.{ "--dir", try std.fmt.bufPrint(&p, "{s}/etc:#L/etc", .{s.path}), "--net-allow", try d.allow("svc.test"), "sh", "-c", try d.script("grep -qx 'nameserver 192.0.2.53' /etc/resolv.conf && nc svc.test {[port]d}") }, "hello\n");
+    try std.testing.expect(d.stub.queries() > 0);
+}
+
+test "without name patterns, port 53 isn't redirected [linux-dns]" {
+    var d: DnsCase = undefined;
+    try d.init(@src(), &svc_records, &.{});
+    defer d.deinit();
+    var pat_buf: [64]u8 = undefined;
+    const by_addr = try std.fmt.bufPrint(&pat_buf, "tcp!127.0.0.1!{d}", .{d.svc.port});
+    // The query goes to port 53 on 127.0.0.1 itself, not to the stub.
+    for ([_][]const []const u8{ &.{ "--net-allow", "udp!127.0.0.1!53", "--net-allow", by_addr }, &.{} }) |pats| {
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(gpa);
+        try args.appendSlice(gpa, pats);
+        try args.appendSlice(gpa, &.{ "sh", "-c", "nslookup -timeout=1 -retry=0 svc.test 127.0.0.1 > /tmp/o 2>&1; grep -q 'Address: 127.0.0.1$' /tmp/o || echo direct" });
+        try d.expect(args.items, "direct\n");
+    }
+    try std.testing.expectEqual(0, d.stub.queries());
+}
+
+test "--print shows the resolver caveat [linux-dns]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    const caveat = "DNS queries to port 53 go to h9's resolver, which forwards names the allowlist covers to the host's DNS servers";
+    const r = try runLinux(&le, false, &.{ "--print", "--net-allow", "tcp!registry.npmjs.org!443", "sh" });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\n", .{r.out});
+    try std.testing.expect(std.mem.indexOf(u8, r.out, caveat) != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "link-local DNS server") == null);
+    const a = try runLinux(&le, false, &.{ "--print", "--net-allow", "tcp!10.0.0.0/8!443", "sh" });
+    defer a.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, a.out, caveat) == null);
 }
 
 // 32-bit x86 Linux programs (design/epoch-0/linux-i386.md): Alpine's x86 root

@@ -1440,9 +1440,22 @@ connect to other machines, and `9fs` mounts remote file servers.
   pattern allows it, so connect by name, through `cs`, rather than by
   address.
 
+  Name patterns work for Linux programs too, which look names up with
+  their own DNS clients. With any name pattern, h9 answers the machine's
+  DNS itself: every query to port 53, to whatever server the program
+  names, goes to a resolver h9 runs for the machine. It answers a name no
+  pattern covers with `REFUSED`, without sending it anywhere, forwards
+  the rest to the host's DNS servers, and remembers the addresses in each
+  answer, so a connect to one of them is allowed as it is after `cs`.
+  The DNS servers need no patterns of their own, and a pattern for one
+  (`udp!10.0.0.53!53`) doesn't take its queries out of the resolver.
+  DNS over TLS or HTTPS isn't seen, so it's refused unless a pattern
+  covers the server.
+
   ```sh
   host$ h9 --net-allow 'tcp!*.github.com!443' --net-allow 'udp!10.0.0.53!53' ./client
   host$ h9 --net-allow 'tcp!10.0.0.0/8!564' --rc 'srv tcp!fileserver!564 fs && mount /srv/fs /tmp/fs'
+  host$ h9 --dir alpine:#L --net-allow 'tcp!registry.npmjs.org!443' npm install
   ```
 
   `--net-allow` with `--net=disable`, or a malformed pattern, is a usage
@@ -2208,8 +2221,10 @@ as `NAME=value`, plus `USER`, `LOGNAME`, `HOME`, and a default `PATH`;
 **Network.** A socket is a `/net` connection underneath, so `--net`,
 `--net-allow`, and listening only under `--net=enable` apply to Linux
 programs exactly as to 9front ones. DNS is the program's own, through the
-`/etc/resolv.conf` above, so under `--net-allow` a pattern has to cover
-those servers (`udp!8.8.8.8!53`). Unix-domain sockets, `socketpair`,
+`/etc/resolv.conf` above. Without name patterns, a `--net-allow` pattern
+has to cover those servers (`udp!8.8.8.8!53`); with one, h9 answers DNS
+for the machine and the name patterns work as they do through `cs` (see
+`--net-allow` in chapter 15). Unix-domain sockets, `socketpair`,
 `epoll`, `eventfd`, passing file descriptors, and passing credentials
 (`SO_PASSCRED`) work between the processes of one machine, and
 `SOCK_SEQPACKET` keeps each message whole. `memfd_create`, and a file

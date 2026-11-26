@@ -6,7 +6,7 @@ created: 2026-11-25
 authors: [progrium]
 depends: []
 areas: [kern, sandbox, linux]
-branch: []
+branch: [dev, linux-dns]
 ---
 
 # Proposal: Name patterns for a Linux guest's DNS
@@ -103,17 +103,17 @@ The guest can newly reach, through the resolver, the host's DNS servers, for nam
 
 ## Done criteria
 
-- [ ] `test "a Linux program's lookup of an allowed name connects [linux-dns]"` passes: a Linux root, `--net-allow` naming a name the test's stub DNS server answers with a local listener's address, and `wget` or `nc` reaching the listener by name.
-- [ ] `test "a name outside --net-allow gets REFUSED, and isn't forwarded [linux-dns]"` passes: the stub server sees no query.
-- [ ] `test "a connect by address without a lookup is refused [linux-dns]"` passes.
-- [ ] `test "a CNAME's addresses are recorded under the question's name [linux-dns]"` passes.
-- [ ] `test "a truncated answer retries over TCP through the resolver [linux-dns]"` passes.
-- [ ] `test "a root's own resolv.conf server is redirected too [linux-dns]"` passes.
-- [ ] `test "without name patterns, port 53 isn't redirected [linux-dns]"` passes.
-- [ ] `test "--print shows the resolver caveat [linux-dns]"` passes.
-- [ ] The backends' cases pass with a stub server given through `Machine.Options.nameservers` as `127.0.0.1!PORT`.
-- [ ] h9x builds Railpack's node-npm example with its registry allowlist and no proxy.
-- [ ] spec/sandbox.md and spec/abi-linux.md describe the resolver, and MANUAL.md's `--net-allow` section says name patterns work for Linux programs.
+- [x] `test "a Linux program's lookup of an allowed name connects [linux-dns]"` passes: a Linux root, `--net-allow` naming a name the test's stub DNS server answers with a local listener's address, and `wget` or `nc` reaching the listener by name.
+- [x] `test "a name outside --net-allow gets REFUSED, and isn't forwarded [linux-dns]"` passes: the stub server sees no query.
+- [x] `test "a connect by address without a lookup is refused [linux-dns]"` passes.
+- [x] `test "a CNAME's addresses are recorded under the question's name [linux-dns]"` passes.
+- [x] `test "a truncated answer retries over TCP through the resolver [linux-dns]"` passes.
+- [x] `test "a root's own resolv.conf server is redirected too [linux-dns]"` passes.
+- [x] `test "without name patterns, port 53 isn't redirected [linux-dns]"` passes.
+- [x] `test "--print shows the resolver caveat [linux-dns]"` passes.
+- [x] The backends' cases pass with a stub server given through `Machine.Options.nameservers` as `127.0.0.1!PORT`.
+- [~] h9x builds Railpack's node-npm example with its registry allowlist and no proxy. Waived: Jeff Lindsay waived it for this implementation (see Updates).
+- [x] spec/sandbox.md and spec/abi-linux.md describe the resolver, and MANUAL.md's `--net-allow` section says name patterns work for Linux programs.
 
 ## Implementation
 
@@ -128,3 +128,8 @@ The guest can newly reach, through the resolver, the host's DNS servers, for nam
 - **Policies that name a DNS server.** Should an address pattern covering a server on port 53 send that server's queries to it directly, through the resolver's checks, rather than to `nameservers`? That keeps a split-horizon server reachable, at the cost of forwarding to an address the guest chose.
 - **DNS over TLS and HTTPS.** A program that resolves over port 853, or over HTTPS to a public resolver, bypasses this, and its connects are refused unless a pattern covers the resolver. Refusing them is the safe result, but it may surprise users of Firefox-like clients.
 - **The table's size.** 1024 entries may not hold every name a large build resolves. Entries could expire by TTL instead of by count.
+
+## Updates
+
+- 2026-11-26: Jeff Lindsay waived the Done criteria item "h9x builds Railpack's node-npm example with its registry allowlist and no proxy". h9x and its Railpack build aren't part of this repository, so the item can't be checked where the resolver is built; the `[linux-dns]` cases cover the same path with busybox's resolver on the Alpine root. The open issues are taken as the proposal has them: an address pattern for a DNS server doesn't take its queries out of the resolver, DNS over TLS and HTTPS stay refused unless a pattern covers the server, and the resolved-name table keeps its 1024 entries.
+- 2026-11-26: Refinements made while building it. devip's one hook rewrites the address the conversation dials, which is the one its `remote` file shows, so a redirected conversation's `remote` names the resolver; a Linux `getpeername` and `recvfrom` give the address the guest dialled, from what the hook registered. The hook binds the conversation's host socket on the loopback before the connect, to know its host port, so a 9front `connect ADDR!53 LPORT` that also names a local port fails. The CLI passes the host's servers to any machine with an allowlist, not only one with a Linux root, since a 9front program's `ndb/dns` is redirected too.

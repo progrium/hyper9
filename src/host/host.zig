@@ -1,0 +1,233 @@
+//! The host a kernel is given (design/host-handles.md): a table of
+//! handles, each the one way a device reaches outside the machine. A
+//! handle that's null is a capability the machine doesn't have, so
+//! `Host{}` reaches nothing. The policy is which handles exist and what
+//! each allows; `fromPlan` (src/host/planned.zig) builds the table a
+//! compiled plan describes.
+//!
+//! Each handle is an interface, a context and a table of functions, as
+//! `std.mem.Allocator` is, so an embedder can supply its own: an
+//! in-memory tree, a dialer through its own proxy, or a clock it
+//! controls.
+
+const std = @import("std");
+const policy = @import("../policy.zig");
+const kern = @import("../kern.zig");
+const consin = @import("../consin.zig");
+const gfx = @import("../gfx.zig");
+
+pub const planned = @import("planned.zig");
+pub const fromPlan = planned.fromPlan;
+
+pub const Host = struct {
+    /// Named directory handles: the host trees the machine can reach.
+    dirs: ?Dirs = null,
+    /// Outbound connections, and the names that may be resolved for them.
+    dial: ?Dial = null,
+    /// Listening addresses.
+    listen: ?Listen = null,
+    /// Wall and monotonic time.
+    clock: ?Clock = null,
+    /// The terminal.
+    console: ?Console = null,
+    /// Entropy.
+    random: ?Random = null,
+    /// The `--gfx` window, or the headless screen.
+    window: ?Window = null,
+    /// Host commands (design/host-cmd.md).
+    spawn: ?Spawn = null,
+};
+
+/// A host tree, by the name the plan gives it.
+pub const Dir = struct {
+    /// `cwd` for the host cwd, `root` for a host directory at the root of
+    /// `/`, and `d1`, `d2`, and so on for the rest, in the plan's order.
+    name: []const u8,
+    /// The resolved host path the handle is opened on. Only the host side
+    /// (`--print`) shows it.
+    path: []const u8,
+    /// Whether the tree can be changed on the host. A tree under an
+    /// overlay is read-only here: the overlay never writes it.
+    writable: bool,
+    /// Links in the tree resolve inside it (design/epoch-0/symlinks-in-root.md).
+    contained: bool = false,
+    /// Read-deny paths beneath the tree, relative to it: the one rule a
+    /// handle can't express alone.
+    deny: []const []const u8 = &.{},
+};
+
+pub const Dirs = struct {
+    list: []const Dir,
+    ctx: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        /// The verdict on `op` on a resolved host path.
+        check: *const fn (ctx: *anyopaque, path: []const u8, op: policy.Op) policy.Verdict,
+    };
+
+    /// The handle named `name`.
+    pub fn get(d: Dirs, name: []const u8) ?*const Dir {
+        for (d.list) |*x| if (std.mem.eql(u8, x.name, name)) return x;
+        return null;
+    }
+
+    /// The handle whose tree holds host path `path`, the deepest if
+    /// several do, and the path relative to it: how a namespace file that
+    /// names `#U` by a host path finds its handle.
+    pub fn holding(d: Dirs, path: []const u8) ?struct { dir: *const Dir, rel: []const u8 } {
+        var best: ?*const Dir = null;
+        for (d.list) |*x| if (policy.relUnder(x.path, path) != null) {
+            if (best == null or x.path.len > best.?.path.len) best = x;
+        };
+        const b = best orelse return null;
+        return .{ .dir = b, .rel = policy.relUnder(b.path, path).? };
+    }
+
+    pub fn check(d: Dirs, path: []const u8, op: policy.Op) policy.Verdict {
+        return d.vtable.check(d.ctx, path, op);
+    }
+};
+
+/// Addresses are devip's 16 bytes, IPv4 as IPv4-mapped IPv6. A null
+/// protocol is one devip doesn't name (neither TCP nor UDP).
+pub const Dial = struct {
+    ctx: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        allows: *const fn (ctx: *anyopaque, proto: ?policy.NetProto, addr: *const [16]u8, port: u16) bool,
+        lookup: *const fn (ctx: *anyopaque, proto: ?policy.NetProto, name: []const u8, port: u16) bool,
+        resolved: *const fn (ctx: *anyopaque, proto: ?policy.NetProto, name: []const u8, port: u16, addrs: []const [16]u8) void,
+    };
+
+    /// Whether a connection to `addr!port` may be made.
+    pub fn allows(d: Dial, proto: ?policy.NetProto, addr: *const [16]u8, port: u16) bool {
+        return d.vtable.allows(d.ctx, proto, addr, port);
+    }
+
+    /// Whether `name` may be resolved, for `proto` and `port`.
+    pub fn lookup(d: Dial, proto: ?policy.NetProto, name: []const u8, port: u16) bool {
+        return d.vtable.lookup(d.ctx, proto, name, port);
+    }
+
+    /// Records what an allowed name resolved to, so a connection to one
+    /// of its addresses is allowed as the name is.
+    pub fn resolved(d: Dial, proto: ?policy.NetProto, name: []const u8, port: u16, addrs: []const [16]u8) void {
+        d.vtable.resolved(d.ctx, proto, name, port, addrs);
+    }
+};
+
+pub const Listen = struct {
+    ctx: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        allows: *const fn (ctx: *anyopaque, proto: ?policy.NetProto, addr: *const [16]u8, port: u16) bool,
+    };
+
+    /// Whether the guest may announce on `addr!port`.
+    pub fn allows(l: Listen, proto: ?policy.NetProto, addr: *const [16]u8, port: u16) bool {
+        return l.vtable.allows(l.ctx, proto, addr, port);
+    }
+};
+
+pub const Clock = struct {
+    ctx: ?*anyopaque = null,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        /// Nanoseconds since the epoch.
+        wall: *const fn (ctx: ?*anyopaque) i64,
+        /// Nanoseconds that never go backwards.
+        mono: *const fn (ctx: ?*anyopaque) i64,
+    };
+
+    pub fn wall(c: Clock) i64 {
+        return c.vtable.wall(c.ctx);
+    }
+
+    pub fn mono(c: Clock) i64 {
+        return c.vtable.mono(c.ctx);
+    }
+};
+
+/// The host streams behind the guest's console: reads from `in` (none
+/// means EOF), writes to fd 1 go to `out` and to fd 2 to `err`. This is
+/// `Machine.Stdio`.
+pub const Console = struct {
+    in: ?*std.Io.Reader = null,
+    /// Makes a blocked read of `in` return, so a run can end while a
+    /// console read is pending. Without it such a run ends `stuck`.
+    in_cancel: ?consin.Cancel = null,
+    out: *std.Io.Writer,
+    err: *std.Io.Writer,
+    /// Called when the guest turns raw mode on or off (writing `rawon`
+    /// or `rawoff` to /dev/consctl, or closing its last consctl), and
+    /// echo (`echooff`, `echoon`). The CLI puts the host terminal in
+    /// raw mode or turns its echo off. The machine turns both back
+    /// when a run ends.
+    raw: ?kern.Console.Raw = null,
+};
+
+pub const Random = struct {
+    ctx: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        fill: *const fn (ctx: *anyopaque, buf: []u8) void,
+    };
+
+    pub fn fill(r: Random, buf: []u8) void {
+        r.vtable.fill(r.ctx, buf);
+    }
+};
+
+pub const Window = struct {
+    /// The screen asked for.
+    options: gfx.Options,
+    ctx: ?*anyopaque = null,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        /// Takes the screen for `claim`, whose `close` runs when the user
+        /// closes it.
+        acquire: *const fn (ctx: ?*anyopaque, io: std.Io, claim: *const gfx.Claim, opts: gfx.Options) gfx.Error!void,
+        release: *const fn (ctx: ?*anyopaque, claim: *const gfx.Claim) void,
+    };
+
+    pub fn acquire(w: Window, io: std.Io, claim: *const gfx.Claim) gfx.Error!void {
+        return w.vtable.acquire(w.ctx, io, claim, w.options);
+    }
+
+    pub fn release(w: Window, claim: *const gfx.Claim) void {
+        w.vtable.release(w.ctx, claim);
+    }
+};
+
+/// Host commands. Whether this handle stays here or moves to host-cmd
+/// is an open issue of design/host-handles.md; a plan never gives one
+/// while `#C` is masked.
+pub const Spawn = struct {
+    ctx: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        /// Whether the host command `path` may be run.
+        allows: *const fn (ctx: *anyopaque, path: []const u8) bool,
+    };
+
+    pub fn allows(s: Spawn, path: []const u8) bool {
+        return s.vtable.allows(s.ctx, path);
+    }
+};
+
+test {
+    _ = planned;
+}
+
+test "an empty Host has no handles [host-handles]" {
+    const h: Host = .{};
+    try std.testing.expect(h.dirs == null and h.dial == null and h.listen == null and h.clock == null);
+    try std.testing.expect(h.console == null and h.random == null and h.window == null and h.spawn == null);
+}
