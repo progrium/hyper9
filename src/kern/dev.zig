@@ -473,7 +473,27 @@ pub const Ops = struct {
     /// The device's own Devgens, which are Zig that doesn't raise, so
     /// callgen calls them directly.
     gens: []const *const Devgen = &.{},
+    /// The device's own Devgens that can fail (`Egen`): callgen calls
+    /// their Zig directly.
+    egens: []const Egen = &.{},
 };
+
+/// A Devgen in Zig that can fail, as a C Devgen can raise.
+pub const Zgen = fn (*Chan, ?[*:0]const u8, ?[*]Dirtab, c_int, c_int, *Dir) Error!c_int;
+
+/// A native device's Devgen that can fail: `z`, and `c`, its C form
+/// (which raises), the Devgen devwalk and the rest are handed.
+pub const Egen = struct { c: *const Devgen, z: *const Zgen };
+
+/// z as an Egen.
+pub fn egen(comptime z: Zgen) Egen {
+    const W = struct {
+        fn gen(ch: [*c]Chan, name: [*c]u8, tab: [*c]Dirtab, ntab: c_int, i: c_int, dp: [*c]Dir) callconv(.c) c_int {
+            return z(ch, name, tab, ntab, i, dp) catch |e| port.raise(e);
+        }
+    };
+    return .{ .c = &W.gen, .z = &z };
+}
 
 fn devbreadOpt(ch: *Chan, n: c_int, offset: c_uint) Error!?*Block {
     return try devbread(ch, n, offset);
@@ -559,6 +579,7 @@ const natives = .{
     @import("devmnt.zig").Device,
     @import("dev/pipe.zig").Device,
     @import("dev/root.zig").Device,
+    @import("dev/srv.zig").Device,
 };
 
 /// d's functions, if it's native.
@@ -701,6 +722,8 @@ pub fn callgen(gen: *const Devgen, ch: *Chan, name: ?[*:0]const u8, tab: ?[*]Dir
     inline for (natives) |N| {
         for (N.ops.gens) |g| if (gen == g)
             return gen(ch, @constCast(name), tab, ntab, i, dp);
+        for (N.ops.egens) |g| if (gen == g.c)
+            return g.z(ch, name, tab, ntab, i, dp);
     }
     var r: c_int = 0;
     try caught(h9_dev_gen(gen, ch, name, tab, ntab, i, dp, &r));
