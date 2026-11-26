@@ -30,6 +30,7 @@ const ws = @import("ws.zig");
 const cred = @import("cred.zig");
 const statictree = @import("statictree.zig");
 const serve = @import("serve.zig");
+const resolver = @import("resolver.zig");
 const lsys = @import("abi/linux/sys.zig");
 const lsig = @import("abi/linux/signal.zig");
 const lexec = @import("abi/linux/exec.zig");
@@ -226,8 +227,11 @@ pub const Machine = struct {
         /// The host's DNS servers, as addresses: a Linux root without an
         /// /etc/resolv.conf gets one naming them, and the network policy
         /// lets port 53 reach them even when they're link-local
-        /// (design/epoch-0/linux-net.md). The CLI reads the host's
-        /// resolv.conf.
+        /// (design/epoch-0/linux-net.md). A machine that resolves for the
+        /// guest forwards its queries to them, in order
+        /// (design/linux-dns.md). Each may give a port, `ADDR!PORT`, for a
+        /// server of an embedder's or a test's own; resolv.conf names
+        /// the address. The CLI reads the host's resolv.conf.
         nameservers: []const []const u8 = &.{},
         /// Resolve a guest program in the 9front view even with a Linux
         /// root: `--rc` always means 9front's rc.
@@ -600,6 +604,24 @@ pub const Machine = struct {
         return @max(1, @min(want, max));
     }
 
+    /// Starts the machine's resolver when its plan resolves for the guest
+    /// (design/linux-dns.md), forwarding to `Options.nameservers`. It's in
+    /// the arena, so a stuck process that still asks for it finds its
+    /// ports closed rather than freed memory.
+    fn startResolver(m: *Machine) ?*resolver.Resolver {
+        m.plan.dns = null;
+        if (!m.plan.resolves or !resolver.supported) return null;
+        const names = m.plan.names orelse return null;
+        const a = m.arena.allocator();
+        var servers: std.ArrayList(resolver.Server) = .empty;
+        for (m.opts.nameservers) |ns| if (resolver.parseServer(ns)) |s| servers.append(a, s) catch return null;
+        const r = a.create(resolver.Resolver) catch return null;
+        r.* = .{ .gpa = m.gpa, .patterns = m.plan.net_allow, .names = names, .servers = servers.items };
+        r.start() catch return null;
+        m.plan.dns = r;
+        return r;
+    }
+
     /// Runs a program to completion. `argv[0]` is the program's name as it
     /// sees it.
     ///
@@ -667,6 +689,10 @@ pub const Machine = struct {
             break :blk s;
         } else null;
         defer if (srv) |s| s.close();
+        // The machine's resolver, while it runs (design/linux-dns.md).
+        // Without one, port 53 is refused.
+        const dns = m.startResolver();
+        defer if (dns) |r| r.stop();
         // Heap-allocated, with its own copy of the machine, so a stuck
         // process never refers to the caller's Machine.
         const job = try m.gpa.create(Job);
@@ -3069,7 +3095,7 @@ pub const Machine = struct {
         } else if (eq(u8, name, "hostname")) {
             w.writeAll("h9\n") catch {};
         } else if (eq(u8, name, "resolv.conf")) {
-            for (j.m.opts.nameservers) |ns| w.print("nameserver {s}\n", .{ns}) catch {};
+            for (j.m.opts.nameservers) |ns| w.print("nameserver {s}\n", .{resolver.serverHost(ns)}) catch {};
         } else if (eq(u8, name, "online") or eq(u8, name, "possible")) {
             if (ncpu <= 1) w.writeAll("0\n") catch {} else w.print("0-{d}\n", .{ncpu - 1}) catch {};
         } else return -1;
