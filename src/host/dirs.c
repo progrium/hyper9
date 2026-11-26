@@ -738,12 +738,42 @@ ntwalk(HANDLE top, const char *rel, ACCESS_MASK access, ULONG share, ULONG disp,
 			p = e;
 			continue;
 		}
-		h = ntopen(cur, p, n, access, share, disp, opts|FILE_OPEN_REPARSE_POINT, attrs, sa);
-		if(h == INVALID_HANDLE_VALUE)
-			goto err;
-		if(!wantlink && islink(h)){
-			CloseHandle(h);
-			goto link;
+		{
+			ULONG d;
+			int trunc;
+
+			/*
+			 * An overwriting open of a link would overwrite the link
+			 * itself, which FILE_OPEN_REPARSE_POINT opens, before
+			 * islink could see it: open without truncating, and
+			 * truncate once the name is known not to be a link.
+			 */
+			d = disp;
+			trunc = 0;
+			if(!wantlink && (disp == FILE_OVERWRITE || disp == FILE_OVERWRITE_IF || disp == FILE_SUPERSEDE)){
+				d = disp == FILE_OVERWRITE ? FILE_OPEN : FILE_OPEN_IF;
+				trunc = 1;
+			}
+			h = ntopen(cur, p, n, access, share, d, opts|FILE_OPEN_REPARSE_POINT, attrs, sa);
+			if(h == INVALID_HANDLE_VALUE)
+				goto err;
+			if(!wantlink && islink(h)){
+				CloseHandle(h);
+				goto link;
+			}
+			if(trunc){
+				FILE_END_OF_FILE_INFO eof;
+
+				eof.EndOfFile.QuadPart = 0;
+				if(!SetFileInformationByHandle(h, FileEndOfFileInfo, &eof, sizeof eof)){
+					DWORD err;
+
+					err = GetLastError();
+					CloseHandle(h);
+					SetLastError(err);
+					goto err;
+				}
+			}
 		}
 		if(cur != top)
 			CloseHandle(cur);
