@@ -200,6 +200,32 @@ fn findone(path: [*:0]const WCHAR, wfd: *FindData) bool {
     return true;
 }
 
+/// A FindFirstFile or FindNextFile entry is the parent directory's copy
+/// of a name's times and size, which NTFS updates lazily: a directory's
+/// last-write time there stays at what it was before a name was made in
+/// it, so a listing (or a walk) and a stat would disagree on its mtime
+/// and qid.vers, and an index made from a listing would be stale
+/// (design/epoch-0/mount-index.md). GetFileAttributesEx reads the name's
+/// own record, so each takes the times and size from there; the
+/// attributes and reparse tag stay the entry's.
+fn ownrecord(path: [*:0]const WCHAR, wfd: *FindData) void {
+    var fa: w.WIN32_FILE_ATTRIBUTE_DATA = undefined;
+    if (w.GetFileAttributesExW(path, w.GetFileExInfoStandard, &fa) == 0) return;
+    wfd.ftLastAccessTime = fa.ftLastAccessTime;
+    wfd.ftLastWriteTime = fa.ftLastWriteTime;
+    wfd.nFileSizeHigh = fa.nFileSizeHigh;
+    wfd.nFileSizeLow = fa.nFileSizeLow;
+}
+
+/// A host file's qid from its entry, once ownrecord has updated it.
+fn fileqid(path: [*:0]const WCHAR, wfd: *const FindData) Qid {
+    var q: Qid = std.mem.zeroes(Qid);
+    q.type = if (wfd.dwFileAttributes & w.FILE_ATTRIBUTE_DIRECTORY != 0) c.QTDIR else c.QTFILE;
+    q.path = pathhash(path);
+    q.vers = unixtime(&wfd.ftLastWriteTime);
+    return q;
+}
+
 fn wfdtoqid(path: [*:0]const WCHAR, wfd_: ?*const FindData) Error!Qid {
     var q: Qid = std.mem.zeroes(Qid);
     switch (pathtype(path)) {
@@ -210,13 +236,9 @@ fn wfdtoqid(path: [*:0]const WCHAR, wfd_: ?*const FindData) Error!Qid {
         },
         .file => {
             var f: FindData = undefined;
-            const wfd = wfd_ orelse blk: {
-                if (!findone(path, &f)) return w.oserr();
-                break :blk &f;
-            };
-            q.type = if (wfd.dwFileAttributes & w.FILE_ATTRIBUTE_DIRECTORY != 0) c.QTDIR else c.QTFILE;
-            q.path = pathhash(path);
-            q.vers = unixtime(&wfd.ftLastWriteTime);
+            if (wfd_) |x| f = x.* else if (!findone(path, &f)) return w.oserr();
+            ownrecord(path, &f);
+            q = fileqid(path, &f);
         },
     }
     return q;
@@ -248,8 +270,12 @@ fn wfdtodir(path: [*:0]const WCHAR, d: *Dir, wfd_: ?*const FindData) Error!void 
                     f.nFileSizeHigh = fa.nFileSizeHigh;
                     f.nFileSizeLow = fa.nFileSizeLow;
                 }
-                wfd = &f;
+            } else {
+                // A listing's entry, as a stat sees it (ownrecord).
+                f = wfd.?.*;
+                ownrecord(path, &f);
             }
+            wfd = &f;
             const x = wfd.?;
             d.mode = wfdtodmode(x);
             d.atime = unixtime(&x.ftLastAccessTime);
@@ -257,7 +283,7 @@ fn wfdtodir(path: [*:0]const WCHAR, d: *Dir, wfd_: ?*const FindData) Error!void 
             d.length = @bitCast((@as(u64, x.nFileSizeHigh) << 32) | x.nFileSizeLow);
         },
     }
-    d.qid = try wfdtoqid(path, wfd);
+    d.qid = if (wfd) |x| fileqid(path, x) else try wfdtoqid(path, null);
     d.uid = c.eve;
     d.gid = c.eve;
     d.muid = c.eve;

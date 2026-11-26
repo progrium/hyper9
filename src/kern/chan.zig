@@ -341,7 +341,44 @@ fn addelem(p_: *Path, s: [*:0]const u8, from: ?*Chan) *Path {
     return p;
 }
 
+/// h9's, as 9front's Chan.srvname: the /srv name a channel was posted
+/// as, which /proc/n/ns prints for a mount of it. drawterm's Chan has no
+/// field for it, so it's kept beside the channel, and a flag bit beyond
+/// drawterm's says a channel has one, so most frees don't look.
+const CSRVNAME = 0x2000; // beside linux.zig's CLROOT and CSROOT
+var srvnames: std.AutoHashMapUnmanaged(*Chan, [*:0]u8) = .empty;
+var srvnames_lk: c.Lock = std.mem.zeroes(c.Lock);
+
+/// The /srv name ch was posted as, if any. It lives as long as ch.
+pub fn srvname(ch: *const Chan) ?[*:0]u8 {
+    if (ch.flag & CSRVNAME == 0) return null;
+    c.lock(&srvnames_lk);
+    defer c.unlock(&srvnames_lk);
+    return srvnames.get(@constCast(ch));
+}
+
+/// Records the /srv name ch is posted as, unless it has one: a channel
+/// keeps the name of its first post, as 9front's.
+pub fn setsrvname(ch: *Chan, name: [*:0]const u8) void {
+    c.lock(&srvnames_lk);
+    defer c.unlock(&srvnames_lk);
+    const e = srvnames.getOrPut(std.heap.c_allocator, ch) catch return;
+    if (e.found_existing) return;
+    e.value_ptr.* = c.strdup(@constCast(name)) orelse {
+        srvnames.removeByPtr(e.key_ptr);
+        return;
+    };
+    ch.flag |= CSRVNAME;
+}
+
+fn dropsrvname(ch: *Chan) void {
+    c.lock(&srvnames_lk);
+    defer c.unlock(&srvnames_lk);
+    if (srvnames.fetchRemove(ch)) |kv| c.free(kv.value);
+}
+
 pub fn chanfree(ch: *Chan) void {
+    if (ch.flag & CSRVNAME != 0) dropsrvname(ch);
     ch.flag = c.CFREE;
 
     if (ch.dirrock != null) {
@@ -369,9 +406,6 @@ pub fn chanfree(ch: *Chan) void {
 
     pathclose(ch.path);
     ch.path = null;
-
-    c.free(ch.srvname); // h9, as 9front
-    ch.srvname = null;
 
     c.lock(&chanalloc.lk);
     ch.next = chanalloc.free;
@@ -1237,6 +1271,84 @@ pub fn namelenerror(aname: [*:0]const u8, len_: c_int, err: [*:0]const u8) error
 /// unnecessary clone in order to get a cunique Chan so it can attach the
 /// correct name. Sysstat and sys_stat need the correct name so they can
 /// rewrite the stat info.
+// Handle names in the namespace (design/host-handles.md): src/kern.zig's
+// leaves, weak since a kernel built without src/kern.zig (the kernel's
+// own cases) has no host.
+const NsFn = fn ([*]const u8, c_int, [*]u8, c_int) callconv(.c) c_int;
+const h9_host_nsname = @extern(?*const NsFn, .{ .name = "h9_host_nsname", .linkage = .weak });
+const h9_host_nspath = @extern(?*const NsFn, .{ .name = "h9_host_nspath", .linkage = .weak });
+const h9_tree_path = @extern(?*const NsFn, .{ .name = "h9_tree_path", .linkage = .weak });
+
+/// `#U` and `#U!c`, the host tree device's names, and where a host path
+/// or a handle name starts in `s`.
+fn hostfsPrefix(s: []const u8) ?usize {
+    if (!std.mem.startsWith(u8, s, "#U")) return null;
+    return if (std.mem.startsWith(u8, s[2..], "!c")) 4 else 2;
+}
+
+/// A name for the host tree device by a handle's name, `#Ucwd/a` or
+/// `#U!croot/a`, as /proc/n/ns prints one, spelled by the host path
+/// it stands for, `#U/home/me/a`, so the channel it gives is the one the
+/// namespace was built with; null for any other name, or a handle the
+/// calling thread's machine doesn't have, which then fails as a bad
+/// attach.
+fn hostfsByHandle(name: [*:0]const u8) ?[*:0]u8 {
+    const s = std.mem.span(name);
+    const i = hostfsPrefix(s) orelse return null;
+    if (i >= s.len or s[i] == '/') return null;
+    const f = h9_host_nspath orelse return null;
+    const end = std.mem.indexOfScalarPos(u8, s, i, '/') orelse s.len;
+    var buf: [4096]u8 = undefined;
+    const n = f(s[i..].ptr, @intCast(end - i), &buf, buf.len);
+    if (n < 0) return null;
+    const host = buf[0..@intCast(n)];
+    const rest = s[end..];
+    const total = i + host.len + rest.len;
+    const out: [*]u8 = @ptrCast(c.malloc(@intCast(total + 1)) orelse return null);
+    @memcpy(out[0..i], s[0..i]);
+    @memcpy(out[i..][0..host.len], host);
+    @memcpy(out[i + host.len ..][0..rest.len], rest);
+    out[total] = 0;
+    return @ptrCast(out);
+}
+
+/// The name on the tree device, `#ū<name>/<path>`, of a host tree
+/// device name (`#U/mem/a`) for a path one of the calling thread's
+/// machine's trees in memory holds; null for any other.
+fn hostfsTree(name: [*:0]const u8) ?[*:0]u8 {
+    const s = std.mem.span(name);
+    const i = hostfsPrefix(s) orelse return null;
+    if (i >= s.len or s[i] != '/') return null;
+    const f = h9_tree_path orelse return null;
+    const dev_name = "#\u{16B}";
+    var buf: [4096]u8 = undefined;
+    const n = f(s[i..].ptr, @intCast(s.len - i), &buf, buf.len);
+    if (n < 0) return null;
+    const rest = buf[0..@intCast(n)];
+    const out: [*]u8 = @ptrCast(c.malloc(@intCast(dev_name.len + rest.len + 1)) orelse return null);
+    @memcpy(out[0..dev_name.len], dev_name);
+    @memcpy(out[dev_name.len..][0..rest.len], rest);
+    out[dev_name.len + rest.len] = 0;
+    return @ptrCast(out);
+}
+
+/// The name /proc/n/ns prints for a channel's path p: for the host tree
+/// device, the machine's handle that holds the host path, by its name
+/// (`#U/home/me/a` as `#Ucwd/a`), so no host path shows; p otherwise, or
+/// if `buf` is too short or no handle holds it.
+pub fn nsname(p: [*:0]const u8, buf: []u8) [*:0]const u8 {
+    const s = std.mem.span(p);
+    const i = hostfsPrefix(s) orelse return p;
+    if (i >= s.len or s[i] != '/') return p;
+    const f = h9_host_nsname orelse return p;
+    if (buf.len < i + 2) return p;
+    @memcpy(buf[0..i], s[0..i]);
+    const n = f(s[i..].ptr, @intCast(s.len - i), buf[i..].ptr, @intCast(buf.len - i - 1));
+    if (n < 0) return p;
+    buf[i + @as(usize, @intCast(n))] = 0;
+    return @ptrCast(buf.ptr);
+}
+
 pub fn namec(aname_: [*:0]const u8, amode: c_int, omode: c_int, perm: c_uint) Error!*Chan {
     return namecx(aname_, amode, omode, perm, false);
 }
@@ -1248,7 +1360,18 @@ pub fn namec(aname_: [*:0]const u8, amode: c_int, omode: c_int, perm: c_uint) Er
 pub fn namecx(aname_: [*:0]const u8, amode: c_int, omode: c_int, perm: c_uint, nofollow: bool) Error!*Chan {
     if (aname_[0] == 0)
         return port.kerror("empty file name");
-    const aname: [*:0]u8 = (try validnamedupAt(aname_, true, @returnAddress())).?;
+    var aname: [*:0]u8 = (try validnamedupAt(aname_, true, @returnAddress())).?;
+    // h9: a host tree by its handle's name (design/host-handles.md).
+    if (hostfsByHandle(aname)) |r| {
+        c.free(aname);
+        aname = r;
+    }
+    // A host path an embedder's tree in memory holds is on #ū
+    // (src/host/devtree.zig).
+    if (hostfsTree(aname)) |r| {
+        c.free(aname);
+        aname = r;
+    }
     defer c.free(aname);
     var name: [*:0]u8 = aname;
     const p = up();

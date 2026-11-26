@@ -11,13 +11,13 @@ const drawterm_glue = "third_party/drawterm-glue";
 // for the one process record), devcmd.c (host commands live on the
 // host-cmd branch while design/host-cmd.md rethinks them), or the files
 // ported to Zig (design/kernel-port.md, src/kern/port.zig): allocb.c,
-// chan.c, dev.c, devmnt.c, devpipe.c, devroot.c, pgrp.c, qio.c, qlock.c,
+// chan.c, dev.c, devcons.c, devmnt.c, devpipe.c, devroot.c, pgrp.c, qio.c, qlock.c,
 // rwlock.c, sleep.c, and sysfile.c, nor the host's devices, devfs and
 // devip, which are src/host's (design/host-handles.md). Plus the OS files
 // below.
 const kern_sources = [_][]const u8{
     "alloc.c",    "data.c",     "devaudio.c", "devaudio-none.c",
-    "devcons.c",  "devdraw.c",  "devkbd.c",   "devmouse.c",
+    "devdraw.c",  "devkbd.c",   "devmouse.c",
     "devssl.c",   "devtls.c",   "error.c",    "parse.c",
     "stub.c",     "term.c",     "waserror.c",
 };
@@ -622,7 +622,7 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.O
     });
     kern.root_module.addCSourceFiles(.{
         .root = b.path("src/kern"),
-        .files = &.{ "devtab.c", "devdup.c", "devhtools.c", "consx.c", "werrstr.c" },
+        .files = &.{ "devtab.c", "devdup.c", "devhtools.c", "consx.c", "consprint.c", "werrstr.c" },
         .flags = flags,
     });
     // The host's half of the policy's file checks.

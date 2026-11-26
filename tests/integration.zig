@@ -835,7 +835,7 @@ test "--print shows the plan and doesn't run [baseline]" {
     try std.testing.expect(std.mem.indexOf(u8, r.out, "profile:  tight\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "net.disable") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "memory=512M timeout=1m") != null);
-    try std.testing.expect(std.mem.indexOf(u8, r.out, "devmask:  #C #I #ℏ #U #ι #b #i #m #μ\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "devmask:  #C #I #ℏ #U #ū #ι #b #i #m #μ\n") != null);
 }
 
 test "--memory caps guest memory [baseline]" {
@@ -5341,7 +5341,7 @@ test "--no-guest-tools leaves out the bind and masks #H [guest-tools]" {
     defer p.deinit();
     try std.testing.expect(std.mem.indexOf(u8, p.out, "#H/bin") == null);
     // The web host also masks #I, having no sockets.
-    const want = if (getenv(3, "H9_TEST_WEB") != null) "devmask:  #C #I #H #U #ι #b #i #m #μ\n" else "devmask:  #C #H #U #ι #b #i #m #μ\n";
+    const want = if (getenv(3, "H9_TEST_WEB") != null) "devmask:  #C #I #H #U #ū #ι #b #i #m #μ\n" else "devmask:  #C #H #U #ū #ι #b #i #m #μ\n";
     try std.testing.expect(std.mem.indexOf(u8, p.out, want) != null);
     const r = try run(e, &.{ "--no-guest-tools", "ls", "#H" });
     defer r.deinit();
@@ -10123,17 +10123,48 @@ test "ns prints an up instance as bind -u [upper-layers]" {
     });
     defer r.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{r.err});
-    // The host path as ns writes it, which on Windows has / for each \
-    // and a leading / (#U/C:/...).
-    var hp: [std.Io.Dir.max_path_bytes + 1]u8 = undefined;
-    const host = if (builtin.os.tag == .windows) blk: {
-        hp[0] = '/';
-        @memcpy(hp[1..][0..s.path.len], s.path);
-        std.mem.replaceScalar(u8, hp[1..][0..s.path.len], '\\', '/');
-        break :blk hp[0 .. s.path.len + 1];
-    } else s.path;
-    var want: [std.Io.Dir.max_path_bytes + 32]u8 = undefined;
-    try expectIn(r.out, try std.fmt.bufPrint(&want, "bind -u '#U{s}/up' /n/x", .{host}));
+    // The layer by its handle's name, not its host path
+    // (design/host-handles.md).
+    try expectIn(r.out, "bind -u '#Ud");
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "/up' /n/x") == null);
+}
+
+test "/proc/n/ns shows handle names and no host path, in every profile [host-handles]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.createDirPath(std.testing.io, "r");
+    var rb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    for ([_][]const u8{ "--profile=default", "--profile=tight" }) |profile| {
+        const r = try run(e, &.{ "--cwd", s.path, profile, "--readable", try under(&s, &rb, "r"), "--rc", "cat /proc/$pid/ns" });
+        defer r.deinit();
+        errdefer std.debug.print("{s}: {s}\nstderr: {s}\n", .{ profile, r.out, r.err });
+        try expectIn(r.out, "'#Ucwd' /mnt/term/cwd");
+        try expectIn(r.out, "'#Ud");
+        // No host tree by its host path, whatever the host spells it as.
+        try std.testing.expect(std.mem.indexOf(u8, r.out, "#U/") == null);
+        try std.testing.expect(std.mem.indexOf(u8, r.out, std.fs.path.basename(s.path)) == null);
+    }
+}
+
+test "--ns replays /proc/n/ns output in a machine with the same handles [host-handles]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.createDirPath(std.testing.io, "sub");
+    try s.tmp.dir.createDirPath(std.testing.io, "mnt");
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "sub/f", .data = "hi\n" });
+    const w = try run(e, &.{ "--cwd", s.path, "--rc", "bind /mnt/term/cwd/sub /mnt/term/cwd/mnt && cat /proc/$pid/ns >/mnt/term/cwd/ns" });
+    defer w.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{w.err});
+    try std.testing.expectEqual(@as(u8, 0), w.code);
+    var nb: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+    const r = try run(e, &.{ "--cwd", s.path, "--ns", try std.fmt.bufPrint(&nb, "@{s}/ns", .{s.path}), "--rc", "cat /mnt/term/cwd/mnt/f" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("hi\n", r.out);
 }
 
 test "links and FIFOs are made in the layer [upper-layers]" {

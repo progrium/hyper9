@@ -1,11 +1,11 @@
 /*
- * h9's hooks for drawterm's devcons (design/epoch-0/go-compat.md): #c/pid,
+ * h9's files of #c (src/kern/dev/cons.zig, design/epoch-0/go-compat.md): #c/pid,
  * #c/ppid, nanosecond /dev/bintime and /dev/time, and a /dev/sysstat line
  * per CPU. The C side is src/kern/consx.c; the clock and the CPU count
  * are Zig leaves (src/kern.zig). None of them fail or raise kernel errors.
  */
 
-/* Read handlers, called as devcons's own are: off is the file offset. */
+/* Read handlers, called as cons.zig's own are: off is the file offset. */
 long	h9_cons_pid(ulong off, char *buf, long n);
 long	h9_cons_ppid(ulong off, char *buf, long n);
 long	h9_cons_bintime(char *buf, long n);
