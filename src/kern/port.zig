@@ -25,6 +25,14 @@
 //!   library's only, too).
 //! - `kserve.zig`: h9's kserve.c, the kernel's 9P2000 server.
 //!
+//! And h9's own C, as it's ported:
+//!
+//! - `glue.zig`: glue.c, booting the kernel, and the Zig side's small
+//!   calls into it.
+//! - `proc.zig`: proc.c, the process record, notes, rfork, and wait
+//!   records, with drawterm's procinit.c.
+//! - `dev/proc.zig`: devproc.c, #p.
+//!
 //! This file is the root the kernel builds compile (build.zig's addKern,
 //! and src/nskernel.zig), and holds what the ported files share: the C
 //! kernel's types (`c`, translated from port.h with the kernel's flags),
@@ -48,9 +56,13 @@ pub const devsrv = @import("dev/srv.zig");
 pub const devlinux = @import("dev/linux.zig");
 pub const linux = @import("linux.zig");
 pub const kserve = @import("kserve.zig");
+pub const glue = @import("glue.zig");
+pub const process = @import("proc.zig");
+pub const devproc = @import("dev/proc.zig");
 
-/// Whether this is the namespace kernel (src/nskernel.zig), which has
-/// no Linux ABI: src/kern/nstab.c stands in for it.
+/// Whether this is the namespace kernel (src/nskernel.zig,
+/// design/epoch-0/namespace-kernel.md), which builds with H9_NSKERNEL and
+/// has none of h9's devices for running programs (#y, for one).
 pub const nskernel = @hasDecl(c, "H9_NSKERNEL");
 
 comptime {
@@ -64,9 +76,12 @@ comptime {
     devmnt.exportC();
     devpipe.exportC();
     devroot.exportC();
+    glue.exportC();
+    process.exportC();
     devsrv.exportC();
     kserve.exportC();
     if (!nskernel) {
+        devproc.exportC();
         devlinux.exportC();
         linux.exportC();
     }
@@ -87,6 +102,9 @@ test {
     _ = devpipe;
     _ = devroot;
     _ = devsrv;
+    _ = glue;
+    _ = process;
+    _ = devproc;
 }
 
 /// A kernel error. The Plan 9 error string is on the process, in

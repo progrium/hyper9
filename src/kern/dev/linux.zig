@@ -113,7 +113,7 @@ const Q = enum(u8) {
 };
 
 const Nq: c_int = @typeInfo(Q).@"enum".field_names.len;
-const Qfirstpid: c_int = @intFromEnum(Q.exe); // a /proc/n entry
+const Qfirstpid: c_int = @backingInt(Q.exe); // a /proc/n entry
 
 const FDSHIFT = 8;
 const PIDSHIFT = 24;
@@ -142,7 +142,7 @@ const tab: [Nq]Lent = blk: {
     var t: [Nq]Lent = undefined;
     const e = struct {
         fn f(tt: *[Nq]Lent, q: Q, name: [*:0]const u8, parent: Q, mode: c_int, chr: bool) void {
-            tt[@intFromEnum(q)] = .{ .name = name, .parent = parent, .mode = mode, .chr = chr };
+            tt[@backingInt(q)] = .{ .name = name, .parent = parent, .mode = mode, .chr = chr };
         }
     }.f;
     e(&t, .root, "#L", .root, D | 0o555, false);
@@ -219,7 +219,7 @@ const tab: [Nq]Lent = blk: {
 };
 
 fn q_(q: Q) c_int {
-    return @intFromEnum(q);
+    return @backingInt(q);
 }
 
 /// Implemented in Zig (src/machine.zig): writes the text of file q into
@@ -570,7 +570,7 @@ fn linuxopen(ch: *Chan, omode: c_int) Error!*Chan {
         errdefer c.free(t);
         const buf = textbuf(t);
         var n: c_int = -1;
-        switch (@as(Q, @enumFromInt(q))) {
+        switch (@as(Q, @fromBackingInt(@intCast(q)))) {
             .cmdline => n = try cmdline(pid, buf, Ntext, false),
             .comm => n = try cmdline(pid, buf, Ntext, true),
             .pstat => n = try pstat(pid, buf, Ntext, 0),

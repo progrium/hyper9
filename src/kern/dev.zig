@@ -598,8 +598,11 @@ const natives = .{
     @import("dev/pipe.zig").Device,
     @import("dev/root.zig").Device,
     @import("dev/srv.zig").Device,
+} ++ (if (port.nskernel) .{} else .{
+    // h9's own, which the namespace kernel doesn't build.
+    @import("dev/proc.zig").Device,
     @import("dev/linux.zig").Device,
-};
+});
 
 /// d's functions, if it's native.
 fn nativeOps(d: *Dev) ?*const Ops {
