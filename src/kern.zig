@@ -4,8 +4,8 @@
 //! holds the message. No Zig frame sits between a waserror and an error.
 //!
 //! The kernel boots once per host process, on a private thread. Each guest
-//! process runs on a thread made by `spawn`, and only that thread may make
-//! kernel calls for it.
+//! process runs on a thread made by `Kernel.spawn` (or `fork`) in its
+//! machine's `Kernel`, and only that thread may make kernel calls for it.
 
 const std = @import("std");
 const build_options = @import("build_options");
@@ -13,6 +13,10 @@ const policy = @import("policy.zig");
 const resolver = @import("resolver.zig");
 const consin = @import("consin.zig");
 const web = @import("web.zig");
+const Host = @import("host/host.zig").Host;
+const dotl_kern = @import("dotl/kern.zig");
+const hidx_kern = @import("rootindex/kern.zig");
+const hstream = @import("hstream.zig");
 
 /// False where kern isn't built (a checkout without drawterm).
 pub const available = build_options.kern;
@@ -40,9 +44,16 @@ const c_stub = struct {
     fn h9_kern_park() noreturn {
         unreachable;
     }
-    fn h9_kern_spawn(_: [*:0]const u8, _: *const fn (?*anyopaque) callconv(.c) void, _: ?*anyopaque) c_int {
+    fn h9_kern_spawn(_: ?*anyopaque, _: [*:0]const u8, _: *const fn (?*anyopaque) callconv(.c) void, _: ?*anyopaque) c_int {
         return -1;
     }
+    fn h9_kern_newmach(_: ?*anyopaque) ?*anyopaque {
+        return null;
+    }
+    fn h9_kern_machkernel(_: ?*anyopaque) ?*anyopaque {
+        return null;
+    }
+    fn h9_kern_machdetach(_: ?*anyopaque) void {}
     fn h9_kern_kprocdetached(_: [*:0]const u8, _: *const fn (?*anyopaque) callconv(.c) void, _: ?*anyopaque) c_int {
         return -1;
     }
@@ -287,7 +298,10 @@ const c_stub = struct {
 const c_real = struct {
     extern fn h9_kern_boot() c_int;
     extern fn h9_kern_park() noreturn;
-    extern fn h9_kern_spawn(name: [*:0]const u8, func: *const fn (?*anyopaque) callconv(.c) void, arg: ?*anyopaque) c_int;
+    extern fn h9_kern_spawn(mach: ?*anyopaque, name: [*:0]const u8, func: *const fn (?*anyopaque) callconv(.c) void, arg: ?*anyopaque) c_int;
+    extern fn h9_kern_newmach(kernel: ?*anyopaque) ?*anyopaque;
+    extern fn h9_kern_machkernel(mach: ?*anyopaque) ?*anyopaque;
+    extern fn h9_kern_machdetach(mach: ?*anyopaque) void;
     extern fn h9_kern_kprocdetached(name: [*:0]const u8, func: *const fn (?*anyopaque) callconv(.c) void, arg: ?*anyopaque) c_int;
     extern fn h9_kern_pid() c_ulong;
     extern fn h9_kern_fork(flag: c_int, pid: c_ulong, func: *const fn (?*anyopaque) callconv(.c) void, arg: ?*anyopaque) c_int;
@@ -428,18 +442,86 @@ fn bootThread() void {
     if (ok) c.h9_kern_park();
 }
 
-/// Runs `func(arg)` on a new kernel process with its own host thread, a
-/// fresh namespace containing only #/, no fds, an empty environment and no
-/// parent. The process ends when `func` returns.
-pub fn spawn(name: [*:0]const u8, comptime T: type, comptime func: fn (*T) void, arg: *T) Error!void {
-    try boot();
-    const Tramp = struct {
-        fn run(p: ?*anyopaque) callconv(.c) void {
-            func(@ptrCast(@alignCast(p.?)));
-        }
-    };
-    if (c.h9_kern_spawn(name, Tramp.run, arg) < 0) return error.OutOfMemory;
+/// A kernel (design/kernel-port.md, "A kernel is a value"): one
+/// machine's processes and what they share, which no other kernel in the
+/// host process sees. The processes `spawn` starts and their descendants
+/// are its; its process list, note groups, `#s` board and `/proc` are
+/// theirs alone, and so are the settings #ℓ, #ι and host streams look up
+/// for it, which were tables keyed by machine. `Machine` makes one for
+/// each run.
+///
+/// Its C half (the kernel's Hmach) is counted, so processes and host
+/// streams can outlive the Kernel; once `deinit` has run, lookups from
+/// them find no Kernel.
+pub const Kernel = struct {
+    gpa: std.mem.Allocator,
+    /// The host it may reach (design/host-handles.md). Only held for now:
+    /// host-handles' later steps move the devices onto it.
+    host: *const Host,
+    mach: *Mach,
+    /// Guards the settings below, which a process reads from its own
+    /// thread while the machine's first process sets them.
+    lock: std.atomic.Mutex = .unlocked,
+    /// What #ℓ's translators are made with (src/dotl/kern.zig).
+    dotl: ?dotl_kern.Config = null,
+    /// Where #ι caches compiled indexes (src/rootindex/kern.zig).
+    hidx: ?hidx_kern.Config = null,
+    /// What #ℓ redials a host stream with (src/hstream.zig).
+    streams: ?hstream.HostSet = null,
+
+    /// A kernel that reaches `host`, which must outlive it. Boots the
+    /// host process's kernel threads the first time.
+    pub fn init(gpa: std.mem.Allocator, host: *const Host) Error!*Kernel {
+        try boot();
+        const k = try gpa.create(Kernel);
+        errdefer gpa.destroy(k);
+        const m = c.h9_kern_newmach(k) orelse return error.OutOfMemory;
+        k.* = .{ .gpa = gpa, .host = host, .mach = @ptrCast(m) };
+        return k;
+    }
+
+    /// Lets go of the kernel. Its processes must have ended, or at least
+    /// stopped looking at its settings.
+    pub fn deinit(k: *Kernel) void {
+        c.h9_kern_machdetach(k.mach);
+        k.gpa.destroy(k);
+    }
+
+    /// The kernel whose machine is `mach` (a `Mach`, or the pointer C
+    /// passes as a machine's key), or null once it has been deinited.
+    pub fn ofMach(m: ?*anyopaque) ?*Kernel {
+        return @ptrCast(@alignCast(c.h9_kern_machkernel(m)));
+    }
+
+    pub fn lockSettings(k: *Kernel) void {
+        while (!k.lock.tryLock()) std.atomic.spinLoopHint();
+    }
+
+    /// Runs `func(arg)` on a new process in this kernel, with its own
+    /// host thread, a fresh namespace containing only #/, no fds, an
+    /// empty environment and no parent. The process ends when `func`
+    /// returns.
+    pub fn spawn(k: *Kernel, name: [*:0]const u8, comptime T: type, comptime func: fn (*T) void, arg: *T) Error!void {
+        const Tramp = struct {
+            fn run(p: ?*anyopaque) callconv(.c) void {
+                func(@ptrCast(@alignCast(p.?)));
+            }
+        };
+        if (c.h9_kern_spawn(k.mach, name, Tramp.run, arg) < 0) return error.OutOfMemory;
+    }
+};
+
+/// Spawns `func(arg)` as the first process of a kernel of its own, which
+/// reaches no host and which only the process holds: a machine of one
+/// process tree, for a kernel thread such as the interval timers' and
+/// for tests.
+pub fn spawnAlone(name: [*:0]const u8, comptime T: type, comptime func: fn (*T) void, arg: *T) Error!void {
+    const k = try Kernel.init(std.heap.page_allocator, &no_host);
+    defer k.deinit();
+    try k.spawn(name, T, func, arg);
 }
+
+const no_host: Host = .{};
 
 /// Runs `func(arg)` on a kproc started from the calling process, once it
 /// has dropped the fds, namespace, dot and slash it shares with the
@@ -693,7 +775,7 @@ pub const NoteFlag = enum(c_int) { user = 0, exit = 1, debug = 2 };
 /// machine. Returns false if its queue was full. Fails, with "process
 /// exited" as the error string, if there's no such process.
 pub fn postNote(to: u32, msg: [*:0]const u8, flag: NoteFlag) Error!bool {
-    return try check(c.h9_kern_postnote(to, msg, @intFromEnum(flag))) != 0;
+    return try check(c.h9_kern_postnote(to, msg, @backingInt(flag))) != 0;
 }
 
 /// A reference to the calling process, for notes posted later from any
@@ -705,7 +787,7 @@ pub fn selfRef() ?*anyopaque {
 /// Posts a note to a `selfRef` process; false if it wasn't queued (a full
 /// queue, or the process ended).
 pub fn postNoteRef(ref: *anyopaque, msg: [*:0]const u8, flag: NoteFlag) bool {
-    return c.h9_kern_postnoteref(ref, msg, @intFromEnum(flag)) != 0;
+    return c.h9_kern_postnoteref(ref, msg, @backingInt(flag)) != 0;
 }
 
 pub fn unref(ref: *anyopaque) void {
@@ -715,7 +797,7 @@ pub fn unref(ref: *anyopaque) void {
 /// Posts a note to every process but the caller in note group `noteid` of
 /// the caller's machine.
 pub fn postNoteGroup(noteid: u32, msg: [*:0]const u8, flag: NoteFlag) void {
-    c.h9_kern_postnotepg(noteid, msg, @intFromEnum(flag));
+    c.h9_kern_postnotepg(noteid, msg, @backingInt(flag));
 }
 
 /// The calling process's note group: machine-local, inherited by children
@@ -752,7 +834,7 @@ pub const NoteAction = enum(c_int) {
 /// Also clears the "interrupt this call" flag.
 pub fn popNote(msg: *[ERRMAX]u8, pc: u64) NoteAction {
     msg[0] = 0;
-    return @enumFromInt(c.h9_kern_popnote(msg, pc));
+    return @fromBackingInt(@intCast(c.h9_kern_popnote(msg, pc)));
 }
 
 /// noted's arguments (9front's libc.h).
@@ -764,9 +846,9 @@ pub const Noted = enum(c_int) { cont = 0, dflt = 1, save = 2, rstr = 3, _ };
 /// error string set, for noted outside a handler with anything but `rstr`.
 pub fn noted(arg: Noted, msg: *[ERRMAX]u8) Error!NoteAction {
     msg[0] = 0;
-    const r = c.h9_kern_noted(@intFromEnum(arg), msg);
+    const r = c.h9_kern_noted(@backingInt(arg), msg);
     if (r < 0) return error.Kern;
-    return @enumFromInt(r);
+    return @fromBackingInt(@intCast(r));
 }
 
 /// A machine as the kernel sees it: the process tree from one `spawn`.
@@ -789,7 +871,7 @@ pub const Mach = opaque {
     /// from any thread, including ones that aren't kernel processes.
     /// Returns how many processes it reached.
     pub fn post(m: *Mach, to: To, msg: [*:0]const u8) u32 {
-        return @intCast(c.h9_kern_postmach(m, @intFromEnum(to), msg, @intFromEnum(NoteFlag.user)));
+        return @intCast(c.h9_kern_postmach(m, @backingInt(to), msg, @backingInt(NoteFlag.user)));
     }
 };
 
@@ -1574,8 +1656,8 @@ fn h9_policy_active() callconv(.c) c_int {
 
 fn h9_policy_check(path: [*]const u8, len: c_long, op: c_int) callconv(.c) c_int {
     const p = fs_plan orelse return 0;
-    const o = std.enums.fromInt(policy.Op, op) orelse return @intFromEnum(policy.Verdict.hidden);
-    return @intFromEnum(p.check(path[0..@intCast(len)], o));
+    const o = std.enums.fromInt(policy.Op, op) orelse return @backingInt(policy.Verdict.hidden);
+    return @backingInt(p.check(path[0..@intCast(len)], o));
 }
 
 // devip's sandbox hooks (src/kern/netcheck.h): leaves that return a
@@ -1816,7 +1898,7 @@ test "spawn a process and read a host file through kern" {
         }
     };
     var t: T = .{ .root = root };
-    try spawn("test", T, T.run, &t);
+    try spawnAlone("test", T, T.run, &t);
     while (!t.done.load(.acquire)) std.Thread.yield() catch {};
     if (t.err) |e| return e;
     try std.testing.expectEqualStrings("mount -a #s/boot /\n", t.data[0..t.len]);
@@ -1933,7 +2015,7 @@ test "fork shares or copies groups, and await returns wait records" {
         }
     };
     var t: T = .{ .root = root };
-    try spawn("test", T, T.run, &t);
+    try spawnAlone("test", T, T.run, &t);
     while (!t.done.load(.acquire)) std.Thread.yield() catch {};
     if (t.err) |e| {
         std.debug.print("failed in {s}\n", .{t.where});
@@ -2050,8 +2132,8 @@ test "notes queue per process, reach note groups and stay in their machine" {
         }
     };
     var t: T = .{};
-    try spawn("test", T, T.run, &t);
-    try spawn("other", T, T.other, &t);
+    try spawnAlone("test", T, T.run, &t);
+    try spawnAlone("other", T, T.other, &t);
     while (!t.done.load(.acquire)) std.Thread.yield() catch {};
     while (!t.other_done.load(.acquire)) std.Thread.yield() catch {};
     if (t.err) |e| {
@@ -2062,6 +2144,72 @@ test "notes queue per process, reach note groups and stay in their machine" {
     try std.testing.expectEqual(NoteAction.kill, t.acts[0]);
     try std.testing.expectEqualStrings("die", std.mem.sliceTo(&t.got[1], 0));
     try std.testing.expectEqual(NoteAction.kill, t.acts[1]);
+}
+
+test "two machines don't share /srv [kernel-port]" {
+    if (!available) return error.SkipZigTest;
+    const T = struct {
+        const Self = @This();
+        errs: [2]?anyerror = .{ null, null },
+        /// How many machines have posted their service.
+        posted: std.atomic.Value(u32) = .init(0),
+        looked: std.atomic.Value(u32) = .init(0),
+        done: std.atomic.Value(u32) = .init(0),
+
+        const names = [2][*:0]const u8{ "#s/kernel-port-a", "#s/kernel-port-b" };
+
+        fn machine(t: *Self, i: usize) void {
+            defer _ = t.done.fetchAdd(1, .release);
+            t.body(i) catch |e| {
+                t.errs[i] = e;
+                // The other machine mustn't wait for this one.
+                _ = t.posted.fetchAdd(2, .release);
+                _ = t.looked.fetchAdd(2, .release);
+            };
+        }
+        fn body(t: *Self, i: usize) !void {
+            const fd = try create(names[i], OWRITE, 0o600);
+            defer close(fd) catch {};
+            _ = t.posted.fetchAdd(1, .release);
+            while (t.posted.load(.acquire) < 2) std.Thread.yield() catch {};
+            var buf: [256]u8 = undefined;
+            // Its own service is there, and the other machine's isn't,
+            // though both are posted under the same #s.
+            _ = try stat(names[i], &buf);
+            if (stat(names[1 - i], &buf)) |_| return error.SharedSrv else |_| {}
+            // Nor does a listing of its board show the other's.
+            const dfd = try open("#s", OREAD);
+            defer close(dfd) catch {};
+            var dirs: [4096]u8 = undefined;
+            var n: usize = 0;
+            while (n < dirs.len) {
+                const k = try pread(dfd, dirs[n..], @intCast(n));
+                if (k == 0) break;
+                n += k;
+            }
+            const other = std.mem.span(names[1 - i])[3..];
+            if (std.mem.indexOf(u8, dirs[0..n], other) != null) return error.SharedSrvListing;
+            // Stay posted until both have looked.
+            _ = t.looked.fetchAdd(1, .release);
+            while (t.looked.load(.acquire) < 2) std.Thread.yield() catch {};
+        }
+        fn m0(t: *Self) void {
+            t.machine(0);
+        }
+        fn m1(t: *Self) void {
+            t.machine(1);
+        }
+    };
+    var t: T = .{};
+    const host: Host = .{};
+    const k0 = try Kernel.init(std.testing.allocator, &host);
+    defer k0.deinit();
+    const k1 = try Kernel.init(std.testing.allocator, &host);
+    defer k1.deinit();
+    try k0.spawn("m0", T, T.m0, &t);
+    try k1.spawn("m1", T, T.m1, &t);
+    while (t.done.load(.acquire) < 2) std.Thread.yield() catch {};
+    for (t.errs) |e| if (e) |x| return x;
 }
 
 test "#p lists and serves only the caller's machine, by machine-local pid" {
@@ -2180,8 +2328,8 @@ test "#p lists and serves only the caller's machine, by machine-local pid" {
             a.t.machine(1);
         }
     };
-    try spawn("m0", @TypeOf(m0), M0.run, &m0);
-    try spawn("m1", @TypeOf(m1), M1.run, &m1);
+    try spawnAlone("m0", @TypeOf(m0), M0.run, &m0);
+    try spawnAlone("m1", @TypeOf(m1), M1.run, &m1);
     while (t.ready.load(.acquire) < 2) std.Thread.yield() catch {};
     t.go.store(true, .release);
     while (t.done.load(.acquire) < 2) std.Thread.yield() catch {};
@@ -2257,7 +2405,7 @@ test "tsleep returns at its deadline, returns early on wakeup, and fails with in
         }
     };
     var t: T = .{};
-    try spawn("tsleep", T, T.run, &t);
+    try spawnAlone("tsleep", T, T.run, &t);
     while (!t.done.load(.acquire)) std.Thread.yield() catch {};
     if (t.err) |e| return e;
     errdefer std.debug.print("results {any}, ms {any}, timers {any}\n", .{ t.rs, t.ms, t.timers });
@@ -2440,7 +2588,7 @@ test "#O overlays a host tree in memory and never writes it" {
         }
     };
     var t: T = .{ .root = root };
-    try spawn("test", T, T.run, &t);
+    try spawnAlone("test", T, T.run, &t);
     while (!t.done.load(.acquire)) std.Thread.yield() catch {};
     if (t.err) |e| {
         std.debug.print("failed in {s}\n", .{t.where});
@@ -2517,7 +2665,7 @@ test "a kproc started from a process in an overlay doesn't keep the overlay" {
     var k: K = .{};
     defer k.release.store(true, .release);
     var t: T = .{ .root = root, .k = &k };
-    try spawn("test", T, T.run, &t);
+    try spawnAlone("test", T, T.run, &t);
     while (!t.done.load(.acquire)) std.Thread.yield() catch {};
     if (t.err) |e| return e;
 }
@@ -2574,7 +2722,7 @@ test "#O finds, removes and lists the children of a large directory" {
         }
     };
     var t: T = .{ .root = root };
-    try spawn("test", T, T.run, &t);
+    try spawnAlone("test", T, T.run, &t);
     while (!t.done.load(.acquire)) std.Thread.yield() catch {};
     if (t.err) |e| return e;
     try std.testing.expectEqual(@as(usize, count / 2), t.listed);
@@ -2696,7 +2844,7 @@ test "#U!c resolves symlinks inside the tree it's bound from [34]" {
         }
     };
     var t: T = .{ .root = buf[0..n :0] };
-    try spawn("test", T, T.run, &t);
+    try spawnAlone("test", T, T.run, &t);
     while (!t.done.load(.acquire)) std.Thread.yield() catch {};
     if (t.err) |e| {
         std.debug.print("failed in {s}\n", .{t.where});

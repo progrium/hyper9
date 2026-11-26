@@ -1014,7 +1014,10 @@ pub fn rendezvous(arg0: ?*anyopaque, arg1: ?*anyopaque) ?*anyopaque {
             const val = p.rendval;
             p.rendval = arg1;
 
-            while (@as(*volatile c_uint, &p.mach).* != 0) {}
+            // 9front waits here for p to leave its CPU (p->mach). A
+            // Proc has its own thread, and unpark copes with one that
+            // hasn't parked yet, so there's nothing to wait for; the
+            // scheduler (design/scheduler.md) decides this for its Cont.
             sync.unpark(p);
             c.unlock(&rg.ref.lk);
             return val;
