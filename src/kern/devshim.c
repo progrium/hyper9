@@ -283,6 +283,33 @@ h9_shim_fs_mkfifo(Chan *c, char *name, ulong perm)
 	return 0;
 }
 
+/*
+ * ns.c's pgrpcpy and devsrv.c's h9_srvpost, which raise, for
+ * src/kern/dev/ns.zig.
+ */
+extern void pgrpcpy(Pgrp*, Pgrp*, int);
+extern void h9_srvpost(void*, char*, Chan*, ulong);
+
+int
+h9_shim_pgrpcpy(Pgrp *to, Pgrp *from, int flag)
+{
+	if(waserror())
+		return -1;
+	pgrpcpy(to, from, flag);
+	poperror();
+	return 0;
+}
+
+int
+h9_shim_srvpost(void *board, char *name, Chan *c, ulong perm)
+{
+	if(waserror())
+		return -1;
+	h9_srvpost(board, name, c, perm);
+	poperror();
+	return 0;
+}
+
 #ifndef H9_NSKERNEL
 /*
  * devip's host-socket calls, which raise, for src/kern/netcheck.zig:

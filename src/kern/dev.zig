@@ -560,7 +560,9 @@ const natives = .{
     @import("dev/pipe.zig").Device,
     @import("dev/root.zig").Device,
     @import("dev/pty.zig").Device,
-};
+} ++ if (port.options.nskernel) .{
+    @import("dev/ns.zig").Device,
+} else .{};
 
 /// d's functions, if it's native.
 fn nativeOps(d: *Dev) ?*const Ops {

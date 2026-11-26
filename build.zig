@@ -771,8 +771,8 @@ const nskern_sources = [_][]const u8{
     "procinit.c", "stub.c", "waserror.c",
 };
 const nskern_h9 = [_][]const u8{
-    "glue.c",       "proc.c",    "ns.c",     "devns.c",  "nstab.c",   "devoverlay.c", "devsrv.c",
-    "devhstream.c", "devdotl.c", "kserve.c", "tsleep.c", "devshim.c", "werrstr.c",    "rootdial.c",
+    "glue.c",    "proc.c",   "ns.c",     "nstab.c",   "devoverlay.c", "devsrv.c",   "devhstream.c",
+    "devdotl.c", "kserve.c", "tsleep.c", "devshim.c", "werrstr.c",    "rootdial.c",
 };
 // libc's files the kernel subset uses, from kern_libs' list.
 const nskern_libc_skip = [_][]const u8{ "pushssl.c", "pushtls.c", "crypt.c", "dial.c" };

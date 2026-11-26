@@ -18,6 +18,7 @@
 //! - `dev/pipe.zig` and `dev/root.zig`: devpipe.c and devroot.c.
 //! - `dev/pty.zig`: h9's src/kern/devpty.c, the Linux ABI's ptys.
 //! - `netcheck.zig`: h9's src/kern/netcheck.c, devip's sandbox hooks.
+//! - `dev/ns.zig`: h9's src/kern/devns.c, the namespace kernel's #N.
 //! - `fscheck.zig`: the kernel's half of h9's src/kern/fscheck.c, links,
 //!   renames, and FIFOs by path for the Linux ABI.
 //!
@@ -47,6 +48,7 @@ pub const devroot = @import("dev/root.zig");
 pub const devpty = @import("dev/pty.zig");
 pub const netcheck = @import("netcheck.zig");
 pub const fscheck = @import("fscheck.zig");
+pub const devns = @import("dev/ns.zig");
 
 comptime {
     qio.exportC();
@@ -64,6 +66,7 @@ comptime {
     }
     // Without devfs, nstab.c stands in for these.
     if (options.hostfs) fscheck.exportC();
+    if (options.nskernel) devns.exportC();
 }
 
 test {
@@ -82,6 +85,7 @@ test {
     _ = devpty;
     _ = netcheck;
     _ = fscheck;
+    _ = devns;
 }
 
 /// A kernel error. The Plan 9 error string is on the process, in

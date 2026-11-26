@@ -1,13 +1,13 @@
 //! The namespace kernel (design/epoch-0/namespace-kernel.md): h9's kernel with
 //! nothing for running programs, holding namespaces that `#N`
-//! (src/kern/devns.c) makes and composes, served over 9P2000 by kserve
+//! (src/kern/dev/ns.zig) makes and composes, served over 9P2000 by kserve
 //! with each attach name a namespace's id.
 //!
 //! On the web host it's `h9ns.wasm`, whose `main` boots the kernel and
 //! serves each port the page hands it (h9ns.js's `connect`). Natively it's
 //! `libh9ns.a`, with the C API in `h9ns.h`.
 //!
-//! This file has the Zig leaves devns.c calls: `h9_ns_ctl`, which runs a
+//! This file has the Zig leaves #N (src/kern/dev/ns.zig) calls: `h9_ns_ctl`, which runs a
 //! ctl line's bind, mount, unmount or cd in the calling process's
 //! namespace, and the dials its mounts make.
 
@@ -311,7 +311,7 @@ fn runOp(ns: ?*anyopaque, arena: std.mem.Allocator, op: newns.Op, why: *[]const 
         },
         .unmount => |u| try kern.unmount(if (u.from) |f| try arena.dupeSentinel(u8, f, 0) else null, try arena.dupeSentinel(u8, u.to, 0)),
         .cd => |d| try kern.chdir(try arena.dupeSentinel(u8, d, 0)),
-        // devns.c runs clear itself.
+        // #N runs clear itself.
         .clear => {
             why.* = "clear: not in a line with others";
             return error.Dial;
@@ -320,7 +320,7 @@ fn runOp(ns: ?*anyopaque, arena: std.mem.Allocator, op: newns.Op, why: *[]const 
 }
 
 /// Runs one ctl line (design/epoch-0/namespace-kernel.md, Composing) in the
-/// calling process's namespace, which devns.c has set to namespace `ns`'s.
+/// calling process's namespace, which #N has set to namespace `ns`'s.
 /// Returns 0, or -1 with the error in `err` (ERRMAX bytes); the line's
 /// operations before a failed one stand.
 export fn h9_ns_ctl(ns: ?*anyopaque, line: [*]const u8, n: c_long, err: [*]u8) c_int {
@@ -452,7 +452,7 @@ const Accepted = struct {
 
     fn ready(ctx: *anyopaque, id: u32) void {
         const a: *Accepted = @ptrCast(@alignCast(ctx));
-        if (h9_ns_post(@intFromEnum(Post.stream), @intCast(id), @ptrCast(&a.aname)) < 0) hstream.release(id);
+        if (h9_ns_post(@backingInt(Post.stream), @intCast(id), @ptrCast(&a.aname)) < 0) hstream.release(id);
     }
 
     fn done(ctx: *anyopaque, handed: bool) void {
@@ -526,7 +526,7 @@ export fn h9ns_serve(fd: c_int, aname: ?[*:0]const u8) c_int {
     if (comptime nofds) return -1;
     if (bootOnce() < 0) return -1;
     if (fd < 0) return -1;
-    if (h9_ns_post(@intFromEnum(Post.fd), fd, aname orelse "") < 0) return -1;
+    if (h9_ns_post(@backingInt(Post.fd), fd, aname orelse "") < 0) return -1;
     return 0;
 }
 

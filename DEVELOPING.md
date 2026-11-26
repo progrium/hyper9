@@ -416,7 +416,7 @@ development builds report `git describe` (`-Dversion=V` overrides it).
 | `src/engine.zig`, `src/engine/` | the engine interface and engines (HVF, KVM, WHP, sud, and hcpu, h9's own CPUs, which the web host uses too), with the guest-physical allocator and page tables the hypervisor engines share |
 | `src/engine/hcpu/hcpu.zig`, `src/engine/hcpu/jit/`, `src/engine/hcpu/interp/` | h9's own CPUs for the emulator (hcpu): the JIT's IR and its reference evaluator, the runtime ABI, the emitters (arm64, wasm), the front ends (`a64/`), and the interpreters and software TLB the two tiers share. `src/engine/hcpu/jit/README.md` has the contracts |
 | `src/web.zig`, `src/web/` | the web host: coroutines on JSPI, its `std.Io` and console, the JS host (`h9-web.js`, `h9-node`, `worker.js`, `wasi-mem.js`, and `statictree.js` for static dotfs trees) and the demo page |
-| `src/nskernel.zig`, `src/nskernel/`, `src/kern/devns.c`, `src/kern/nstab.c` | the namespace kernel: its Zig root (ctl lines, dials, serving, the native API), `h9ns.h`, the `#N` device, and its device table and stubs; `src/web/h9ns.js` and `h9ns-worker.js` are its JS host |
+| `src/nskernel.zig`, `src/nskernel/`, `src/kern/dev/ns.zig`, `src/kern/nstab.c` | the namespace kernel: its Zig root (ctl lines, dials, serving, the native API), `h9ns.h`, the `#N` device, and its device table and stubs; `src/web/h9ns.js` and `h9ns-worker.js` are its JS host |
 | `src/arch/` | per-architecture Ureg/ABI and the guest shims |
 | `third_party/drawterm` | vendored drawterm (git subtree; kern and libraries). Local changes: the sandbox hooks in `kern/devfs-posix.c` and `kern/devfs-win32.c` |
 | `tests/engines.zig` | engine conformance tests |
