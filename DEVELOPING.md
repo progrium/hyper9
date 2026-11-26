@@ -93,6 +93,7 @@ zig build          # builds and ad-hoc signs zig-out/bin/h9 with h9.entitlements
 zig build test     # unit tests, and the engine tests on every engine built in (not the integration cases)
 zig build kern     # compiles drawterm's kern and the libraries it uses, with the parts ported to Zig (src/kern/port.zig)
 zig build kern-test  # the ported kernel's own cases (src/kern/*.zig), on the native namespace kernel; zig build test runs them too
+zig build sched-test  # the scheduler's kernel stacks and park and resume (src/kern/sched/), with no kernel or engine; compiled only for a -Dtarget the host can't run, and for wasm32 run through Asyncify under Node if Binaryen's wasm-opt is on PATH; zig build test runs them too
 zig build embed    # builds docs/embedding/embed.zig, the embedding guide's example, as zig-out/bin/embed
 zig build integration  # real 9front binaries from the root tree through the h9 CLI
 zig build proposal -Dp=baseline  # one proposal's demos, web cases, and integration cases, by slug
