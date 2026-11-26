@@ -51,6 +51,22 @@ fn raiseFdLimit() void {
 }
 
 pub fn main(init: std.process.Init) !u8 {
+    if (comptime !web) return realMain(init);
+    // On the web host, main is the first task on the one executor
+    // (src/kern/sched/web.zig), which runs every task until it returns.
+    const S = struct {
+        var in: std.process.Init = undefined;
+        var out: anyerror!u8 = 0;
+        fn f() void {
+            out = realMain(in);
+        }
+    };
+    S.in = init;
+    h9.web.task.runMain(S.f);
+    return S.out;
+}
+
+fn realMain(init: std.process.Init) !u8 {
     raiseFdLimit();
     const arena = init.arena.allocator();
     const io = if (web) h9.web.io() else init.io;

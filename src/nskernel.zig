@@ -552,9 +552,14 @@ export fn h9ns_addfd(name: ?[*:0]const u8, fd: c_int) c_int {
 /// The web host's: boots and serves the ports the page hands it.
 pub fn main() void {
     if (comptime !web.enabled) return;
+    web.task.runMain(serve);
+}
+
+/// The first task on the web host's executor.
+fn serve() void {
     if (bootOnce() < 0) {
         std.debug.print("h9ns: {s}\n", .{std.mem.sliceTo(&boot_err, 0)});
         return;
     }
-    while (true) web.coro.sleep(1 << 30);
+    while (true) web.task.sleep(1 << 30);
 }

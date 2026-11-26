@@ -25,9 +25,9 @@ const Error = port.Error;
 /// A sleep condition, as C's int (*)(void*).
 pub const Cond = *const fn (?*anyopaque) callconv(.c) c_int;
 
-/// Whether processes can park on continuations on this host. Not yet on
-/// the web host, whose continuations need Asyncify run on h9.wasm
-/// (design/scheduler.md, step 6); there every process waits in os-wasm.c.
+/// Whether processes park on the kernel's continuations here. Not on the
+/// web host, where every process is already a task on its one executor
+/// (sched/web.zig) and waits in os-wasm.c's procsleep, which parks it.
 pub const can_park = !builtin.cpu.arch.isWasm();
 
 /// p's kernel continuation, if the scheduler runs it.

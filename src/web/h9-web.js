@@ -1,6 +1,7 @@
 // h9's JS host (design/epoch-0/browser-host.md): instantiates h9.wasm, runs
-// its coroutines on JavaScript Promise Integration, and compiles the
-// modules its JIT builds (wasmJit). The same code runs under Node
+// its executor (src/kern/sched/web.zig) on JavaScript Promise Integration,
+// does the ops its tasks wait on, and compiles the modules its JIT builds
+// (wasmJit). The same code runs under Node
 // (h9-node) and in a Web Worker (worker.js), with the page's side of it in
 // createMachine.
 
@@ -142,7 +143,16 @@ export function wasmJit({ memory, table, exports, log = console.error }) {
 }
 
 // Runs fn on a later turn of the event loop. setTimeout(0) is clamped to
-// 4 ms after a few nested calls, which would throttle every yield.
+// 4 ms after a few nested calls, which would throttle every idle.
+/**
+ * An import that waits on JavaScript, as an op (src/kern/sched/web.zig):
+ * run() makes it start f and return the op's id at once, and the task
+ * that called it waits in h9_task_await until the executor's idle sees
+ * f's result. f gets the import's arguments; it may write into wasm
+ * memory when it ends, since a waiting task's stack stays put.
+ */
+const asOp = (f) => ({ op: f });
+
 const nextTask = (() => {
   if (typeof setImmediate === 'function') return (fn) => setImmediate(fn);
   const ch = new MessageChannel();
@@ -161,7 +171,7 @@ const nextTask = (() => {
  *   readStdin(n) -> Promise<Uint8Array|null|'cancelled'>, cancelStdin(),
  *   waitSignal() -> Promise<number>, stopSignals(), setRaw(on).
  * - stats({ maxStack }): called once h9 ends, with the deepest any
- *   coroutine's stack got at a park, in bytes.
+ *   task's stack got at a park, in bytes.
  * - gfx: a GfxHost, the page's canvas in a Worker
  *   (design/epoch-0/browser-gfx.md); without one, --gfx fails as on a build
  *   without graphics.
@@ -193,10 +203,18 @@ export async function run({ h9, wasi, host, log = console.error, stats, gfx, cre
   const mem = new WebAssembly.Memory({ initial: Math.max(h9pages, 1), maximum: maxPages });
   const str = (p, n) => new TextDecoder().decode(new Uint8Array(mem.buffer, p >>> 0, n >>> 0));
 
-  // Coroutines. A park is a Promise that unpark resolves; an unpark
-  // before the park leaves a permit, so the park returns at once.
-  const waiters = new Map();
-  const permits = new Set();
+  // The executor's ops: started by an import, and handed back by
+  // ops_done once they end. idle suspends the executor until one does,
+  // or for ms when that isn't negative.
+  let nextOp = 1;
+  const opsDone = [];
+  let wake = null;
+  const opWake = () => { if (wake) { const w = wake; wake = null; w(); } };
+  const startOp = (f) => (...a) => {
+    const id = nextOp++;
+    (async () => f(...a))().then((r) => { opsDone.push(id, r | 0); opWake(); }, die);
+    return id;
+  };
   let fatal = null;
   let finish;
   const done = new Promise((res) => { finish = res; });
@@ -205,30 +223,29 @@ export async function run({ h9, wasi, host, log = console.error, stats, gfx, cre
     fatal = e;
     finish(e instanceof Exit ? e.code : Promise.reject(e));
   };
-  let entry, hx;
+  let hx;
   const h9table = h9tableSize === null ? null : new WebAssembly.Table({ element: 'anyfunc', initial: h9tableSize });
   const jit = h9table && wasmJit({ memory: mem, table: h9table, exports: () => hx, log });
   const h9imports = {
-    park: new WebAssembly.Suspending((id, ms) => {
-      if (permits.delete(id)) return 1;
+    idle: new WebAssembly.Suspending((ms) => {
+      if (opsDone.length) return 0;
       return new Promise((res) => {
         let t = null;
-        if (ms >= 0) t = setTimeout(() => { waiters.delete(id); res(0); }, ms);
-        waiters.set(id, () => { if (t !== null) clearTimeout(t); res(1); });
+        wake = () => { if (t !== null) clearTimeout(t); res(0); };
+        if (ms === 0) nextTask(opWake);
+        else if (ms > 0) t = setTimeout(opWake, ms);
       });
     }),
-    unpark: (id) => {
-      const w = waiters.get(id);
-      if (w) { waiters.delete(id); w(); } else permits.add(id);
+    ops_done: (p, n) => {
+      const k = Math.min(n >>> 0, opsDone.length / 2);
+      new Int32Array(mem.buffer, p >>> 0, k * 2).set(opsDone.splice(0, k * 2));
+      return k;
     },
-    start: (c) => nextTask(() => entry(c).catch(die)),
-    yield: new WebAssembly.Suspending(() => new Promise((res) => nextTask(res))),
-    sleep: new WebAssembly.Suspending((ms) => new Promise((res) => setTimeout(res, ms))),
     panic: (p, n) => { throw new Panic(str(p, n)); },
     random: (p, n) => { crypto.getRandomValues(new Uint8Array(mem.buffer, p >>> 0, n >>> 0)); },
     now_ms: () => Date.now(),
     mono_ms: () => performance.now(),
-    read_stdin: new WebAssembly.Suspending(async (p, n) => {
+    read_stdin: asOp(async (p, n) => {
       const got = await host.readStdin(n >>> 0);
       if (got === 'cancelled') return -2;
       if (got === null) return 0;
@@ -237,13 +254,14 @@ export async function run({ h9, wasi, host, log = console.error, stats, gfx, cre
       return got.length;
     }),
     cancel_stdin: () => host.cancelStdin(),
-    wait_signal: new WebAssembly.Suspending(() => host.waitSignal()),
+    wait_signal: asOp(() => host.waitSignal()),
     stop_signals: () => host.stopSignals(),
     set_raw: (on) => host.setRaw(!!on),
     ...wsImports(() => mem, str, credentials, ports instanceof Ports ? ports : new Ports(ports)),
     ...(jit ? { jit_compile: jit.jit_compile, jit_drop: jit.jit_drop } : {}),
     ...(gfx ?? noGfx).imports(() => mem),
   };
+  for (const [k, v] of Object.entries(h9imports)) if (v && typeof v === 'object' && v.op) h9imports[k] = startOp(v.op);
   const wimports = wasi(mem);
   wimports.proc_exit = (code) => { throw new Exit(code); };
   const inst = new WebAssembly.Instance(h9mod, {
@@ -254,17 +272,16 @@ export async function run({ h9, wasi, host, log = console.error, stats, gfx, cre
   hx = inst.exports;
   // Table slots from here on are the JIT's (src/engine/hcpu/jit/wasm_t1.zig).
   if (h9table && hx.jit_table_base) hx.jit_table_base(h9table.length);
-  entry = WebAssembly.promising(hx.h9_coro_entry);
-  // _start is the first coroutine, on the linker's stack.
+  // _start runs the executor, which idle suspends.
   WebAssembly.promising(hx._start)().then(() => finish(0), die);
   if (!stats) return done;
-  return done.finally(() => stats({ maxStack: Number(hx.h9_coro_maxdepth()) }));
+  return done.finally(() => stats({ maxStack: Number(hx.h9_task_maxdepth()) }));
 }
 
 // WebSockets for src/hstream.zig (design/epoch-0/websocket-9p.md, "On the
 // web host"): the page's WebSocket, or Node's, does the handshake,
-// TLS and framing. ws_opened and ws_recv are Suspending: each parks only
-// the stream's reader coroutine.
+// TLS and framing. ws_opened and ws_recv are ops: each parks only the
+// stream's reader task.
 // Whether this host's WebSocket takes handshake headers: Node's does, as
 // an option a browser's doesn't have.
 const wsHeaders = typeof process !== 'undefined' && !!process.versions?.node;
@@ -392,7 +409,7 @@ function wsImports(memory, str, credentials, ports) {
   const enc = new TextEncoder();
   const u8 = (p, n) => new Uint8Array(memory().buffer, p >>> 0, n >>> 0);
   const setU32 = (p, v) => new DataView(memory().buffer).setUint32(p >>> 0, v, true);
-  // Resolves the socket's waiter, if a coroutine is parked on it.
+  // Resolves the socket's waiter, if a task is waiting on it.
   const poke = (s) => { const w = s.waiter; s.waiter = null; w?.(); };
   const until = (s, ready) => (ready() ? null : new Promise((res) => { s.waiter = res; }));
   const addSock = (s) => {
@@ -416,7 +433,7 @@ function wsImports(memory, str, credentials, ports) {
     },
     // The next port the page serves the machine on, opened; -1 once the
     // machine stops serving.
-    port_accept: new WebAssembly.Suspending(async () => {
+    port_accept: asOp(async () => {
       for (;;) {
         if (ports.stopped) return -1;
         const e = ports.served.shift();
@@ -440,7 +457,7 @@ function wsImports(memory, str, credentials, ports) {
     },
     port_stop: () => ports.stop(),
     port_serving: () => (ports.serving ? 1 : 0) | (ports.serveNet ? 2 : 0),
-    ws_cred: new WebAssembly.Suspending(async (up, un, fp, fn, ap, an, op, on) => {
+    ws_cred: asOp(async (up, un, fp, fn, ap, an, op, on) => {
       const helper = an ? str(ap, an).split('\n') : undefined;
       const put = (t) => {
         const b = enc.encode(t);
@@ -514,7 +531,7 @@ function wsImports(memory, str, credentials, ports) {
       socks.set(id, s);
       return id;
     },
-    ws_opened: new WebAssembly.Suspending(async (id, p, n) => {
+    ws_opened: asOp(async (id, p, n) => {
       const s = socks.get(id);
       if (!s) return -1;
       await until(s, () => s.open !== 0);
@@ -523,7 +540,7 @@ function wsImports(memory, str, credentials, ports) {
       u8(p, b.length).set(b);
       return b.length;
     }),
-    ws_recv: new WebAssembly.Suspending(async (id, p, n, infop) => {
+    ws_recv: asOp(async (id, p, n, infop) => {
       const s = socks.get(id);
       if (!s) return -1;
       for (;;) {
@@ -622,7 +639,7 @@ const noGfx = {
     gfx_size: () => {},
     gfx_screen: () => {},
     gfx_flush: () => {},
-    gfx_wait: new WebAssembly.Suspending(async () => 0),
+    gfx_wait: asOp(async () => 0),
     gfx_paste: () => 0,
     gfx_snarf: () => {},
     gfx_cursor: () => {},
@@ -684,7 +701,7 @@ export class GfxHost {
   }
 
   // Copies the dirty rectangle of the screen onto the canvas, with each
-  // pixel's X byte set to 255, outside any coroutine.
+  // pixel's X byte set to 255, while the executor idles.
   #frame() {
     this.framing = false;
     const s = this.screen, d = this.dirty;
@@ -730,7 +747,7 @@ export class GfxHost {
         this.#mark([0, 0, dx, dy]);
       },
       gfx_flush: (x0, y0, x1, y1) => this.#mark([x0, y0, x1, y1]),
-      gfx_wait: new WebAssembly.Suspending(async (p, n) => {
+      gfx_wait: asOp(async (p, n) => {
         while (!this.q.length) await new Promise((res) => { this.waiter = res; });
         const k = Math.min(this.q.length, (n / 4) | 0);
         const out = new Int32Array(memory().buffer, p >>> 0, k * 4);

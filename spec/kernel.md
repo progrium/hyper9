@@ -36,7 +36,7 @@ Each CLI invocation is one machine: one host process with one VM. Each Plan 9 pr
 
 The kernel boots once per host process, on a private thread, because booting turns the calling thread into a Proc for good. Every guest process then runs on a kernel thread made by `h9_kern_spawn` in `src/kern/proc.zig`, which works like drawterm's `kproc` but can be called from a thread that isn't a Proc: it clones from the boot Proc, and the new thread sets up its groups once `up` is set.
 
-On a machine with executors (every native build; the web host keeps a thread per process until it has them), `h9_kern_spawn` and `rfork` don't start a host thread: they hand the new Proc to the machine's scheduler (`Hmach.schedstart`), which runs its exit loop on a continuation. `Machine.run` starts the first process this way and waits for it to exit. A process forked with `RFHOSTTHREAD`, h9's own 9P and pty servers, gets a host thread of its own, as every process does on the web host, and that thread creates its vCPU, which HVF binds to its creating thread.
+On a machine with executors (every native build; the web host's processes are tasks on its one executor, `src/kern/sched/web.zig`, which os-wasm.c's `osproc` starts), `h9_kern_spawn` and `rfork` don't start a host thread: they hand the new Proc to the machine's scheduler (`Hmach.schedstart`), which runs its exit loop on a continuation. `Machine.run` starts the first process this way and waits for it to exit. A process forked with `RFHOSTTHREAD`, h9's own 9P and pty servers, gets a host thread of its own, and that thread creates its vCPU, which HVF binds to its creating thread.
 
 ### Executors
 
@@ -76,7 +76,7 @@ So on HVF 64 is a hard cap on *live* processes, not just running ones, and a pip
 
 KVM in a nested x86\_64 VM (Linux 6.12, Intel VT-x) reports 1024, and recycles its vCPUs (see KVM above), so its limit is on live vCPUs too; with fewer file descriptors it reports less.
 
-With executors a machine uses only `--cpus` vCPUs (one per process on sud, which has no limit), so the cap doesn't apply. On the web host, where each process has a host thread, the answer (`src/cpupool.zig`) is a hybrid. A process creates and owns its vCPU on its own thread, as before, while the machine owns fewer than the limit less a reserve of 8.
+With executors a machine uses only `--cpus` vCPUs (one per process on sud, which has no limit), so the cap doesn't apply. On the web host, where each process is a task of its own, the answer (`src/cpupool.zig`) is a hybrid. A process creates and owns its vCPU on its own thread, as before, while the machine owns fewer than the limit less a reserve of 8.
 
 Processes beyond that run guest code through a pool of 8 pool threads, each with a vCPU: the process thread hands its Ureg, FP/SIMD registers, and thread pointer to a pool thread, which runs the guest to its next exit and hands them back. Kernel calls stay on the process's own thread, so pool threads never block in the kernel and the pool always makes progress.
 

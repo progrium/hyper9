@@ -202,6 +202,12 @@ pub fn exit() noreturn {
     unreachable;
 }
 
+/// The stack pointer: on wasm the shadow stack's, a global.
+pub fn stackPointer() usize {
+    if (is_wasm) return wasm.h9_sched_get_sp();
+    return @frameAddress();
+}
+
 /// The continuation running on this thread, if any.
 pub fn self() ?*Cont {
     const ex = current() orelse return null;

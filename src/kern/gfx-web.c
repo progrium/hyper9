@@ -8,11 +8,11 @@
  * - The screen, gscreen, stays in wasm memory as XBGR32, whose
  *   little-endian bytes are R, G, B and X, an ImageData row's order.
  *   flushmemscreen only tells the JS host which rectangle changed; it
- *   copies the rectangle onto the canvas once a frame, outside any
- *   coroutine, so the kernel never waits for the canvas.
+ *   copies the rectangle onto the canvas once a frame, while the
+ *   executor idles, so the kernel never waits for the canvas.
  * - The page's pointer, keys, size changes and pastes queue up in the
- *   JS host. gfxinput, a kernel process, waits for them with a
- *   Suspending import and hands them to absmousetrack, h9_kbdkey and
+ *   JS host. gfxinput, a kernel process, waits for them with an op
+ *   (waitevents) and hands them to absmousetrack, h9_kbdkey and
  *   screenresize, as the X11 backend's event thread does, so the input
  *   paths run with up set.
  * - /dev/snarf is a buffer here. A paste into the canvas replaces it, and
@@ -35,13 +35,12 @@
 #include <cursor.h>
 #include "screen.h"
 
-#include "../web/coro.h"
-
 #define IMPORT(n) __attribute__((import_module("h9"), import_name(#n)))
 
 /*
- * The JS host's side (h9-web.js, gfxImports). gfx_wait is Suspending: it
- * parks the calling coroutine until events arrive.
+ * The JS host's side (h9-web.js, gfxImports). gfx_wait is an op: it
+ * returns at once, and the calling task waits for events in
+ * h9_task_await (src/kern/sched/web.zig).
  */
 IMPORT(gfx_present) int js_gfx_present(void);
 IMPORT(gfx_size) void js_gfx_size(int *wh);
@@ -52,8 +51,7 @@ IMPORT(gfx_paste) int js_gfx_paste(char *p, int n);
 IMPORT(gfx_snarf) void js_gfx_snarf(char *p, int n);
 IMPORT(gfx_cursor) void js_gfx_cursor(uchar *c);
 
-uintptr h9_get_sp(void);
-void h9_set_sp(uintptr);
+int h9_task_await(int);
 
 extern void h9_kbdkey(Rune, int);	/* src/kern/dev/gfx.zig */
 
@@ -80,24 +78,11 @@ h9_gfx_web_present(void)
 	return js_gfx_present();
 }
 
-/*
- * Calls gfx_wait as a park: other coroutines run while it waits, so
- * what's per thread is saved around it, as coro.zig's blocking does.
- */
+/* Waits for events, with the other tasks running meanwhile. */
 static int
 waitevents(int *ev, int n)
 {
-	H9coro *me;
-	uintptr sp;
-	int r;
-
-	me = h9_coro_self();
-	h9_coro_save(me);
-	sp = h9_get_sp();
-	r = js_gfx_wait(ev, n);
-	h9_set_sp(sp);
-	h9_coro_restore(me);
-	return r;
+	return h9_task_await(js_gfx_wait(ev, n));
 }
 
 static void

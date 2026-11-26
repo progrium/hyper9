@@ -7,20 +7,21 @@ const builtin = @import("builtin");
 /// Whether this is a web build.
 pub const enabled = builtin.os.tag == .wasi;
 
-pub const coro = @import("web/coro.zig");
+/// The web host's one executor (src/kern/sched/web.zig).
+pub const task = @import("web/task.zig");
 
 /// The web host's allocator (std.heap.page_allocator there, and the engine's).
 pub const heap = @import("web/heap.zig");
 
-/// A host thread: a coroutine on the web host.
-pub const Thread = if (enabled) coro.Thread else std.Thread;
+/// A host thread: a task on the web host's executor.
+pub const Thread = if (enabled) task.Thread else std.Thread;
 
-/// The web host's Io, whose blocking parks the calling coroutine.
+/// The web host's Io, whose blocking parks the calling task.
 pub const io = @import("web/io.zig").io;
 
-/// Lets other threads, or coroutines, run.
+/// Lets other threads, or tasks, run.
 pub fn yield() void {
-    if (enabled) coro.yield() else std.Thread.yield() catch {};
+    if (enabled) task.yield() else std.Thread.yield() catch {};
 }
 
 /// std.atomic.Value, or on the web host, where everything runs on one

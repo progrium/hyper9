@@ -152,6 +152,8 @@ fn h9_sched_yield() callconv(.c) void {
 }
 
 pub fn exportC() void {
+    // The web host's one executor is its own (web.zig).
+    if (@import("builtin").cpu.arch.isWasm()) return @import("web.zig").exportC();
     if (!sync.can_park) return;
     @export(&h9_sched_pool_new, .{ .name = "h9_sched_pool_new" });
     @export(&h9_sched_pool_free, .{ .name = "h9_sched_pool_free" });

@@ -125,3 +125,12 @@ None for the guest's reach. The scheduler is new code in the trusted base, and a
 - **CPU time is the process's.** `getrusage` and `/proc/n/status` count a thread's time across executors, through `cputime.task_hook`.
 
 Steps 6 and 7 are left. The web build needs Binaryen's `wasm-opt` for Asyncify, and the pool, the per-process threads, and the coroutines go only once the web host runs on an executor.
+
+**2026-11-26, the web host on one executor.** `src/kern/sched/web.zig` is the web host's executor: every kernel process and every one of h9's own threads is a task on it, a continuation switched with Asyncify, and `src/web/coro.c`, `coro.zig`, and `stack.S` are gone. Some things building it found:
+
+- **Asyncify and wasm exception handling work together.** `wasm-opt --enable-exception-handling --asyncify` accepts h9.wasm, and a C test of a park inside a `setjmp`'s body, a `longjmp` after the resume, and a park after the `longjmp` lands gives the right answers at `-O0` and `-O2`. Asyncify can't unwind through a `catch` handler, but no task parks inside one: LLVM's lowering uses the handler only to note which `setjmp` was jumped to and branch out, so the code after a `setjmp` returns 1 runs outside it. So the C kernel keeps wasm EH for `setjmp` and `longjmp`.
+- **One JSPI stack.** Only `_start` is `promising`, and the one `Suspending` import is `idle(ms)`, which the executor calls when nothing is runnable, and every 10 ms otherwise so the page's events are seen. The other imports that wait on JavaScript (console input, the signal wait, `gfx_wait`, and the WebSocket and port waits) are ops: they return an id at once, the task parks in `h9_task_await`, and `idle` hands back the finished ops' results.
+- **Asyncify leaves the CPUs and the JIT alone.** A task parks or yields only between runs of guest code, so `asyncify-removelist` skips the interpreters, h86, ha64, hx64, and the JIT's compilers. Instrumented, they were half the module, and V8's optimizing compiler took a minute on them before `ls` ran. Debug builds also run `wasm-opt -O1` after the pass, which takes the module from 83 MB to 35 MB; `ls /bin` is now 0.7 s under Node, against 1.0 s before the executor.
+- **Per-task state.** A switch saves and restores `errno`, the kernel's Zig threadlocals, and drawterm's `up`, as coro.c did around its parks. `H9_TEST_KSTACK` sets task stacks' size, rounded to 16 bytes rather than wasm's 64 KiB pages.
+
+`zig build web-test` needs Chromium and Playwright, which this step's checks didn't have.

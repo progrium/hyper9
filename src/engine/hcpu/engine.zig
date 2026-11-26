@@ -45,7 +45,7 @@ pub const req_kick = cache.req_kick;
 pub const req_sync = cache.req_sync;
 
 /// The web host (design/epoch-0/browser-host.md): one thread, whose
-/// coroutines take turns, so a vCPU leaves guest code on a budget of
+/// tasks take turns, so a vCPU leaves guest code on a budget of
 /// instructions as well as on requests (see State.run).
 const web = builtin.os.tag == .wasi;
 /// Guest memory there: a tab's memory is scarcer than a host's, and wasm32
@@ -53,10 +53,10 @@ const web = builtin.os.tag == .wasi;
 const web_default_memory: u64 = 256 << 20;
 const web_max_memory: u64 = 2 << 30;
 /// Guest instructions between looks at the clock, and how long a vCPU
-/// keeps the thread before the other coroutines get a turn.
+/// keeps the thread before the other tasks get a turn.
 const web_budget: i64 = 64 * 1024;
 const web_slice_ns = 2 * std.time.ns_per_ms;
-const coro = if (web) @import("../../web/coro.zig") else struct {};
+const task = if (web) @import("../../web/task.zig") else struct {};
 /// The web host's T1, whose regions are keyed by this engine's arena pages.
 const wasm_t1 = @import("hcpu").wasm_t1;
 const dispatch = @import("hcpu").dispatch;
@@ -212,7 +212,7 @@ pub fn Emu(comptime A64: type, comptime X86: type, comptime X64: type) type {
             stopping: std.atomic.Value(u32) = .init(0),
             /// Serializes flushes.
             world: std.Io.Mutex = .init,
-            /// On the web, when a vCPU last let the other coroutines run,
+            /// On the web, when a vCPU last let the other tasks run,
             /// in monotonic ns.
             yielded: u64 = 0,
 
@@ -344,11 +344,11 @@ pub fn Emu(comptime A64: type, comptime X86: type, comptime X64: type) type {
                 return .{ .s = s };
             }
 
-            /// On the web: lets every other coroutine run. Only between
+            /// On the web: lets every other task run. Only between
             /// runs of guest code, so no vCPU is ever in it while another
-            /// coroutine runs, and kickAndWait never waits.
+            /// task runs, and kickAndWait never waits.
             fn yieldThread(b: *HcpuEngine) void {
-                coro.yield();
+                task.yield();
                 b.yielded = monoNs();
             }
 
