@@ -359,7 +359,7 @@ pub fn chanfree(ch: *Chan) void {
         ch.umc = null;
     }
     if (ch.mux != null) {
-        c.muxclose(ch.mux);
+        @import("devmnt.zig").muxclose(ch.mux);
         ch.mux = null;
     }
     if (@as(?*Chan, ch.mchan)) |m| {

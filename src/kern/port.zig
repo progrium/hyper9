@@ -30,6 +30,7 @@ pub const dev = @import("dev.zig");
 pub const pgrp = @import("pgrp.zig");
 pub const chan = @import("chan.zig");
 pub const sysfile = @import("sysfile.zig");
+pub const devmnt = @import("devmnt.zig");
 
 comptime {
     qio.exportC();
@@ -38,6 +39,7 @@ comptime {
     pgrp.exportC();
     chan.exportC();
     sysfile.exportC();
+    devmnt.exportC();
 }
 
 test {
@@ -50,6 +52,7 @@ test {
     _ = pgrp;
     _ = chan;
     _ = sysfile;
+    _ = devmnt;
 }
 
 /// A kernel error. The Plan 9 error string is on the process, in

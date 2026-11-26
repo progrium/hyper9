@@ -8,8 +8,8 @@
 //! `Dev` in `devtab` (src/kern/devtab.c, or nstab.c in the namespace
 //! kernel), and the switch calls a C device's functions, and a C Devgen,
 //! through src/kern/devshim.c, which catches the device's error() and
-//! hands it back as an error union. A device ported to Zig names its
-//! functions in `native`, and the switch calls those directly.
+//! hands it back as an error union. A device ported to Zig is a `Native`
+//! in `natives`, and the switch calls its Zig functions directly.
 //!
 //! drawterm's devtab.c is h9's own src/kern/devtab.c and nstab.c, which
 //! are C until h9's devices are ported, since the table names them.
@@ -443,13 +443,116 @@ pub fn aux(ch: *Chan) *?*anyopaque {
 
 // The device switch.
 
-/// A device ported to Zig: its functions with error unions, which the
-/// switch calls directly in place of the C ones in its Dev. (None yet.)
-pub const Native = struct {
-    dev: *const Dev,
+/// A device ported to Zig: its functions, with error unions.
+pub const Ops = struct {
+    reset: *const fn () void = devreset,
+    init: *const fn () void = devinit,
+    shutdown: *const fn () void = devshutdown,
+    attach: *const fn ([*:0]const u8) Error!*Chan,
+    walk: *const fn (*Chan, ?*Chan, [*]const [*:0]const u8, c_int) Error!?*Walkqid,
+    stat: *const fn (*Chan, [*]u8, c_int) Error!c_int,
+    open: *const fn (*Chan, c_int) Error!*Chan,
+    create: *const fn (*Chan, [*:0]const u8, c_int, c_uint) Error!*Chan,
+    close: *const fn (*Chan) Error!void,
+    read: *const fn (*Chan, ?*anyopaque, c_int, i64) Error!c_int,
+    bread: *const fn (*Chan, c_int, c_uint) Error!?*Block = devbreadOpt,
+    write: *const fn (*Chan, ?*const anyopaque, c_int, i64) Error!c_int,
+    bwrite: *const fn (*Chan, *Block, c_uint) Error!c_int = devbwrite,
+    remove: *const fn (*Chan) Error!void,
+    wstat: *const fn (*Chan, [*]u8, c_int) Error!c_int,
 };
 
-pub const native = [_]Native{};
+fn devbreadOpt(ch: *Chan, n: c_int, offset: c_uint) Error!?*Block {
+    return try devbread(ch, n, offset);
+}
+
+/// A native device: `ops`, which the switch calls directly, and `dev`,
+/// the C Dev the device table names, whose functions raise for C
+/// callers.
+pub fn Native(comptime dc: u8, comptime name: [:0]const u8, comptime o: Ops) type {
+    return struct {
+        pub const ops = o;
+
+        fn c_reset() callconv(.c) void {
+            o.reset();
+        }
+        fn c_init() callconv(.c) void {
+            o.init();
+        }
+        fn c_shutdown() callconv(.c) void {
+            o.shutdown();
+        }
+        fn c_attach(spec: [*c]u8) callconv(.c) [*c]Chan {
+            return o.attach(spec orelse "") catch |e| port.raise(e);
+        }
+        fn c_walk(ch: [*c]Chan, nc: [*c]Chan, nm: [*c][*c]u8, n: c_int) callconv(.c) [*c]Walkqid {
+            return o.walk(ch, nc, @ptrCast(nm), n) catch |e| port.raise(e);
+        }
+        fn c_stat(ch: [*c]Chan, db: [*c]u8, n: c_int) callconv(.c) c_int {
+            return o.stat(ch, db, n) catch |e| port.raise(e);
+        }
+        fn c_open(ch: [*c]Chan, omode: c_int) callconv(.c) [*c]Chan {
+            return o.open(ch, omode) catch |e| port.raise(e);
+        }
+        fn c_create(ch: [*c]Chan, nm: [*c]u8, omode: c_int, perm: c_uint) callconv(.c) [*c]Chan {
+            return o.create(ch, nm, omode, perm) catch |e| port.raise(e);
+        }
+        fn c_close(ch: [*c]Chan) callconv(.c) void {
+            o.close(ch) catch |e| port.raise(e);
+        }
+        fn c_read(ch: [*c]Chan, a: ?*anyopaque, n: c_int, off: i64) callconv(.c) c_int {
+            return o.read(ch, a, n, off) catch |e| port.raise(e);
+        }
+        fn c_bread(ch: [*c]Chan, n: c_int, off: c_uint) callconv(.c) [*c]Block {
+            return o.bread(ch, n, off) catch |e| port.raise(e);
+        }
+        fn c_write(ch: [*c]Chan, a: ?*anyopaque, n: c_int, off: i64) callconv(.c) c_int {
+            return o.write(ch, a, n, off) catch |e| port.raise(e);
+        }
+        fn c_bwrite(ch: [*c]Chan, b: [*c]Block, off: c_uint) callconv(.c) c_int {
+            return o.bwrite(ch, b, off) catch |e| port.raise(e);
+        }
+        fn c_remove(ch: [*c]Chan) callconv(.c) void {
+            o.remove(ch) catch |e| port.raise(e);
+        }
+        fn c_wstat(ch: [*c]Chan, db: [*c]u8, n: c_int) callconv(.c) c_int {
+            return o.wstat(ch, db, n) catch |e| port.raise(e);
+        }
+
+        pub var dev: Dev = .{
+            .dc = dc,
+            .name = @constCast(name.ptr),
+            .reset = &c_reset,
+            .init = &c_init,
+            .shutdown = &c_shutdown,
+            .attach = &c_attach,
+            .walk = &c_walk,
+            .stat = &c_stat,
+            .open = &c_open,
+            .create = &c_create,
+            .close = &c_close,
+            .read = &c_read,
+            .bread = &c_bread,
+            .write = &c_write,
+            .bwrite = &c_bwrite,
+            .remove = &c_remove,
+            .wstat = &c_wstat,
+        };
+    };
+}
+
+/// The native devices, whose functions the switch calls directly.
+const natives = .{
+    @import("devmnt.zig").Device,
+};
+
+/// d's functions, if it's native.
+fn nativeOps(d: *Dev) ?*const Ops {
+    inline for (natives) |N| {
+        if (d == &N.dev) return &N.ops;
+    }
+    return null;
+}
 
 // src/kern/devshim.c.
 extern fn h9_dev_reset(d: *Dev) c_int;
@@ -478,18 +581,22 @@ pub fn caught(rc: c_int) Error!void {
 }
 
 pub fn reset(d: *Dev) Error!void {
+    if (nativeOps(d)) |o| return o.reset();
     try caught(h9_dev_reset(d));
 }
 
 pub fn init(d: *Dev) Error!void {
+    if (nativeOps(d)) |o| return o.init();
     try caught(h9_dev_init(d));
 }
 
 pub fn shutdown(d: *Dev) Error!void {
+    if (nativeOps(d)) |o| return o.shutdown();
     try caught(h9_dev_shutdown(d));
 }
 
 pub fn attach(d: *Dev, spec: [*:0]const u8) Error!*Chan {
+    if (nativeOps(d)) |o| return o.attach(spec);
     var r: [*c]Chan = null;
     try caught(h9_dev_attach(d, @constCast(spec), &r));
     return r;
@@ -498,46 +605,54 @@ pub fn attach(d: *Dev, spec: [*:0]const u8) Error!*Chan {
 /// A device's walk, which returns nil (with the error string set) for a
 /// walk that failed at its first name.
 pub fn walkdev(d: *Dev, ch: *Chan, nc: ?*Chan, name: [*]const [*:0]const u8, nname: c_int) Error!?*Walkqid {
+    if (nativeOps(d)) |o| return o.walk(ch, nc, name, nname);
     var r: [*c]Walkqid = null;
     try caught(h9_dev_walk(d, ch, nc, name, nname, &r));
     return r;
 }
 
 pub fn stat(d: *Dev, ch: *Chan, db: [*]u8, n: c_int) Error!c_int {
+    if (nativeOps(d)) |o| return o.stat(ch, db, n);
     var r: c_int = 0;
     try caught(h9_dev_stat(d, ch, db, n, &r));
     return r;
 }
 
 pub fn open(d: *Dev, ch: *Chan, omode: c_int) Error!*Chan {
+    if (nativeOps(d)) |o| return o.open(ch, omode);
     var r: [*c]Chan = null;
     try caught(h9_dev_open(d, ch, omode, &r));
     return r;
 }
 
 pub fn create(d: *Dev, ch: *Chan, name: [*:0]const u8, omode: c_int, perm: c_uint) Error!*Chan {
+    if (nativeOps(d)) |o| return o.create(ch, name, omode, perm);
     var r: [*c]Chan = null;
     try caught(h9_dev_create(d, ch, name, omode, perm, &r));
     return r;
 }
 
 pub fn close(d: *Dev, ch: *Chan) Error!void {
+    if (nativeOps(d)) |o| return o.close(ch);
     try caught(h9_dev_close(d, ch));
 }
 
 pub fn read(d: *Dev, ch: *Chan, a: ?*anyopaque, n: c_int, off: i64) Error!c_int {
+    if (nativeOps(d)) |o| return o.read(ch, a, n, off);
     var r: c_int = 0;
     try caught(h9_dev_read(d, ch, a, n, off, &r));
     return r;
 }
 
 pub fn bread(d: *Dev, ch: *Chan, n: c_int, off: c_uint) Error!?*Block {
+    if (nativeOps(d)) |o| return o.bread(ch, n, off);
     var r: [*c]Block = null;
     try caught(h9_dev_bread(d, ch, n, off, &r));
     return r;
 }
 
 pub fn write(d: *Dev, ch: *Chan, a: ?*const anyopaque, n: c_int, off: i64) Error!c_int {
+    if (nativeOps(d)) |o| return o.write(ch, a, n, off);
     var r: c_int = 0;
     try caught(h9_dev_write(d, ch, a, n, off, &r));
     return r;
@@ -545,16 +660,19 @@ pub fn write(d: *Dev, ch: *Chan, a: ?*const anyopaque, n: c_int, off: i64) Error
 
 /// A device's bwrite, which frees b, whatever happens.
 pub fn bwrite(d: *Dev, ch: *Chan, b: *Block, off: c_uint) Error!c_int {
+    if (nativeOps(d)) |o| return o.bwrite(ch, b, off);
     var r: c_int = 0;
     try caught(h9_dev_bwrite(d, ch, b, off, &r));
     return r;
 }
 
 pub fn remove(d: *Dev, ch: *Chan) Error!void {
+    if (nativeOps(d)) |o| return o.remove(ch);
     try caught(h9_dev_remove(d, ch));
 }
 
 pub fn wstat(d: *Dev, ch: *Chan, db: [*]u8, n: c_int) Error!c_int {
+    if (nativeOps(d)) |o| return o.wstat(ch, db, n);
     var r: c_int = 0;
     try caught(h9_dev_wstat(d, ch, db, n, &r));
     return r;

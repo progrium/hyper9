@@ -176,8 +176,7 @@ h9_dev_gen(Devgen *gen, Chan *c, char *name, Dirtab *tab, int ntab, int i, Dir *
 /*
  * What else the Zig calls that can raise: h9's hooks in chan.zig,
  * devfs's anchored attach and reading a Linux symbolic link's target
- * (src/kern/fscheck.h), and sysfile.zig's mount of a 9P conversation
- * (devmnt.c's mntattach).
+ * (src/kern/fscheck.h).
  */
 extern void h9_fs_anchor(Chan*);
 extern int h9_fs_chanreadlink(Chan*, char*, int);
@@ -198,16 +197,6 @@ h9_shim_fs_chanreadlink(Chan *c, char *buf, int nbuf, int *r)
 	if(waserror())
 		return -1;
 	*r = h9_fs_chanreadlink(c, buf, nbuf);
-	poperror();
-	return 0;
-}
-
-int
-h9_shim_mntattach(Chan *c, Chan *ac, char *spec, int flags, Chan **r)
-{
-	if(waserror())
-		return -1;
-	*r = mntattach(c, ac, spec, flags);
 	poperror();
 	return 0;
 }

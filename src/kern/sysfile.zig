@@ -20,6 +20,7 @@ const sync = @import("sync.zig");
 const dev = @import("dev.zig");
 const chan = @import("chan.zig");
 const pgrp = @import("pgrp.zig");
+const devmnt = @import("devmnt.zig");
 const c = port.c;
 const up = port.up;
 const Error = port.Error;
@@ -813,15 +814,6 @@ pub fn chdir(name: [*:0]const u8) Error!c_int {
     return 0;
 }
 
-// devmnt.c's mntattach, through src/kern/devshim.c, since it raises.
-extern fn h9_shim_mntattach(c: *Chan, ac: ?*Chan, spec: [*:0]const u8, flags: c_int, r: *?*Chan) c_int;
-
-fn mntattach(bc: *Chan, ac: ?*Chan, spec: [*:0]const u8, flags: c_int) Error!*Chan {
-    var r: ?*Chan = null;
-    try dev.caught(h9_shim_mntattach(bc, ac, spec, flags, &r));
-    return r.?;
-}
-
 fn bindmount(ismount: bool, fd: c_int, afd: c_int, arg0: ?[*:0]const u8, arg1: [*:0]const u8, flag: c_int, spec_: ?[*:0]const u8) Error!c_int {
     if ((flag & ~@as(c_int, c.MMASK)) != 0 or (flag & c.MORDER) == (c.MBEFORE | c.MAFTER))
         return port.kerror(&port.Ebadarg);
@@ -840,7 +832,7 @@ fn bindmount(ismount: bool, fd: c_int, afd: c_int, arg0: ?[*:0]const u8, arg1: [
         if (afd >= 0)
             ac = try fdtochan(afd, c.ORDWR, false, true);
         defer if (ac) |a| chan.cclose(a);
-        c0 = try mntattach(bc, ac, spec.?, flag & c.MCACHE);
+        c0 = try devmnt.mntattach(bc, ac, spec.?, flag & c.MCACHE);
     } else {
         c0 = try chan.namec(arg0.?, c.Abind, 0, 0);
     }
