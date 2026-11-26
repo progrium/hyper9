@@ -11,6 +11,7 @@ const std = @import("std");
 const aout = @import("abi/plan9/aout.zig");
 pub const mount = @import("mount.zig");
 const web = @import("web.zig").enabled;
+const resolver = @import("resolver.zig");
 
 pub const Profile = enum { default, tight };
 
@@ -264,6 +265,12 @@ pub const Plan = struct {
     net_allow: []const NetPattern = &.{},
     /// The machine's resolved-name table, when a pattern names hosts.
     names: ?*NameTable = null,
+    /// Whether the machine resolves for the guest (design/linux-dns.md):
+    /// a name pattern, and a network. Every connect to port 53 then goes
+    /// to the machine's resolver, `dns`, which the machine starts with a
+    /// run; without one it's refused.
+    resolves: bool = false,
+    dns: ?*resolver.Resolver = null,
     /// Device letters masked after the namespace is built.
     devmask: []const u8,
     binds: []const Bind,
@@ -921,7 +928,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     // servers (design/epoch-0/linux-net.md).
     var nameservers: std.ArrayList([16]u8) = .empty;
     if (has_linux and net != .disable) for (in.nameservers) |ns| {
-        if (parseIp(ns)) |a| try nameservers.append(arena, a);
+        if (resolver.parseServer(ns)) |s| try nameservers.append(arena, s.addr);
     };
     var ll_dns = false;
     for (nameservers.items) |*a| ll_dns = ll_dns or isLinkLocal(a);
@@ -936,6 +943,8 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
             try caveats.append(arena, "the guest can make the host resolve any name");
         }
         if (name_patterns) try caveats.append(arena, "name patterns trust the host's resolver: a name is allowed to reach whatever address it resolves to");
+        // The machine resolves for the guest (design/linux-dns.md).
+        if (name_patterns) try caveats.append(arena, "DNS queries to port 53 go to h9's resolver, which forwards names the allowlist covers to the host's DNS servers");
         if (net == .enable) try caveats.append(arena, "servers in the guest are reachable by anything that can reach the host's ports");
     }
     if (in.gfx) |g| {
@@ -976,6 +985,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         .cpus = pol.cpus,
         .net_allow = net_allow,
         .names = names,
+        .resolves = name_patterns and net != .disable and !web,
         .devmask = devmask.items,
         .binds = binds.items,
         .rules = rules.items,
@@ -1540,8 +1550,11 @@ pub const NameTable = struct {
     pub const max_name = 255;
 
     pub const Entry = struct {
-        proto: NetProto,
-        port: u16,
+        /// Null in an entry the machine's resolver recorded from a DNS
+        /// answer, which has neither (design/linux-dns.md): it matches
+        /// any connect's, which the patterns then decide.
+        proto: ?NetProto,
+        port: ?u16,
         addr: [16]u8,
         name_len: u8,
         name_buf: [max_name]u8,
@@ -1555,7 +1568,7 @@ pub const NameTable = struct {
         while (!nt.lock.tryLock()) std.atomic.spinLoopHint();
     }
 
-    pub fn record(nt: *NameTable, proto: NetProto, addr: *const [16]u8, port: u16, name: []const u8) void {
+    pub fn record(nt: *NameTable, proto: ?NetProto, addr: *const [16]u8, port: ?u16, name: []const u8) void {
         if (name.len > max_name) return;
         nt.acquire();
         defer nt.lock.unlock();
@@ -1566,13 +1579,16 @@ pub const NameTable = struct {
     }
 
     /// Whether a name that resolved to addr for proto and port matches a
-    /// name pattern.
+    /// name pattern. An entry without a protocol or port takes the
+    /// connect's.
     pub fn allows(nt: *NameTable, pats: []const NetPattern, proto: NetProto, addr: *const [16]u8, port: u16) bool {
         nt.acquire();
         defer nt.lock.unlock();
         const n = @min(nt.count, capacity);
         for (nt.entries[0..n]) |*e| {
-            if (e.proto != proto or e.port != port or !std.mem.eql(u8, &e.addr, addr)) continue;
+            if (e.proto) |ep| if (ep != proto) continue;
+            if (e.port) |ept| if (ept != port) continue;
+            if (!std.mem.eql(u8, &e.addr, addr)) continue;
             for (pats) |pat| switch (pat.host) {
                 .name, .suffix => if (pat.matchName(proto, e.name(), port)) return true,
                 else => {},
@@ -1855,6 +1871,21 @@ test "net: the resolved-name table keeps the most recent entries" {
     // A name that no longer matches a pattern allows nothing.
     nt.record(.tcp, &tip("10.2.0.1"), 443, "other.org");
     try t.expect(!nt.allows(&pats, .tcp, &tip("10.2.0.1"), 443));
+}
+
+test "an entry without a protocol or port takes the connect's, which the patterns decide [linux-dns]" {
+    const nt = try t.allocator.create(NameTable);
+    defer t.allocator.destroy(nt);
+    nt.* = .{};
+    const pats = [_]NetPattern{try tpat("tcp!api.example.com!443")};
+    nt.record(null, &tip("10.0.0.7"), null, "api.example.com");
+    try t.expect(nt.allows(&pats, .tcp, &tip("10.0.0.7"), 443));
+    try t.expect(!nt.allows(&pats, .tcp, &tip("10.0.0.7"), 80));
+    try t.expect(!nt.allows(&pats, .udp, &tip("10.0.0.7"), 443));
+    try t.expect(!nt.allows(&pats, .tcp, &tip("10.0.0.8"), 443));
+    // An entry cs recorded still needs its own protocol and port.
+    nt.record(.tcp, &tip("10.0.0.9"), 80, "api.example.com");
+    try t.expect(!nt.allows(&pats, .tcp, &tip("10.0.0.9"), 443));
 }
 
 test "net: --print shows patterns and caveats" {

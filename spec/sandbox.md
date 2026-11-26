@@ -8,6 +8,7 @@ This describes, as built, h9's security stance and the sandbox policy: what a gu
 - [Sandbox policy](#sandbox-policy)
   - [Vendor hooks](#vendor-hooks)
   - [Network rules](#network-rules)
+  - [The machine's resolver](#the-machines-resolver)
   - [Access rules](#access-rules)
   - [Path resolution](#path-resolution)
   - [Contained trees](#contained-trees)
@@ -54,6 +55,8 @@ devip calls `h9_net_check(op, proto, addr, port)` (declared in `src/kern/netchec
 
 Its `cs` calls `h9_net_lookup(proto, name, port)` before the host's resolver, raising "no translation for host found" for a name no pattern covers, and `h9_net_resolved` after it.
 
+Its connect calls `h9_net_redirect(proto, addr, &port, &sfd, opts)` right after `h9_net_check`, which may replace the address and port it dials with the machine's resolver's ([linux-dns](../design/linux-dns.md), under [The machine's resolver](#the-machines-resolver)), and raises "permission denied" when it would and can't. It's the one hook in devip for the resolver; the rest, in `src/kern/netcheck.c`, binds the conversation's host socket on the loopback first (making it if there's none) and tells the resolver its host port, through the Zig leaves `h9_dns_target` and `h9_dns_register`.
+
 The machine's compiled plan is set per host thread, because each guest process runs on its own thread. The leaves return an int and never raise kernel errors themselves.
 
 ### Network rules
@@ -66,9 +69,22 @@ With patterns, the patterns are the whole policy: a `connect` must match one, by
 
 A name pattern (`api.example.com`, or `*.example.com` for one or more labels) can't be checked at `connect`, whose message is numeric, so `cs` resolves only names a pattern covers and records what each returned in the machine's resolved-name table (the 1024 most recent entries). A later `connect` to a recorded address is allowed if its name matches a name pattern with that protocol and port.
 
+A resolved-name entry from the machine's resolver has no protocol or port, so it takes the connect's, which the name patterns then decide: a name allowed as `tcp!api.example.com!443` allows TCP port 443 to its addresses only, whichever lookup recorded them.
+
 A `/net/ws` `connect` is checked as a TCP dial to the URL's host and port: a name goes through the same lookup check and resolved-name table, and each address it resolves to through the connect check.
 
 Connections h9 makes itself (a root, a namespace-file mount) are outside the policy, and the guest can't reach them by name. `--net-allow` with `--net=disable`, or a bad pattern, is exit 2.
+
+### The machine's resolver
+
+A machine *resolves for the guest* when its plan has a name pattern (`Plan.resolves`) and a network ([linux-dns](../design/linux-dns.md)), on any host but the web one, whose network is WebSockets. Its resolver (`src/resolver.zig`) belongs to the machine, as its resolved-name table does: each run starts one, a UDP socket and a TCP listener on 127.0.0.1 on ports the host picks and a thread that answers them, and stops it when the run ends. It's kept in the machine's arena, so a stuck process finds its ports closed rather than its memory freed. The resolver's host sockets are made in one place, `HostNet`: `listenLoopback` opens the two it listens on, and `dial` the ones it forwards each query with.
+
+- **Redirecting port 53.** `h9_net_check` allows a connect to port 53, TCP or UDP, on any address, and `h9_net_redirect` then dials the resolver instead; a Linux `sendto` to port 53 is redirected the same way (`h9_net_redirectto`, from `src/kern/linuxnet.c`). Without a resolver (one that failed to start, or a Windows host, which has none) the redirect fails, and so does the connect. The conversation's host socket is bound on the loopback before it's dialled, and its host port is registered with the resolver along with the address the guest dialled, so a `recvfrom` on it gives that address as the source, and so does `getpeername`. devip's `remote` file shows the resolver's address.
+- **Answering.** A message that isn't a query with one question gets `FORMERR`. The question's name, lowercased and without a trailing dot, must match a name pattern for any protocol and port, as `h9_net_lookup`'s rule has it; otherwise it gets `REFUSED` and isn't sent anywhere. An allowed query goes as it came to `Machine.Options.nameservers`, in order and over the transport it came on, each given its share of 5 seconds, and the first answer with the query's id comes back; with none, `SERVFAIL`. Every query type is forwarded, and a truncated UDP answer is passed on as it is, for the guest's retry over TCP.
+- **Recording.** Before an answer goes back, its answer section's `A` and `AAAA` records whose owner is the question's name, or a name its `CNAME` records lead to from it (at most 16), are recorded in the resolved-name table under the question's name. Only answers to a host port devip registered are recorded, so another host process that finds the resolver's sockets can't add entries. Names and records are parsed with bounds checks and at most 32 compression pointers a name, and a message that doesn't parse is passed on, recording what came before the fault.
+- **The DNS servers' own rule.** Under such a machine, port 53 never reaches a DNS server directly, so the link-local exception for the host's servers, and the need for patterns to cover them, don't apply, and an address pattern that covers a server (`udp!10.0.0.53!53`) doesn't take its queries out of the resolver: every one is checked and recorded. DNS over TLS or HTTPS isn't seen, so it's refused unless a pattern covers the server.
+
+Each nameserver may give a port, `ADDR!PORT`. The CLI passes the host's servers on port 53 whenever there's an allowlist, and `#Letc`'s `resolv.conf` names the address alone. The plan's caveats say "DNS queries to port 53 go to h9's resolver, which forwards names the allowlist covers to the host's DNS servers".
 
 ### Access rules
 

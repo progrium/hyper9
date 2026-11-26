@@ -151,7 +151,7 @@ const sema_fixtures = [_][]const u8{
 
 /// Programs in tests/fixtures/net, for tests/engines.zig. They share
 /// tests/fixtures/segattach/lib.S.
-const net_fixtures = [_][]const u8{ "ctl", "cs" };
+const net_fixtures = [_][]const u8{ "ctl", "cs", "dns" };
 /// C programs in tests/fixtures/linux, built static for Linux on arm64 and
 /// amd64, for the linux-personality cases in tests/integration.zig.
 const linux_fixture_names = [_][]const u8{ "hello", "probe", "die", "sigreturn", "net", "threads", "files", "tls386", "bigexe", "pty", "fifo", "cowfork", "symlink", "chroot" };

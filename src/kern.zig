@@ -10,6 +10,7 @@
 const std = @import("std");
 const build_options = @import("build_options");
 const policy = @import("policy.zig");
+const resolver = @import("resolver.zig");
 const consin = @import("consin.zig");
 const web = @import("web.zig");
 
@@ -1386,6 +1387,10 @@ comptime {
         @export(&h9_net_check, .{ .name = "h9_net_check" });
         @export(&h9_net_lookup, .{ .name = "h9_net_lookup" });
         @export(&h9_net_resolved, .{ .name = "h9_net_resolved" });
+        @export(&h9_dns_target, .{ .name = "h9_dns_target" });
+        @export(&h9_dns_register, .{ .name = "h9_dns_register" });
+        @export(&h9_dns_peer, .{ .name = "h9_dns_peer" });
+        @export(&h9_dns_self, .{ .name = "h9_dns_self" });
         @export(&h9_overlay_pool, .{ .name = "h9_overlay_pool" });
         @export(&h9_overlay_alloc, .{ .name = "h9_overlay_alloc" });
         @export(&h9_overlay_free, .{ .name = "h9_overlay_free" });
@@ -1604,7 +1609,70 @@ fn h9_net_check(op: c_int, proto: c_int, addr: [*]const u8, port: c_int) callcon
         if (p.net_allow.len > 0) return -1;
         break :blk 0;
     };
+    // A connect to port 53 goes to the machine's resolver instead, which
+    // checks each query (design/linux-dns.md): devip and the Linux
+    // layer's sendto redirect it right after this, through
+    // h9_dns_target, which refuses it if there's no resolver.
+    if (p.resolves and o == .connect and pt == 53 and netProto(proto) != null and p.net != .disable) return 0;
     return if (p.netCheck(o, netProto(proto), addr[0..16], pt)) 0 else -1;
+}
+
+fn dnsKind(proto: c_int) ?resolver.Transport {
+    return switch (netProto(proto) orelse return null) {
+        .udp => .udp,
+        .tcp => .tcp,
+    };
+}
+
+/// Where a connect or sendto to port 53 goes when the machine resolves
+/// for the guest (design/linux-dns.md): 1 with addr and port rewritten
+/// to the machine's resolver, 0 if it isn't redirected, -1 if it would
+/// be and the machine has no resolver, which refuses it.
+fn h9_dns_target(proto: c_int, addr: *[16]u8, port: *c_int) callconv(.c) c_int {
+    const p = fs_plan orelse return 0;
+    if (!p.resolves or port.* != 53) return 0;
+    const kind = dnsKind(proto) orelse return -1;
+    const r = p.dns orelse return -1;
+    addr.* = resolver.loopback;
+    port.* = r.port(kind);
+    return 1;
+}
+
+/// Tells the resolver that host port lport was redirected from
+/// orig!oport, the address the guest dialled.
+fn h9_dns_register(proto: c_int, lport: c_int, orig: *const [16]u8, oport: c_int) callconv(.c) void {
+    const p = fs_plan orelse return;
+    const r = p.dns orelse return;
+    const kind = dnsKind(proto) orelse return;
+    r.register(kind, std.math.cast(u16, lport) orelse return, orig, std.math.cast(u16, oport) orelse return);
+}
+
+/// If addr!port is the resolver's, as a reply's source or a redirected
+/// conversation's peer is, rewrites it to the address the guest dialled
+/// from host port lport, and returns 1.
+fn h9_dns_peer(proto: c_int, lport: c_int, addr: *[16]u8, port: *u16) callconv(.c) c_int {
+    var a: [16]u8 = addr.*;
+    if (!dnsPeer(dnsKind(proto) orelse return 0, std.math.cast(u16, lport) orelse return 0, &a, port)) return 0;
+    addr.* = a;
+    return 1;
+}
+
+/// Whether addr!port is one of the machine's resolver's sockets.
+fn h9_dns_self(proto: c_int, addr: *const [16]u8, port: c_int) callconv(.c) c_int {
+    const p = fs_plan orelse return 0;
+    const r = p.dns orelse return 0;
+    return @intFromBool(r.isSelf(dnsKind(proto) orelse return 0, addr, std.math.cast(u16, port) orelse return 0));
+}
+
+/// h9_dns_peer, for the Linux layer's getpeername.
+pub fn dnsPeer(kind: resolver.Transport, lport: u16, addr: *[16]u8, port: *u16) bool {
+    const p = fs_plan orelse return false;
+    const r = p.dns orelse return false;
+    if (!r.isSelf(kind, addr, port.*)) return false;
+    const o = r.original(kind, lport) orelse return false;
+    addr.* = o.addr;
+    port.* = o.port;
+    return true;
 }
 
 fn h9_net_lookup(proto: c_int, name: [*:0]const u8, port: c_int) callconv(.c) c_int {

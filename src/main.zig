@@ -289,7 +289,11 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
         .stdio = undefined,
     };
 
-    if (h9.Machine.hasLinux(base)) base.nameservers = try hostNameservers(arena, io);
+    // A machine with an allowlist forwards its guest's DNS queries there
+    // too (design/linux-dns.md). H9_TEST_NAMESERVERS (ADDR!PORT, comma
+    // separated) puts the integration cases' stub server in their place.
+    // Tests only.
+    if (h9.Machine.hasLinux(base) or base.policy.net_allow.len > 0) base.nameservers = if (init.environ_map.get("H9_TEST_NAMESERVERS")) |v| try testNameservers(arena, v) else try hostNameservers(arena, io);
     var conflict: []const u8 = "";
     var plan = h9.Machine.compilePlan(arena, base, &conflict) catch |err| switch (err) {
         error.Conflict => {
@@ -628,6 +632,13 @@ fn proxyFrom(env: *const std.process.Environ.Map) h9.Machine.Proxy {
 /// The host's DNS servers, from its /etc/resolv.conf, for a Linux root
 /// (design/epoch-0/linux-net.md). A host without one (Windows) or naming
 /// none gets Google's public servers, as Docker does.
+fn testNameservers(arena: std.mem.Allocator, v: []const u8) error{OutOfMemory}![]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    var it = std.mem.tokenizeScalar(u8, v, ',');
+    while (it.next()) |s| try out.append(arena, s);
+    return out.items;
+}
+
 fn hostNameservers(arena: std.mem.Allocator, io: std.Io) error{OutOfMemory}![]const []const u8 {
     const fallback: []const []const u8 = &.{ "8.8.8.8", "8.8.4.4" };
     const text = std.Io.Dir.cwd().readFileAlloc(io, "/etc/resolv.conf", arena, .limited(64 << 10)) catch return fallback;
