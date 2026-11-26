@@ -582,7 +582,12 @@ const natives = .{
     @import("dev/ns.zig").Device,
 } else .{
     @import("dev/eventfd.zig").Device,
-};
+} ++ if (port.options.gfx) .{
+    @import("dev/gfx.zig").Draw,
+    @import("dev/gfx.zig").Cons,
+    @import("dev/gfx.zig").Kbd,
+    @import("dev/gfx.zig").Mouse,
+} else .{};
 
 /// d's functions, if it's native.
 fn nativeOps(d: *Dev) ?*const Ops {

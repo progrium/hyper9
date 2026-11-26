@@ -402,7 +402,7 @@ development builds report `git describe` (`-Dversion=V` overrides it).
 | Path | Contents |
 | --- | --- |
 | `src/main.zig`, `src/cli.zig`, `src/stdin.zig`, `src/hostsig.zig`, `src/tools.zig` | CLI: entry point, flag parsing with no I/O, the host stdin reader (cancellable, for the console's reader thread), Ctrl-C, hangup, and raw mode on the host terminal, and `--check`/`--version` |
-| `src/gfx.zig`, `src/kern/gfx*.c`, `src/kern/nogfx.c` | `--gfx`: the window claim and `h9.gfx.main`, the kernel glue around drawterm's GUI backends (lazy `#i`, the kbdfs `/dev/kbd`, `/dev/screen`, `/dev/mousein`, `/dev/kbdin`, the clipboard, and the choice of screen), the headless screen, and the stubs for builds without graphics |
+| `src/gfx.zig`, `src/kern/gfx*.c`, `src/kern/dev/gfx.zig`, `src/kern/nogfx.c` | `--gfx`: the window claim and `h9.gfx.main`, the kernel glue around drawterm's GUI backends (lazy `#i`, the kbdfs `/dev/kbd`, `/dev/screen`, `/dev/mousein`, `/dev/kbdin`, the clipboard, and the choice of screen), the headless screen, and the stubs for builds without graphics |
 | `src/root.zig` | library root; [docs/embedding.md](docs/embedding.md) explains using it |
 | `docs/` | guides that go further than the manual; `docs/embedding/embed.zig` is the embedding guide's example program |
 | `src/machine.zig` | one machine: builds its namespace, runs a process, and serves its syscalls |

@@ -593,7 +593,7 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.O
     const kern = b.addLibrary(.{
         .name = if (gfx == .headless and !exported) "kern-headless" else "kern",
         .linkage = .static,
-        .root_module = kernPort(b, target, optimize, flags),
+        .root_module = kernPort(b, target, optimize, flags, gfx != .none),
     });
     kern.root_module.addIncludePath(b.path(drawterm));
     kern.root_module.addIncludePath(b.path(drawterm ++ "/include"));
@@ -664,7 +664,7 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.O
 /// of the drawterm files ported so far, with the C kernel's types
 /// translated from src/kern/port.h under the same macros as the C files
 /// it's linked with (`flags`), so the two agree on every layout.
-fn kernPort(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, flags: []const []const u8) *std.Build.Module {
+fn kernPort(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, flags: []const []const u8, gfx: bool) *std.Build.Module {
     const tc = b.addTranslateC(.{ .root_source_file = b.path("src/kern/port.h"), .target = target, .optimize = optimize });
     // On the web, wasi-libc's setjmp.h (for Label) wants exception
     // handling, which the C kernel is built with (webTarget) and
@@ -690,6 +690,8 @@ fn kernPort(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.
     options.addOption(bool, "nskernel", nskernel);
     // devfs (#U), which the full kernel always has.
     options.addOption(bool, "hostfs", hostfs or !nskernel);
+    // A screen (src/kern/gfx.c and src/kern/dev/gfx.zig), not nogfx.c.
+    options.addOption(bool, "gfx", gfx);
     return b.createModule(.{
         .root_source_file = b.path("src/kern/port.zig"),
         .target = target,
@@ -812,7 +814,7 @@ fn addNsKernel(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.la
     const flags = std.mem.concat(b.allocator, []const u8, &.{ base, extra }) catch @panic("OOM");
     // The kernel's Zig (src/kern/port.zig), which src/nskernel.zig
     // imports.
-    const port = kernPort(b, root.resolved_target.?, optimize, flags);
+    const port = kernPort(b, root.resolved_target.?, optimize, flags, false);
     root.addImport("kern_port", port);
     m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/kern"), .files = &nskern_sources, .flags = flags });
     m.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &nskern_h9, .flags = flags });

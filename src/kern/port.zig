@@ -26,6 +26,8 @@
 //! - `linuxnet.zig`, `dev/eventfd.zig`, and `rconv.zig`: h9's
 //!   src/kern/linuxnet.c, the Linux ABI's readiness and socket calls, #ε,
 //!   and the read-ahead for remote conversations.
+//! - `dev/gfx.zig`: the devices of h9's src/kern/gfx.c, #i, #c, #b, and
+//!   #m over drawterm's, in builds with a screen (`options.gfx`).
 //!
 //! The files only the full kernel has (devip's hooks, the Linux ABI, and
 //! the screen) export their C names only there: `options.nskernel` says
@@ -58,6 +60,7 @@ pub const devns = @import("dev/ns.zig");
 pub const linuxnet = @import("linuxnet.zig");
 pub const rconv = @import("rconv.zig");
 pub const deveventfd = @import("dev/eventfd.zig");
+pub const devgfx = @import("dev/gfx.zig");
 
 comptime {
     qio.exportC();
@@ -78,6 +81,7 @@ comptime {
     // Without devfs, nstab.c stands in for these.
     if (options.hostfs) fscheck.exportC();
     if (options.nskernel) devns.exportC();
+    if (options.gfx) devgfx.exportC();
 }
 
 test {
