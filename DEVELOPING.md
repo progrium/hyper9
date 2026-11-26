@@ -95,6 +95,7 @@ zig build kern     # compiles drawterm's kern and the libraries it uses
 zig build embed    # builds docs/embedding/embed.zig, the embedding guide's example, as zig-out/bin/embed
 zig build integration  # real 9front binaries from the root tree through the h9 CLI
 zig build proposal -Dp=baseline  # one proposal's demos, web cases, and integration cases, by slug
+zig build conformance            # tests/conformance/ns.rc on h9, against 9front's transcript; -- --oracle records that under QEMU
 zig build design -- check        # validate design/, the test tags, and links to design/ (also list, ready, new, propose, log, sign, archive)
 zig build mkroot -- --src        # build the root tree from the pinned image (also --force, --arch arm64,386,amd64)
 zig build slim     # 9box, 9front's commands as one multi-call binary, and a slim root around it in .local/9front/slim-<release>-<arch>
@@ -303,6 +304,29 @@ pins.sh with the host's cargo, which takes several minutes, into
 doesn't build it. "Linux v9fs
 mounts --serve over a unix socket" runs only on Linux with the kernel's
 9p, as root or with `sudo -n`, as in the `linux-kvm` VM.
+
+### Namespace conformance
+
+[tests/conformance/ns.rc](tests/conformance/ns.rc) is a script of
+namespace operations (binds, unions, mounts, `..` across mounts, creates
+in unions, `ORCLOSE`, and flush) that prints what each one showed, and
+[tests/conformance/9front.out](tests/conformance/9front.out) is what it
+printed on 9front's own kernel ([kernel-port](design/kernel-port.md)).
+`zig build conformance` runs it on h9, on each engine `-Dengines` picks,
+with the root tree (`-Droot`, and `-Darch`), and fails on any difference,
+showing the first one; each engine's transcript is left in
+`zig-out/conformance`. It skips without a root tree, and needs no QEMU.
+When the script changes, record the transcript again on 9front:
+
+```sh
+zig build conformance -- --oracle   # boots the pinned arm64 image under QEMU (scripts/fetch.sh image), as mkroot does
+```
+
+It runs the script there with rc and writes `9front.out`
+([tools/conformance.zig](tools/conformance.zig)). On TCG, with no
+hypervisor for arm64, that takes well under a minute. A difference that
+is a bug in h9's kernel is noted in kernel-port's Updates, not hidden by
+changing the script.
 
 ### Workloads
 

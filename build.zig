@@ -1580,6 +1580,30 @@ pub fn build(b: *std.Build) void {
         if (jit_check and b.graph.environ_map.get("H9_TEST_SLOW") == null) run_integration.setEnvironmentVariable("H9_TEST_SLOW", "40");
     }
 
+    // The namespace conformance check (design/kernel-port.md,
+    // tools/conformance.zig): tests/conformance/ns.rc on h9, on each engine
+    // -Dengines picks, against what 9front printed for it
+    // (tests/conformance/9front.out). `-- --oracle` records that on 9front
+    // under QEMU instead.
+    const conformance_tool = b.addExecutable(.{
+        .name = "conformance",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/conformance.zig"),
+            .target = b.graph.host,
+        }),
+    });
+    const run_conformance = b.addRunArtifact(conformance_tool);
+    run_conformance.setCwd(b.path("."));
+    run_conformance.has_side_effects = true;
+    run_conformance.stdio = .inherit;
+    run_conformance.addArg("--h9");
+    run_conformance.addFileArg2(h9, .{ .make_absolute = true });
+    run_conformance.addArgs(&.{ "--root", root, "--engines", engine_list });
+    if (test_arch) |a| run_conformance.addArgs(&.{ "--arch", a });
+    run_conformance.addPassthruArgs();
+    run_conformance.step.dependOn(signed_step);
+    b.step("conformance", "Run tests/conformance/ns.rc on h9 and compare it with 9front's transcript; -- --oracle records that under QEMU").dependOn(&run_conformance.step);
+
     // The workloads (tests/workloads): real programs on real roots, in
     // parallel, timed, by scripts/workloads.sh. Too slow for every PR, so
     // a workflow runs them every two days (.github/workflows/workloads.yml).
