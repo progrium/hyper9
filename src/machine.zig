@@ -257,6 +257,16 @@ pub const Machine = struct {
         /// The sandbox policy (SPEC.md, "Sandbox policy"). Host paths in
         /// it, like `root` and `cwd`, must be absolute and resolved.
         policy: policy.Policy = .{},
+        /// The handles the kernel reaches outside through
+        /// (design/host-handles.md), for an embedder that supplies its
+        /// own: an in-memory tree, a dialer through its own proxy, or a
+        /// clock it controls. A handle left null is a capability the
+        /// machine doesn't have; `.{}` reaches nothing. The policy is
+        /// still compiled and checked beside it, and the embedder keeps
+        /// its handles open for the Machine's life and closes them after.
+        /// Its console, when it has one, replaces `stdio`'s. Null builds
+        /// the host the policy describes, as the CLI does.
+        host: ?handles.Host = null,
         /// Bind h9's own commands, `#H/bin`, after /bin; false leaves the
         /// bind out and masks `#H` (design/epoch-0/guest-tools.md).
         guest_tools: bool = true,
@@ -504,10 +514,14 @@ pub const Machine = struct {
     opts: Options,
     /// The compiled policy; allocated in `arena`.
     plan: policy.Plan,
-    /// The host the plan describes (design/host-handles.md), in `arena`:
-    /// the handles the kernel reaches outside through. Built at init, with
-    /// its directories opened; `plan.host` points at the arena's copy.
+    /// The host the plan describes (design/host-handles.md), or
+    /// `Options.host`, in `arena`: the handles the kernel reaches outside
+    /// through. Built at init, with its directories opened; `plan.host`
+    /// points at the arena's copy.
     host: handles.Host,
+    /// Whether `host`'s directory handles are the machine's to close: not
+    /// an embedder's.
+    owns_dirs: bool = true,
     arena: *std.heap.ArenaAllocator,
     msg_buf: [256]u8 = undefined,
     err_buf: [256]u8 = undefined,
@@ -910,8 +924,9 @@ pub const Machine = struct {
         // devfs opens beneath them (design/host-handles.md); the plan the
         // machine's threads find holds it, in the arena.
         const hst_at = try arena.allocator().create(handles.Host);
-        hst_at.* = try handles.fromPlan(arena.allocator(), io, plan_at, .{ .console = o.stdio, .gfx = o.gfx, .open_dirs = !web.enabled });
-        errdefer handles.closeDirs(hst_at.*);
+        hst_at.* = if (o.host) |given_host| given_host else try handles.fromPlan(arena.allocator(), io, plan_at, .{ .console = o.stdio, .gfx = o.gfx, .open_dirs = !web.enabled });
+        const owns_dirs = o.host == null;
+        errdefer if (owns_dirs) handles.closeDirs(hst_at.*);
         var pl = plan;
         pl.host = hst_at;
         var claim: ?*gfx.Claim = null;
@@ -938,7 +953,7 @@ pub const Machine = struct {
         quota.* = .{ .limit = plan.memory orelse engine.default_memory };
         const backend = try gpa.create(Backend);
         backend.* = .{ .gpa = gpa, .engine = eng };
-        return .{ .gpa = gpa, .io = io, .opts = o, .arch = arch, .engine = eng.withQuota(quota), .backend = backend, .quota = quota, .plan = pl, .host = hst_at.*, .arena = arena, .gfx_claim = claim, .plan_run = plan_run };
+        return .{ .gpa = gpa, .io = io, .opts = o, .arch = arch, .engine = eng.withQuota(quota), .backend = backend, .quota = quota, .plan = pl, .host = hst_at.*, .owns_dirs = owns_dirs, .arena = arena, .gfx_claim = claim, .plan_run = plan_run };
     }
 
     /// Entropy from the machine's host (design/host-handles.md), for
@@ -967,7 +982,7 @@ pub const Machine = struct {
         // leaked rather than freed under it.
         if (m.stuck) return;
         if (m.gfx_claim) |cl| if (m.host.window) |w| w.release(cl) else gfx.release(cl);
-        handles.closeDirs(m.host);
+        if (m.owns_dirs) handles.closeDirs(m.host);
         vclock.forget(m.engine);
         // A child gives its reservation back to its parent
         // (design/child-machines.md); childGone then lets the parent's
@@ -1088,11 +1103,12 @@ pub const Machine = struct {
         defer if (dns) |r| r.stop();
         // Heap-allocated, with its own copy of the machine, so a stuck
         // process never refers to the caller's Machine.
-        // The guest's console is the host's (design/host-handles.md):
-        // `Options.stdio` as it is for this run, since an embedder may
-        // change it between runs.
-        m.host.console = m.opts.stdio;
-        if (m.plan.host) |h| @constCast(h).console = m.opts.stdio;
+        // The guest's console is the host's (design/host-handles.md): an
+        // embedder's host's, or `Options.stdio` as it is for this run,
+        // since an embedder may change it between runs.
+        const given_console = if (m.opts.host) |h| h.console else null;
+        m.host.console = given_console orelse m.opts.stdio;
+        if (m.plan.host) |h| @constCast(h).console = m.host.console;
         const sc = m.host.console.?;
         const job = try m.gpa.create(Job);
         // A child machine's runs are under its parent's pool

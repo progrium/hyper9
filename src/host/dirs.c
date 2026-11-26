@@ -549,7 +549,7 @@ h9_host_readlink(const char *path, char *buf, size_t n)
 #if defined(_WIN32)
 
 /*
- * Windows: devfs-win32's paths are "C:\a\b" (src/kern/fscheck.c spells
+ * Windows: devfs-win32's paths are "C:\a\b" (src/host/fscheck.c spells
  * them "\\?\C:\a\b" for the Win32 calls). A file beneath a handle is
  * opened with NtCreateFile relative to its directory, a name at a time,
  * each with FILE_OPEN_REPARSE_POINT, so the host follows no symbolic link
@@ -1020,7 +1020,7 @@ out:
 }
 
 /*
- * devfs-win32's CreateFileW (through src/kern/fscheck.c's
+ * devfs-win32's CreateFileW (through src/host/fscheck.c's
  * h9_fs_createfile): 1 with *out set, or 0 for the caller to call
  * CreateFileW itself.
  */

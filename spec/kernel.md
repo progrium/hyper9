@@ -99,9 +99,21 @@ The kernel is h9's Zig, in `src/kern/` ([kernel-port](../design/kernel-port.md))
 
 ### drawterm's C
 
-h9 vendors 9front drawterm (`third_party/drawterm`, a squashed subtree), and still builds from its `kern/` the C that isn't ported: devcons (for everything but `cons` itself), devdraw, devfs-posix and devfs-win32 (the host filesystem, with h9's sandbox hook calls), devip (with h9's network hook calls), devkbd, devmouse, devaudio, devlfd (`#φ`, for unix socket servers and embedders' descriptors), devtls, devssl, the allocator, error strings, the OS layer (`posix.c` or `win32.c`), and drawterm's libraries (libc, libdraw, libmemdraw, libmemlayer, libsec, libmp, libip, libauthsrv) and GUI backends. It doesn't build `kern/devtab.c` or `kern/devenv.c`, whose own versions are `src/kern/devtab.c` and `src/kern/dev/env.zig`, `kern/procinit.c` (in `src/kern/proc.zig`), or any file the port replaced (see Ported to Zig), and h9 doesn't patch those: they're as upstream has them, for reference and for merges.
+h9 vendors 9front drawterm (`third_party/drawterm`, a squashed subtree), and still builds from its `kern/` the C that isn't ported: devcons (for everything but `cons` itself), devdraw, devkbd, devmouse, devaudio, devtls, devssl, the allocator, error strings, the OS layer (`posix.c` or `win32.c`), and drawterm's libraries (libc, libdraw, libmemdraw, libmemlayer, libsec, libmp, libip, libauthsrv) and GUI backends. It doesn't build `kern/devtab.c` or `kern/devenv.c`, whose own versions are `src/kern/devtab.c` and `src/kern/dev/env.zig`, `kern/procinit.c` (in `src/kern/proc.zig`), or any file the port replaced (see Ported to Zig), and h9 doesn't patch those: they're as upstream has them, for reference and for merges. Nor does it build the host's devices, devfs-posix, devfs-win32, devip, devip-posix, devip-win32, devlfd-posix, and devlfd-win32, which are h9's own in `src/host/` (see The host's devices).
 
-The patches h9 still carries are small and marked: `dat.h` includes h9's `Proc` (`src/kern/h9proc.h`) in place of its own and has `Chan.srvname`; devcons calls h9's hooks for `pid`, `ppid`, the clock, and `sysstat` (see devcons hooks); devfs and devip call the sandbox hooks (see Sandbox policy) and have h9's FIFOs, links, attributes, syncs, and socket calls; devlfd's character is `φ`; and `win32.c`'s `oserrstr` reads socket errors as POSIX names them.
+The patches h9 still carries are small and marked: `dat.h` includes h9's `Proc` (`src/kern/h9proc.h`) in place of its own and has `Chan.srvname`; and devcons calls h9's hooks for `pid`, `ppid`, the clock, and `sysstat` (see devcons hooks). `win32.c` is upstream's: the host's C reads a Windows error through `src/host/hostsock.h`'s `oserrstr`, which is `src/host/win32.zig`'s, so a socket error reads as POSIX names it and a system message has no closing period.
+
+#### The host's devices ([host-handles](../design/host-handles.md))
+
+The devices that reach outside the machine are in `src/host/`, native devices the kernel's switch names through the `host_dev` module (`src/host/devices.zig`), which imports the kernel's Zig in turn. They're close ports of drawterm's C, with h9's changes to it:
+
+| Device | File | Does |
+|---|---|---|
+| `#U` | `src/host/devfs.zig`, with `devfs_posix.zig` (POSIX and the web host) and `devfs_win32.zig` | the host's trees, each file opened beneath the machine's directory handle that holds it (`src/host/dirs.c`), with the policy's checks (`src/host/fscheck.c`), h9's FIFOs, links, attributes, and syncs |
+| `#I` | `src/host/devip.zig` | the host's network: drawterm's devip, with the dialer's and listener's checks, nonblocking connects, `shutdown`, socket options, and the Linux layer's calls; its socket layer is `src/host/ipsock-posix.c`, `ipsock-win32.c`, and `ipsock-wasm.c` (drawterm's `so_` calls, which raise), and `hostsock-*.c` (h9's) |
+| `#φ` | `src/host/devlfd.zig` | a host descriptor, or a `HANDLE`, read and written as it is: unix socket servers, embedders' descriptors, and drawterm's `oscmd` pipes. drawterm names it `#L`, which the Linux device has |
+
+The rest of the host's code is there too: the GUI backends (`gfx-cocoa.m`, `gfx-headless.c`, and `gfx-web.c`), the Windows glue (`glue-win32.c`), the host interfaces for netlink (`hostif-posix.c`), and the host's C headers (`src/host/glue.h`, which `src/kern/port.h` includes), so nothing under `src/kern/` includes a host OS header.
 
 ### Added by us
 
@@ -165,13 +177,13 @@ drawterm's `devmnt.c` is `src/kern/devmnt.zig`, the 9P client and the first nati
 
 drawterm's `devpipe.c` and `devroot.c` are `src/kern/dev/pipe.zig` and `src/kern/dev/root.zig`, native devices too. The pipe keeps h9's Linux FIFOs (one queue that every open reads and writes, `fifopipe` and `fiforefs` for `src/kern/fifo.zig`) and `ready` and `watch` on its queues, and a write on a pipe whose reader closed still posts the note through `h9_postnote`, unless the pipe carries a mount's 9P. A native device's own `Devgen` is Zig that doesn't raise, so the switch calls it directly. Of drawterm's `kern/`, the build now compiles no file the proposal ports.
 
-h9's own C is ported the same way, a file at a time. `src/kern/devpty.c` is `src/kern/dev/pty.zig`, a native device, with `h9_ptyq` and the `h9_pty_*` calls the Linux ABI makes exported for their callers. `src/kern/netcheck.c` is `src/kern/netcheck.zig`, and the kernel's half of `src/kern/fscheck.c` (FIFOs by path, through overlays and 9P2000.L mounts) is `src/kern/fscheck.zig`; the host's half, the policy checks on host paths, stays C, since it never sets an error label. The C they call that raises (devip's socket calls, and devfs's FIFOs) goes through `raising`. `src/kern/devns.c` is `src/kern/dev/ns.zig`, the namespace kernel's `#N`, native there only, calling `pgrp.zig`'s `pgrpcpy` and `dev/srv.zig`'s `srvpost` directly. `src/kern/linuxnet.c` is two files: `src/kern/linuxnet.zig`, Linux poll (`h9_poll`) and the Linux socket calls; and `src/kern/dev/eventfd.zig`, `#ε`. The devices of `src/kern/gfx.c` (`#i` opening the screen lazily with `/dev/screen`, `#c`'s `/dev/snarf` limit, `#b`'s kbdfs format and `/dev/kbdin`, and `#m`'s `/dev/mousein`) are `src/kern/dev/gfx.zig`, native wrappers around drawterm's C devices, in builds with a screen; the screen interface the backends call and are called by stays C in `gfx.c`, since it never sets an error label, with the two calls that need the screen's image (`h9_gfx_screenshot` and `h9_gfx_mousein`) beside it. Files only one kernel has export their C names only there (`kern_options`, from the build).
+h9's own C is ported the same way, a file at a time. `src/kern/devpty.c` is `src/kern/dev/pty.zig`, a native device, with `h9_ptyq` and the `h9_pty_*` calls the Linux ABI makes exported for their callers. `src/kern/netcheck.c` is `src/kern/netcheck.zig`, and the kernel's half of `src/host/fscheck.c` (FIFOs by path, through overlays and 9P2000.L mounts) is `src/kern/fscheck.zig`; the host's half, the policy checks on host paths, stays C, since it never sets an error label. The C they call that raises (devip's socket calls) goes through `raising`; devfs's FIFOs are Zig calls into `src/host/devfs.zig`. `src/kern/devns.c` is `src/kern/dev/ns.zig`, the namespace kernel's `#N`, native there only, calling `pgrp.zig`'s `pgrpcpy` and `dev/srv.zig`'s `srvpost` directly. `src/kern/linuxnet.c` is two files: `src/kern/linuxnet.zig`, Linux poll (`h9_poll`) and the Linux socket calls; and `src/kern/dev/eventfd.zig`, `#ε`. The devices of `src/kern/gfx.c` (`#i` opening the screen lazily with `/dev/screen`, `#c`'s `/dev/snarf` limit, `#b`'s kbdfs format and `/dev/kbdin`, and `#m`'s `/dev/mousein`) are `src/kern/dev/gfx.zig`, native wrappers around drawterm's C devices, in builds with a screen; the screen interface the backends call and are called by stays C in `gfx.c`, since it never sets an error label, with the two calls that need the screen's image (`h9_gfx_screenshot` and `h9_gfx_mousein`) beside it. Files only one kernel has export their C names only there (`kern_options`, from the build).
 
 The rest of the kernel is C, so each ported file exports drawterm's functions under their C names (`qread`, `qlock`, `ksleep`, which `lib.h` renames `sleep` to, and the rest) with their C semantics: an exported function that gets an error from the Zig raises it with `nexterror()`, from its own frame, which has nothing to undo. A queue's kick and bypass functions are called from the Zig, so they must not raise; nothing in h9 sets them. Every place a process waits in the Zig is `park` in `sync.zig` (posix.c's `procsleep`), and every place one is let go is `unpark`. `zig build kern-test` runs their cases, on the native namespace kernel.
 
 #### Links and attributes ([file-interface](../design/file-interface.md), Part 2)
 
-Besides the nine operations, a device can have six optional ones for links and attributes: `readlink`, `symlink`, `link`, `getattr`, `setattr`, and `rename`. A Zig device has them as optional fields of its `dev.Ops`; a C device has them as function pointers in a `Devx` (`src/kern/devx.h`), found by the device's character in `devxtab` (`devtab.c`, or `nstab.c`), and called through `raising` like the rest. `dev.zig`'s switch calls a device's operation, or the default where it has none:
+Besides the nine operations, a device can have six optional ones for links and attributes: `readlink`, `symlink`, `link`, `getattr`, `setattr`, and `rename`. A Zig device has them as optional fields of its `dev.Ops`; a C device would have them as function pointers in a `Devx` (`src/kern/devx.h`), found by the device's character in `devxtab` (`devtab.c`, or `nstab.c`), and called through `raising` like the rest, though none does now. `dev.zig`'s switch calls a device's operation, or the default where it has none:
 
 | Operation | Does | Default |
 |---|---|---|
@@ -186,8 +198,8 @@ An `Attr` has a mask of what it holds (`Amode`, `Anlink`, `Auid`, `Agid`, `Ardev
 
 | Device | Has |
 |---|---|
-| `#U`, POSIX (`devfs-posix.c`) | `readlink`, `symlink`, `link` (`linkat`, the new name checked like a create), `getattr` (the host's `stat`, with nanoseconds and the real link count), and `rename` (`rename(2)`) |
-| `#U`, Windows (`devfs-win32.c`) | `readlink`, `rename`, and `symlink`, which is "permission denied" there; `link` is the default copy |
+| `#U`, POSIX (`src/host/devfs_posix.zig`) | `readlink`, `symlink`, `link` (`linkat`, the new name checked like a create), `getattr` (the host's `stat`, with nanoseconds and the real link count), and `rename` (`rename(2)`) |
+| `#U`, Windows (`src/host/devfs_win32.zig`) | `readlink`, `rename`, and `symlink`, which is "permission denied" there; `link` is the default copy |
 | `#O` (`dev/overlay.zig`) | `readlink` and `symlink` (its own `Nlink` nodes, or the tree a name is in), `getattr` (its `Dir`, with what the lower tree's `getattr` adds), and `rename` (`h9_overlay_move`); `link` is the default copy |
 | devmnt | all six, as 9P2000.L requests, on a mount whose server is a `#ℓ` conversation translating to 9P2000.L (see [spec/ninep.md](ninep.md)); the defaults elsewhere. Its `attrstat` builds a stat's `Dir` from the `Attr` its `getattr` brought, so a Linux `stat` there (`h9_getattr`, which wants both) is one `Tgetattr`, a Linux process on a .L root translating once |
 
@@ -199,7 +211,7 @@ A device can have two more optional operations, `ready` and `watch` (`src/kern/r
 |---|---|
 | pipes, ptys, and `#y` | queue readiness (`qio.qready`), the queues' wakeups notifying the device's `Watchers` (`qsetwatch`) |
 | `#ε` | the counter's, notified by its reads and writes, which wait on the same list |
-| devip (`#I`, a `Devx`) | the host socket's, from a zero-timeout `poll`, and a host-socket watcher thread that wakes the watch once it fires (`h9_ip_ready` and `h9_ip_watch` in `linuxnet.zig`) |
+| devip (`#I`, `src/host/devip.zig`) | the host socket's, from a zero-timeout `poll`, and a host-socket watcher thread that wakes the watch once it fires (`ipready` and `ipwatch` in `linuxnet.zig`) |
 | devmnt | `Tready`, on a mount whose server took `9P2000.ready` (see [spec/ninep.md](ninep.md)); the default elsewhere |
 
 devmnt's `ready` sends a `Tready` that asks for an answer now, unless one waiting for these events is already out (and `Now` isn't asked). Its `watch` sends a `Tready` for the events its watches want that the server hasn't said hold, as an asynchronous request: a reply calls back from `mountmux`, and while only asynchronous requests are outstanding a reader kproc per mount reads the replies. A clunk flushes the channel's waiting `Tready`s. A server that fails a `Tready` is always ready.
@@ -222,9 +234,9 @@ drawterm has no semaphores. 9front's code is ported closely, with the wait lists
 
 `rendezvous` is 9front's on drawterm's Rgrp, so `procinterrupt` still pulls a process out of it, but it also checks for a note that arrived before the process was on the list.
 
-#### Sandbox hooks (`src/kern/fscheck.c` and `src/kern/fscheck.zig`, `src/kern/netcheck.zig`)
+#### Sandbox hooks (`src/host/fscheck.c` and `src/kern/fscheck.zig`, `src/kern/netcheck.zig`)
 
-The C side of the policy checks devfs and devip call; see Sandbox policy, "Vendor hooks".
+The C side of the policy checks devfs and devip call; see [spec/sandbox.md](sandbox.md), "Device hooks".
 
 #### devsrv `#s`, from 9front (`src/kern/dev/srv.zig`), per machine
 

@@ -1,6 +1,6 @@
 /*
  * h9: host-socket calls for devip's h9 additions and the Linux socket
- * calls on Windows (src/kern/hostsock.h). The watcher selects with a
+ * calls on Windows (src/host/hostsock.h). The watcher selects with a
  * short timeout instead of a wake pipe.
  */
 
@@ -251,9 +251,9 @@ h9so_linuxerrno(int e)
 
 /*
  * The text a Linux host gives for a Winsock error, or nil for any other
- * error. drawterm's oserrstr asks first, so a guest reads "Connection
- * refused" on every host, not Windows's sentence for it, which is longer
- * than an exits string and gets cut off.
+ * error. h9_oserrstr (src/host/win32.zig's oserr) asks first, so a
+ * guest reads "Connection refused" on every host, not Windows's sentence
+ * for it, which is longer than an exits string and gets cut off.
  */
 char*
 h9so_errstr(int e)

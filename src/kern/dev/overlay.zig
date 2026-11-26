@@ -84,16 +84,14 @@ extern fn h9_overlay_pool() ?*anyopaque;
 extern fn h9_overlay_alloc(pool: ?*anyopaque, n: c_uint) ?*anyopaque;
 extern fn h9_overlay_free(pool: ?*anyopaque, p: ?*anyopaque, n: c_uint) void;
 extern fn h9_overlay_changed(track: ?*anyopaque, path: [*:0]const u8) void;
-// src/kern/fscheck.c
+// src/host/fscheck.c
 extern fn h9_plan_get() ?*anyopaque;
 extern fn h9_fs_linkwalk() c_int;
 extern fn h9_clock_mono() i64;
-// devfs's (src/kern/fscheck.h), which doesn't raise.
-extern fn h9_fs_isfifo(ch: *Chan) c_int;
-// devfs's h9_fs_mkfifo, which raises, through dev.zig's `raising`.
-extern fn h9_fs_mkfifo(ch: [*c]Chan, name: [*c]u8, perm: c_uint) void;
+// devfs's FIFOs (src/host/devfs.zig).
+const hostfs = @import("host_dev").fs;
 
-// src/kern/fscheck.h's.
+// src/host/fscheck.h's.
 const H9_DMFIFO: c_uint = 0x00200000;
 const H9_QTSYMLINK: u8 = 0x02;
 const H9_DMSYMLINK: c_uint = 0x02000000;
@@ -1372,7 +1370,7 @@ pub fn isfifo(ch: *Chan) Error!bool {
         l = o.lower;
     sync.qunlock(&o.inst.ql);
     if (l) |x|
-        r = h9_fs_isfifo(x);
+        r = @intFromBool(hostfs.isfifo(x));
     return r != 0;
 }
 
@@ -2642,7 +2640,7 @@ fn mklink(dir: *Chan, name: [*c]const u8, target: [*c]const u8) Error!void {
 /// As mklink, a FIFO.
 fn mkfifo1(dir: *Chan, name: [*c]const u8, perm: c_uint) Error!void {
     switch (dcof(dir)) {
-        'U' => try dev.raising(&h9_fs_mkfifo, .{ dir, @constCast(z(name)), perm }),
+        'U' => try hostfs.mkfifo(dir, z(name), perm),
         'O' => try mkfifo(try chan.cclone(dir), name, perm),
         'M' => {
             // A 9P2000.L server's makes a create with H9_DMFIFO a Tmknod.
@@ -4261,7 +4259,7 @@ fn ovopen(ch: *Chan, omode: c_int) Error!*Chan {
             o.lower = try dopen(o.lower.?, OREAD);
             o.lopen = 1;
         }
-    } else if (o.node == null and h9_fs_isfifo(o.lower.?) != 0) {
+    } else if (o.node == null and hostfs.isfifo(o.lower.?)) {
         // A host FIFO isn't copied up for a write: it has no data, and
         // a Linux open of it joins a pipe instead (src/kern/fifo.c).
         o.lower = try dopen(o.lower.?, OREAD);
