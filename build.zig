@@ -682,8 +682,14 @@ fn kernPort(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.
     // screen.
     const options = b.addOptions();
     var nskernel = false;
-    for (flags) |f| nskernel = nskernel or std.mem.eql(u8, f, "-DH9_NSKERNEL");
+    var hostfs = false;
+    for (flags) |f| {
+        nskernel = nskernel or std.mem.eql(u8, f, "-DH9_NSKERNEL");
+        hostfs = hostfs or std.mem.eql(u8, f, "-DH9_NSKERNEL_HOSTFS");
+    }
     options.addOption(bool, "nskernel", nskernel);
+    // devfs (#U), which the full kernel always has.
+    options.addOption(bool, "hostfs", hostfs or !nskernel);
     return b.createModule(.{
         .root_source_file = b.path("src/kern/port.zig"),
         .target = target,

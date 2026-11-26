@@ -151,7 +151,7 @@ void h9_fs_markroot(Chan *c, int lx) { USED(c, lx); }
 void h9_qwake(Queue *q) { USED(q); }
 
 #ifndef H9_NSKERNEL_HOSTFS
-/* devfs and fscheck.c's: no host tree under an overlay. */
+/* devfs's and fscheck.zig's: no host tree under an overlay. */
 void h9_fs_anchor(Chan *c) { USED(c); }
 void h9_fs_symlink(Chan *c, char *name, char *target) { USED(c, name, target); error(Eperm); }
 void h9_fs_mkfifo(Chan *c, char *name, ulong perm) { USED(c, name, perm); error(Eperm); }

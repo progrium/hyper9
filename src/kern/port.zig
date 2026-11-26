@@ -18,6 +18,8 @@
 //! - `dev/pipe.zig` and `dev/root.zig`: devpipe.c and devroot.c.
 //! - `dev/pty.zig`: h9's src/kern/devpty.c, the Linux ABI's ptys.
 //! - `netcheck.zig`: h9's src/kern/netcheck.c, devip's sandbox hooks.
+//! - `fscheck.zig`: the kernel's half of h9's src/kern/fscheck.c, links,
+//!   renames, and FIFOs by path for the Linux ABI.
 //!
 //! The files only the full kernel has (devip's hooks, the Linux ABI, and
 //! the screen) export their C names only there: `options.nskernel` says
@@ -44,6 +46,7 @@ pub const devpipe = @import("dev/pipe.zig");
 pub const devroot = @import("dev/root.zig");
 pub const devpty = @import("dev/pty.zig");
 pub const netcheck = @import("netcheck.zig");
+pub const fscheck = @import("fscheck.zig");
 
 comptime {
     qio.exportC();
@@ -59,6 +62,8 @@ comptime {
     if (!options.nskernel) {
         netcheck.exportC();
     }
+    // Without devfs, nstab.c stands in for these.
+    if (options.hostfs) fscheck.exportC();
 }
 
 test {
@@ -76,6 +81,7 @@ test {
     _ = devroot;
     _ = devpty;
     _ = netcheck;
+    _ = fscheck;
 }
 
 /// A kernel error. The Plan 9 error string is on the process, in

@@ -201,6 +201,88 @@ h9_shim_fs_chanreadlink(Chan *c, char *buf, int nbuf, int *r)
 	return 0;
 }
 
+/*
+ * What src/kern/fscheck.zig calls that raises: devoverlay's links,
+ * FIFOs, and moves, and devfs's (or nstab.c's stand-ins for them).
+ */
+extern Chan *h9_overlay_lower(Chan*);
+extern void h9_overlay_symlink(Chan*, char*, char*);
+extern int h9_overlay_move(Chan*, Chan*, char*);
+extern void h9_overlay_mkfifo(Chan*, char*, ulong);
+extern void h9_fs_symlink(Chan*, char*, char*);
+extern int h9_fs_rename(Chan*, Chan*, char*);
+extern void h9_fs_mkfifo(Chan*, char*, ulong);
+
+int
+h9_shim_overlay_lower(Chan *c, Chan **r)
+{
+	if(waserror())
+		return -1;
+	*r = h9_overlay_lower(c);
+	poperror();
+	return 0;
+}
+
+int
+h9_shim_overlay_symlink(Chan *c, char *name, char *target)
+{
+	if(waserror())
+		return -1;
+	h9_overlay_symlink(c, name, target);
+	poperror();
+	return 0;
+}
+
+int
+h9_shim_overlay_move(Chan *c, Chan *dc, char *name, int *r)
+{
+	if(waserror())
+		return -1;
+	*r = h9_overlay_move(c, dc, name);
+	poperror();
+	return 0;
+}
+
+int
+h9_shim_overlay_mkfifo(Chan *c, char *name, ulong perm)
+{
+	if(waserror())
+		return -1;
+	h9_overlay_mkfifo(c, name, perm);
+	poperror();
+	return 0;
+}
+
+int
+h9_shim_fs_symlink(Chan *c, char *name, char *target)
+{
+	if(waserror())
+		return -1;
+	h9_fs_symlink(c, name, target);
+	poperror();
+	return 0;
+}
+
+int
+h9_shim_fs_rename(Chan *c, Chan *dir, char *name, int *r)
+{
+	if(waserror())
+		return -1;
+	*r = h9_fs_rename(c, dir, name);
+	poperror();
+	return 0;
+}
+
+int
+h9_shim_fs_mkfifo(Chan *c, char *name, ulong perm)
+{
+	if(waserror())
+		return -1;
+	h9_fs_mkfifo(c, name, perm);
+	poperror();
+	return 0;
+}
+
 #ifndef H9_NSKERNEL
 /*
  * devip's host-socket calls, which raise, for src/kern/netcheck.zig:

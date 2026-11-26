@@ -1,5 +1,6 @@
 /*
- * h9's sandbox hooks for devfs (src/kern/fscheck.c). The operation
+ * h9's sandbox hooks for devfs (src/kern/fscheck.c, and the kernel's half in
+ * src/kern/fscheck.zig). The operation
  * numbers match policy.Op in src/policy.zig.
  */
 enum {
@@ -140,12 +141,12 @@ DWORD	h9_fs_getattr(wchar_t *path);
  */
 void	h9_fs_anchor(Chan *c);
 int	h9_fs_readlink(Chan *c, char *buf, int nbuf);
-/* The same by a path in the caller's namespace, through an overlay (fscheck.c). */
+/* The same by a path in the caller's namespace, through an overlay (fscheck.zig). */
 int	h9_fs_readlinkpath(char *path, char *buf, int nbuf);
 /*
  * h9_fs_symlink makes name in the devfs directory c a link to target.
  * h9_fs_symlinkpath does it by a path in the caller's namespace, in an
- * overlay, a devfs tree, or a 9P2000.L mount (fscheck.c); 0, or -1 with
+ * overlay, a devfs tree, or a 9P2000.L mount (fscheck.zig); 0, or -1 with
  * the error in errstr. h9_fs_mntsymlink makes one in a 9P2000.L mount's
  * directory dir, by Tsymlink, and is Eperm on any other.
  */
@@ -175,7 +176,7 @@ int	h9_fs_renamepath(char *old, char *new);
  * h9_fs_mkfifo makes name in the devfs directory c a host FIFO, and
  * h9_fs_isfifo says whether the devfs chan c is one. h9_fs_mkfifopath
  * makes one by a path in the caller's namespace, in an overlay or a
- * devfs tree (fscheck.c); 0, or -1 with the error in errstr.
+ * devfs tree (fscheck.zig); 0, or -1 with the error in errstr.
  * h9_fs_chanisfifo says whether any chan is a FIFO's, through an overlay.
  */
 #define	H9_DMFIFO	0x00200000
