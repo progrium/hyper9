@@ -14,6 +14,8 @@
 //! - `chan.zig`: chan.c, channels, paths, mounts, walks, and namec.
 //! - `sysfile.zig`: sysfile.c, file descriptors and the file system
 //!   calls.
+//! - `devmnt.zig`: devmnt.c, the 9P client.
+//! - `dev/pipe.zig` and `dev/root.zig`: devpipe.c and devroot.c.
 //!
 //! This file is the root the kernel builds compile (build.zig's addKern,
 //! and src/nskernel.zig), and holds what the ported files share: the C
@@ -31,6 +33,8 @@ pub const pgrp = @import("pgrp.zig");
 pub const chan = @import("chan.zig");
 pub const sysfile = @import("sysfile.zig");
 pub const devmnt = @import("devmnt.zig");
+pub const devpipe = @import("dev/pipe.zig");
+pub const devroot = @import("dev/root.zig");
 
 comptime {
     qio.exportC();
@@ -40,6 +44,8 @@ comptime {
     chan.exportC();
     sysfile.exportC();
     devmnt.exportC();
+    devpipe.exportC();
+    devroot.exportC();
 }
 
 test {
@@ -53,6 +59,8 @@ test {
     _ = chan;
     _ = sysfile;
     _ = devmnt;
+    _ = devpipe;
+    _ = devroot;
 }
 
 /// A kernel error. The Plan 9 error string is on the process, in

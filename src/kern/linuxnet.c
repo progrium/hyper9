@@ -25,7 +25,7 @@
 #include "netcheck.h"
 #include "hostsock.h"
 
-extern Queue*	h9_pipeq(Chan*, int);		/* kern/devpipe.c */
+extern Queue*	h9_pipeq(Chan*, int);		/* src/kern/dev/pipe.zig */
 extern Queue*	h9_ptyq(Chan*, int);		/* devpty.c */
 extern int	h9_ip_sfd(Chan*, int*);		/* kern/devip.c */
 extern long	h9_ip_ctl(Chan*, char*);	/* kern/devip.c */

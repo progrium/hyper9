@@ -12,7 +12,7 @@
  * Notes are queued on the record, not in drawterm's Proc: drawterm's
  * postnote only sets notepending, which its sysfile.c clears after every
  * successful call, so notepending stays the "interrupt this call" flag.
- * devpipe.c is built with -Dpostnote=h9_postnote, so its notes come here.
+ * The pipe device (src/kern/dev/pipe.zig) posts its notes here.
  * Each record belongs to a machine (Hmach): note groups and postnotepg
  * never reach another machine's processes.
  *
@@ -233,8 +233,8 @@ pushnote(Hproc *h, Hnote *n)
 }
 
 /*
- * drawterm's postnote, which kern files built with -Dpostnote=h9_postnote
- * (devpipe.c) call. A Proc that isn't an h9 process (a kproc) is only
+ * drawterm's postnote, which the pipe device (src/kern/dev/pipe.zig)
+ * calls. A Proc that isn't an h9 process (a kproc) is only
  * interrupted, as drawterm's postnote does.
  */
 int

@@ -1376,7 +1376,7 @@ fn c_qnoblock(q: *Queue, onoff: c_int) callconv(.c) void {
 
 /// qio.c's global: the bytes a qwrite writes at a time. (Nothing reads
 /// it; qwrite uses Maxatomic, as in C.)
-var qiomaxatomic: c_uint = Maxatomic;
+pub var qiomaxatomic: c_uint = Maxatomic;
 
 pub fn exportC() void {
     @export(&c_allocb, .{ .name = "allocb" });

@@ -31,10 +31,20 @@ const Qid = c.Qid;
 const Walkqid = c.Walkqid;
 const Block = c.Block;
 
-/// A C Devgen: int (*)(Chan*, char*, Dirtab*, int, int, Dir*).
 /// DMDIR as a long, for a Dirtab perm or devdir.
-const dmdir: c_int = @bitCast(@as(c_uint, c.DMDIR));
+pub const dmdir: c_int = @bitCast(@as(c_uint, c.DMDIR));
 
+/// A Dirtab entry, for a device's table.
+pub fn dirtab(comptime name: []const u8, qid: Qid, length: i64, perm: c_int) Dirtab {
+    var d = std.mem.zeroes(Dirtab);
+    @memcpy(d.name[0..name.len], name);
+    d.qid = qid;
+    d.length = length;
+    d.perm = perm;
+    return d;
+}
+
+/// A C Devgen: int (*)(Chan*, char*, Dirtab*, int, int, Dir*).
 pub const Devgen = fn ([*c]Chan, [*c]u8, [*c]Dirtab, c_int, c_int, [*c]Dir) callconv(.c) c_int;
 
 extern var kerndate: c_uint;
@@ -392,7 +402,7 @@ pub fn devopen(ch: *Chan, omode: c_int, tab: ?[*]Dirtab, ntab: c_int, gen: *cons
     return ch;
 }
 
-pub fn devcreate(ch: *Chan, name: [*c]u8, mode: c_int, perm: c_uint) Error!*Chan {
+pub fn devcreate(ch: *Chan, name: [*:0]const u8, mode: c_int, perm: c_uint) Error!*Chan {
     _ = .{ ch, name, mode, perm };
     return port.kerror(&port.Eperm);
 }
@@ -415,7 +425,7 @@ pub fn devremove(ch: *Chan) Error!void {
     return port.kerror(&port.Eperm);
 }
 
-pub fn devwstat(ch: *Chan, a: [*c]u8, n: c_int) Error!c_int {
+pub fn devwstat(ch: *Chan, a: [*]u8, n: c_int) Error!c_int {
     _ = .{ ch, a, n };
     return port.kerror(&port.Eperm);
 }
@@ -460,6 +470,9 @@ pub const Ops = struct {
     bwrite: *const fn (*Chan, *Block, c_uint) Error!c_int = devbwrite,
     remove: *const fn (*Chan) Error!void,
     wstat: *const fn (*Chan, [*]u8, c_int) Error!c_int,
+    /// The device's own Devgens, which are Zig that doesn't raise, so
+    /// callgen calls them directly.
+    gens: []const *const Devgen = &.{},
 };
 
 fn devbreadOpt(ch: *Chan, n: c_int, offset: c_uint) Error!?*Block {
@@ -544,6 +557,8 @@ pub fn Native(comptime dc: u8, comptime name: [:0]const u8, comptime o: Ops) typ
 /// The native devices, whose functions the switch calls directly.
 const natives = .{
     @import("devmnt.zig").Device,
+    @import("dev/pipe.zig").Device,
+    @import("dev/root.zig").Device,
 };
 
 /// d's functions, if it's native.
@@ -678,14 +693,24 @@ pub fn wstat(d: *Dev, ch: *Chan, db: [*]u8, n: c_int) Error!c_int {
     return r;
 }
 
-/// (*gen)(c, name, tab, ntab, i, dp): devgen directly, or a device's
-/// own Devgen through the shim.
+/// (*gen)(c, name, tab, ntab, i, dp): devgen, or a native device's own,
+/// directly, or a C device's own Devgen through the shim.
 pub fn callgen(gen: *const Devgen, ch: *Chan, name: ?[*:0]const u8, tab: ?[*]Dirtab, ntab: c_int, i: c_int, dp: *Dir) Error!c_int {
     if (gen == &c_devgen)
         return devgen(ch, name, tab, ntab, i, dp);
+    inline for (natives) |N| {
+        for (N.ops.gens) |g| if (gen == g)
+            return gen(ch, @constCast(name), tab, ntab, i, dp);
+    }
     var r: c_int = 0;
     try caught(h9_dev_gen(gen, ch, name, tab, ntab, i, dp, &r));
     return r;
+}
+
+/// devgen as a C Devgen, for a native device's devwalk, devstat, and the
+/// rest.
+pub fn devgenC() *const Devgen {
+    return &c_devgen;
 }
 
 // The C kernel's names, with its semantics: a function that fails raises
@@ -734,7 +759,7 @@ fn c_devopen(ch: *Chan, omode: c_int, tab: ?[*]Dirtab, ntab: c_int, gen: *const 
     return devopen(ch, omode, tab, ntab, gen) catch |e| port.raise(e);
 }
 fn c_devcreate(ch: *Chan, name: [*c]u8, mode: c_int, perm: c_uint) callconv(.c) *Chan {
-    return devcreate(ch, name, mode, perm) catch |e| port.raise(e);
+    return devcreate(ch, @ptrCast(name), mode, perm) catch |e| port.raise(e);
 }
 fn c_devbread(ch: *Chan, n: c_int, offset: c_uint) callconv(.c) *Block {
     return devbread(ch, n, offset) catch |e| port.raise(e);
@@ -746,7 +771,7 @@ fn c_devremove(ch: *Chan) callconv(.c) void {
     devremove(ch) catch |e| port.raise(e);
 }
 fn c_devwstat(ch: *Chan, a: [*c]u8, n: c_int) callconv(.c) c_int {
-    return devwstat(ch, a, n) catch |e| port.raise(e);
+    return devwstat(ch, @ptrCast(a), n) catch |e| port.raise(e);
 }
 fn c_devpower(a: c_int) callconv(.c) void {
     devpower(a) catch |e| port.raise(e);

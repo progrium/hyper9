@@ -5,22 +5,18 @@ const guesttree = @import("tools/guesttree.zig");
 const drawterm = "third_party/drawterm";
 
 // drawterm's kern/Makefile OFILES with AUDIO=none, without devtab.c and
-// devenv.c (src/kern/ has our own), devpipe.c (built with kern_notes
-// below), devcmd.c (host commands live on the host-cmd branch while
-// design/host-cmd.md rethinks them), or the files ported to Zig
-// (design/kernel-port.md, src/kern/port.zig): allocb.c, chan.c, dev.c,
-// devmnt.c, pgrp.c, qio.c, qlock.c, rwlock.c, sleep.c, and sysfile.c.
-// Plus the OS files below.
+// devenv.c (src/kern/ has our own), devcmd.c (host commands live on the
+// host-cmd branch while design/host-cmd.md rethinks them), or the files
+// ported to Zig (design/kernel-port.md, src/kern/port.zig): allocb.c,
+// chan.c, dev.c, devmnt.c, devpipe.c, devroot.c, pgrp.c, qio.c, qlock.c,
+// rwlock.c, sleep.c, and sysfile.c. Plus the OS files below.
 const kern_sources = [_][]const u8{
     "alloc.c",    "data.c",     "devaudio.c", "devaudio-none.c",
     "devcons.c",  "devdraw.c",  "devip.c",    "devkbd.c",
-    "devmouse.c", "devroot.c",  "devssl.c",   "devtls.c",
-    "error.c",    "parse.c",    "procinit.c", "stub.c",
-    "term.c",     "waserror.c",
+    "devmouse.c", "devssl.c",   "devtls.c",   "error.c",
+    "parse.c",    "procinit.c", "stub.c",     "term.c",
+    "waserror.c",
 };
-// drawterm files that post notes, built so their notes reach h9's note
-// queue (src/kern/proc.c) instead of drawterm's postnote.
-const kern_notes = [_][]const u8{"devpipe.c"};
 // OS=posix (Make.unix), and OS=win32 with FS=fs-win32 (Make.win64).
 const kern_posix = [_][]const u8{ "devfs-posix.c", "devip-posix.c", "devlfd-posix.c", "posix.c" };
 const kern_win32 = [_][]const u8{ "devfs-win32.c", "devip-win32.c", "devlfd-win32.c", "win32.c" };
@@ -610,11 +606,6 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.O
     });
     kern.root_module.addCSourceFiles(.{
         .root = b.path(drawterm ++ "/kern"),
-        .files = &kern_notes,
-        .flags = std.mem.concat(b.allocator, []const u8, &.{ flags, &.{"-Dpostnote=h9_postnote"} }) catch @panic("OOM"),
-    });
-    kern.root_module.addCSourceFiles(.{
-        .root = b.path(drawterm ++ "/kern"),
         .files = if (web) &kern_web else if (os == .windows) &kern_win32 else &kern_posix,
         .flags = flags,
     });
@@ -760,8 +751,8 @@ fn addWeb(b: *std.Build, optimize: std.lang.Optimize, parts: ModuleParts, gfx: G
 // programs. src/kern/nstab.c is its device table and stands in for what
 // the left-out files would define.
 const nskern_sources = [_][]const u8{
-    "alloc.c", "data.c",     "devroot.c", "error.c",
-    "parse.c", "procinit.c", "stub.c",    "waserror.c",
+    "alloc.c",    "data.c", "error.c",    "parse.c",
+    "procinit.c", "stub.c", "waserror.c",
 };
 const nskern_h9 = [_][]const u8{
     "glue.c",       "proc.c",    "ns.c",     "devns.c",  "nstab.c",   "devoverlay.c", "devsrv.c",
@@ -809,11 +800,6 @@ fn addNsKernel(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.la
     const port = kernPort(b, root.resolved_target.?, optimize, flags);
     root.addImport("kern_port", port);
     m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/kern"), .files = &nskern_sources, .flags = flags });
-    m.addCSourceFiles(.{
-        .root = b.path(drawterm ++ "/kern"),
-        .files = &kern_notes,
-        .flags = std.mem.concat(b.allocator, []const u8, &.{ flags, &.{"-Dpostnote=h9_postnote"} }) catch @panic("OOM"),
-    });
     m.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &nskern_h9, .flags = flags });
     var libc: std.ArrayList([]const u8) = .empty;
     for (kern_libs[0].files) |f| {
