@@ -11,6 +11,8 @@ branch: []
 
 # Proposal: Baseline 1
 
+Nov 25, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
+
 ## Abstract
 
 The second baseline, which closes epoch 0 and opens epoch 1 ([epochs](epoch-0/epochs.md)). It records where h9 stood when it was cut: the commit, what h9 had become, each of epoch 0's proposals with a line on what it decided, and the open proposals carried into epoch 1. It also restates what h9 is, in SPEC.md's title and overview, since "Plan 9 executables on host hypervisors" no longer describes it. It's cut after the work that was mostly built in epoch 0 has landed and the parts have their new names, so that everything in epoch 1 is written against one vocabulary and one description. Until it's cut this file is a draft that says what the baseline will hold, and the tables are filled in by the PR that cuts it.
