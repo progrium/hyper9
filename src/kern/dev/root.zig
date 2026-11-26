@@ -1,6 +1,6 @@
 //! drawterm's devroot.c (design/kernel-port.md): the root device, `#/`,
 //! with its directories and boot files. A close translation: the same
-//! functions in the same order, with error unions in place of waserror.
+//! functions in the same order, with error unions in place of C's error labels.
 //! A native device (dev.zig's `Native`).
 
 const std = @import("std");

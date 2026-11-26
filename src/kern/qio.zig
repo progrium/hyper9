@@ -1,7 +1,7 @@
 //! drawterm's allocb.c and qio.c (design/kernel-port.md): blocks, and the
 //! I/O queues pipes, devmnt's conversations, and h9's streams are made
 //! of. A close translation: the same functions in the same order, with
-//! error unions in place of waserror, and h9's two patches kept: a
+//! error unions in place of C's error labels, and h9's two patches kept: a
 //! queue's watchers (design/file-interface.md, Part 1: `watch`, a
 //! ready.zig list its owner hangs on it, notified whenever its state
 //! changes), and reader and writer locks that a note interrupts
@@ -988,7 +988,7 @@ pub fn qread(q: *Queue, vp: [*]u8, len: c_int) Error!c_int {
 
     sync.qunlock(&q.rlock);
 
-    // C guards this copy with waserror, for a fault on a user buffer;
+    // C guards this copy with an error label, for a fault on a user buffer;
     // h9 copies to and from guest memory outside the kernel, so it can't
     // fail here.
     const r = readblist(first, vp, len, 0);
@@ -1077,7 +1077,7 @@ pub fn qwrite(q: *Queue, vp: [*]const u8, len: c_int) Error!c_int {
 
         const b = allocb(n);
         const k: usize = @intCast(n);
-        // C guards this copy with waserror, as qread's.
+        // C guards this copy with an error label, as qread's.
         @memmove(b.wp[0..k], (p + @as(usize, @intCast(sofar)))[0..k]);
         b.wp += k;
 

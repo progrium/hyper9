@@ -1,6 +1,6 @@
 //! h9's #y, a machine's console (src/kern/devhcons.c,
 //! design/kernel-port.md). A close translation of the C: the same
-//! functions in the same order, with error unions in place of waserror.
+//! functions in the same order, with error unions in place of C's error labels.
 //! A native device (dev.zig's `Native`).
 //!
 //! drawterm's #c/cons reads and writes the host process's fds 0 and 1;

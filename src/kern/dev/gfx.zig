@@ -1,8 +1,8 @@
 //! The devices of src/kern/gfx.c in Zig (design/kernel-port.md): drawterm's
 //! devdraw, devcons, devkbd, and devmouse as h9 serves them when a GUI
 //! backend is built in (design/epoch-0/gfx.md). Each is a native device
-//! wrapping the C one, which the device switch calls through
-//! src/kern/devshim.c:
+//! wrapping the C one, which the device switch calls through dev.zig's
+//! `raising`:
 //!
 //! - #i opens the screen at its first walk, not its attach, and adds
 //!   /dev/screen (design/epoch-0/headless-screen.md).

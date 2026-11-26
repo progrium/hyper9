@@ -1,6 +1,6 @@
 //! h9's devdotl.c (design/kernel-port.md): `#ℓ`, 9P2000.L translation
 //! (design/epoch-0/dotl.md). A close translation: the same functions in
-//! the same order, with error unions in place of waserror. A native
+//! the same order, with error unions in place of C's error labels. A native
 //! device (dev.zig's `Native`).
 //!
 //! A conversation puts the translator (src/dotl/client.zig) between
@@ -33,8 +33,8 @@
 //! one request can take several round trips. A guest reading data sleeps
 //! until the translator has bytes for it, so a note interrupts it.
 //!
-//! The translator is called through leaves (src/dotl/kern.zig, SPEC.md
-//! seam rule 3) that take and return bytes and never raise. A QLock per
+//! The translator is called through leaves (src/dotl/kern.zig)
+//! that take and return bytes and never raise. A QLock per
 //! conversation serializes them; another keeps writes to the server in
 //! the order the translator queued them.
 //!

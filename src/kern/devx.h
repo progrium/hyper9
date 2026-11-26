@@ -4,7 +4,7 @@
  * some lists them in a Devx, named in devxtab (src/kern/devtab.c, or
  * nstab.c in the namespace kernel), by its device character; a device
  * in Zig has them in its dev.Native ops. The device switch
- * (src/kern/dev.zig) calls them through src/kern/devshim.c, so each may
+ * (src/kern/dev.zig) calls them through its `raising`, so each may
  * raise, and any a device leaves nil gets the switch's default, which
  * is what h9 did before: links are "permission denied" and read as no
  * link, a link is a copy, attributes are built from stat and set by

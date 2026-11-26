@@ -2,7 +2,7 @@
 //! design/epoch-0/ninep-roots.md, design/kernel-port.md): connecting a unix
 //! socket root, and the user name devmnt sends in a root's attach. A
 //! close translation of the C: the same functions in the same order,
-//! with error unions in place of waserror.
+//! with error unions in place of C's error labels.
 //!
 //! A unix socket root is connected by h9 on the host and wrapped as a
 //! channel with devlfd's lfdchan, as drawterm wraps the host's stdio.

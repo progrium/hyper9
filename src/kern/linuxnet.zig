@@ -57,9 +57,9 @@ extern fn h9so_watchinit() void;
 extern fn h9so_watch(fd: c_int, events: c_int, owner: ?*anyopaque) void;
 extern fn h9so_unwatch(owner: ?*anyopaque) void;
 
-// src/kern/devshim.c: devip's h9_ip_ctl, which raises; -1 with the
-// error string set.
-extern fn h9_shim_ip_ctl(ch: *Chan, msg: [*:0]const u8) c_int;
+// devip's h9_ip_ctl, which raises, so it's called through dev.zig's
+// `raising`.
+extern fn h9_ip_ctl(ch: [*c]Chan, msg: [*c]u8) c_int;
 
 /// A call that failed: its error string becomes the process's
 /// syserrstr, as errstr(2) reads it, and -1, as proc.c's syserr does.
@@ -740,7 +740,7 @@ fn sockctl(fd: c_int, msg: [*:0]const u8) Error!void {
         return rctl(id, msg);
     if (dev.of(ch).dc != 'I')
         return port.kerror("not a socket");
-    try dev.caught(h9_shim_ip_ctl(ch, msg));
+    _ = try dev.raising(&h9_ip_ctl, .{ ch, @constCast(msg) });
 }
 
 fn h9_linux_sockctl(fd: c_int, msg: [*:0]const u8) callconv(.c) c_int {

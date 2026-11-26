@@ -1,6 +1,6 @@
 //! FIFOs for the Linux ABI (src/kern/fifo.c, design/epoch-0/linux-fifo.md,
 //! design/kernel-port.md). A close translation of the C: the same
-//! functions in the same order, with error unions in place of waserror.
+//! functions in the same order, with error unions in place of C's error labels.
 //!
 //! A FIFO file (an overlay's Nfifo node, or a host FIFO in a devfs tree)
 //! is never read or written itself. A Linux open of one joins a pipe kept

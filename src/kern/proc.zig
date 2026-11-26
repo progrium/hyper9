@@ -31,7 +31,7 @@
 //! parent never touches freed memory. A parent that exits marks its
 //! record dead, and children's exits then leave no wait record.
 //!
-//! One C call that can raise is made through src/kern/procshim.c: the
+//! One C call that can raise is made through dev.zig's `raising`: the
 //! function h9_kern_isolated runs.
 
 const std = @import("std");
@@ -68,9 +68,6 @@ const unlock = c.unlock;
 extern fn h9_srvmachclose(m: *Hmach) void;
 extern fn h9_srvmachfree(m: *Hmach) void;
 extern fn h9_hstream_machend(m: ?*anyopaque) void;
-// src/kern/procshim.c: a call of fn(arg), returning -1 if it raised,
-// with the error string on the process.
-extern fn h9_shim_call(f: *const fn (?*anyopaque) callconv(.c) void, arg: ?*anyopaque) c_int;
 extern fn sysclose(fd: c_int) c_int; // sysfile.zig's, for C
 
 // dev/env.zig's environment groups, kept as void* on the record; the
@@ -1018,7 +1015,7 @@ fn h9_kern_adopt(name: [*c]const u8) callconv(.c) c_int {
 /// Proc's own back after. The kprocs fn starts share these, not the
 /// caller's: a GUI backend's event and resize kprocs outlive the guest
 /// process whose attach of #i started them (src/kern/gfx.c). fn is C,
-/// which can raise: it's called through the shim, and its error raised
+/// which can raise: it's called through dev.zig's `raising`, and its error raised
 /// again once the Proc's own are back.
 fn h9_kern_isolated(f: Fn, arg: ?*anyopaque) callconv(.c) void {
     const p = up();
@@ -1032,7 +1029,7 @@ fn h9_kern_isolated(f: Fn, arg: ?*anyopaque) callconv(.c) void {
     p.rgrp = pgrp.newrgrp() catch |e| port.raise(e);
     p.slash = bootslash();
     p.dot = bootslash();
-    const rc = h9_shim_call(f, arg);
+    const rc = dev.raising(f, .{arg});
     pgrp.closepgrp(p.pgrp);
     fgrpclose(p.fgrp);
     pgrp.closergrp(p.rgrp);
@@ -1043,7 +1040,7 @@ fn h9_kern_isolated(f: Fn, arg: ?*anyopaque) callconv(.c) void {
     p.rgrp = rg;
     p.slash = slash;
     p.dot = dot;
-    dev.caught(rc) catch |e| port.raise(e);
+    rc catch |e| port.raise(e);
 }
 
 fn forktramp(v: ?*anyopaque) callconv(.c) void {

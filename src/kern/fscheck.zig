@@ -9,7 +9,7 @@
 //! h9_fs_mkfifopath returns -1 with the error in errstr, as the sys*
 //! wrappers do; h9_fs_chanisfifo raises for the C that calls it.
 //! The overlay is called directly (src/kern/dev/overlay.zig); devfs's
-//! calls that raise go through src/kern/devshim.c.
+//! calls that raise go through dev.zig's `raising`.
 
 const std = @import("std");
 const port = @import("port.zig");
@@ -28,8 +28,8 @@ const overlay = @import("dev/overlay.zig");
 extern fn h9_fs_isfifo(ch: *Chan) c_int;
 // devhidx.c
 extern fn h9_hidx_dotl(ch: *Chan) c_int;
-// src/kern/devshim.c: those that raise.
-extern fn h9_shim_fs_mkfifo(ch: *Chan, name: [*:0]const u8, perm: c_uint) c_int;
+// devfs's, which raises, through dev.zig's `raising`.
+extern fn h9_fs_mkfifo(ch: [*c]Chan, name: [*c]u8, perm: c_uint) void;
 
 
 /// A call that failed: its error string becomes the process's
@@ -93,7 +93,7 @@ fn mkfifopath(path: [*:0]const u8, perm: c_uint) Error!void {
         'O' => return overlay.mkfifo(ch, nn.name, perm),
         'U' => {
             defer chan.cclose(ch);
-            try dev.caught(h9_shim_fs_mkfifo(ch, nn.name, perm));
+            try dev.raising(&h9_fs_mkfifo, .{ ch, @constCast(nn.name), perm });
         },
         // A 9P2000.L server's: devdotl's translator makes a create with H9_DMFIFO a Tmknod.
         'M' => if (dotlmount(ch)) {

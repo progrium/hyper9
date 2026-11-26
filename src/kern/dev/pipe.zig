@@ -1,7 +1,7 @@
 //! drawterm's devpipe.c (design/kernel-port.md): pipes, `#|`, with h9's
 //! Linux FIFOs (design/epoch-0/linux-fifo.md). A close translation: the
 //! same functions in the same order, with error unions in place of
-//! waserror. A native device (dev.zig's `Native`).
+//! C's error labels. A native device (dev.zig's `Native`).
 //!
 //! A pipe waits only in its queues, which wait in sync.zig.
 

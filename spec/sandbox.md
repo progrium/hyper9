@@ -51,7 +51,7 @@ Sandboxing is a `Policy` in `Machine.Options`: a set of capabilities, host paths
 
 ### Vendor hooks
 
-The policy lives in Zig. drawterm calls it through leaf functions, following seam rule 3.
+The policy lives in Zig. drawterm's devfs and devip call it through leaf functions, which return a status and never raise.
 
 devfs-posix and devfs-win32 call `h9_fs_check(path, op)` (in `src/kern/fscheck.c`) before each walk, open, create, remove, wstat, and directory entry. It resolves the host path and asks the Zig leaf `h9_policy_check` for a verdict: allowed, hidden (the walk fails, or the entry is left out of the listing) or read-only ("permission denied").
 
@@ -122,7 +122,7 @@ A 9front program's walks follow links anywhere ([Path resolution](#path-resoluti
 
 A bind from `#U!c/path` ([symlinks-in-root](../design/epoch-0/symlinks-in-root.md)) is *contained*: devfs resolves its links itself, inside the tree, as `openat2`'s `RESOLVE_IN_ROOT` does.
 
-The tree's top is where namec's walk from the `#U!c` attach ends (`h9_fs_anchor`, called from the vendored `chan.c`), canonicalised.
+The tree's top is where namec's walk from the `#U!c` attach ends (`h9_fs_anchor`, called from `namec` in `src/kern/chan.zig`), canonicalised.
 
 Each later walk looks names up one at a time with `lstat` (`h9_fs_resolvein` in `src/kern/fscheck.c`; on Windows `h9_fs_resolveinw`, which reads symlinks and junctions with `FSCTL_GET_REPARSE_POINT` and refuses other reparse points and UNC targets): a link's target is read, an absolute one starts again at the top (on Windows, with its drive dropped), a relative one from the link's directory, `..` at the top stays there, and more than 40 links in one walk is "too many symbolic links".
 
@@ -144,7 +144,7 @@ A device's walk stops at the first link it meets: the link is the last qid of it
 
 devfs looks each name up with `lstat` (on Windows, `FindFirstFile`, whose entry for a symbolic link or junction isn't followed) and checks it against the access rules by its own path (`h9_fs_checkname`) rather than its `realpath`. A walk's path holds no links, from a canonical start (the first such walk from a chan `realpath`s it), so `..` is its parent, and it stops at a contained tree's top. An open of the walked path doesn't follow a link that appeared since: on Linux it's an `openat2` with `RESOLVE_NO_SYMLINKS`, elsewhere (and on Linux kernels without `openat2`) a chain of `openat`s with `O_NOFOLLOW` from `/`, and on Windows an open of the reparse point itself, refused if it is one. A link swapped in after the walk fails the open ("too many symbolic links") instead of being followed by the host, and a create doesn't follow a link left in its name. Those opens are made beneath the handle that holds the path ([Files beneath a handle](#files-beneath-a-handle)), with no link followed. The web host, with no `/` to start from, refuses a link only as the last name.
 
-`walk()` in the vendored `chan.c` follows a link when a walk stopped at one with names left, or at the last name of a lookup that follows links (`followlink`): it reads the target (the link's device's readlink operation, `dev.readlink` in `src/kern/dev.zig`, which an overlay passes down to the tree that holds it) and walks it, an absolute target from the process's root and a relative one from the link's directory as the walk reached it, then the rest of the path. A mount point before the link is crossed first. The result's name is the target's, so `..` after a link is the target's parent, and `getcwd` after a `chdir` through one is the target's path. More than 40 links in one lookup is "too many symbolic links". A lookup follows a link in its last name unless it's a remove or the call says not to (`h9_fs_nofollow`, per process): `lstat`, `readlink`, `rename`'s old name, and `O_NOFOLLOW`. `namec`'s `h9_fs_anchor` call, after the walk, is unchanged.
+`walk()` in `src/kern/chan.zig` follows a link when a walk stopped at one with names left, or at the last name of a lookup that follows links (`followlink`): it reads the target (the link's device's readlink operation, `dev.readlink` in `src/kern/dev.zig`, which an overlay passes down to the tree that holds it) and walks it, an absolute target from the process's root and a relative one from the link's directory as the walk reached it, then the rest of the path. A mount point before the link is crossed first. The result's name is the target's, so `..` after a link is the target's parent, and `getcwd` after a `chdir` through one is the target's path. More than 40 links in one lookup is "too many symbolic links". A lookup follows a link in its last name unless it's a remove or the call says not to (`h9_fs_nofollow`, per process): `lstat`, `readlink`, `rename`'s old name, and `O_NOFOLLOW`. `namec`'s `h9_fs_anchor` call, after the walk, is unchanged.
 
 A 9P2000.L mount follows its own links, from its attach root, only for a 9front process ([ninep.md](ninep.md)).
 
@@ -173,7 +173,7 @@ The root overlay reports each create, copy-up, remove, and wstat to the machine 
 
 ### The root overlay's cost
 
-Every walk in the root goes through `#O`: a lookup in its memory tree, then the lower device. A lower directory keeps the mounts made on it before the overlay (`findmount` in `third_party/drawterm/kern/chan.c` asks `#O` for the lower device when a mount hash bucket has an entry for the same qid path), which only a namespace file's overlay over `/` needs.
+Every walk in the root goes through `#O`: a lookup in its memory tree, then the lower device. A lower directory keeps the mounts made on it before the overlay (`findmount` in `src/kern/chan.zig` asks `#O` for the lower device when a mount hash bucket has an entry for the same qid path), which only a namespace file's overlay over `/` needs.
 
 Measured on the emulator (Linux x86_64, 4 cores, best of 7 runs, `--write=overlay` against `--write=scope`): `du -a /sys/src`, twenty `ls -l` of `/bin`, `/lib`, and `/sys/include`, and `mk -n cat.install` in `/sys/src/cmd` all differ by less than 4%, within run-to-run noise, and the `[baseline]` suite passes the same cases either way.
 

@@ -1,4 +1,5 @@
-//! Guest memory as the kernel sees it (SPEC.md, seam rule 7). drawterm's
+//! Guest memory as the kernel sees it (spec/kernel.md, "Errors, calls across
+//! the edge, and guest memory"). drawterm's
 //! validaddr is a no-op, so these checks are the only thing between a guest
 //! pointer and host memory.
 
