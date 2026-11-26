@@ -22,8 +22,6 @@
  * The sys*() routines needn't poperror() as they return directly to syscall().
  */
 
-int	h9_linux_inview(void);	/* h9: src/kern/linux.c */
-
 static void
 unlockfgrp(Fgrp *f)
 {
@@ -32,12 +30,7 @@ unlockfgrp(Fgrp *f)
 	ex = f->exceed;
 	f->exceed = 0;
 	unlock(&f->ref.lk);
-	/*
-	 * h9: not for a Linux process, whose fd 2 is its own stderr: Linux
-	 * prints nothing past 100 fds, and zig build fails a compile that
-	 * writes anything there (design/0018-linux-personality.md).
-	 */
-	if(ex && !h9_linux_inview())
+	if(ex)
 		pprint("warning: process exceeds %d file descriptors\n", ex);
 }
 
@@ -652,17 +645,19 @@ mountfix(Chan *c, uchar *op, long n, long maxn)
 	return e-op;
 }
 
-/*
- * h9: kread's work on a channel, for kserve (src/kern/kserve.c,
- * design/kernel-serve.md), so its directory reads of unions and mount
- * points are sysread's.
- */
-long
-h9_chanread(Chan *c, uchar *p, long n, vlong *offp)
+static long
+kread(int fd, uchar *p, long n, vlong *offp)
 {
 	long nn, nnn;
+	Chan *c;
 	vlong off;
 
+	c = fdtochan(fd, OREAD, 1, 1);
+
+	if(waserror()){
+		cclose(c);
+		nexterror();
+	}
 
 	/*
 	 * The offset is passed through on directories, normally.
@@ -709,24 +704,10 @@ h9_chanread(Chan *c, uchar *p, long n, vlong *offp)
 		c->offset += nnn;
 		unlock(&c->lk);
 	}
-	return nnn;
-}
 
-static long
-kread(int fd, uchar *p, long n, vlong *offp)
-{
-	long nn;
-	Chan *c;
-
-	c = fdtochan(fd, OREAD, 1, 1);
-	if(waserror()){
-		cclose(c);
-		nexterror();
-	}
-	nn = h9_chanread(c, p, n, offp);
 	cclose(c);
 	poperror();
-	return nn;
+	return nnn;
 }
 
 /* name conflicts with netbsd
@@ -935,19 +916,6 @@ _sysfstat(int fd, void *s, long n)
 		r = dirsetname(name, strlen(name), s, r, l);
 	cclose(c);
 	poperror();
-	return r;
-}
-
-/* h9: fstat's work on a channel, for kserve (src/kern/kserve.c). */
-long
-h9_chanstat(Chan *c, uchar *s, long n)
-{
-	char *name;
-	long r;
-
-	r = devtab[c->type]->stat(c, s, n);
-	if((name = pathlast(c->path)) != nil && name[0] != '\0')
-		r = dirsetname(name, strlen(name), s, r, n);
 	return r;
 }
 
@@ -1294,42 +1262,6 @@ sysdup(int fd0, int fd1)
 	n = _sysdup(fd0, fd1);
 	enderror();
 	return n;
-}
-
-/*
- * h9: fd0 dup'ed onto the lowest free fd at or above min, found and
- * taken under the fgrp's lock, close-on-exec if cexec, for Linux's
- * F_DUPFD and F_DUPFD_CLOEXEC (src/linux/sys.zig). Finding a free fd
- * first and then dup'ing onto it would replace one another thread
- * opened in between.
- */
-int
-h9_dupfrom(int fd0, int min, int cexec)
-{
-	int fd;
-	Chan *c;
-	Fgrp *f = up->fgrp;
-
-	starterror();
-	if(waserror()){
-		_syserror();
-		return -1;
-	}
-	c = fdtochan(fd0, -1, 0, 1);
-	lock(&f->ref.lk);
-	fd = findfreefd(f, min < 0 ? 0 : min);
-	if(fd < 0){
-		unlockfgrp(f);
-		cclose(c);
-		error(Enofd);
-	}
-	if(fd > f->maxfd)
-		f->maxfd = fd;
-	f->fd[fd] = c;
-	f->flag[fd] = cexec ? CCEXEC : 0;
-	unlockfgrp(f);
-	enderror();
-	return fd;
 }
 
 int

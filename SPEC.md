@@ -69,7 +69,7 @@ This file is the overview. Each part of h9 is described, as built, in a file und
 | --- | --- |
 | [spec/engines.md](spec/engines.md) | The `engine` interface; the hypervisor engines (HVF, KVM, and WHP), the sud engine, and the hcpu engine; and the guest shims |
 | [spec/jit.md](spec/jit.md), [spec/h86.md](spec/h86.md), [spec/hx64.md](spec/hx64.md), [spec/ha64.md](spec/ha64.md) | h9's own CPUs for the emulator: the layer they share, and each architecture |
-| [spec/kernel.md](spec/kernel.md) | The process model; and the kernel: drawterm's `kern/`, what h9 adds to it, and the Zig/C seam rules |
+| [spec/kernel.md](spec/kernel.md) | The process model; and the kernel: h9's Zig, ported from drawterm's `kern/`, what h9 adds to it, and the drawterm C it still builds |
 | [spec/abi-plan9.md](spec/abi-plan9.md) | The 9front binary ABI, a.out loading, the syscall table, and Go programs |
 | [spec/abi-linux.md](spec/abi-linux.md) | The Linux ABI |
 | [spec/ninep.md](spec/ninep.md) | Mounts and the root, static trees, the 9P dialects, and serving |
@@ -90,7 +90,7 @@ Proposals and other docs written before the split name sections of this file, su
 | Process model | [spec/kernel.md](spec/kernel.md#process-model) |
 | Go programs | [spec/abi-plan9.md](spec/abi-plan9.md#go-programs) |
 | Linux personality | [spec/abi-linux.md](spec/abi-linux.md) |
-| Kernel: drawterm `kern/` and the Zig seam | [spec/kernel.md](spec/kernel.md#kernel-drawterm-kern-and-the-zig-seam) |
+| Kernel: h9's Zig and drawterm's C | [spec/kernel.md](spec/kernel.md#kernel-h9s-zig-and-drawterms-c) |
 | Filesystem, boot, and I/O | The root filesystem and 9P dialects in [spec/ninep.md](spec/ninep.md); slim roots, the boot sequence, the terminal, and graphics in [spec/machine.md](spec/machine.md) |
 | Serving | [spec/ninep.md](spec/ninep.md#serving) |
 | Security, debugging, and testing | The security stance and the sandbox policy in [spec/sandbox.md](spec/sandbox.md); debugging, and testing and CI, in [spec/testing.md](spec/testing.md) |

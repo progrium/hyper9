@@ -3,7 +3,7 @@
 //! connection, and the small calls the Zig side makes into the kernel
 //! (src/kern.zig's). The screen is src/kern/gfx.c with a GUI backend, or
 //! src/kern/nogfx.c without one (design/epoch-0/gfx.md). See SPEC.md,
-//! "Kernel: drawterm kern/ and the Zig seam".
+//! "Kernel: h9's Zig and drawterm's C" in spec/kernel.md.
 //!
 //! A close translation of the C, with error unions in place of
 //! the C's error labels. Each function is exported under its C name.
