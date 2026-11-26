@@ -69,6 +69,7 @@ test {
     _ = @import("cpupool.zig");
     _ = @import("abi/linux/nr.zig");
     _ = @import("abi/linux/mm.zig");
+    _ = @import("kern/mm.zig");
     _ = @import("abi/linux/elf.zig");
     _ = @import("abi/linux/vclock.zig");
     _ = @import("abi/linux/signal.zig");
