@@ -1208,6 +1208,24 @@ test "an RFMEM process can use pages another just grew, without a syscall [nativ
     try std.testing.expectEqual(0, r.code);
 }
 
+test "an rfork child takes no note before its first instruction" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try buildC(e, &s, "rfnote", @embedFile("fixtures/rfmem/rfnote.c"));
+    // The parent posts each child a note as soon as rfork returns. Before
+    // h9 held a new child's notes until its first syscall, the child's
+    // handler nearly always ran first, on the stack the parent left,
+    // which crashed a Go program's Ctrl-C under load ("os/signal receives
+    // interrupt on Ctrl-C" [go-compat]).
+    const r = try run(e, &.{ "--sandbox", s.path, "--timeout", "60s", "--rc", "./rfnote" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("early 0 of 100\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
 test "concurrent processes contending for one environment don't hang" {
     const e = try env(@src());
     // 8 processes sharing /env, each creating 150 variables, then running
