@@ -520,7 +520,7 @@ fn devbreadOpt(ch: *Chan, n: c_int, offset: c_uint) Error!?*Block {
 /// A native device: `ops`, which the switch calls directly, and `dev`,
 /// the C Dev the device table names, whose functions raise for C
 /// callers.
-pub fn Native(comptime dc: u8, comptime name: [:0]const u8, comptime o: Ops) type {
+pub fn Native(comptime dc: c_int, comptime name: [:0]const u8, comptime o: Ops) type {
     return struct {
         pub const ops = o;
 
@@ -597,12 +597,25 @@ const natives = .{
     @import("devmnt.zig").Device,
     @import("dev/pipe.zig").Device,
     @import("dev/root.zig").Device,
+    @import("dev/pty.zig").Device,
+    @import("dev/hstream.zig").Device,
     @import("dev/srv.zig").Device,
-} ++ (if (port.nskernel) .{} else .{
+} ++ (if (port.options.nskernel) .{
+    @import("dev/ns.zig").Device,
+} else .{
     // h9's own, which the namespace kernel doesn't build.
     @import("dev/proc.zig").Device,
+    @import("dev/eventfd.zig").Device,
+    @import("dev/hcons.zig").Device,
+    @import("dev/env.zig").Device,
+    @import("dev/hidx.zig").Device,
     @import("dev/linux.zig").Device,
-});
+}) ++ (if (port.options.gfx) .{
+    @import("dev/gfx.zig").Draw,
+    @import("dev/gfx.zig").Cons,
+    @import("dev/gfx.zig").Kbd,
+    @import("dev/gfx.zig").Mouse,
+} else .{});
 
 /// d's functions, if it's native.
 fn nativeOps(d: *Dev) ?*const Ops {

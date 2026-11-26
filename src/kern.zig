@@ -1255,7 +1255,7 @@ pub fn fauth(fd: u31, aname: [*:0]const u8) Error!u31 {
 /// Connects to the unix-domain socket at host path `path` and returns an
 /// fd on a channel for it (design/epoch-0/ninep-roots.md). Fails on Windows.
 /// The status of the caller's machine's `#ι` conversation `n`
-/// (src/kern/devhidx.c), read without a chan, since `#ι` is masked once
+/// (src/kern/dev/hidx.zig), read without a chan, since `#ι` is masked once
 /// the namespace is built; or null.
 pub fn hidxStatus(n: u32, buf: []u8) ?[]u8 {
     const k = c.h9_hidx_convstatus(@intCast(n), buf.ptr, @intCast(@min(buf.len, std.math.maxInt(c_int))));
@@ -1287,7 +1287,7 @@ fn fdPtr(fd: std.posix.fd_t) ?*anyopaque {
 }
 
 /// Wakes guest reads and connects waiting on host stream `id`
-/// (src/kern/devhstream.c). Called from the stream's thread, which isn't
+/// (src/kern/dev/hstream.zig). Called from the stream's thread, which isn't
 /// a kernel process, as `wakeConsole` is.
 pub fn hstreamWake(id: u32) void {
     c.h9_hstream_wake(id);
@@ -1407,7 +1407,7 @@ pub fn fd2path(fd: u31, buf: []u8) Error!void {
     _ = try check(c.h9_fd2path(fd, buf.ptr, @intCast(@min(buf.len, std.math.maxInt(c_uint)))));
 }
 
-/// One machine's console, behind `#y<id>` (src/kern/devhcons.c).
+/// One machine's console, behind `#y<id>` (src/kern/dev/hcons.zig).
 pub const Console = struct {
     /// Input from the run's reader thread; none means EOF.
     in: ?*consin.ConsoleInput,
@@ -1506,7 +1506,8 @@ fn console(id: c_ulong) ?*Console {
     return consoles[id].load(.acquire);
 }
 
-// Leaves called from devhcons.c. They never raise kernel errors.
+// Leaves called from src/kern/dev/hcons.zig and the C devices. They never
+// raise kernel errors.
 
 /// Whether this is the namespace kernel's build (design/epoch-0/namespace-kernel.md),
 /// which has no console, policy, guest tools, or built-in root: it
@@ -1514,7 +1515,7 @@ fn console(id: c_ulong) ?*Console {
 pub const nskernel = @hasDecl(build_options, "nskernel") and build_options.nskernel;
 
 comptime {
-    // devhstream.c's leaves.
+    // src/kern/dev/hstream.zig's leaves.
     _ = @import("hstream.zig");
     if (available and nskernel) {
         @export(&h9_plan_get, .{ .name = "h9_plan_get" });

@@ -28,6 +28,9 @@ const nonposix = @hasDecl(c, "WINDOWS") or @hasDecl(c, "H9_WEB");
 
 var argv0: ?[*:0]u8 = null;
 extern var kerndate: c_uint;
+const tnow = if (nonposix) struct {
+    extern fn h9_tnow() u64;
+}.h9_tnow else timer.h9_tnow;
 
 /// Compose sequences only matter for GUI keyboard input.
 fn latin1(k: ?*c.Rune, n: c_int) callconv(.c) c_int {
@@ -126,20 +129,25 @@ fn h9_kern_interrupt(p: *c.Proc) callconv(.c) void {
 /// and stops early when the Proc is interrupted. Returns 0, or -1 with
 /// "interrupted" as the error string.
 fn h9_kern_sleep(ms_: c_int) callconv(.c) c_int {
-    var ms = ms_;
-    if (ms <= 0) {
+    // What's left is measured against a deadline on the monotonic clock
+    // rather than counted down by slices: each osmsleep can overshoot (on
+    // a busy host or macOS's efficiency cores, several times over), and
+    // counting slices added every overshoot to the sleep.
+    if (ms_ <= 0) {
         c.osyield();
         return 0;
     }
-    while (ms > 0) {
+    const deadline = tnow() + @as(u64, @intCast(ms_)) * 1000000;
+    while (true) {
         if (up().notepending != 0) {
             up().notepending = 0;
             chan.kstrcpy(up().syserrstr, &port.Eintr, port.ERRMAX);
             return -1;
         }
-        const slice = if (ms < 20) ms else 20;
-        c.osmsleep(slice);
-        ms -= slice;
+        const now = tnow();
+        if (now >= deadline) break;
+        const ms: u64 = (deadline - now + 999999) / 1000000;
+        c.osmsleep(@intCast(@min(ms, 20)));
     }
     return 0;
 }

@@ -181,17 +181,11 @@ fn chanproc(ch: *Chan) Error!*Proc {
     return proc.h9_pidlookup(try upmach(), PIDQ(ch.qid)) orelse port.kerror(&port.Eprocdied);
 }
 
-/// procgen raises, as the C's did, when the caller isn't a guest
-/// process, so it isn't among the device's own Devgens (Ops.gens) that
-/// the switch calls directly: the switch calls it through the shim, as
-/// it calls a C device's.
-fn procgen(ch_: [*c]Chan, name_: [*c]u8, tab: [*c]Dirtab, ntab: c_int, s: c_int, dp: [*c]Dir) callconv(.c) c_int {
-    _ = tab;
-    _ = ntab;
-    return procgen1(ch_, name_, s, dp) catch |e| port.raise(e);
-}
-
-fn procgen1(ch: *Chan, name_: ?[*:0]u8, s: c_int, dp: *Dir) Error!c_int {
+/// procgen fails, as the C's raised, when the caller isn't a guest
+/// process, so it's an Egen (dev.zig), whose Zig the switch calls
+/// directly.
+fn procgen(ch: *Chan, name_: ?[*:0]const u8, tab: ?[*]Dirtab, ntab: c_int, s: c_int, dp: *Dir) Error!c_int {
+    _ = .{ tab, ntab };
     var q: Qid = undefined;
     if (s == c.DEVDOTDOT) {
         dev.mkqid(&q, Qdir, 0, c.QTDIR);
@@ -252,16 +246,16 @@ fn procattach(spec: [*:0]const u8) Error!*Chan {
 }
 
 fn procwalk(ch: *Chan, nc: ?*Chan, name: [*]const [*:0]const u8, nname: c_int) Error!?*Walkqid {
-    return dev.devwalk(ch, nc, name, nname, null, 0, &procgen);
+    return dev.devwalk(ch, nc, name, nname, null, 0, procgenE.c);
 }
 
 fn procstat(ch: *Chan, db: [*]u8, n: c_int) Error!c_int {
-    return dev.devstat(ch, db, n, null, 0, &procgen);
+    return dev.devstat(ch, db, n, null, 0, procgenE.c);
 }
 
 fn procopen(ch: *Chan, omode0: c_int) Error!*Chan {
     if (ch.qid.type & c.QTDIR != 0)
-        return dev.devopen(ch, omode0, null, 0, &procgen);
+        return dev.devopen(ch, omode0, null, 0, procgenE.c);
 
     const h = try chanproc(ch);
     defer proc.h9_putproc(h);
@@ -300,7 +294,7 @@ fn procopen(ch: *Chan, omode0: c_int) Error!*Chan {
     if (vers == 0)
         return port.kerror(&port.Eprocdied);
     ch.qid.vers = vers;
-    return dev.devopen(ch, omode, null, 0, &procgen);
+    return dev.devopen(ch, omode, null, 0, procgenE.c);
 }
 
 fn procclose(ch: *Chan) Error!void {
@@ -509,7 +503,7 @@ fn procread(ch: *Chan, va_: ?*anyopaque, n_: c_int, off: i64) Error!c_int {
     const va: [*]u8 = @ptrCast(va_.?);
 
     if (ch.qid.type & c.QTDIR != 0)
-        return dev.devdirread(ch, va, n, null, 0, &procgen);
+        return dev.devdirread(ch, va, n, null, 0, procgenE.c);
 
     const h = try chanproc(ch);
     defer proc.h9_putproc(h);
@@ -800,6 +794,8 @@ fn procwrite(ch: *Chan, va_: ?*const anyopaque, n: c_int, off: i64) Error!c_int 
     return n;
 }
 
+const procgenE = dev.egen(procgen);
+
 pub const Device = dev.Native('p', "proc", .{
     .attach = procattach,
     .walk = procwalk,
@@ -811,6 +807,7 @@ pub const Device = dev.Native('p', "proc", .{
     .write = procwrite,
     .remove = dev.devremove,
     .wstat = dev.devwstat,
+    .egens = &.{procgenE},
 });
 
 pub fn exportC() void {

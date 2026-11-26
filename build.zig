@@ -5,7 +5,7 @@ const guesttree = @import("tools/guesttree.zig");
 const drawterm = "third_party/drawterm";
 
 // drawterm's kern/Makefile OFILES with AUDIO=none, without devtab.c and
-// devenv.c (src/kern/ has our own), procinit.c (src/kern/proc.c has it,
+// devenv.c (src/kern/dev/env.zig is our own), procinit.c (src/kern/proc.c has it,
 // for the one process record), devcmd.c (host commands live on the
 // host-cmd branch while design/host-cmd.md rethinks them), or the files
 // ported to Zig (design/kernel-port.md, src/kern/port.zig): allocb.c,
@@ -596,7 +596,7 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.O
     const kern = b.addLibrary(.{
         .name = if (gfx == .headless and !exported) "kern-headless" else "kern",
         .linkage = .static,
-        .root_module = kernPort(b, target, optimize, flags),
+        .root_module = kernPort(b, target, optimize, flags, gfx != .none),
     });
     kern.root_module.addIncludePath(b.path(drawterm));
     kern.root_module.addIncludePath(b.path(drawterm ++ "/include"));
@@ -614,12 +614,11 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.O
     });
     kern.root_module.addCSourceFiles(.{
         .root = b.path("src/kern"),
-        .files = &.{ "procshim.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "devoverlay.c", "devhtools.c", "fscheck.c", "netcheck.c", "consx.c", "tsleep.c", "devshim.c", "werrstr.c", "sema.c", "rootdial.c", "devhstream.c", "devdotl.c", "devhidx.c" },
+        .files = &.{ "procshim.c", "devtab.c", "devdup.c", "devoverlay.c", "devhtools.c", "fscheck.c", "consx.c", "devshim.c", "werrstr.c", "devdotl.c" },
         .flags = flags,
     });
     // The Linux ABI (design/epoch-0/linux-personality.md) and its host
     // sockets (design/epoch-0/linux-net.md).
-    kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{ "linuxnet.c", "devpty.c", "fifo.c" }, .flags = flags });
     if (web) {
         kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"hostsock-wasm.c"}, .flags = flags });
     } else if (os != .windows) kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{ "hostsock-posix.c", "hostif-posix.c" }, .flags = flags });
@@ -667,7 +666,7 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.O
 /// of the drawterm files ported so far, with the C kernel's types
 /// translated from src/kern/port.h under the same macros as the C files
 /// it's linked with (`flags`), so the two agree on every layout.
-fn kernPort(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, flags: []const []const u8) *std.Build.Module {
+fn kernPort(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, flags: []const []const u8, gfx: bool) *std.Build.Module {
     const tc = b.addTranslateC(.{ .root_source_file = b.path("src/kern/port.h"), .target = target, .optimize = optimize });
     // On the web, wasi-libc's setjmp.h (for Label) wants exception
     // handling, which the C kernel is built with (webTarget) and
@@ -680,12 +679,30 @@ fn kernPort(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.
     for (flags) |f| if (std.mem.startsWith(u8, f, "-D")) tc.defineCMacroRaw(f[2..]);
     if (target.result.os.tag == .macos) if (b.graph.environ_map.get("SDKROOT")) |sdk|
         tc.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr/include" }) });
+    // Which kernel the Zig is built into, for the files only one of them
+    // has: the namespace kernel leaves out devip, the Linux ABI, and the
+    // screen.
+    const options = b.addOptions();
+    var nskernel = false;
+    var hostfs = false;
+    for (flags) |f| {
+        nskernel = nskernel or std.mem.eql(u8, f, "-DH9_NSKERNEL");
+        hostfs = hostfs or std.mem.eql(u8, f, "-DH9_NSKERNEL_HOSTFS");
+    }
+    options.addOption(bool, "nskernel", nskernel);
+    // devfs (#U), which the full kernel always has.
+    options.addOption(bool, "hostfs", hostfs or !nskernel);
+    // A screen (src/kern/gfx.c and src/kern/dev/gfx.zig), not nogfx.c.
+    options.addOption(bool, "gfx", gfx);
     return b.createModule(.{
         .root_source_file = b.path("src/kern/port.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{.{ .name = "kern_c", .module = tc.createModule() }},
+        .imports = &.{
+            .{ .name = "kern_c", .module = tc.createModule() },
+            .{ .name = "kern_options", .module = options.createModule() },
+        },
     });
 }
 
@@ -757,9 +774,8 @@ const nskern_sources = [_][]const u8{
     "alloc.c", "data.c", "error.c", "parse.c", "stub.c", "waserror.c",
 };
 const nskern_h9 = [_][]const u8{
-    "procshim.c",   "devns.c",    "nstab.c",  "devoverlay.c",
-    "devhstream.c", "devdotl.c",  "tsleep.c", "devshim.c",
-    "werrstr.c",    "rootdial.c",
+    "procshim.c", "nstab.c",   "devoverlay.c",
+    "devdotl.c",  "devshim.c", "werrstr.c",
 };
 // libc's files the kernel subset uses, from kern_libs' list.
 const nskern_libc_skip = [_][]const u8{ "pushssl.c", "pushtls.c", "crypt.c", "dial.c" };
@@ -800,7 +816,7 @@ fn addNsKernel(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.la
     const flags = std.mem.concat(b.allocator, []const u8, &.{ base, extra }) catch @panic("OOM");
     // The kernel's Zig (src/kern/port.zig), which src/nskernel.zig
     // imports.
-    const port = kernPort(b, root.resolved_target.?, optimize, flags);
+    const port = kernPort(b, root.resolved_target.?, optimize, flags, false);
     root.addImport("kern_port", port);
     m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/kern"), .files = &nskern_sources, .flags = flags });
     m.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &nskern_h9, .flags = flags });

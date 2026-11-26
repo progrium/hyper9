@@ -364,7 +364,15 @@ pub fn Pump(comptime S: type) type {
                 if (n == 0) return;
                 try p.server.feed(buf[0..n]);
                 if (p.server.out.items.len > 0) {
-                    try writeFd(p.wr, p.server.out.items);
+                    writeFd(p.wr, p.server.out.items) catch |e| switch (e) {
+                        // h9 closed its end with a reply still to come:
+                        // the dotl client answers a clunk itself and
+                        // clunks the server's fid behind it, so a run
+                        // that ends right after one leaves the server's
+                        // Rclunk with nobody to read it.
+                        error.Closed => return,
+                        else => return e,
+                    };
                     p.server.out.items.len = 0;
                 }
             }
@@ -392,18 +400,23 @@ pub fn readFd(fd: fd_t, buf: []u8) !usize {
     }
 }
 
-pub fn writeFd(fd: fd_t, data: []const u8) !void {
+pub fn writeFd(fd: fd_t, data: []const u8) error{ Closed, WriteFailed }!void {
     var off: usize = 0;
     while (off < data.len) {
         if (builtin.os.tag == .windows) {
             var put: u32 = 0;
-            if (!win.WriteFile(fd, data[off..].ptr, @intCast(data.len - off), &put, null).toBool()) return error.WriteFailed;
+            // A failed write is the other end gone, as readFd takes a
+            // failed read on Windows.
+            if (!win.WriteFile(fd, data[off..].ptr, @intCast(data.len - off), &put, null).toBool()) return error.Closed;
             off += put;
             continue;
         }
         const n = std.c.write(fd, data[off..].ptr, data.len - off);
         if (n < 0) {
-            if (std.c._errno().* == @backingInt(std.c.E.INTR)) continue;
+            const e = std.c._errno().*;
+            if (e == @backingInt(std.c.E.INTR)) continue;
+            // The other end is gone, as in readFd.
+            if (e == @backingInt(std.c.E.PIPE) or e == @backingInt(std.c.E.CONNRESET)) return error.Closed;
             return error.WriteFailed;
         }
         off += @intCast(n);
