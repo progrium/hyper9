@@ -11,7 +11,7 @@ Every proposal at the top of [design/](README.md), in the order they were writte
 | [host-cmd](host-cmd.md) |  | draft | in progress on host-cmd | Rethinking host commands |
 | [child-machines](child-machines.md) | [#109](../../../issues/109) | proposed |  | Child machines |
 | [wine-draw](wine-draw.md) | [#158](../../../issues/158) | proposed | in progress on wine-draw | Wine windows through draw |
-| [baseline-1](baseline-1.md) |  | draft |  | Baseline 1 (h9 at the end of epoch 0) |
+| [baseline-1](baseline-1.md) |  | draft | in progress on claude/project-thread-zhebn2 | Baseline 1 (h9 at the end of epoch 0) |
 | [file-interface](file-interface.md) |  | draft | needs kernel-port | A wider file interface inside the kernel, with 9P2000 as a view |
 | [host-handles](host-handles.md) |  | draft | needs kernel-port | Host access through handles |
 | [kernel-port](kernel-port.md) |  | draft | needs baseline-1 | Port the kernel core to Zig, as an instance |
