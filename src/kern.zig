@@ -1773,15 +1773,22 @@ test "fork shares or copies groups, and await returns wait records" {
         no_child_len: usize = 0,
         child_saw: [16]u8 = undefined,
         child_saw_len: usize = 0,
+        /// Set by the RFNOWAIT child as its last touch of the test's
+        /// memory. The parent can't await that child, so it waits on this
+        /// before its frame (holding the child's Child) and `t` go away.
+        nowait_done: std.atomic.Value(bool) = .init(false),
 
         const Self = @This();
         const Child = struct {
             t: *Self,
             kind: enum { copy_env, share_env, new_ns, nowait },
             fn run(ch: *Child) void {
+                const t = ch.t;
+                const kind = ch.kind;
+                defer if (kind == .nowait) t.nowait_done.store(true, .release);
                 ch.body() catch |e| {
-                    ch.t.err = e;
-                    ch.t.where = @tagName(ch.kind);
+                    t.err = e;
+                    t.where = @tagName(kind);
                 };
             }
             fn body(ch: *Child) !void {
@@ -1839,12 +1846,15 @@ test "fork shares or copies groups, and await returns wait records" {
 
             var c4: Child = .{ .t = t, .kind = .nowait };
             try fork(RF.PROC | RF.NOWAIT, 5, Child, Child.run, &c4);
+            // c4 and t must outlive the RFNOWAIT child, even when this
+            // returns an error. A fixed sleep wasn't enough on a loaded
+            // Windows runner: the child ran after this frame was gone and
+            // wrote through a stale `t`.
+            defer while (!t.nowait_done.load(.acquire)) sleep(5) catch {};
             if (await(&t.waits[3])) |_| return error.AwaitedNowaitChild else |_| {}
             const e = errstr();
             @memcpy(t.no_child[0..e.len], e);
             t.no_child_len = e.len;
-            // Let the RFNOWAIT child finish before c4 goes out of scope.
-            try sleep(50);
         }
 
         fn readAll(path: [*:0]const u8, out: []u8) !usize {
