@@ -607,6 +607,11 @@ enum {
 #define OBJ_INHERIT	0x02
 #endif
 
+/* The directories a walk keeps open beneath its handle, for "..". */
+enum {
+	Walkmax = 256,
+};
+
 /* What a walk met: a link (a name surrogate reparse point), or an error. */
 enum {
 	Wok = 0,
@@ -682,10 +687,11 @@ static int
 ntwalk(HANDLE top, const char *rel, ACCESS_MASK access, ULONG share, ULONG disp, ULONG opts, ULONG attrs, SECURITY_ATTRIBUTES *sa, int wantlink, HANDLE *out)
 {
 	wchar_t *w, *p, *e;
-	HANDLE cur, h;
-	int n, last;
+	HANDLE cur, h, up[Walkmax];
+	int n, last, depth, i;
 
 	*out = INVALID_HANDLE_VALUE;
+	depth = 0;
 	if((w = malloc((Longmax+1)*sizeof(wchar_t))) == NULL){
 		SetLastError(ERROR_NOT_ENOUGH_MEMORY);
 		return Werr;
@@ -713,9 +719,19 @@ ntwalk(HANDLE top, const char *rel, ACCESS_MASK access, ULONG share, ULONG disp,
 				}
 		}
 		if(n == 2 && p[0] == L'.' && p[1] == L'.'){
-			/* devfs's paths are clean: this would climb out. */
-			SetLastError(ERROR_ACCESS_DENIED);
-			goto err;
+			/*
+			 * A Linux program's paths keep their "..": back to the
+			 * directory this walk came through, but never above the
+			 * handle, which would climb out of the tree.
+			 */
+			if(depth == 0){
+				SetLastError(ERROR_ACCESS_DENIED);
+				goto err;
+			}
+			if(cur != top)
+				CloseHandle(cur);
+			cur = up[--depth];
+			n = 0;	/* and, if it's the last name, that directory itself */
 		}
 		if(n == 1 && p[0] == L'.')
 			n = 0;	/* the directory itself: an empty name relative to it */
@@ -732,8 +748,13 @@ ntwalk(HANDLE top, const char *rel, ACCESS_MASK access, ULONG share, ULONG disp,
 				CloseHandle(h);
 				goto link;
 			}
-			if(cur != top)
-				CloseHandle(cur);
+			/* Kept for a later "..". */
+			if(depth == Walkmax){
+				CloseHandle(h);
+				SetLastError(ERROR_FILENAME_EXCED_RANGE);
+				goto err;
+			}
+			up[depth++] = cur;
 			cur = h;
 			p = e;
 			continue;
@@ -777,6 +798,9 @@ ntwalk(HANDLE top, const char *rel, ACCESS_MASK access, ULONG share, ULONG disp,
 		}
 		if(cur != top)
 			CloseHandle(cur);
+		for(i = 0; i < depth; i++)
+			if(up[i] != top)
+				CloseHandle(up[i]);
 		free(w);
 		*out = h;
 		return Wok;
@@ -784,6 +808,9 @@ ntwalk(HANDLE top, const char *rel, ACCESS_MASK access, ULONG share, ULONG disp,
 link:
 	if(cur != top)
 		CloseHandle(cur);
+	for(i = 0; i < depth; i++)
+		if(up[i] != top)
+			CloseHandle(up[i]);
 	free(w);
 	return Wlink;
 err:
@@ -793,6 +820,9 @@ err:
 		err = GetLastError();
 		if(cur != top)
 			CloseHandle(cur);
+		for(i = 0; i < depth; i++)
+			if(up[i] != top)
+				CloseHandle(up[i]);
 		free(w);
 		SetLastError(err);
 	}
