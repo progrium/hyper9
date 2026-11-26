@@ -4937,7 +4937,7 @@ const TCP_KEEPINTVL = 5;
 const TCP_KEEPCNT = 6;
 const IPV6_V6ONLY = 26;
 
-/// devip's data file type, and its protocols' indexes (kern/devip.c).
+/// devip's data file type, and its protocols' indexes (src/host/devip.zig).
 const ip_qdata = 7;
 const ip_udp = 0;
 const ip_tcp = 1;

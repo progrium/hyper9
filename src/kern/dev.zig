@@ -638,6 +638,7 @@ const natives = .{
     @import("dev/env.zig").Device,
     @import("dev/hidx.zig").Device,
     @import("dev/linux.zig").Device,
+    @import("dev/machine.zig").Device,
     // The host's network (src/host/devip.zig).
     @import("host_dev").ip.Device,
 }) ++ (if (port.options.gfx) .{

@@ -43,6 +43,7 @@ const attr = @import("dotl/attr.zig");
 const gfx = @import("gfx.zig");
 const hostpty = @import("hostpty.zig");
 const handles = @import("host/host.zig");
+const child = @import("child.zig");
 
 pub const Status = union(enum) {
     /// The `exits` string; empty means success.
@@ -442,10 +443,25 @@ pub const Machine = struct {
         /// Bumped by each call, for `run` to wait on.
         seq: std.atomic.Value(u32) = .init(0),
         pending: std.atomic.Value(u8) = .init(0),
+        /// A note `note` posts, for `run` to copy; guarded by `note_lock`.
+        note_buf: [kern.ERRMAX]u8 = undefined,
+        note_len: usize = 0,
+        note_lock: std.atomic.Mutex = .unlocked,
 
         const interrupt_bit = 1;
         const hangup_bit = 2;
         const stop_bit = 4;
+        const note_bit = 8;
+
+        /// Posts `msg` to the foreground note group, as a host process's
+        /// note (a child machine's `note` file, design/child-machines.md).
+        pub fn note(s: *Signals, io: std.Io, msg: []const u8) void {
+            while (!s.note_lock.tryLock()) std.atomic.spinLoopHint();
+            s.note_len = @min(msg.len, s.note_buf.len - 1);
+            @memcpy(s.note_buf[0..s.note_len], msg[0..s.note_len]);
+            s.note_lock.unlock();
+            s.raise(io, note_bit);
+        }
 
         /// Posts `interrupt` to the foreground note group (Ctrl-C).
         pub fn interrupt(s: *Signals, io: std.Io) void {
@@ -481,7 +497,19 @@ pub const Machine = struct {
 
     gpa: std.mem.Allocator,
     io: std.Io,
+    /// The engine, with this machine's quota on its memory.
     engine: engine.Engine,
+    /// The engine itself, which child machines share with the machine
+    /// that started them (design/child-machines.md): it's destroyed with
+    /// the last machine that uses it.
+    backend: *Backend,
+    /// This machine's share of the engine's memory, which `engine`
+    /// counts against: its `--memory`, or a child's reservation from its
+    /// parent's. In `arena`.
+    quota: *engine.Quota,
+    /// A child machine's link to the machine that started it; null for a
+    /// root machine. In `arena`.
+    parent: ?*Parent = null,
     arch: engine.Arch,
     opts: Options,
     /// The compiled policy; allocated in `arena`.
@@ -527,6 +555,202 @@ pub const Machine = struct {
     /// The last `connectUrl` connected to a static tree, which has no
     /// server for `#ι` to ask.
     conn_static: bool = false,
+
+    /// An engine that one or more machines use (design/child-machines.md).
+    const Backend = struct {
+        gpa: std.mem.Allocator,
+        engine: engine.Engine,
+        refs: std.atomic.Value(u32) = .init(1),
+
+        fn get(b: *Backend) void {
+            _ = b.refs.fetchAdd(1, .acq_rel);
+        }
+
+        fn put(b: *Backend) void {
+            if (b.refs.fetchSub(1, .acq_rel) != 1) return;
+            b.engine.destroy();
+            b.gpa.destroy(b);
+        }
+    };
+
+    /// What a child machine (design/child-machines.md) has of the machine
+    /// that started it.
+    pub const Parent = struct {
+        /// The parent's run, which waits for its children before it
+        /// ends, and whose pool and process count the child's are under.
+        job: *Job,
+        /// The channels of the caller's paths (`policy.fromCaller`), held
+        /// until the child's namespace is built, which the machine device
+        /// hands out as `#μsN`.
+        sources: []?*anyopaque,
+        sources_taken: std.atomic.Value(bool) = .init(false),
+        /// Where the child starts, in its own namespace: the caller's cwd,
+        /// or the `cwd` line's. `/` if it isn't there.
+        cwd: ?[]const u8,
+    };
+
+    /// The machine of the guest process making the current kernel call,
+    /// for the machine device (design/child-machines.md).
+    pub const Caller = struct {
+        job: *Job,
+
+        /// The calling thread's guest process's machine, or null for a
+        /// thread that isn't one.
+        pub fn current() ?Caller {
+            const p: *Proc = @ptrCast(@alignCast(kern.aux() orelse return null));
+            return .{ .job = p.job };
+        }
+
+        pub fn machine(c: Caller) *const Machine {
+            return c.job.m;
+        }
+
+        /// What the machine device keys a machine's children by.
+        pub fn key(c: Caller) usize {
+            return @intFromPtr(c.job);
+        }
+
+        /// The bytes of memory the machine hasn't used or reserved.
+        pub fn memoryLeft(c: Caller) u64 {
+            return c.job.m.quota.left();
+        }
+
+        /// How many more processes the machine and its ancestors may
+        /// start, or null for no cap.
+        pub fn pidsLeft(c: Caller) ?u32 {
+            var left: ?u32 = null;
+            var a: ?*Job = c.job;
+            while (a) |q| : (a = q.parent_job) {
+                const cap = q.m.plan.pids orelse continue;
+                q.lockSpin();
+                const n = cap -| q.n_program;
+                q.lock.unlock();
+                left = if (left) |l| @min(l, n) else n;
+            }
+            return left;
+        }
+
+        /// The time left until the machine's deadline, or null for none.
+        pub fn timeLeft(c: Caller) ?u64 {
+            const t = c.job.m.plan.timeout_ns orelse return null;
+            const gone: u64 = @intCast(@max(0, kern.monoNs() - c.job.start_ns));
+            return @max(1, t -| gone);
+        }
+
+        /// The plan the machine was made from.
+        pub fn spec(c: Caller, arena: std.mem.Allocator) error{OutOfMemory}!policy.Spec {
+            return c.job.m.opts.toSpec(arena);
+        }
+
+        /// The machine's `#μsN`: the channel a child machine's plan named,
+        /// while its namespace is being built.
+        pub fn source(c: Caller, n: usize) ?*anyopaque {
+            const pa = c.job.m.parent orelse return null;
+            if (pa.sources_taken.load(.acquire) or n >= pa.sources.len) return null;
+            return pa.sources[n];
+        }
+    };
+
+    /// A child machine's plan (design/child-machines.md): `opts` compiled
+    /// with its mounts' and paths' sources in the caller's namespace,
+    /// whose paths are added to `paths` in the order the plan's `#μsN`
+    /// name them, its devices masked as the parent's are and more, and
+    /// devfs's checks of the parent's channels made by the parent's rules.
+    pub fn compileChild(arena: std.mem.Allocator, caller: Caller, opts: Options, paths: *std.ArrayList([]const u8), err_msg: *[]const u8) policy.CompileError!policy.Plan {
+        const pm = caller.job.m;
+        // opts.cwd is a path in the caller's namespace: its cwd, or the
+        // child's `cwd` line.
+        const in: policy.Inputs = .{ .mounts = opts.mounts, .binds = opts.binds, .cwd = opts.cwd, .arch = pm.arch, .guest_tools = opts.guest_tools, .nameservers = opts.nameservers, .caller = true };
+        var plan = try policy.compile(arena, in, opts.policy, err_msg);
+        try policy.fromCaller(arena, &plan, paths);
+        var mask: std.ArrayList(u8) = .empty;
+        try mask.appendSlice(arena, plan.devmask);
+        var dv = (std.unicode.Utf8View.init(pm.plan.devmask) catch unreachable).iterator();
+        while (dv.nextCodepointSlice()) |d| if (std.mem.indexOf(u8, mask.items, d) == null) try mask.appendSlice(arena, d);
+        plan.devmask = mask.items;
+        plan.rules = pm.plan.rules;
+        return plan;
+    }
+
+    /// The job a child machine's parent runs, for childGone.
+    pub fn parentJob(m: *const Machine) ?*Job {
+        return if (m.parent) |pa| pa.job else null;
+    }
+
+    /// Tells parent job `j` a child of it has ended and been freed, with
+    /// everything it allocated, so the parent's run may end; the last
+    /// thing a child's thread does (endChildren waits for it).
+    pub fn childGone(j: *Job, io: std.Io) void {
+        _ = j.kids.fetchSub(1, .acq_rel);
+        io.futexWake(u32, &j.kids.raw, std.math.maxInt(u32));
+    }
+
+    /// A child machine (design/child-machines.md) of the machine `caller`
+    /// runs in: it shares the parent's engine, its memory is reserved
+    /// from the parent's (`opts.policy.memory`, which must be set), and
+    /// its namespace is built from `sources`, the channels of the paths
+    /// `compileChild` gave, which it holds until then. On PolicyConflict,
+    /// `conflict` explains it. Free it with `deinit` and `gpa.destroy`, then `childGone`.
+    pub fn initChild(gpa: std.mem.Allocator, io: std.Io, caller: Caller, opts: Options, sources: []?*anyopaque, cwd: ?[]const u8, conflict: *[]const u8) InitError!*Machine {
+        const pj = caller.job;
+        const pm = pj.m;
+        const mem = opts.policy.memory orelse return error.PolicyConflict;
+        if (!pm.quota.take(mem)) {
+            conflict.* = "memory: more than the parent has left";
+            return error.PolicyConflict;
+        }
+        errdefer pm.quota.give(mem);
+        const arena = try gpa.create(std.heap.ArenaAllocator);
+        arena.* = .init(gpa);
+        errdefer {
+            arena.deinit();
+            gpa.destroy(arena);
+        }
+        const a = arena.allocator();
+        var paths: std.ArrayList([]const u8) = .empty;
+        var msg: []const u8 = "";
+        const plan = compileChild(a, caller, opts, &paths, &msg) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Conflict => {
+                conflict.* = msg;
+                return error.PolicyConflict;
+            },
+        };
+        if (paths.items.len != sources.len) return error.PolicyConflict;
+        const quota = try a.create(engine.Quota);
+        quota.* = .{ .limit = mem };
+        const pa = try a.create(Parent);
+        pa.* = .{ .job = pj, .sources = try a.dupe(?*anyopaque, sources), .cwd = if (cwd) |c| try a.dupe(u8, c) else null };
+        const plan_at = try a.create(policy.Plan);
+        plan_at.* = plan;
+        // No directory handles: the child's files are its caller's,
+        // reached through the caller's namespace.
+        const hst_at = try a.create(handles.Host);
+        hst_at.* = try handles.fromPlan(a, io, plan_at, .{ .console = opts.stdio });
+        var pl = plan;
+        pl.host = hst_at;
+        const m = try gpa.create(Machine);
+        pm.backend.get();
+        _ = pj.kids.fetchAdd(1, .acq_rel);
+        m.* = .{ .gpa = gpa, .io = io, .opts = opts, .arch = pm.arch, .engine = pm.backend.engine.withQuota(quota), .backend = pm.backend, .quota = quota, .parent = pa, .plan = pl, .host = hst_at.*, .arena = arena };
+        return m;
+    }
+
+    /// A child that never ran leaves the caller's channels held; they're
+    /// leaked rather than closed off a kernel process.
+    fn dropSourcesLeaked(m: *Machine) void {
+        const pa = m.parent orelse return;
+        pa.sources_taken.store(true, .release);
+    }
+
+    /// Closes the caller's channels a child machine holds, once its
+    /// namespace has them, or it won't build one. On the child's first
+    /// process.
+    fn dropSources(m: *Machine) void {
+        const pa = m.parent orelse return;
+        if (pa.sources_taken.swap(true, .acq_rel)) return;
+        for (pa.sources) |src| if (src) |ch| kern.childDropSource(ch);
+    }
 
     /// Each `serve` listener's bound address, in the order given, with
     /// port 0 resolved, once a run has opened them; empty before.
@@ -722,7 +946,14 @@ pub const Machine = struct {
         }
         errdefer if (claim) |cl| hst_at.window.?.release(cl);
         const eng = try engine.create(gpa, io, opts.engine, .{ .arch = arch, .memory = plan.memory });
-        return .{ .gpa = gpa, .io = io, .opts = o, .arch = arch, .engine = eng, .plan = pl, .host = hst_at.*, .owns_dirs = owns_dirs, .arena = arena, .gfx_claim = claim, .plan_run = plan_run };
+        errdefer eng.destroy();
+        // The machine's quota is all of the engine's memory; its children
+        // reserve theirs from it (design/child-machines.md).
+        const quota = try arena.allocator().create(engine.Quota);
+        quota.* = .{ .limit = plan.memory orelse engine.default_memory };
+        const backend = try gpa.create(Backend);
+        backend.* = .{ .gpa = gpa, .engine = eng };
+        return .{ .gpa = gpa, .io = io, .opts = o, .arch = arch, .engine = eng.withQuota(quota), .backend = backend, .quota = quota, .plan = pl, .host = hst_at.*, .owns_dirs = owns_dirs, .arena = arena, .gfx_claim = claim, .plan_run = plan_run };
     }
 
     /// Entropy from the machine's host (design/host-handles.md), for
@@ -753,7 +984,14 @@ pub const Machine = struct {
         if (m.gfx_claim) |cl| if (m.host.window) |w| w.release(cl) else gfx.release(cl);
         if (m.owns_dirs) handles.closeDirs(m.host);
         vclock.forget(m.engine);
-        m.engine.destroy();
+        // A child gives its reservation back to its parent
+        // (design/child-machines.md); childGone then lets the parent's
+        // run end.
+        if (m.parent) |pa| {
+            m.dropSourcesLeaked();
+            pa.job.m.quota.give(m.quota.limit);
+        }
+        m.backend.put();
         m.arena.deinit();
         m.gpa.destroy(m.arena);
     }
@@ -873,11 +1111,13 @@ pub const Machine = struct {
         if (m.plan.host) |h| @constCast(h).console = m.host.console;
         const sc = m.host.console.?;
         const job = try m.gpa.create(Job);
-        const pool = cpupool.Pool.init(m.gpa, m.io, m.engine, m.plan.cpus, m.opts.owned_vcpus) catch |e| {
+        // A child machine's runs are under its parent's pool
+        // (design/child-machines.md).
+        const pool = if (m.parent) |pa| cpupool.Pool.initChild(&pa.job.pool, m.plan.cpus) else cpupool.Pool.init(m.gpa, m.io, m.engine, m.plan.cpus, m.opts.owned_vcpus) catch |e| {
             m.gpa.destroy(job);
             return e;
         };
-        job.* = .{ .m = undefined, .mc = m.*, .prog = prog, .argv = argv, .con = .{ .in = null, .out = sc.out, .err = sc.err, .raw = sc.raw }, .pool = pool, .srv = srv };
+        job.* = .{ .m = undefined, .mc = m.*, .prog = prog, .argv = argv, .con = .{ .in = null, .out = sc.out, .err = sc.err, .raw = sc.raw }, .pool = pool, .srv = srv, .parent_job = if (m.parent) |pa| pa.job else null };
         // Host ptys can be asked for from here; the pty server takes them
         // once the namespace is built. Every process has exited (or is
         // stuck) by the time `end` fails the rest.
@@ -924,7 +1164,9 @@ pub const Machine = struct {
             m.gpa.destroy(job);
             return switch (e) {
                 error.OutOfMemory => error.OutOfMemory,
-                error.TooManyProcs => unreachable, // the cap is at least 1
+                // The cap is at least 1, but a child machine's parent's
+                // processes count too (design/child-machines.md).
+                error.TooManyProcs => m.fail("too many processes: the parent's --pids is reached", .{}),
             };
         };
         // Its processes run on executors (design/scheduler.md), where the
@@ -969,6 +1211,15 @@ pub const Machine = struct {
             m.stuck = true;
             m.root_changes = job.rootChanges();
             m.out_of_memory = job.out_of_memory.load(.acquire);
+            kern.removeConsole(job.con_id);
+            job.con.reset();
+            return .{ .killed = if (timed_out) timeout_note else stopped_note };
+        }
+        // Children never outlive the machine that started them
+        // (design/child-machines.md), and use its pool and engine.
+        if (!job.endChildren()) {
+            m.stuck = true;
+            m.root_changes = job.rootChanges();
             kern.removeConsole(job.con_id);
             job.con.reset();
             return .{ .killed = if (timed_out) timeout_note else stopped_note };
@@ -1075,6 +1326,11 @@ pub const Machine = struct {
         trace_lock: std.atomic.Mutex = .unlocked,
         /// vCPUs for the processes.
         pool: cpupool.Pool,
+        /// A child machine's parent's run (design/child-machines.md),
+        /// whose `--pids` its processes count against too.
+        parent_job: ?*Job = null,
+        /// The child machines this run has started that haven't ended.
+        kids: std.atomic.Value(u32) = .init(0),
         /// The CPUs /dev/sysstat lists (design/epoch-0/go-compat.md).
         ncpu: u32 = 1,
         /// When the run started, for /proc/uptime.
@@ -1146,7 +1402,11 @@ pub const Machine = struct {
             errdefer gpa.destroy(p);
             j.lockSpin();
             defer j.lock.unlock();
-            if (owner == .program) if (j.m.plan.pids) |cap| if (j.n_program >= cap) return error.TooManyProcs;
+            if (owner == .program) {
+                if (j.m.plan.pids) |cap| if (j.n_program >= cap) return error.TooManyProcs;
+                if (!j.takeAncestors()) return error.TooManyProcs;
+            }
+            errdefer if (owner == .program) j.giveAncestors(null);
             try j.procs.append(gpa, p);
             if (owner == .program) j.n_program += 1;
             p.* = .{ .job = j, .pid = j.next_pid, .serving = owner == .serving };
@@ -1178,7 +1438,52 @@ pub const Machine = struct {
         }
 
         fn uncount(j: *Job, p: *Proc) void {
-            if (!p.serving) j.n_program -= 1;
+            if (p.serving) return;
+            j.n_program -= 1;
+            j.giveAncestors(null);
+        }
+
+        /// Counts a new process against each ancestor's `--pids`
+        /// (design/child-machines.md), or none if one is full.
+        fn takeAncestors(j: *Job) bool {
+            var a = j.parent_job;
+            while (a) |q| : (a = q.parent_job) {
+                q.lockSpin();
+                const full = if (q.m.plan.pids) |cap| q.n_program >= cap else false;
+                if (!full) q.n_program += 1;
+                q.lock.unlock();
+                if (full) {
+                    j.giveAncestors(q);
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        /// Takes a process out of the ancestors' counts, up to `upto`.
+        fn giveAncestors(j: *Job, upto: ?*Job) void {
+            var a = j.parent_job;
+            while (a) |q| : (a = q.parent_job) {
+                if (q == upto) return;
+                q.lockSpin();
+                q.n_program -= 1;
+                q.lock.unlock();
+            }
+        }
+
+        /// Stops the run's child machines and waits for them to end.
+        /// Returns false if some are stuck.
+        fn endChildren(j: *Job) bool {
+            if (j.kids.load(.acquire) == 0) return true;
+            child.stopAll(@intFromPtr(j));
+            var waited: u32 = 0;
+            while (true) {
+                const n = j.kids.load(.acquire);
+                if (n == 0) return true;
+                if (waited >= grace_ms + teardown_ms) return false;
+                j.m.io.futexWaitTimeout(u32, &j.kids.raw, n, .{ .duration = .{ .raw = .fromMilliseconds(10), .clock = .awake } }) catch {};
+                waited += 10;
+            }
         }
 
         /// Waits for the first process to exit, delivering host signals
@@ -1199,6 +1504,13 @@ pub const Machine = struct {
                     const bits = s.pending.swap(0, .acq_rel);
                     if (bits & Signals.stop_bit != 0) break;
                     if (bits & Signals.interrupt_bit != 0) j.post(.foreground, "interrupt");
+                    if (bits & Signals.note_bit != 0) {
+                        var nb: [kern.ERRMAX]u8 = undefined;
+                        while (!s.note_lock.tryLock()) std.atomic.spinLoopHint();
+                        const msg = std.fmt.bufPrintSentinel(&nb, "{s}", .{s.note_buf[0..s.note_len]}, 0) catch "interrupt";
+                        s.note_lock.unlock();
+                        j.post(.foreground, msg);
+                    }
                     if (bits & Signals.hangup_bit != 0 and !hung_up) {
                         hung_up = true;
                         j.post(.all, "hangup");
@@ -1648,6 +1960,7 @@ pub const Machine = struct {
             hstream.registerHost(k, if (m.rootUrl()) |r| if (r.kind == .ws) r.addr else null else null, m.rootStreamOptions(), m.mountStreamOptions());
         }
         const r = m.startFirst(p);
+        m.dropSources();
         // What the root's index saved, for -v.
         if (m.opts.verbose) if (m.hidx_root) |n| m.indexCounts(n);
         // The status and err_msg can point into the Proc or its errstr,
@@ -1686,7 +1999,18 @@ pub const Machine = struct {
     fn startFirst(m: *Machine, p: *Proc) RunError!Status {
         const j = p.job;
         if (j.stopping.load(.acquire)) return .{ .killed = timeout_note };
-        const built = try m.buildNamespace(j.con_id);
+        const built = m.buildNamespace(j.con_id) catch |e| {
+            m.dropSources();
+            return e;
+        };
+        // A child machine's namespace holds the caller's channels now,
+        // and it starts where the caller is (design/child-machines.md).
+        m.dropSources();
+        if (m.parent) |pa| if (pa.cwd) |cwd| {
+            var cb: [std.fs.max_path_bytes + 1]u8 = undefined;
+            const at = std.fmt.bufPrintSentinel(&cb, "{s}", .{cwd}, 0) catch "/";
+            kern.chdir(at) catch kern.chdir("/") catch {};
+        };
         const root_ov = built.root_overlay;
         if (m.opts.ns.len > 0) {
             var cd = false;
@@ -3695,7 +4019,19 @@ pub const Machine = struct {
         var cwd_at: ?[:0]const u8 = null;
         // Named unions the plan made but never bound go when it's built.
         defer for ([_]policy.mount.Stack{ .root, .linux }) |st| kern.unionUnpin(st.name());
-        for (m.plan.binds) |b| {
+        var cow_buf: [24]u8 = undefined;
+        for (m.plan.binds) |b0| {
+            var b = b0;
+            // A caller's channel the child only reads, under an overlay
+            // of the child's own (design/child-machines.md).
+            if (b0.parent_cow) {
+                const src = try std.fmt.bufPrintSentinel(&buf, "{s}", .{b0.from}, 0);
+                const id = kern.overlayNew(src) catch {
+                    if (b0.optional) continue;
+                    return m.fail("{s}: {s}", .{ b0.parent orelse b0.from, kern.errstr() });
+                };
+                b.from = std.fmt.bufPrint(&cow_buf, "#O{d}", .{id}) catch unreachable;
+            }
             if (b.make) if (!try m.makeTarget(b)) continue;
             if (b.make_from and m.plan.root_overlay) {
                 // Made through the stack's overlay: /root takes no creates.
@@ -4713,6 +5049,9 @@ pub const Machine = struct {
             try kern.bind(from, to, flag);
             return null;
         };
+        // A device path: a child machine's caller's channel, `#μsN`
+        // (design/child-machines.md).
+        if (l.len > 0 and l[0] == '#') return try overlay(std.fmt.bufPrintSentinel(buf, "{s}", .{l}, 0) catch return error.Kern, to, flag);
         return try overlay(std.fmt.bufPrintSentinel(buf, "#U{s}{s}", .{ if (contained) "!c" else "", l }, 0) catch return error.Kern, to, flag);
     }
 

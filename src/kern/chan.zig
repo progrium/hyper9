@@ -684,8 +684,7 @@ fn ccloneAt(ch: *Chan, pc: usize) Error!*Chan {
 
 // h9: src/kern/dev/overlay.zig
 extern fn h9_overlay_lowerdev(c_int, c_int, Qid, *c_int, *c_int) c_int;
-// h9: devfs-posix.c and devfs-win32.c (src/host/fscheck.h), through
-// dev.zig's `raising`, since they raise.
+// h9: the host tree device (src/host/devfs.zig).
 const hostfs = @import("host_dev").fs;
 // h9: Linux symlinks (design/epoch-0/linux-symlinks.md, src/host/fscheck.h)
 extern fn h9_fs_linkwalk() c_int;

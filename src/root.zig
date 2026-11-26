@@ -74,6 +74,7 @@ test {
     _ = serve;
     _ = gfx;
     _ = @import("cpupool.zig");
+    _ = @import("child.zig");
     _ = @import("abi/linux/nr.zig");
     _ = @import("abi/linux/mm.zig");
     _ = @import("kern/mm.zig");

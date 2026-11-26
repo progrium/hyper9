@@ -47,6 +47,7 @@ Sandboxing is a `Policy` in `Machine.Options`: a set of capabilities, host paths
 | `net.outbound` | devip refuses `announce`, TCP and UDP, so the guest can dial out but not serve; `/net/ws` only connects |
 | `net.allow` | devip checks each `connect` against dial-string patterns (`tcp!10.0.0.0/8!564`, `tcp!*.example.com!443`), and devip's `cs` refuses to resolve names no pattern covers; an egress allowlist isobox can't offer |
 | `res.memory` | A cap on the guest-physical page allocator; exact, not a watchdog |
+| `proc.children` | `#μ` is bound on `/dev` and left out of the device mask, so the machine can start child machines; under `--children`, and never under `tight`. A child shares the machine's kernel ([child-machines](../design/child-machines.md)) |
 | `proc.timeout` | A machine deadline: a `hangup` note to every process, then a hard teardown after a 2 s grace period |
 | `res.pids`, `res.cpu` | A cap on live processes in `rfork`; a cap on vCPUs running guest code at once |
 
@@ -265,7 +266,7 @@ run mk
 # profile:  tight
 # enforces: env.scrub fs.read.scope fs.write.overlay fs.write.scope ipc.restrict kernel.isolation net.disable proc.timeout res.memory
 # limits:   write=overlay net=disable memory=512M timeout=1m
-# devmask:  #C #I #ℏ #U #ι #b #i #m
+# devmask:  #C #I #ℏ #U #ι #b #i #m #μ
 # namespace:
 #   bind '#/' /  # the kernel's names: bin dev env fd net proc root srv
 #   bind -r '#U/Users/me/h9root' '#Oroot' ro

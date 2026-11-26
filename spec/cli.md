@@ -84,6 +84,7 @@ A host program that starts with `#!` runs as a guest program by its guest path (
 | `--serve-token @FILE` | A token, the file's one word, that WebSocket listeners require as `Authorization: Bearer TOKEN` or `?token=TOKEN`. A missing file is exit 125 |
 | `--serve-origin ORIGIN` (repeatable) | An `Origin` WebSocket listeners accept; `*` for any, which needs `--serve-token`. A request with no `Origin` is accepted |
 | `--serve-net` | Exports `/net` too. Without it, the server Proc unmounts `/net` |
+| `--children` | Binds `#μ` at `/dev/machine`, so the guest's `h9` can start child machines (spec/kernel.md, Child machines); ignored under `--profile=tight`, which masks `#μ` |
 | `--memory SIZE` | Caps guest memory (`512m`, `2g`) |
 | `--pids N`, `--cpus N` | Caps processes and concurrently running vCPUs |
 | `--timeout DURATION` | Posts `hangup` at a deadline, waits up to 2 s, then tears down the machine |
@@ -103,7 +104,7 @@ A host program that starts with `#!` runs as a guest program by its guest path (
 
 ### Flags as plan lines
 
-Each flag that decides what the machine is compiles to a plan line ([plan-format](../design/plan-format.md)), and `--print` writes them. Given with `--plan`, a flag narrows the plan's line of the same kind (`src/policy.zig`'s `narrow`, the one rule child machines will use too): what's lower, read-only, or removed is taken, and anything wider is exit 2.
+Each flag that decides what the machine is compiles to a plan line ([plan-format](../design/plan-format.md)), and `--print` writes them. Given with `--plan`, a flag narrows the plan's line of the same kind (`src/policy.zig`'s `narrow`, the one rule child machines use too: a child's `ctl` lines narrow its caller's plan, with what's left of its limits): what's lower, read-only, or removed is taken, and anything wider is exit 2.
 
 | Flag | Plan line | With `--plan` |
 | --- | --- | --- |
@@ -117,7 +118,7 @@ Each flag that decides what the machine is compiles to a plan line ([plan-format
 | `--readable PATH` | `allow read PATH` | A path the plan shares, or a writable one made read-only |
 | `--writable PATH` | `allow write PATH` | Only under a writable path of the plan's |
 | `--read-deny PATH` | `deny read PATH` | Always narrows |
-| `--host-fs`, `--no-guest-tools` | `devices [host-fs] [guest-tools]` | Can be left out, not added |
+| `--host-fs`, `--no-guest-tools`, `--children` | `devices [host-fs] [guest-tools] [children]` | Can be left out, not added |
 | `--memory SIZE`, `--pids N`, `--cpus N`, `--timeout D` | `memory SIZE`, `pids N`, `cpus N`, `timeout D`; one that's unset is a comment, such as `# memory: the engine's default` | Lower only |
 | `--engine E` | `engine E` | The plan's engine, any under no `engine` line, and any but `sud` under `auto` |
 | `--arch A` | `arch A` | The plan's, or any under no `arch` line |
