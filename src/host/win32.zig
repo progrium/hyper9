@@ -80,9 +80,16 @@ pub const VOLUME_NAME_DOS: DWORD = 0;
 pub const ERROR_ALREADY_EXISTS: DWORD = 183;
 pub const CP_UTF8: c_uint = 65001;
 pub const GetFileExInfoStandard: c_int = 0;
+pub const FileDispositionInfo: c_int = 4;
 pub const FileDispositionInfoEx: c_int = 21;
+pub const SYNCHRONIZE: DWORD = 0x00100000;
 
 pub extern "kernel32" fn GetLastError() callconv(.winapi) DWORD;
+pub extern "kernel32" fn SetLastError(err: DWORD) callconv(.winapi) void;
+pub const FileRenameInformation: c_int = 10;
+pub const IO_STATUS_BLOCK = extern struct { status: usize, information: usize };
+pub extern "ntdll" fn NtSetInformationFile(h: HANDLE, iosb: *IO_STATUS_BLOCK, info: *const anyopaque, n: c_ulong, class: c_int) callconv(.winapi) i32;
+pub extern "ntdll" fn RtlNtStatusToDosError(status: i32) callconv(.winapi) c_ulong;
 pub extern "kernel32" fn CloseHandle(h: HANDLE) callconv(.winapi) BOOL;
 pub extern "kernel32" fn FindClose(h: HANDLE) callconv(.winapi) BOOL;
 pub extern "kernel32" fn FindNextFileW(h: HANDLE, wfd: *WIN32_FIND_DATAW) callconv(.winapi) BOOL;

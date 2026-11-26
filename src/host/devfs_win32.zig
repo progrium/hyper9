@@ -656,28 +656,62 @@ fn fswrite(ch: *Chan, va: ?*const anyopaque, n: c_int, offset: i64) Error!c_int 
     return @intCast(r);
 }
 
-/// Deletes with POSIX semantics, as unlink(2) does: the name goes at
-/// once, even while the file is open, rather than when the last handle
-/// closes, so a new file can take the name right away. Falls back to
-/// DeleteFile where the file system doesn't support it.
-fn posixdelete(path: [*:0]const WCHAR) bool {
-    // FILE_DISPOSITION_INFO_EX: DELETE | POSIX_SEMANTICS | IGNORE_READONLY_ATTRIBUTE
-    const fd: extern struct { Flags: w.DWORD } = .{ .Flags = 0x1 | 0x2 | 0x10 };
-    const h = h9_fs_createfile(path, w.DELETE, w.FILE_SHARE_READ | w.FILE_SHARE_WRITE | w.FILE_SHARE_DELETE, null, w.OPEN_EXISTING, w.FILE_FLAG_OPEN_REPARSE_POINT, null);
-    if (h == invalid) return h9_fs_deletefile(path) != 0;
-    const ok = w.SetFileInformationByHandle(h, w.FileDispositionInfoEx, &fd, @sizeOf(@TypeOf(fd)));
-    _ = w.CloseHandle(h);
-    if (ok != 0) return true;
-    return h9_fs_deletefile(path) != 0;
+/// path's own entry, a link itself rather than its target, opened for
+/// deletion or renaming beneath the machine's directory handle
+/// (h9_fs_createfile goes through src/host/dirs.c's walk), so what the
+/// host deletes or renames is the file that walk found, not whatever
+/// the path names by the time the host resolves it again.
+fn openown(path: [*:0]const WCHAR) Error!HANDLE {
+    const h = h9_fs_createfile(path, w.DELETE | w.SYNCHRONIZE | w.FILE_READ_ATTRIBUTES, w.FILE_SHARE_READ | w.FILE_SHARE_WRITE | w.FILE_SHARE_DELETE, null, w.OPEN_EXISTING, w.FILE_FLAG_OPEN_REPARSE_POINT | w.FILE_FLAG_BACKUP_SEMANTICS, null);
+    if (h == invalid) return w.oserr();
+    return h;
 }
 
-/// Removes a link, a directory's with RemoveDirectory.
-fn removelink(path: [*:0]const WCHAR) Error!void {
-    const attr = h9_fs_getattr(path);
-    if (attr == w.INVALID_FILE_ATTRIBUTES) return w.oserr();
-    if (attr & w.FILE_ATTRIBUTE_DIRECTORY != 0) {
-        if (h9_fs_removedir(path) == 0) return w.oserr();
-    } else if (!posixdelete(path)) return w.oserr();
+/// Removes path's own entry, a file, an empty directory, or a link,
+/// through a handle (openown). With POSIX semantics the name goes at
+/// once, even while the file is open, rather than when the last handle
+/// closes, so a new file can take the name right away; where the file
+/// system doesn't support that, the classic disposition, on the same
+/// handle.
+fn removeown(path: [*:0]const WCHAR) Error!void {
+    const h = try openown(path);
+    defer _ = w.CloseHandle(h);
+    // FILE_DISPOSITION_INFO_EX: DELETE | POSIX_SEMANTICS | IGNORE_READONLY_ATTRIBUTE
+    const fdx: extern struct { Flags: w.DWORD } = .{ .Flags = 0x1 | 0x2 | 0x10 };
+    if (w.SetFileInformationByHandle(h, w.FileDispositionInfoEx, &fdx, @sizeOf(@TypeOf(fdx))) != 0) return;
+    const err = w.GetLastError();
+    // FILE_DISPOSITION_INFO's DeleteFile, for a file system without the Ex form.
+    const fd: extern struct { DeleteFile: u8 } = .{ .DeleteFile = 1 };
+    if (w.SetFileInformationByHandle(h, w.FileDispositionInfo, &fd, @sizeOf(@TypeOf(fd))) != 0) return;
+    // The Ex form's error says more (a directory that isn't empty, say)
+    // unless it was only unsupported.
+    if (err != 50 and err != 87) w.SetLastError(err); // ERROR_NOT_SUPPORTED, ERROR_INVALID_PARAMETER
+    return w.oserr();
+}
+
+/// Renames path's own entry to name within its directory, through a
+/// handle (openown): NtSetInformationFile's FileRenameInformation with no
+/// root directory and a bare name renames the file where it is, so the
+/// host never resolves the new name's directory again. Not
+/// SetFileInformationByHandle, which reads a bare name as relative to
+/// the process's current directory and would move the file there. An
+/// existing name isn't replaced, as MoveFile didn't.
+fn renameown(path: [*:0]const WCHAR, name: []const WCHAR) Error!void {
+    for (name) |ch| if (ch == '\\' or ch == '/' or ch == ':') return port.kerror(&port.Ebadchar);
+    if (name.len == 0 or name.len > MAX_PATH) return port.kerror(&port.Ebadstat);
+    const h = try openown(path);
+    defer _ = w.CloseHandle(h);
+    // FILE_RENAME_INFO: ReplaceIfExists (padded), RootDirectory, FileNameLength, FileName.
+    const Info = extern struct { replace: w.DWORD, root: ?HANDLE, len: w.DWORD, name: [MAX_PATH + 1]WCHAR };
+    var info: Info = .{ .replace = 0, .root = null, .len = @intCast(name.len * 2), .name = undefined };
+    @memcpy(info.name[0..name.len], name);
+    info.name[name.len] = 0;
+    var iosb: w.IO_STATUS_BLOCK = undefined;
+    const st = w.NtSetInformationFile(h, &iosb, &info, @intCast(@offsetOf(Info, "name") + (name.len + 1) * 2), w.FileRenameInformation);
+    if (st < 0) {
+        w.SetLastError(@intCast(w.RtlNtStatusToDosError(st)));
+        return w.oserr();
+    }
 }
 
 fn fsremove(ch: *Chan) Error!void {
@@ -685,14 +719,9 @@ fn fsremove(ch: *Chan) Error!void {
     const uif = uifOf(ch);
     // A link is removed, not its target.
     try allow(ownpath(uif), Remove);
-    if (uif.lpath) |l| {
-        try removelink(l);
-    } else if (ch.qid.type & fs.QTSYMLINK != 0) {
-        // A link a Linux walk stopped at.
-        try removelink(uif.path);
-    } else if (ch.qid.type & c.QTDIR != 0) {
-        if (h9_fs_removedir(uif.path) == 0) return w.oserr();
-    } else if (!posixdelete(uif.path)) return w.oserr();
+    // ownpath is the link itself for a link (lpath, or a link a Linux
+    // walk stopped at), else the file.
+    try removeown(ownpath(uif));
 }
 
 fn nochange(d: *const Dir) bool {
@@ -765,7 +794,9 @@ fn fswstat(ch: *Chan, buf: [*]u8, n: c_int) Error!c_int {
         if (!wcseq(ownpath(uif), newpath)) {
             try allow(newpath, Create);
             try allow(ownpath(uif), Rename);
-            if (h9_fs_movefile(ownpath(uif), newpath) == 0) return w.oserr();
+            const np = wspan(newpath);
+            const slash = std.mem.lastIndexOfScalar(WCHAR, np, '\\') orelse return port.kerror(&port.Ebadstat);
+            try renameown(ownpath(uif), np[slash + 1 ..]);
         }
         if (uif.lpath) |lp| {
             free(lp);
