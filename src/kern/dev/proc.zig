@@ -400,7 +400,7 @@ fn readns1(ch: *Chan, g: *Groups, buf: [*]u8, nbuf: c_int) Error!c_int {
             // A posted channel prints as its /srv name, as on 9front
             // (design/epoch-0/devsrv.md).
             const mc: *Chan = f.to.*.mchan;
-            const srv: [*c]const u8 = if (mc.srvname != null) mc.srvname else chan.chanpath(mc);
+            const srv: [*c]const u8 = chan.srvname(mc) orelse chan.chanpath(mc);
             const spec: [*:0]u8 = @ptrCast(f.spec());
             i = if (spec[0] != 0)
                 c.snprint(buf, nbuf, @constCast("mount %s %q %q %q\n"), fp, srv, from, spec)

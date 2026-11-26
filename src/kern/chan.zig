@@ -341,7 +341,44 @@ fn addelem(p_: *Path, s: [*:0]const u8, from: ?*Chan) *Path {
     return p;
 }
 
+/// h9's, as 9front's Chan.srvname: the /srv name a channel was posted
+/// as, which /proc/n/ns prints for a mount of it. drawterm's Chan has no
+/// field for it, so it's kept beside the channel, and a flag bit beyond
+/// drawterm's says a channel has one, so most frees don't look.
+const CSRVNAME = 0x2000; // beside linux.zig's CLROOT and CSROOT
+var srvnames: std.AutoHashMapUnmanaged(*Chan, [*:0]u8) = .empty;
+var srvnames_lk: c.Lock = std.mem.zeroes(c.Lock);
+
+/// The /srv name ch was posted as, if any. It lives as long as ch.
+pub fn srvname(ch: *const Chan) ?[*:0]u8 {
+    if (ch.flag & CSRVNAME == 0) return null;
+    c.lock(&srvnames_lk);
+    defer c.unlock(&srvnames_lk);
+    return srvnames.get(@constCast(ch));
+}
+
+/// Records the /srv name ch is posted as, unless it has one: a channel
+/// keeps the name of its first post, as 9front's.
+pub fn setsrvname(ch: *Chan, name: [*:0]const u8) void {
+    c.lock(&srvnames_lk);
+    defer c.unlock(&srvnames_lk);
+    const e = srvnames.getOrPut(std.heap.c_allocator, ch) catch return;
+    if (e.found_existing) return;
+    e.value_ptr.* = c.strdup(@constCast(name)) orelse {
+        srvnames.removeByPtr(e.key_ptr);
+        return;
+    };
+    ch.flag |= CSRVNAME;
+}
+
+fn dropsrvname(ch: *Chan) void {
+    c.lock(&srvnames_lk);
+    defer c.unlock(&srvnames_lk);
+    if (srvnames.fetchRemove(ch)) |kv| c.free(kv.value);
+}
+
 pub fn chanfree(ch: *Chan) void {
+    if (ch.flag & CSRVNAME != 0) dropsrvname(ch);
     ch.flag = c.CFREE;
 
     if (ch.dirrock != null) {
@@ -369,9 +406,6 @@ pub fn chanfree(ch: *Chan) void {
 
     pathclose(ch.path);
     ch.path = null;
-
-    c.free(ch.srvname); // h9, as 9front
-    ch.srvname = null;
 
     c.lock(&chanalloc.lk);
     ch.next = chanalloc.free;
