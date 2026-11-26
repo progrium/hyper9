@@ -95,6 +95,9 @@ pub const Outcome = enum {
     returned,
     /// It parked, and holds its stack until it's resumed and returns.
     parked,
+    /// It gave the executor up (`yield`) and is runnable: it holds its
+    /// stack, and the scheduler queues it again to be resumed.
+    yielded,
 };
 
 /// A kernel continuation. Embed it in the process; it holds no memory
@@ -171,8 +174,32 @@ pub fn park() void {
     const ex = current().?;
     const k = ex.cur.?;
     if (k.consume()) return;
+    if (ex.out_hook) |h| h(ex, k);
     ex.why = .park;
     switchOut(ex, k);
+}
+
+/// Gives the executor up for now, with k runnable: the executor's call
+/// or resume reports `yielded`, and the scheduler resumes it later. Only
+/// on a continuation. Its time slice is up, for one.
+pub fn yield() void {
+    const ex = current().?;
+    const k = ex.cur.?;
+    if (ex.out_hook) |h| h(ex, k);
+    ex.why = .yield;
+    switchOut(ex, k);
+}
+
+/// Ends the call running on this thread now, as if its function had
+/// returned: what's on its stack is abandoned, so nothing it holds may
+/// need its frames after. A process that exits does this.
+pub fn exit() noreturn {
+    const ex = current().?;
+    const k = ex.cur.?;
+    ex.why = .ret;
+    // On wasm the unwind is abandoned: nothing rewinds it.
+    switchOut(ex, k);
+    unreachable;
 }
 
 /// The continuation running on this thread, if any.
@@ -203,7 +230,14 @@ pub const Executor = struct {
     /// The executor's own saved stack pointer while a continuation runs.
     sp: usize = 0,
     /// Why the continuation switched out.
-    why: enum { park, ret } = .ret,
+    why: enum { park, yield, ret } = .ret,
+    /// Called on the continuation as it parks or yields, before it
+    /// switches out: while nothing can resume it yet, so what it leaves
+    /// on the executor (a vCPU's registers) can be saved for another to
+    /// load.
+    out_hook: ?*const fn (ex: *Executor, k: *Cont) void = null,
+    /// The scheduler's, for its hooks.
+    ctx: ?*anyopaque = null,
 
     pub fn init(pool: *Pool) Executor {
         return .{ .pool = pool };
@@ -256,6 +290,10 @@ pub const Executor = struct {
                     if (!k.stack.?.holds(k.sp)) @panic("kernel stack overflow");
                     if (k.commit()) return .parked;
                     // An unpark came while it was switching out: go on.
+                },
+                .yield => {
+                    if (!k.stack.?.holds(k.sp)) @panic("kernel stack overflow");
+                    return .yielded;
                 },
             }
         }

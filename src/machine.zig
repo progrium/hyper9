@@ -19,6 +19,7 @@ const policy = @import("policy.zig");
 const segment = @import("segment.zig");
 const newns = @import("newns.zig");
 const cpupool = @import("cpupool.zig");
+const executor = @import("executor.zig");
 const gm = @import("guestmem.zig");
 const consin = @import("consin.zig");
 const web = @import("web.zig");
@@ -910,7 +911,25 @@ pub const Machine = struct {
                 error.TooManyProcs => unreachable, // the cap is at least 1
             };
         };
+        // Its processes run on executors (design/scheduler.md), where the
+        // engine has them.
+        if (executor.enabled and executor.usable(m.engine.kind())) {
+            job.sched = executor.Sched.create(m.gpa, m.io, m.engine, job.ncpu, .{ .thread_init = Job.threadInit, .init_ctx = job }) catch |e| {
+                job.dropProc(first);
+                kernel.deinit();
+                kern.removeConsole(job.con_id);
+                job.procs.deinit(m.gpa);
+                job.pool.deinit();
+                m.gpa.destroy(job);
+                return switch (e) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    else => error.Kern,
+                };
+            };
+            kernel.setScheduler(job.sched.?, executor.Sched.startC);
+        }
         kernel.spawn("h9", Proc, firstMain, first) catch |e| {
+            if (job.sched) |s| _ = s.shutdown(grace_ms);
             job.dropProc(first);
             kernel.deinit();
             kern.removeConsole(job.con_id);
@@ -929,6 +948,8 @@ pub const Machine = struct {
         // as at a timeout.
         job.stopAll();
         if (!job.waitAll()) {
+            // The executors stay for what's stuck, with the Job.
+            if (job.sched) |s| _ = s.shutdown(0);
             m.stuck = true;
             m.root_changes = job.rootChanges();
             m.out_of_memory = job.out_of_memory.load(.acquire);
@@ -940,6 +961,10 @@ pub const Machine = struct {
         job.con.reset();
         m.root_changes = job.rootChanges();
         m.out_of_memory = job.out_of_memory.load(.acquire);
+        if (job.sched) |s| if (!s.shutdown(grace_ms)) {
+            m.stuck = true;
+            return .{ .killed = if (timed_out) timeout_note else stopped_note };
+        };
         if (job.mach.load(.acquire)) |mc| {
             hidx.unregister(@intFromPtr(mc));
             _ = hstream.waitConnects(@intFromPtr(mc), grace_ms);
@@ -1017,6 +1042,9 @@ pub const Machine = struct {
         out_of_memory: std.atomic.Value(bool) = .init(false),
         /// Set to end every process; exit loops check it after every exit.
         stopping: std.atomic.Value(bool) = .init(false),
+        /// The executors its processes run on (design/scheduler.md), or
+        /// null where each has a host thread and a vCPU (`pool`).
+        sched: ?*executor.Sched = null,
         /// Guards `procs`, `next_pid` and each Proc's `kproc` and `lease`.
         lock: std.atomic.Mutex = .unlocked,
         /// Live processes. A process is only made by a live one, so once
@@ -1124,6 +1152,15 @@ pub const Machine = struct {
 
         /// Takes a leaving process out of the counts. Called with `lock`
         /// held.
+        /// An executor's host thread, set up for the machine: devfs
+        /// checks its accesses against the plan, as a process's thread's.
+        fn threadInit(ctx: ?*anyopaque) void {
+            const j: *Job = @ptrCast(@alignCast(ctx.?));
+            kern.setPlan(&j.m.plan);
+            kern.setPages(&j.pages);
+            kern.setCpus(j.ncpu);
+        }
+
         fn uncount(j: *Job, p: *Proc) void {
             if (!p.serving) j.n_program -= 1;
         }
@@ -1266,7 +1303,7 @@ pub const Machine = struct {
         lx: ?*lsys.Process = null,
         /// Set in a vfork child: its parent waits on it until the child
         /// execs or exits.
-        vfork_done: ?*std.Io.Event = null,
+        vfork_done: ?*executor.Event = null,
         /// Set by the stop kick hook when a debugger asks the process to
         /// stop, so the exit loop asks the kernel at its next stop point.
         stop_flag: std.atomic.Value(bool) = .init(false),
@@ -1756,7 +1793,8 @@ pub const Machine = struct {
             error.OutOfMemory => return error.OutOfMemory,
             error.TooManyProcs => unreachable, // the cap is at least 1
         };
-        const flags = kern.RF.PROC | kern.RF.NAMEG | kern.RF.FDG | kern.RF.ENVG | kern.RF.NOTEG | kern.RF.NOWAIT;
+        // It waits in the host for connections: a host thread of its own.
+        const flags = kern.RF.PROC | kern.RF.NAMEG | kern.RF.FDG | kern.RF.ENVG | kern.RF.NOTEG | kern.RF.NOWAIT | kern.RF.HOSTTHREAD;
         kern.fork(flags, p.pid, Proc, serverMain, p) catch {
             j.dropProc(p);
             return m.fail("serve: can't start the server process: {s}", .{kern.errstr()});
@@ -1802,7 +1840,9 @@ pub const Machine = struct {
             error.OutOfMemory => return error.OutOfMemory,
             error.TooManyProcs => unreachable, // the cap is at least 1
         };
-        const flags = kern.RF.PROC | kern.RF.NAMEG | kern.RF.FDG | kern.RF.ENVG | kern.RF.NOTEG | kern.RF.NOWAIT;
+        // It waits in the host for the host's requests, as do the control
+        // processes it starts: host threads of their own.
+        const flags = kern.RF.PROC | kern.RF.NAMEG | kern.RF.FDG | kern.RF.ENVG | kern.RF.NOTEG | kern.RF.NOWAIT | kern.RF.HOSTTHREAD;
         kern.fork(flags, p.pid, Proc, ptyServerMain, p) catch {
             j.dropProc(p);
             return m.fail("ptys: can't start the pty server: {s}", .{kern.errstr()});
@@ -1827,7 +1867,7 @@ pub const Machine = struct {
             };
             // The server's reference becomes the control process's.
             c.pty = pty;
-            kern.fork(kern.RF.PROC | kern.RF.FDG | kern.RF.NOWAIT, c.pid, Proc, ptyCtlMain, c) catch {
+            kern.fork(kern.RF.PROC | kern.RF.FDG | kern.RF.NOWAIT | kern.RF.HOSTTHREAD, c.pid, Proc, ptyCtlMain, c) catch {
                 j.dropProc(c);
                 pty.finish(.failed);
                 pty.unref();
@@ -2060,7 +2100,7 @@ pub const Machine = struct {
 
     fn runLoop(m: *Machine, p: *Proc) RunError!Status {
         const j = p.job;
-        try j.pool.acquire(&p.lease_store);
+        if (executor.enabled and j.sched != null) p.lease_store.initScheduled(&j.pool) else try j.pool.acquire(&p.lease_store);
         p.setLease(&p.lease_store);
         const vcpu = &p.lease_store;
         try vcpu.setAddressSpace(p.as.?);
@@ -3000,7 +3040,7 @@ pub const Machine = struct {
     /// gives it.
     const ExecReq = struct {
         e: lsys.Exec,
-        done: std.Io.Event = .unset,
+        done: executor.Event = .{},
         ok: bool = false,
         err: [kern.ERRMAX]u8 = undefined,
     };
@@ -3035,7 +3075,7 @@ pub const Machine = struct {
         var req: ExecReq = .{ .e = e };
         g.exec_req = &req;
         _ = kern.postNote(g.tgid, exec_note, .user) catch {};
-        req.done.waitUncancelable(m.io);
+        req.done.wait(m.io);
         if (req.ok) return .handed_off;
         kern.setErrstr(std.mem.sliceTo(&req.err, 0));
         return .failed;
@@ -3123,7 +3163,7 @@ pub const Machine = struct {
         if (cl.flags & lsys.CLONE_CHILD_CLEARTID != 0) cx.clear_tid = cl.ctid;
         if (cl.flags & lsys.CLONE_CHILD_SETTID != 0) cx.writeU32(cl.ctid, c.pid) catch {};
         if (cl.flags & lsys.CLONE_PARENT_SETTID != 0) l.writeU32(cl.ptid, c.pid) catch {};
-        var done: std.Io.Event = .unset;
+        var done: executor.Event = .{};
         if (vfork) c.vfork_done = &done;
         c.noteMem();
         var flag: c_int = kern.RF.PROC;
@@ -3137,7 +3177,7 @@ pub const Machine = struct {
             j.dropProc(c);
             return -attr.E.AGAIN;
         };
-        if (vfork) done.waitUncancelable(m.io);
+        if (vfork) done.wait(m.io);
         return pid;
     }
 
