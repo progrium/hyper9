@@ -159,7 +159,7 @@ int h9_fs_linkwalk(void) { return 0; }
 int h9_fs_atroot(Chan *c) { USED(c); return 0; }
 void h9_fs_markroot(Chan *c, int lx) { USED(c, lx); }
 
-/* devhidx.c's: no mount indexes. */
+/* src/kern/dev/hidx.zig's: no mount indexes. */
 int h9_hidx_wide(Chan *c) { USED(c); return 0; }
 
 /* linuxnet.c's: no Linux sockets to wake. */

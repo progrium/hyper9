@@ -582,6 +582,7 @@ const natives = .{
     // h9's own, which the namespace kernel doesn't build.
     @import("dev/hcons.zig").Device,
     @import("dev/env.zig").Device,
+    @import("dev/hidx.zig").Device,
 });
 
 /// d's functions, if it's native.

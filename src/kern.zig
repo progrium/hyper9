@@ -1255,7 +1255,7 @@ pub fn fauth(fd: u31, aname: [*:0]const u8) Error!u31 {
 /// Connects to the unix-domain socket at host path `path` and returns an
 /// fd on a channel for it (design/epoch-0/ninep-roots.md). Fails on Windows.
 /// The status of the caller's machine's `#ι` conversation `n`
-/// (src/kern/devhidx.c), read without a chan, since `#ι` is masked once
+/// (src/kern/dev/hidx.zig), read without a chan, since `#ι` is masked once
 /// the namespace is built; or null.
 pub fn hidxStatus(n: u32, buf: []u8) ?[]u8 {
     const k = c.h9_hidx_convstatus(@intCast(n), buf.ptr, @intCast(@min(buf.len, std.math.maxInt(c_int))));

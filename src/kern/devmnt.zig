@@ -1012,7 +1012,7 @@ fn widereply(t: u8) bool {
     };
 }
 
-// src/kern/devdotl.c and devhidx.c.
+// src/kern/devdotl.c and dev/hidx.zig.
 extern fn h9_dotl_wide(*Chan) c_int;
 extern fn h9_hidx_wide(*Chan) c_int;
 

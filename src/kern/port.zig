@@ -28,6 +28,7 @@
 //! - `rootdial.zig`: rootdial.c, unix socket roots and host descriptors.
 //! - `dev/env.zig`: devenv.c, #e, environment variables.
 //! - `dev/hstream.zig`: devhstream.c, #ℏ, host streams.
+//! - `dev/hidx.zig`: devhidx.c, #ι, metadata indexes for 9P mounts.
 //!
 //! This file is the root the kernel builds compile (build.zig's addKern,
 //! and src/nskernel.zig), and holds what the ported files share: the C
@@ -55,6 +56,7 @@ pub const fifo = @import("fifo.zig");
 pub const rootdial = @import("rootdial.zig");
 pub const devenv = @import("dev/env.zig");
 pub const devhstream = @import("dev/hstream.zig");
+pub const devhidx = @import("dev/hidx.zig");
 
 /// Whether this is the namespace kernel (src/nskernel.zig,
 /// design/epoch-0/namespace-kernel.md), which builds with H9_NSKERNEL and
@@ -79,6 +81,7 @@ comptime {
     rootdial.exportC();
     if (!nskernel) devenv.exportC();
     devhstream.exportC();
+    if (!nskernel) devhidx.exportC();
 }
 
 test {
@@ -102,6 +105,7 @@ test {
     _ = rootdial;
     _ = devenv;
     _ = devhstream;
+    _ = devhidx;
 }
 
 /// A kernel error. The Plan 9 error string is on the process, in
