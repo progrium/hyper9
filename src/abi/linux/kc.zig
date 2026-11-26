@@ -13,16 +13,16 @@ const real = struct {
     extern fn h9_linux_dotrestore(old: ?*anyopaque) void;
     extern fn h9_fs_nofollow(on: c_int) c_int;
     extern fn h9_linux_fdinfo(fd: c_int, dc: *c_int, dev: *c_uint, qpath: *u64, qtype: *c_int, mode: *c_int, cexec: *c_int) c_int;
-    extern fn h9_linux_setcputime(user: c_ulong, sys: c_ulong) void;
+    extern fn h9_linux_setcputime(user: c_uint, sys: c_uint) void;
     extern fn h9_linux_fdchan(fd: c_int, refs: *c_int) usize;
     extern fn h9_linux_changet(fd: c_int) ?*anyopaque;
-    extern fn h9_linux_chanpread(ch: *anyopaque, buf: [*]u8, n: c_long, off: i64) c_long;
+    extern fn h9_linux_chanpread(ch: *anyopaque, buf: [*]u8, n: c_int, off: i64) c_int;
     extern fn h9_linux_chanput(ch: *anyopaque) void;
     extern fn h9_linux_setcexec(fd: c_int, on: c_int) c_int;
     extern fn h9_linux_maxfd() c_int;
     extern fn h9_linux_fds(fds: [*]c_int, n: c_int) c_int;
-    extern fn h9_linux_await(buf: [*]u8, n: c_int, block: c_int, want: c_long, peek: c_int) c_int;
-    extern fn h9_linux_ppid() c_ulong;
+    extern fn h9_linux_await(buf: [*]u8, n: c_int, block: c_int, want: c_int, peek: c_int) c_int;
+    extern fn h9_linux_ppid() c_uint;
     extern fn h9_linux_getcwd(buf: [*]u8, n: c_int) c_int;
     extern fn h9_linux_fchdir(fd: c_int) c_int;
     extern fn h9_linux_chroot(path: [*:0]const u8) c_int;
@@ -84,14 +84,14 @@ const stub = struct {
     fn h9_fs_nofollow(_: c_int) c_int {
         return 0;
     }
-    fn h9_linux_setcputime(_: c_ulong, _: c_ulong) void {}
+    fn h9_linux_setcputime(_: c_uint, _: c_uint) void {}
     fn h9_linux_fdchan(_: c_int, _: *c_int) usize {
         return 0;
     }
     fn h9_linux_changet(_: c_int) ?*anyopaque {
         return null;
     }
-    fn h9_linux_chanpread(_: *anyopaque, _: [*]u8, _: c_long, _: i64) c_long {
+    fn h9_linux_chanpread(_: *anyopaque, _: [*]u8, _: c_int, _: i64) c_int {
         return -1;
     }
     fn h9_linux_chanput(_: *anyopaque) void {}
@@ -107,10 +107,10 @@ const stub = struct {
     fn h9_linux_fds(_: [*]c_int, _: c_int) c_int {
         return 0;
     }
-    fn h9_linux_await(_: [*]u8, _: c_int, _: c_int, _: c_long, _: c_int) c_int {
+    fn h9_linux_await(_: [*]u8, _: c_int, _: c_int, _: c_int, _: c_int) c_int {
         return -1;
     }
-    fn h9_linux_ppid() c_ulong {
+    fn h9_linux_ppid() c_uint {
         return 1;
     }
     fn h9_linux_getcwd(_: [*]u8, _: c_int) c_int {

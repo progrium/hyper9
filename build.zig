@@ -616,7 +616,7 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.O
     });
     // The Linux ABI (design/epoch-0/linux-personality.md) and its host
     // sockets (design/epoch-0/linux-net.md).
-    kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{ "linux.c", "linuxnet.c", "devpty.c", "fifo.c" }, .flags = flags });
+    kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{ "linuxnet.c", "devpty.c", "fifo.c" }, .flags = flags });
     if (web) {
         kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"hostsock-wasm.c"}, .flags = flags });
     } else if (os != .windows) kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{ "hostsock-posix.c", "hostif-posix.c" }, .flags = flags });
