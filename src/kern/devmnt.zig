@@ -18,13 +18,26 @@
 //!
 //! h9: the device's optional operations (design/file-interface.md) are
 //! the wide requests, 9P2000.L's Tsymlink, Treadlink, Tgetattr,
-//! Tsetattr, Tlink, and Trename, with devmnt's fids, which it sends only
+//! Tsetattr, Tlink, Trename, and Tfsync, with devmnt's fids, which it sends only
 //! to a server that takes them: a `#ℓ` conversation that translates to
 //! 9P2000.L, directly or under a `#ι` index (`wideof`). The translator
 //! (src/dotl/client.zig) sends each on with the server's fids, so a
 //! Linux process's link, rename, or stat on a .L mount translates once.
 //! Against any other server they're the switch's defaults, so what a
 //! 9P2000 server sees doesn't change.
+//!
+//! h9: readiness (design/file-interface.md, Part 1). A mount offers
+//! `9P2000.ready` in its Tversion, which a 9P2000 server answers with
+//! `9P2000`, as version(5) has it; one that answers `9P2000.ready`
+//! (kserve) takes Tready, which asks which of some events (Linux's poll
+//! bits) an open fid has, and answers when one holds, or at once when
+//! asked to. `ready` asks it at once, unless a Tready already waiting
+//! covers the events, and `watch` leaves one waiting, sent without
+//! waiting for its reply; whichever process reads the mount's replies
+//! (`m.rip`) hands it to the channel's watchers, and a kproc per mount,
+//! `mntreader`, reads them while only such replies are due. A read or
+//! write forgets what was known. Any other server's files are always
+//! ready, the default.
 
 const std = @import("std");
 const port = @import("port.zig");
@@ -69,6 +82,14 @@ pub const Mntrpc = extern struct {
     /// convS2M for it; its reply's body is left in b.
     wide: ?[*]const u8 = null,
     nwide: c_int = 0,
+    /// h9: called with the reply of a request nobody waits for (an
+    /// outstanding Tready), by whichever process read it, in place of
+    /// a wakeup; its reply type is Rerror if the mount hung up.
+    async: ?*const fn (*Mntrpc) callconv(.c) void = null,
+    aarg: ?*anyopaque = null,
+    /// h9: an async request being flushed, which no longer keeps the
+    /// mount's reader reading.
+    aflush: u8 = 0,
 };
 
 const TAGSHIFT = 5;
@@ -143,6 +164,10 @@ pub fn mntversion(ch: *Chan, version: ?[*]u8, msize_: c_int, returnlen: c_int) E
         if (ver[0] != 0)
             v = @ptrCast(ver);
     }
+    // h9: a mount's own version offers readiness (design/file-interface.md);
+    // a process's fversion gets what it asks.
+    if (returnlen == 0 and dev.streq(v, c.VERSION9P))
+        v = Vready;
 
     // validity
     if (msize < 0)
@@ -156,7 +181,12 @@ pub fn mntversion(ch: *Chan, version: ?[*]u8, msize_: c_int, returnlen: c_int) E
 
         var buf: [128:0]u8 = undefined;
         _ = c.strecpy(&buf, @as([*]u8, &buf) + buf.len, m.version);
-        const k = std.mem.len(@as([*:0]u8, &buf));
+        var k = std.mem.len(@as([*:0]u8, &buf));
+        // h9: an extension the mount took isn't one the caller has to ask.
+        if (!std.mem.startsWith(u8, std.mem.span(v), buf[0..k]) and std.mem.startsWith(u8, buf[0..k], c.VERSION9P ++ ".")) {
+            k = std.mem.len(@as([*:0]const u8, c.VERSION9P));
+            buf[k] = 0;
+        }
         if (!std.mem.startsWith(u8, std.mem.span(v), buf[0..k])) {
             _ = c.snprint(&buf, buf.len, @constCast("incompatible 9P versions %s %s"), m.version, v);
             return port.kerror(&buf);
@@ -502,6 +532,7 @@ fn mntclunk(ch: *Chan, t: c_int) Error!void {
 }
 
 pub fn muxclose(m: *Mnt) void {
+    mrgone(m); // h9
     while (queueOf(m).*) |r| {
         queueOf(m).* = r.list;
         mntfree(r);
@@ -528,10 +559,12 @@ pub fn muxclose(m: *Mnt) void {
 }
 
 fn mntclose(ch: *Chan) Error!void {
+    recclose(ch); // h9
     return mntclunk(ch, c.Tclunk);
 }
 
 fn mntremove(ch: *Chan) Error!void {
+    recclose(ch); // h9
     return mntclunk(ch, c.Tremove);
 }
 
@@ -612,6 +645,7 @@ fn mntrdwr(@"type": c_int, ch: *Chan, buf: [*]u8, n_: c_int, off_: i64) Error!c_
         if (nr != nreq or n == 0)
             break;
     }
+    recforget(ch); // h9: what was ready may not be now
     return @bitCast(cnt);
 }
 
@@ -842,8 +876,14 @@ fn mountmux(m: *Mnt, r: *Mntrpc) void {
             q.reply = r.reply;
             q.b = r.b;
             r.b = null;
-            const z = q.z.?;
             q.done = 1;
+            // h9: a reply nobody waits for goes to its callback.
+            if (q.async) |f| {
+                c.unlock(&m.lk);
+                asyncdone(m, q, f);
+                return;
+            }
+            const z = q.z.?;
             _ = sync.wakeup(z);
             c.unlock(&m.lk);
             return;
@@ -930,6 +970,9 @@ fn mntralloc(ch: *Chan) *Mntrpc {
     new.b = null;
     new.wide = null;
     new.nwide = 0;
+    new.async = null;
+    new.aarg = null;
+    new.aflush = 0;
     return new;
 }
 
@@ -1003,11 +1046,12 @@ const Treadlink = 22;
 const Tgetattr = 24;
 const Tsetattr = 26;
 const Tlink = 70;
+const Tfsync = 50;
 
 /// Whether t is a wide request's reply.
 fn widereply(t: u8) bool {
     return switch (t) {
-        Tsymlink + 1, Trename + 1, Treadlink + 1, Tgetattr + 1, Tsetattr + 1, Tlink + 1 => true,
+        Tsymlink + 1, Trename + 1, Treadlink + 1, Tgetattr + 1, Tsetattr + 1, Tlink + 1, Tfsync + 1, Tready + 1 => true,
         else => false,
     };
 }
@@ -1124,6 +1168,35 @@ fn mnthasattr(ch: *Chan) bool {
     return wideof(ch) != null;
 }
 
+/// A wide mount's Dir, from its Tgetattr's Attr: what the translator's
+/// Tstat would have made of a Tgetattr of its own (src/dotl/attr.zig),
+/// with the machine's user as the owner, so a Linux stat is one request.
+fn mntattrstat(ch: *Chan, a: *const Attr, dp: [*]u8, n: c_int) ?c_int {
+    if (wideof(ch) == null or a.valid & c.Abasic != c.Abasic)
+        return null;
+    var d: c.Dir = undefined;
+    dev.nulldir(&d);
+    d.type = 0;
+    d.dev = 0;
+    d.qid = a.qid;
+    // As dirFromStat derives them: a Plan 9 client reads QTDIR as DMDIR.
+    d.qid.type = if (a.mode & c.DMDIR != 0) c.QTDIR else if (a.mode & DMSYMLINK != 0) QTSYMLINK else 0;
+    d.mode = a.mode;
+    d.atime = @intCast(std.math.clamp(a.atime, 0, std.math.maxInt(u32)));
+    d.mtime = @intCast(std.math.clamp(a.mtime, 0, std.math.maxInt(u32)));
+    d.length = if (a.mode & (c.DMDIR | DMFIFO) != 0) 0 else @bitCast(a.size);
+    d.name = @constCast("");
+    const user: [*c]u8 = @ptrCast(&up().user);
+    d.uid = user;
+    d.gid = user;
+    d.muid = user;
+    const k = c.convD2M(&d, dp, @intCast(n));
+    if (k <= BIT16SZ)
+        return null;
+    mntdirfix(dp, ch);
+    return @intCast(k);
+}
+
 // Linux's file types, for a Tgetattr's mode.
 const S_IFMT = 0o170000;
 const S_IFDIR = 0o040000;
@@ -1202,6 +1275,461 @@ fn mntsetattr(ch: *Chan, mask: u64, a: *const Attr) Error!void {
     _ = try widerpc(m, ch, Tsetattr, &w, &out);
 }
 
+/// Tfsync (Part 3), to a server that takes the wide requests; the null
+/// wstat to any other.
+fn mntfsync(ch: *Chan, datasync: bool) Error!void {
+    const m = wideof(ch) orelse return dev.fsyncdefault(ch);
+    var w: Wbody = .{};
+    w.put32(@bitCast(ch.fid));
+    w.put32(@intFromBool(datasync));
+    var out: [64]u8 = undefined;
+    _ = try widerpc(m, ch, Tfsync, &w, &out);
+}
+
+// h9: readiness (design/file-interface.md, Part 1), for a server that
+// answered Tversion with Vready.
+
+const rd = dev.rd;
+
+const Vready = c.VERSION9P ++ ".ready";
+pub const Tready = 160;
+const Rnow: u32 = 0x40000000; // in a Tready's events: answer at once
+const Npend = 4; // Treadys waiting per channel
+
+extern fn h9_kprocdetach() void; // proc.zig
+
+/// Whether m's server takes Tready.
+fn hasready(m: *Mnt) bool {
+    const v: [*:0]const u8 = m.version orelse return false;
+    return dev.streq(v, Vready);
+}
+
+/// A polled channel's readiness: what its server last said, which only
+/// an edge-triggered watch goes by, and the Treadys waiting for it to
+/// say more.
+const Rec = struct {
+    next: ?*Rec = null,
+    ch: *Chan, // the key; its close takes the Rec away
+    m: *Mnt,
+    lk: c.Lock = std.mem.zeroes(c.Lock),
+    ws: rd.Watchers = .{},
+    /// Events the server last said hold, until a read or write.
+    pos: c_int = 0,
+    /// The server refused a Tready: always ready from now on.
+    broken: bool = false,
+    pend: [Npend]?*Mntrpc = @splat(null),
+    pev: [Npend]c_int = @splat(0),
+};
+
+var reclk: c.Lock = std.mem.zeroes(c.Lock);
+var recs: ?*Rec = null;
+
+fn recof(ch: *Chan) ?*Rec {
+    if (@as(*volatile ?*Rec, &recs).* == null)
+        return null;
+    c.lock(&reclk);
+    defer c.unlock(&reclk);
+    var r = recs;
+    while (r) |x| : (r = x.next) {
+        if (x.ch == ch) return x;
+    }
+    return null;
+}
+
+/// ch's Rec, made if it's an open file of a mount whose server takes
+/// Tready; null otherwise.
+fn recget(ch: *Chan) ?*Rec {
+    if (ch.flag & c.COPEN == 0 or ch.qid.type & c.QTDIR != 0)
+        return null;
+    if (recof(ch)) |r| return r;
+    const m = mntchk(ch);
+    if (!hasready(m))
+        return null;
+    const r: *Rec = @ptrCast(@alignCast(port.malloc(@sizeOf(Rec)) orelse return null));
+    r.* = .{ .ch = ch, .m = m };
+    c.lock(&reclk);
+    r.next = recs;
+    recs = r;
+    c.unlock(&reclk);
+    return r;
+}
+
+/// The Tready body: fid[4] events[4].
+fn readybody(w: *Wbody, ch: *Chan, ev: u32) void {
+    w.put32(@bitCast(ch.fid));
+    w.put32((ev & 0xffff) | (ev & Rnow));
+}
+
+fn replyevents(b_: ?*Block) c_int {
+    var buf: [4]u8 = undefined;
+    var n: usize = 0;
+    var b = b_;
+    while (b) |x| : (b = x.next) {
+        const k = @min(@as(usize, @intCast(blen(x))), 4 - n);
+        @memcpy(buf[n..][0..k], x.rp[0..k]);
+        n += k;
+    }
+    if (n < 4)
+        return rd.Err;
+    return @bitCast(std.mem.readInt(u32, &buf, .little) & 0xffff);
+}
+
+const Interest = rd.In | rd.Out | rd.Pri | rd.Rdhup;
+
+fn mntready(ch: *Chan, ev_: c_int) c_int {
+    const now = ev_ & rd.Now != 0;
+    const ev = ev_ & ~@as(c_int, rd.Now | rd.Edge);
+    const r = recget(ch) orelse return dev.readydefault(ev);
+    const all = ev | rd.Err | rd.Hup;
+    c.lock(&r.lk);
+    if (r.broken) {
+        c.unlock(&r.lk);
+        return dev.readydefault(ev);
+    }
+    var covered = false;
+    for (r.pend, r.pev) |p, pev| {
+        if (p != null and ev & Interest & ~pev == 0) covered = true;
+    }
+    c.unlock(&r.lk);
+    // A Tready waiting for these will say when one holds. Otherwise the
+    // server is asked: what it said before may have changed by a call
+    // on another of its files (a listen, a ctl).
+    if (covered and !now)
+        return 0;
+    var w: Wbody = .{};
+    readybody(&w, ch, @as(u32, @bitCast(ev)) | Rnow);
+    var out: [8]u8 = undefined;
+    const rep = widerpc(r.m, ch, Tready, &w, &out) catch {
+        c.lock(&r.lk);
+        r.broken = true;
+        c.unlock(&r.lk);
+        return dev.readydefault(ev);
+    };
+    if (rep.len < 4)
+        return dev.readydefault(ev);
+    const got: c_int = @bitCast(std.mem.readInt(u32, rep[0..4], .little) & 0xffff);
+    c.lock(&r.lk);
+    r.pos = (r.pos & ~all) | got;
+    c.unlock(&r.lk);
+    // An edge-triggered watch waits for what's now known not to hold.
+    recwant(r);
+    return got & all;
+}
+
+fn watchev(w: *rd.Watch) c_int {
+    return @intCast(@intFromPtr(w.arg));
+}
+
+fn mntwatch(ch: *Chan, ev: c_int, w: *rd.Watch, wk: *rd.Waker) void {
+    const r = recget(ch) orelse return;
+    w.arg = @ptrFromInt(@as(usize, @intCast(ev & 0xffff)));
+    rd.add(&r.ws, w, wk);
+    recwant(r);
+}
+
+/// Leaves a Tready waiting for what r's watchers want that isn't known
+/// to hold and that no waiting Tready asks. An edge-triggered watch
+/// wants its events only once a read or write forgot them.
+fn recwant(r: *Rec) void {
+    if (!rd.watched(&r.ws))
+        return;
+    c.lock(&r.ws.lk);
+    var want: c_int = 0;
+    var x = r.ws.head;
+    while (x) |w| : (x = w.next) want |= watchev(w) & Interest;
+    c.unlock(&r.ws.lk);
+    c.lock(&r.lk);
+    if (r.broken) {
+        c.unlock(&r.lk);
+        return;
+    }
+    want &= ~r.pos;
+    var slot: ?usize = null;
+    for (r.pend, r.pev, 0..) |p, pev, i| {
+        if (p != null) want &= ~pev else if (slot == null) slot = i;
+    }
+    if (want == 0 or slot == null) {
+        c.unlock(&r.lk);
+        return;
+    }
+    const q = mntralloc(r.ch);
+    r.pend[slot.?] = q;
+    r.pev[slot.?] = want;
+    c.unlock(&r.lk);
+    q.request.type = Tready;
+    q.request.fid = @bitCast(r.ch.fid);
+    const body: *Wbody = @ptrCast(@alignCast(port.malloc(@sizeOf(Wbody)) orelse {
+        recdrop(r, q);
+        return;
+    }));
+    body.* = .{};
+    readybody(body, r.ch, @bitCast(want));
+    q.wide = &body.buf;
+    q.nwide = @intCast(body.n);
+    q.async = readydone;
+    q.aarg = r;
+    mntasync(r.m, q) catch {
+        c.free(body);
+        q.wide = null;
+        recdrop(r, q);
+        c.lock(&r.lk);
+        r.broken = true;
+        c.unlock(&r.lk);
+        rd.notify(&r.ws);
+    };
+}
+
+/// Takes q off r's waiting Treadys and frees it.
+fn recdrop(r: *Rec, q: *Mntrpc) void {
+    c.lock(&r.lk);
+    for (&r.pend) |*p| {
+        if (p.* == q) p.* = null;
+    }
+    c.unlock(&r.lk);
+    if (q.wide) |w| {
+        const buf: *[@sizeOf(@FieldType(Wbody, "buf"))]u8 = @ptrCast(@constCast(w));
+        c.free(@as(*Wbody, @alignCast(@fieldParentPtr("buf", buf))));
+    }
+    q.wide = null;
+    mntfree(q);
+}
+
+/// A waiting Tready's reply, from whichever process read it.
+fn readydone(q: *Mntrpc) callconv(.c) void {
+    const r: *Rec = @ptrCast(@alignCast(q.aarg.?));
+    var got: c_int = undefined;
+    if (q.reply.type == Tready + 1) {
+        got = replyevents(q.b);
+    } else {
+        // Refused, or the mount hung up: ready, as a file is.
+        got = rd.In | rd.Out | rd.Err | rd.Hup;
+    }
+    c.lock(&r.lk);
+    r.pos |= got;
+    c.unlock(&r.lk);
+    recdrop(r, q);
+    rd.notify(&r.ws);
+}
+
+/// After a read or write on ch: what held may not now.
+fn recforget(ch: *Chan) void {
+    const r = recof(ch) orelse return;
+    c.lock(&r.lk);
+    r.pos = 0;
+    c.unlock(&r.lk);
+    recwant(r);
+}
+
+/// ch is closing: its waiting Treadys are flushed, and its Rec goes.
+fn recclose(ch: *Chan) void {
+    const r = recof(ch) orelse return;
+    c.lock(&reclk);
+    var l: *?*Rec = &recs;
+    while (l.*) |x| : (l = &x.next) {
+        if (x == r) {
+            l.* = r.next;
+            break;
+        }
+    }
+    c.unlock(&reclk);
+    for (0..Npend) |i| {
+        c.lock(&r.lk);
+        const q = r.pend[i] orelse {
+            c.unlock(&r.lk);
+            continue;
+        };
+        c.unlock(&r.lk);
+        // Not one the reader waits for any more: it reads on only
+        // until the flush's reply.
+        c.lock(&r.m.lk);
+        const was = q.done == 0;
+        if (was) q.aflush = 1;
+        c.unlock(&r.m.lk);
+        if (was) mrdone(r.m);
+        const f = mntralloc(ch);
+        f.request.type = c.Tflush;
+        f.request.oldtag = q.request.tag;
+        mountrpc(r.m, f) catch {};
+        mntfree(f);
+        // A reply that came before the Rflush was handed over; with
+        // none, none will come.
+        c.lock(&r.lk);
+        const still = r.pend[i] == q;
+        c.unlock(&r.lk);
+        if (still) {
+            mntqrm(r.m, q);
+            recdrop(r, q);
+        }
+    }
+    c.free(r);
+}
+
+// The kproc that reads a mount's replies while only Treadys wait.
+
+const Mready = struct {
+    next: ?*Mready = null,
+    m: *Mnt,
+    r: c.Rendez = std.mem.zeroes(c.Rendez),
+    nasync: std.atomic.Value(c_int) = .init(0),
+    gone: bool = false,
+};
+
+var mrlk: c.Lock = std.mem.zeroes(c.Lock);
+var mrs: ?*Mready = null;
+
+/// m's reader, started if it hasn't been.
+fn mrget(m: *Mnt) ?*Mready {
+    c.lock(&mrlk);
+    var x = mrs;
+    while (x) |mr| : (x = mr.next) {
+        if (mr.m == m) {
+            c.unlock(&mrlk);
+            return mr;
+        }
+    }
+    const mr: *Mready = @ptrCast(@alignCast(port.malloc(@sizeOf(Mready)) orelse {
+        c.unlock(&mrlk);
+        return null;
+    }));
+    mr.* = .{ .m = m };
+    mr.next = mrs;
+    mrs = mr;
+    c.unlock(&mrlk);
+    _ = c.kproc(@constCast("mntready"), mntreader, mr);
+    return mr;
+}
+
+fn mrof(m: *Mnt) ?*Mready {
+    c.lock(&mrlk);
+    defer c.unlock(&mrlk);
+    var x = mrs;
+    while (x) |mr| : (x = mr.next) {
+        if (mr.m == m) return mr;
+    }
+    return null;
+}
+
+/// A reply nobody waited for was handed over, or taken back.
+fn mrdone(m: *Mnt) void {
+    if (mrof(m)) |mr| _ = mr.nasync.fetchSub(1, .seq_cst);
+}
+
+/// m is going: its reader, which has nothing to read now, ends.
+fn mrgone(m: *Mnt) void {
+    c.lock(&mrlk);
+    var l: *?*Mready = &mrs;
+    const mr_: ?*Mready = while (l.*) |x| : (l = &x.next) {
+        if (x.m == m) {
+            l.* = x.next;
+            break x;
+        }
+    } else null;
+    c.unlock(&mrlk);
+    const mr = mr_ orelse return;
+    c.lock(&m.lk);
+    mr.gone = true;
+    c.unlock(&m.lk);
+    _ = sync.wakeup(&mr.r);
+}
+
+fn mrcanread(a: ?*anyopaque) callconv(.c) c_int {
+    const mr: *Mready = @ptrCast(@alignCast(a.?));
+    return @intFromBool(@as(*volatile bool, &mr.gone).* or (mr.nasync.load(.seq_cst) > 0 and @as(*volatile ?*c.Proc, @ptrCast(&mr.m.rip)).* == null));
+}
+
+/// Sends q, whose reply goes to q.async, without waiting for it.
+fn mntasync(m: *Mnt, q: *Mntrpc) Error!void {
+    const mr = mrget(m) orelse return port.kerror(&port.Enomem);
+    const w = q.wide.?;
+    const n: c_int = BIT32SZ + BIT8SZ + BIT16SZ + q.nwide;
+    if (n > m.msize)
+        return port.kerror(&port.Emountrpc);
+    const b = qio.allocb(n);
+    pbit32(b.wp, @bitCast(n));
+    b.wp[4] = q.request.type;
+    pbit16(b.wp + 5, q.request.tag);
+    @memcpy(b.wp[7..][0..@intCast(q.nwide)], w[0..@intCast(q.nwide)]);
+    b.wp += @intCast(n);
+    c.lock(&m.lk);
+    q.z = &mr.r;
+    q.m = m;
+    q.done = 0;
+    q.list = queueOf(m).*;
+    queueOf(m).* = q;
+    c.unlock(&m.lk);
+    _ = mr.nasync.fetchAdd(1, .seq_cst);
+    _ = dev.bwrite(dev.of(m.c), m.c, b, 0) catch |e| {
+        mntqrm(m, q);
+        _ = mr.nasync.fetchSub(1, .seq_cst);
+        return e;
+    };
+    _ = sync.wakeup(&mr.r);
+}
+
+/// A reply mountmux found for q, which nobody waits for.
+fn asyncdone(m: *Mnt, q: *Mntrpc, f: *const fn (*Mntrpc) callconv(.c) void) void {
+    if (q.aflush == 0) mrdone(m);
+    f(q);
+}
+
+/// The mount hung up: every reply nobody waited for is an Rerror.
+fn asyncfail(m: *Mnt) void {
+    while (true) {
+        c.lock(&m.lk);
+        var l: *?*Mntrpc = queueOf(m);
+        const q_: ?*Mntrpc = while (l.*) |q| : (l = &q.list) {
+            if (q.async != null and q.done == 0) {
+                l.* = q.list;
+                q.done = 1;
+                break q;
+            }
+        } else null;
+        c.unlock(&m.lk);
+        const q = q_ orelse return;
+        q.reply.type = c.Rerror;
+        asyncdone(m, q, q.async.?);
+    }
+}
+
+fn mntreader(a: ?*anyopaque) callconv(.c) void {
+    const mr: *Mready = @ptrCast(@alignCast(a.?));
+    h9_kprocdetach();
+    const r0: *Mntrpc = @ptrCast(@alignCast(port.malloc(@sizeOf(Mntrpc)).?));
+    r0.* = .{};
+    const m = mr.m;
+    while (true) {
+        sync.sleep(&mr.r, mrcanread, mr) catch {
+            up().notepending = 0;
+            continue;
+        };
+        c.lock(&m.lk);
+        if (mr.gone) {
+            c.unlock(&m.lk);
+            break;
+        }
+        if (m.rip != null) {
+            c.unlock(&m.lk);
+            continue;
+        }
+        m.rip = up();
+        c.unlock(&m.lk);
+        while (mr.nasync.load(.seq_cst) > 0) {
+            const n = mntrpcread(m, r0) catch -1;
+            if (n < 0) {
+                asyncfail(m);
+                break;
+            }
+            mountmux(m, r0);
+            qio.freeblist(r0.b);
+            r0.b = null;
+        }
+        mntgate(m);
+    }
+    c.free(r0);
+    c.free(mr);
+    c.pexit(@constCast(""), 0);
+}
+
 const Attr = dev.Attr;
 
 pub const Device = dev.Native('M', "mnt", .{
@@ -1223,6 +1751,10 @@ pub const Device = dev.Native('M', "mnt", .{
     .setattr = mntsetattr,
     .rename = mntrename,
     .hasattr = mnthasattr,
+    .attrstat = mntattrstat,
+    .fsync = mntfsync,
+    .ready = mntready,
+    .watch = mntwatch,
 });
 
 // The C kernel's names, with its semantics: a function that fails raises

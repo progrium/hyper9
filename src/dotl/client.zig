@@ -939,6 +939,11 @@ pub const Client = struct {
                 sa.fid = f.sfid;
                 try c.send(op, sa, .{ .main = 0 });
             },
+            .Tfsync => |fs| {
+                const f = c.fids.get(fs.fid) orelse return c.rerror(tag, "unknown fid");
+                const op = try c.newOp(tag, .wide);
+                try c.send(op, l.Tfsync{ .fid = f.sfid, .datasync = fs.datasync }, .{ .main = 0 });
+            },
             .Tlink => |k| {
                 const d = c.fids.get(k.dfid) orelse return c.rerror(tag, "unknown fid");
                 const f = c.fids.get(k.fid) orelse return c.rerror(tag, "unknown fid");
@@ -972,6 +977,7 @@ pub const Client = struct {
             .Rgetattr => |r| return c.finish(op, l.Rgetattr{ .valid = r.valid, .stat = r.stat }),
             .Rsetattr => return c.finish(op, l.Rsetattr{}),
             .Rlink => return c.finish(op, l.Rlink{}),
+            .Rfsync => return c.finish(op, l.Rfsync{}),
             .Rrename => {
                 const f = c.fids.get(op.fid) orelse return c.finishErr(op, "unknown fid");
                 const d = c.fids.get(op.newfid) orelse return c.finishErr(op, "unknown fid");

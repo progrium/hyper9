@@ -10,8 +10,9 @@
 //! released when the process closes any fd of the file, or ends. An OFD
 //! or flock lock belongs to an open file description (the kernel's Chan,
 //! which dup and fork share): it's released when the last fd for it
-//! closes. A blocking request polls, as the kernel has no wait queue for
-//! it here, and a signal interrupts it.
+//! closes. A blocking request waits in the kernel for the table to
+//! change (kc.lockWait, which sys.zig's callers wake after each change),
+//! and a signal interrupts it.
 
 const std = @import("std");
 
