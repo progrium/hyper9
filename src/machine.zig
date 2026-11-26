@@ -1031,7 +1031,10 @@ pub const Machine = struct {
         lease: ?*cpupool.Lease = null,
         lease_store: cpupool.Lease = undefined,
         as: ?engine.AddressSpace = null,
-        segs: segment.Segs = .{},
+        /// A 9front process's memory: its segments, as mappings in the
+        /// kernel's Mms (src/segment.zig), mapped into `as`. Swapped by
+        /// exec under `dbg_lock`.
+        space: ?segment.Space = null,
         sys: syscall.Process = undefined,
         /// Registers to start from.
         ureg: engine.Ureg = undefined,
@@ -1088,7 +1091,7 @@ pub const Machine = struct {
         }
 
         fn noteMem(p: *Proc) void {
-            const n = if (p.lx) |l| l.mm.bytes() else p.segs.mapped();
+            const n = if (p.lx) |l| l.mm.bytes() else if (p.space) |*s| s.bytes() else 0;
             p.mem_kb.store(n / 1024, .release);
         }
 
@@ -1117,7 +1120,10 @@ pub const Machine = struct {
         /// thread.
         fn segments(aux: ?*anyopaque, buf: [*]u8, n: c_int) callconv(.c) c_int {
             const p: *Proc = @ptrCast(@alignCast(aux orelse return 0));
-            return @intCast(p.segs.segmentText(buf[0..@intCast(n)]));
+            p.dbgLock();
+            defer p.dbg_lock.unlock();
+            const s = if (p.space) |*sp| sp else return 0;
+            return @intCast(s.segmentText(buf[0..@intCast(n)]));
         }
 
         /// The kernel's hook for /proc/n/status: the state, as 9front's
@@ -1207,13 +1213,39 @@ pub const Machine = struct {
         }
 
         /// /proc/n/mem: the process's memory at `addr`, as 9front's
-        /// procctlmemio, through its address space, so only what's mapped
-        /// there. A write into text first gives the process its own copy
-        /// of the text (9front's txt2data), then makes its vCPU fetch the
-        /// new code. Called with `dbg_lock` held.
+        /// procctlmemio, through its mappings, so only what's mapped
+        /// there, a page at a time. A write goes in whatever the mapping
+        /// allows, text included, into the process's own copy of a page a
+        /// fork shares (9front's txt2data, by copy-on-write), and then
+        /// makes its vCPU fetch the new code. Called with `dbg_lock` held.
         fn memIo(p: *Proc, addr: u64, data: []u8, write: bool) kern.DebugError!usize {
+            if (p.lx != null) return p.memIoAs(addr, data, write);
             const as = p.as orelse return error.BadAddress;
-            const text = write and (p.segs.ownText(as, addr, data.len) catch return error.NoMemory);
+            const sp = if (p.space) |*s| s else return error.BadAddress;
+            var done: usize = 0;
+            while (done < data.len) {
+                const va = addr +% done;
+                if (va < addr) break;
+                const chunk = @min(data.len - done, engine.page_size - va % engine.page_size);
+                const piece = data[done..][0..chunk];
+                const mm = sp.mmFor(va);
+                if (!mm.mapped(va)) break;
+                if (write) {
+                    mm.hostWrite(va, piece) catch |e| return if (e == error.NoSpace) error.NoMemory else error.BadAddress;
+                } else {
+                    sp.read(va, piece) catch break;
+                }
+                done += chunk;
+            }
+            if (done == 0 and data.len > 0) return error.BadAddress;
+            if (write) as.codeChanged(addr, done);
+            return done;
+        }
+
+        /// /proc/n/mem for a Linux process, through its address space,
+        /// so only what's mapped there.
+        fn memIoAs(p: *Proc, addr: u64, data: []u8, write: bool) kern.DebugError!usize {
+            const as = p.as orelse return error.BadAddress;
             var done: usize = 0;
             while (done < data.len) {
                 const va = addr +% done;
@@ -1223,7 +1255,6 @@ pub const Machine = struct {
                 done += chunk;
             }
             if (done == 0 and data.len > 0) return error.BadAddress;
-            if (text) as.codeChanged(addr, done);
             return done;
         }
 
@@ -1280,7 +1311,8 @@ pub const Machine = struct {
                 .gpa = m.gpa,
                 .engine = m.engine,
                 .as = p.as.?,
-                .segs = &p.segs,
+                .space = &p.space.?,
+                .io = m.io,
                 .trace = m.opts.trace,
                 .trace_lock = &p.job.trace_lock,
             };
@@ -1317,7 +1349,8 @@ pub const Machine = struct {
             if (p.lx != null) {
                 p.dropLinux();
             } else if (p.as) |as| {
-                p.segs.release(as);
+                if (p.space) |*s| s.release(as);
+                p.space = null;
                 as.destroy();
             }
             // The namespace and fds can hold overlays, whose pages are the
@@ -1495,9 +1528,11 @@ pub const Machine = struct {
         kern.setText(std.fmt.bufPrintSentinel(&name_buf, "{s}", .{basename(name)}, 0) catch "a.out");
 
         p.as = try m.engine.newAddressSpace();
-        const img = try loader.load(m.gpa, m.engine, p.as.?, bytes, argv, p.pid);
+        const img = try loader.load(m.gpa, m.engine, p.as.?, bytes, argv, p.pid, null);
         // Under the lock, since /proc/n/segment may be read already.
-        p.segs.replace(p.as.?, img.segs);
+        p.dbgLock();
+        p.space = img.space;
+        p.dbg_lock.unlock();
         p.tos = img.tos;
         p.ureg = .initExec(img.arch, img.entry, img.sp, img.tos);
         p.extra = .initExec(img.arch);
@@ -2019,12 +2054,36 @@ pub const Machine = struct {
                     },
                 },
                 .fault => |f| {
-                    // The stack grows down on demand, as 9front's does.
-                    if (f.access != .exec and p.segs.growStack(f.addr)) {
+                    // A first touch fills the page, and a write to one a
+                    // fork shares copy-on-write copies it. The same fault
+                    // again at once, with no remap of the Mm in between,
+                    // means the retry didn't help: it's real, as for a
+                    // Linux process (an exception at the PC, or another
+                    // process's change caught in the middle).
+                    const same = f.addr == last_fault.addr and f.access == last_fault.access and u.pc() == last_fault.pc;
+                    var alloc_failed = false;
+                    if (p.space.?.mmFor(f.addr).fault(f.addr, switch (f.access) {
+                        .read => .read,
+                        .write => .write,
+                        .exec => .exec,
+                    }) catch |e| blk: {
+                        alloc_failed = e != error.Bus;
+                        break :blk null;
+                    }) |gen| if (!same or gen != last_fault.gen) {
+                        last_fault = .{ .addr = f.addr, .access = f.access, .pc = u.pc(), .gen = gen };
                         p.noteMem();
                         continue;
+                    };
+                    last_fault = .{};
+                    if (m.opts.trace) |w| {
+                        if (alloc_failed) traceLine(w, &p.job.trace_lock, "h9: fault: virtual memory allocation failed (out of --memory)\n");
+                        dumpFault(w, &p.job.trace_lock, &u, f, p.image orelse "");
                     }
-                    if (m.opts.trace) |w| dumpFault(w, &p.job.trace_lock, &u, f, p.image orelse "");
+                    // A page the mapping allows but that can't be had (the
+                    // machine's --memory is used up) is a fault note too,
+                    // as 9front's when it can't get a page, and h9 says
+                    // why after the run.
+                    if (alloc_failed) j.out_of_memory.store(true, .release);
                     // 9front's faultnote; popnote adds the pc. If the note
                     // can't be queued, the fault would only repeat.
                     var buf: [kern.ERRMAX]u8 = undefined;
@@ -2109,9 +2168,8 @@ pub const Machine = struct {
         }
         const f = u.notifyFrame(p.sys.notify, kern.ERRMAX) orelse return p.keepNote(&msg);
         const end = f.nureg + u.size();
-        _ = p.segs.growStack(f.sp);
-        if (!p.segs.writable(f.sp, end -% f.sp)) return p.keepNote(&msg);
-        const as = p.as.?;
+        const sp = &p.space.?;
+        if (!sp.writable(f.sp, end -% f.sp)) return p.keepNote(&msg);
         const w: usize = @intCast(u.wordSize());
         var words: [3 * 8]u8 = undefined;
         putWords(&words, w, &.{ 0, f.nureg, f.msg });
@@ -2119,11 +2177,11 @@ pub const Machine = struct {
         putWords(&prev, w, &.{p.noteureg});
         const zmsg = std.mem.sliceTo(&msg, 0);
         @memset(msg[zmsg.len..], 0);
-        gm.write(as, f.nureg, u.bytes()) catch return p.keepNote(&msg);
-        gm.write(as, f.msg, &msg) catch return p.keepNote(&msg);
+        sp.write(f.nureg, u.bytes()) catch return p.keepNote(&msg);
+        sp.write(f.msg, &msg) catch return p.keepNote(&msg);
         // The word under the Ureg is the previous saved Ureg.
-        gm.write(as, f.nureg - w, prev[0..w]) catch return p.keepNote(&msg);
-        gm.write(as, f.sp, words[0 .. 3 * w]) catch return p.keepNote(&msg);
+        sp.write(f.nureg - w, prev[0..w]) catch return p.keepNote(&msg);
+        sp.write(f.sp, words[0 .. 3 * w]) catch return p.keepNote(&msg);
         var x: engine.Extra = undefined;
         try vcpu.getExtra(&x);
         p.note_extra = x;
@@ -2155,26 +2213,26 @@ pub const Machine = struct {
             vcpu.setExtra(&x);
             p.note_extra = null;
         }
-        const as = p.as.?;
+        const space = &p.space.?;
         const nureg = p.noteureg;
         var saved: [@sizeOf(engine.Ureg)]u8 = undefined;
         const w = u.wordSize();
         const n = u.size();
         if (nureg < w or nureg % w != 0) return suicide;
-        const prev = gm.readWord(as, nureg - w, w) catch return suicide;
-        gm.read(as, nureg, saved[0..n]) catch return suicide;
+        const prev = space.readWord(nureg - w, w) catch return suicide;
+        space.read(nureg, saved[0..n]) catch return suicide;
         var r = u.restored(saved[0..n]);
         switch (how) {
             .cont, .rstr => {
                 p.noteureg = prev;
-                if (!r.aligned() or as.translate(r.pc(), 1) == null or as.translate(r.stackPointer(), w) == null) return suicide;
+                if (!r.aligned() or !space.mapped(r.pc()) or !space.mapped(r.stackPointer())) return suicide;
             },
             .save => {
                 const sp = nureg - 4 * w - kern.ERRMAX;
                 var words: [2 * 8]u8 = undefined;
                 putWords(&words, w, &.{ 0, nureg });
-                if (as.translate(r.pc(), 1) == null or sp % w != 0 or !p.segs.writable(sp, 4 * w)) return suicide;
-                gm.write(as, sp, words[0 .. 2 * @as(usize, @intCast(w))]) catch return suicide;
+                if (!space.mapped(r.pc()) or sp % w != 0 or !space.writable(sp, 4 * w)) return suicide;
+                space.write(sp, words[0 .. 2 * @as(usize, @intCast(w))]) catch return suicide;
                 r.setNoteSave(sp, nureg);
             },
             // kern.noted kills for every other argument.
@@ -2339,7 +2397,8 @@ pub const Machine = struct {
             };
             p.dbgLock();
             if (p.as) |old| {
-                p.segs.release(old);
+                if (p.space) |*s| s.release(old);
+                p.space = null;
                 old.destroy();
             }
             l.cpu0 = lsys.cputime.thread();
@@ -3166,12 +3225,12 @@ pub const Machine = struct {
             return failWith("no procs");
         };
         c.as = cas;
-        c.segs = p.segs.fork(cas, flags & kern.RF.MEM != 0) catch {
+        c.space = p.space.?.fork(cas, flags & kern.RF.MEM != 0) catch {
             cas.destroy();
             j.dropProc(c);
             return failWith("virtual memory allocation failed");
         };
-        loader.setTosPid(cas, m.arch, p.tos, c.pid);
+        loader.setTosPid(&c.space.?, m.arch, p.tos, c.pid);
         c.tos = p.tos;
         c.ureg = u.*;
         // The child returns through forkret too.
@@ -3186,7 +3245,7 @@ pub const Machine = struct {
         const pid = c.pid;
         kern.fork(flag, pid, Proc, childMain, c) catch {
             if (c.image) |b| m.gpa.free(b);
-            c.segs.release(cas);
+            c.space.?.release(cas);
             cas.destroy();
             j.dropProc(c);
             return error.Failed;
@@ -3224,39 +3283,43 @@ pub const Machine = struct {
         const hdr = aout.parse(bytes) catch return failWith(ebadexec);
         if (hdr.arch != m.arch) return failWith(ebadexec);
 
+        const spans = loader.imageSpans(bytes) catch return failWith(ebadexec);
         const nas = m.engine.newAddressSpace() catch return failWith("virtual memory allocation failed");
-        var img = loader.load(m.gpa, m.engine, nas, bytes, prog.argv, p.pid) catch |err| {
+        // segattach's segments carry over, except SG_CEXEC ones and any
+        // in the new image's way.
+        const kept = if (p.space) |*s| loader.inherited(s, nas, spans) catch {
+            nas.destroy();
+            return failWith("virtual memory allocation failed");
+        } else null;
+        var img = loader.load(m.gpa, m.engine, nas, bytes, prog.argv, p.pid, kept) catch |err| {
+            if (kept) |k| {
+                k.detach(nas);
+                k.put();
+            }
             nas.destroy();
             return failWith(switch (err) {
                 error.BadExec, error.Truncated, error.BadMagic => ebadexec,
                 else => "virtual memory allocation failed",
             });
         };
-        // segattach's segments carry over, except SG_CEXEC ones.
-        img.segs.inherit(&p.segs, nas) catch {
-            img.segs.release(nas);
-            nas.destroy();
-            return failWith("virtual memory allocation failed");
-        };
         vcpu.setAddressSpace(nas) catch {
-            img.segs.release(nas);
+            img.space.release(nas);
             nas.destroy();
             return failWith("virtual memory allocation failed");
         };
 
         // Committed.
         const was_linux = p.lx != null;
+        // /proc/n/mem and segment may be reading through the old space.
+        p.dbgLock();
         if (was_linux) {
-            p.segs.replace(nas, img.segs);
-            // /proc/n/mem may be reading through the old space.
-            p.dbgLock();
             p.dropLinux();
         } else {
             const old = p.as.?;
-            p.segs.replace(old, img.segs);
-            p.dbgLock();
+            if (p.space) |*s| s.release(old);
             old.destroy();
         }
+        p.space = img.space;
         p.as = nas;
         p.dbg_lock.unlock();
         if (was_linux) {

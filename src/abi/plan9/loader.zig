@@ -1,10 +1,13 @@
 //! Loads a 9front a.out into an address space, following sysexec in
-//! 9front's port/sysproc.c.
+//! 9front's port/sysproc.c: text, data, and bss as mappings in an Mm
+//! (src/kern/mm.zig), filled from the a.out as they're touched, and the
+//! stack in an Mm of its own (src/segment.zig, design/memory-model.md).
 
 const std = @import("std");
 const aout = @import("aout.zig");
 const engine = @import("../../engine.zig");
 const segment = @import("../../segment.zig");
+const kmm = @import("../../kern/mm.zig");
 
 const page = engine.page_size;
 
@@ -41,33 +44,121 @@ pub const Image = struct {
     entry: u64,
     sp: u64,
     tos: u64,
-    /// Text, data (data and bss) and stack, attached to the address space.
-    segs: segment.Segs,
+    /// Text, data and bss, and the stack, mapped into the address space.
+    space: segment.Space,
 };
 
-pub const Error = error{BadExec} || aout.ParseError;
+/// OutOfGuestMemory for pages the machine's --memory hasn't room for.
+pub const Error = error{ BadExec, OutOfGuestMemory, OutOfMemory, BadAddress } || aout.ParseError;
 
 fn pageRound(x: u64) u64 {
     return std.mem.alignForward(u64, x, page);
 }
 
-/// Loads `bytes` into `as`, which must have no segments in the way, and
-/// sets up the stack with `argv` and a Tos for `pid`. On error nothing is
-/// left attached to `as`.
-pub fn load(gpa: std.mem.Allocator, b: engine.Engine, as: engine.AddressSpace, bytes: []const u8, argv: []const []const u8, pid: u32) !Image {
+/// The a.out's text and initialized data, which its mappings' pages are
+/// filled from as they're touched (`kmm.Src`): a copy of those bytes of
+/// the file exec read, held while any process maps them. A mapping's
+/// offset is the address it's at, so `fill` serves each page from where
+/// the a.out puts it: text from the file's start at UTZERO, data from
+/// just past the text at the data segment's base, and zeros elsewhere
+/// (the end of text's last page, and the bss in data's last).
+const AoutSrc = struct {
+    src: kmm.Src = .{ .fill = fill, .free = free },
+    gpa: std.mem.Allocator,
+    bytes: []u8,
+    utzero: u64,
+    ntext: u64,
+    adata: u64,
+
+    fn fill(s: *kmm.Src, dst: []u8, va: u64) usize {
+        const a: *AoutSrc = @fieldParentPtr("src", s);
+        @memset(dst, 0);
+        piece(dst, va, a.utzero, a.bytes[0..@intCast(a.ntext)]);
+        piece(dst, va, a.adata, a.bytes[@intCast(a.ntext)..]);
+        return dst.len;
+    }
+
+    /// Copies the part of `src`, at `base`, that [va, va+dst.len) holds.
+    fn piece(dst: []u8, va: u64, base: u64, src: []const u8) void {
+        const lo = @max(va, base);
+        const hi = @min(va + dst.len, base + src.len);
+        if (lo >= hi) return;
+        @memcpy(dst[@intCast(lo - va)..@intCast(hi - va)], src[@intCast(lo - base)..@intCast(hi - base)]);
+    }
+
+    fn free(s: *kmm.Src) void {
+        const a: *AoutSrc = @fieldParentPtr("src", s);
+        a.gpa.free(a.bytes);
+        a.gpa.destroy(a);
+    }
+};
+
+/// Where an a.out's segments go, as 9front's sysexec lays them out.
+const Layout = struct {
+    h: aout.Header,
+    l: aout.Layout,
+    /// [utzero, text_top) is text, [adata, data_top) the initialized data
+    /// and the start of the bss, and [data_top, ebss) the rest of it.
+    text_top: u64,
+    adata: u64,
+    data_top: u64,
+    ebss: u64,
+    /// The bytes of the file that text covers, its header included.
+    file_text: u64,
+};
+
+fn layoutOf(bytes: []const u8) (error{BadExec} || aout.ParseError)!Layout {
     const h = try aout.parse(bytes);
     const l = aout.layout(h.arch);
-
     const hsize = h.arch.headerSize();
     const text_end = l.utzero + hsize + h.text;
     if (h.entry < l.utzero + hsize or h.entry >= text_end) return error.BadExec;
     const file_text = hsize + h.text;
     if (bytes.len < file_text + h.data) return error.BadExec;
-
     const adata = std.mem.alignForward(u64, text_end, l.data_align);
     const ebss = pageRound(adata + h.data + h.bss);
+    if (ebss >= l.ustktop - l.stack_size) return error.BadExec;
+    return .{
+        .h = h,
+        .l = l,
+        .text_top = l.utzero + pageRound(file_text),
+        .adata = adata,
+        .data_top = @min(adata + pageRound(h.data), ebss),
+        .ebss = ebss,
+        .file_text = file_text,
+    };
+}
+
+/// The spans the image in `bytes` takes (text, data and bss, and the
+/// stack), for exec to keep only the segattach segments clear of them
+/// (`inherited`).
+pub fn imageSpans(bytes: []const u8) (error{BadExec} || aout.ParseError)![3]segment.Span {
+    const y = try layoutOf(bytes);
+    return .{
+        .{ .lo = y.l.utzero, .hi = y.text_top },
+        .{ .lo = y.adata, .hi = y.ebss },
+        .{ .lo = y.l.ustktop - y.l.stack_size, .hi = y.l.ustktop },
+    };
+}
+
+/// Loads `bytes` into `as`, which must have nothing mapped in the way,
+/// and sets up the stack with `argv` and a Tos for `pid`. Text and the
+/// initialized data are filled from the a.out as they're touched. With
+/// `keep` (exec's), the image goes into it, an Mm in `as` holding the
+/// segattach segments exec carries over (`inherited`), which is the
+/// caller's again on error. On error nothing else is left mapped in `as`.
+pub fn load(gpa: std.mem.Allocator, b: engine.Engine, as: engine.AddressSpace, bytes: []const u8, argv: []const []const u8, pid: u32, keep: ?*kmm.Mm) Error!Image {
+    return loadIn(gpa, b, as, bytes, argv, pid, keep) catch |e| switch (e) {
+        error.NoSpace => error.OutOfGuestMemory,
+        else => |x| x,
+    };
+}
+
+fn loadIn(gpa: std.mem.Allocator, b: engine.Engine, as: engine.AddressSpace, bytes: []const u8, argv: []const []const u8, pid: u32, keep: ?*kmm.Mm) (Error || kmm.Error)!Image {
+    const y = try layoutOf(bytes);
+    const h = y.h;
+    const l = y.l;
     const stack_base = l.ustktop - l.stack_size;
-    if (ebss >= stack_base) return error.BadExec;
 
     // The stack's first pages: Tos, then argument strings, then argv[],
     // then argc at SP, with room below for the program to start.
@@ -76,27 +167,83 @@ pub fn load(gpa: std.mem.Allocator, b: engine.Engine, as: engine.AddressSpace, b
     const w: usize = @intCast(h.arch.wordSize());
     const ssize = tosSize(h.arch) + std.mem.alignForward(usize, nbytes, w) + w * (argv.len + 2);
     if (ssize > l.stack_size / 2) return error.BadExec;
-    const stack_len = pageRound(ssize + segment.stack_slack);
+    const stack_len = pageRound(ssize);
 
-    var segs: segment.Segs = .{ .stack_floor = stack_base, .ustktop = l.ustktop, .seg_max = l.seg_max };
-    errdefer segs.release(as);
+    const mm = keep orelse try kmm.Mm.createIn(gpa, b, h.arch, as);
+    errdefer if (keep == null) {
+        mm.detach(as);
+        mm.put();
+    };
+    const src = try gpa.create(AoutSrc);
+    src.* = .{
+        .gpa = gpa,
+        .bytes = gpa.dupe(u8, bytes[0..@intCast(y.file_text + h.data)]) catch |e| {
+            gpa.destroy(src);
+            return e;
+        },
+        .utzero = l.utzero,
+        .ntext = y.file_text,
+        .adata = y.adata,
+    };
+    // The mappings hold it from here.
+    defer src.src.put();
+    const text = segment.Label.of(.text);
+    const data = segment.Label.of(.data);
+    try mm.insert(.{ .start = l.utzero, .end = y.text_top, .prot = .{ .read = true, .exec = true }, .kind = .file, .offset = l.utzero, .src = &src.src, .label = text });
+    errdefer mm.unmap(l.utzero, y.text_top) catch {};
+    if (y.data_top > y.adata) try mm.insert(.{ .start = y.adata, .end = y.data_top, .prot = .rw, .kind = .file, .offset = y.adata, .src = &src.src, .label = data });
+    errdefer if (y.data_top > y.adata) mm.unmap(y.adata, y.data_top) catch {};
+    if (y.ebss > y.data_top) try mm.insert(.{ .start = y.data_top, .end = y.ebss, .prot = .rw, .label = data });
+    errdefer if (y.ebss > y.data_top) mm.unmap(y.data_top, y.ebss) catch {};
+    mm.brk_start = y.adata;
+    mm.brk = y.ebss;
 
-    const text = try segment.Segment.create(gpa, b, .text, .{ .exec = true }, l.utzero, pageRound(file_text));
-    @memcpy(text.chunks.items[0].mem[0..file_text], bytes[0..file_text]);
-    try text.attach(as);
-    segs.text = text;
+    const st = try kmm.Mm.createIn(gpa, b, h.arch, as);
+    errdefer {
+        st.detach(as);
+        st.put();
+    }
+    try st.insert(.{ .start = stack_base, .end = l.ustktop, .prot = .rw, .kind = .stack, .label = segment.Label.of(.stack) });
+    const top_mem = try gpa.alloc(u8, @intCast(stack_len));
+    defer gpa.free(top_mem);
+    @memset(top_mem, 0);
+    const base = l.ustktop - stack_len;
+    const top = buildStack(h.arch, top_mem, base, argv, pid);
+    try st.hostWrite(base, top_mem);
 
-    const data = try segment.Segment.create(gpa, b, .data, .{ .write = true }, adata, ebss - adata);
-    if (h.data > 0) @memcpy(data.chunks.items[0].mem[0..h.data], bytes[file_text..][0..h.data]);
-    try data.attach(as);
-    segs.data = data;
+    return .{ .arch = h.arch, .entry = h.entry, .sp = top.sp, .tos = top.tos, .space = .{ .mm = mm, .stack = st, .lay = l } };
+}
 
-    const stack = try segment.Segment.create(gpa, b, .stack, .{ .write = true }, l.ustktop - stack_len, stack_len);
-    const top = buildStack(h.arch, stack.chunks.items[0].mem, stack.base, argv, pid);
-    try stack.attach(as);
-    segs.stack = stack;
+/// For exec: an Mm in `as` holding `old`'s segattach segments but those
+/// with SG_CEXEC and any that overlap the new image's `spans`, for `load`
+/// to put the image in, or null if there are none to keep. It's a fork
+/// of the old Mm with the rest unmapped, so a `shared` segment stays the
+/// same pages and a `memory` one is the new image's own copy.
+pub fn inherited(old: *const segment.Space, as: engine.AddressSpace, spans: [3]segment.Span) kmm.Error!?*kmm.Mm {
+    var buf: [64]kmm.Vma = undefined;
+    const keep = for (old.mm.labelled(&buf)) |v| {
+        if (inheritable(v, spans)) break true;
+    } else false;
+    if (!keep) return null;
+    const n = try old.mm.forkInto(as);
+    errdefer {
+        n.detach(as);
+        n.put();
+    }
+    var all: [64]kmm.Vma = undefined;
+    for (n.snapshot(&all, false)) |v| if (!inheritable(v, spans)) try n.unmap(v.start, v.end);
+    n.brk_start = 0;
+    n.brk = 0;
+    return n;
+}
 
-    return .{ .arch = h.arch, .entry = h.entry, .sp = top.sp, .tos = top.tos, .segs = segs };
+fn inheritable(v: kmm.Vma, spans: [3]segment.Span) bool {
+    const l = segment.Label.get(v) orelse return false;
+    const k = l.kindOf();
+    if (k != .shared and k != .memory) return false;
+    if (l.cexec) return false;
+    for (spans) |sp| if (v.start < sp.hi and sp.lo < v.end) return false;
+    return true;
 }
 
 /// Lays out Tos, the argument strings, argv[] and argc at the top of
@@ -134,10 +281,12 @@ fn writeWord(b: []u8, w: usize, v: u64) void {
 }
 
 /// Sets the pid in a process's Tos, as fork and exec must (libc's getpid
-/// reads it from there).
-pub fn setTosPid(as: engine.AddressSpace, arch: aout.Arch, tos: u64, pid: u32) void {
-    const b = as.translate(tos + tosPidOffset(arch), 4) orelse return;
-    std.mem.writeInt(u32, b[0..4], pid, .little);
+/// reads it from there). After rfork, the write makes the stack's page
+/// the child's own, so the parent's Tos keeps its pid.
+pub fn setTosPid(space: *const segment.Space, arch: aout.Arch, tos: u64, pid: u32) void {
+    var b: [4]u8 = undefined;
+    std.mem.writeInt(u32, &b, pid, .little);
+    space.stack.hostWrite(tos + tosPidOffset(arch), &b) catch {};
 }
 
 test "Tos layout matches tos.h" {

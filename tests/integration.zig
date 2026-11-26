@@ -2553,11 +2553,18 @@ test "an unknown class is a bad arg [segattach]" {
 }
 
 test "--memory caps segattach [segattach]" {
+    // A shared segment's pages are allocated when it's attached, so one
+    // bigger than --memory fails there. A memory segment's are allocated on
+    // first touch (design/memory-model.md), so reading one word of it fits.
     const e = try env(@src());
-    const r = try run(e, &.{ "--memory", "8m", "seg", "-r", "memory", "0x2000000", "0" });
+    const r = try run(e, &.{ "--memory", "8m", "seg", "-r", "shared", "0x2000000", "0" });
     defer r.deinit();
     try std.testing.expect(std.mem.indexOf(u8, r.err, "virtual memory allocation failed") != null);
     try std.testing.expectEqual(1, r.code);
+    const m = try run(e, &.{ "--memory", "8m", "seg", "-r", "memory", "0x2000000", "0" });
+    defer m.deinit();
+    try std.testing.expectEqualStrings("0x0\n", m.out);
+    try std.testing.expectEqual(0, m.code);
 }
 
 // rendezvous and semaphores (design/epoch-0/semaphores.md). The programs are

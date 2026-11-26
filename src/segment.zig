@@ -1,46 +1,40 @@
-//! A process's memory segments: text, data (data and bss together) and
-//! stack, plus up to five that segattach adds (`shared` and `memory`), each
-//! a set of pages from the engine's allocator that it can free again. See
-//! SPEC.md, "Process model", and design/epoch-0/segattach.md.
+//! A 9front process's segments, as named mappings in the kernel's Mm
+//! (src/kern/mm.zig, design/memory-model.md): text, data (data and bss
+//! together), and stack, plus up to five that segattach adds (`shared`
+//! and `memory`). What's here is Plan 9's own: the segments' names and
+//! classes (`Label`, on each mapping), segattach's placement, brk_ and
+//! the seg* calls, and /proc/n/segment. Pages, faults, copy-on-write,
+//! and the engine's mappings are the Mm's. See spec/kernel.md, "Process
+//! model", and design/epoch-0/segattach.md.
 //!
-//! A segment can be attached to several address spaces (rfork with RFMEM
-//! shares text, data and bss), and a change to it, such as brk growing the
-//! data, is mapped into all of them. It's freed when the last one detaches.
+//! A process's address space is two Mms (`Space`). One holds text, data,
+//! bss, and segattach's segments, and is shared by the RFMEM siblings an
+//! rfork(RFMEM) makes, each mapping it into its own engine address space
+//! (`Mm.attach`), so a brk or a segattach in one is seen by all of them,
+//! as Linux threads share theirs. The other is the stack, which is always
+//! the process's own and at the same address in each, so it can't be in
+//! the shared one. rfork without RFMEM forks both, copy-on-write, as
+//! cow-fork's fork does a Linux process's: so the data an RFMEM sibling
+//! shares is still the child's own copy, as on 9front, which a mapping
+//! shared between per-process Mms couldn't give.
 //!
-//! Pages come in chunks, one engine allocation and one mapping each, so a
-//! segment grows without copying. Semaphore wait lists (src/kern/sema.c)
-//! are keyed by the host address of the guest word, so they rely on a
-//! segment's pages never moving while it's shared; copy-on-write or
-//! compaction would have to change that key (design/epoch-0/semaphores.md). The stack grows down on demand, as
-//! 9front's does: it starts with what the arguments need plus some
-//! headroom, and `Segs.growStack` extends it on faults and at syscalls.
+//! Text and the initialized part of data are private mappings of the
+//! a.out (`loader.zig`), filled as they're touched; bss, the heap above
+//! it, and the stack are anonymous, with pages on first touch. The stack
+//! is its whole 16 MiB from exec, so it needs no growing.
 
 const std = @import("std");
 const engine = @import("engine.zig");
+const kmm = @import("kern/mm.zig");
+const gm = @import("guestmem.zig");
+const aout = @import("abi/plan9/aout.zig");
 
 const page = engine.page_size;
+const Mm = kmm.Mm;
+const Vma = kmm.Vma;
 
-/// Copies `src` into `dst`, which is freshly allocated and so zero, a page
-/// at a time, skipping pages of `src` that are zero. A Go program reserves
-/// several hundred MB of brk it never touches, which rfork would otherwise
-/// write in full; reading an untouched page costs the host next to nothing.
-fn copySparse(dst: []u8, src: []const u8) void {
-    std.debug.assert(dst.len == src.len and src.len % page == 0);
-    var off: usize = 0;
-    while (off < src.len) : (off += page) {
-        const p: []const u8 = src[off..][0..page];
-        const words: []const u64 = @alignCast(std.mem.bytesAsSlice(u64, p));
-        for (words) |w| {
-            if (w != 0) {
-                @memcpy(dst[off..][0..page], p);
-                break;
-            }
-        }
-    }
-}
-
-pub const Kind = enum {
-    text,
+pub const Kind = enum(u3) {
+    text = 1,
     data,
     stack,
     /// segattach's `shared` class: the same pages in rfork children.
@@ -50,239 +44,30 @@ pub const Kind = enum {
     memory,
 };
 
-/// Headroom kept below a stack address when the stack grows to cover it.
-pub const stack_slack: u64 = 64 << 10;
-/// Smallest step the data segment's mapping grows by.
-pub const min_grow: u64 = 64 << 10;
-
-pub const Error = engine.CreateError;
-
-pub const Segment = struct {
-    gpa: std.mem.Allocator,
-    engine: engine.Engine,
-    kind: Kind,
-    perms: engine.Perms,
-    /// [base, top) is mapped: data grows `top` up, the stack grows `base` down.
-    base: u64,
-    top: u64,
-    /// The break, for data: brk moves it, and `top` follows it up in steps
-    /// of at least `min_grow`, so a run of small sbrks maps few chunks.
-    brk: u64,
-    /// Detached at exec (segattach's SG_CEXEC).
+/// A mapping's segment, in its `Vma.label`: the kind, and for segattach's
+/// segments, the slot (the order /proc/n/segment lists them in) and
+/// SG_CEXEC.
+pub const Label = packed struct(u8) {
+    kind: u3,
+    slot: u3 = 0,
     cexec: bool = false,
-    /// Sorted by address and contiguous, covering [base, top).
-    chunks: std.ArrayList(Chunk) = .empty,
-    attached: std.ArrayList(engine.AddressSpace) = .empty,
-    lock: std.atomic.Mutex = .unlocked,
+    _: u1 = 0,
 
-    const Chunk = struct { va: u64, mem: []align(page) u8 };
-
-    /// A segment of `len` zeroed bytes at `base`, attached to nothing yet;
-    /// `len` may be 0.
-    pub fn create(gpa: std.mem.Allocator, eng: engine.Engine, kind: Kind, perms: engine.Perms, base: u64, len: u64) Error!*Segment {
-        std.debug.assert(base % page == 0 and len % page == 0);
-        const s = try gpa.create(Segment);
-        s.* = .{ .gpa = gpa, .engine = eng, .kind = kind, .perms = perms, .base = base, .top = base + len, .brk = base + len };
-        errdefer s.free();
-        if (len > 0) {
-            try s.chunks.ensureUnusedCapacity(gpa, 1);
-            s.chunks.appendAssumeCapacity(.{ .va = base, .mem = try eng.allocPages(@intCast(len / page)) });
-        }
-        return s;
+    pub fn of(k: Kind) u8 {
+        return @bitCast(Label{ .kind = @intFromEnum(k) });
     }
 
-    /// Frees a segment that's attached to nothing.
-    fn free(s: *Segment) void {
-        std.debug.assert(s.attached.items.len == 0);
-        for (s.chunks.items) |c| s.engine.freePages(c.mem);
-        s.chunks.deinit(s.gpa);
-        s.attached.deinit(s.gpa);
-        s.gpa.destroy(s);
+    pub fn get(v: Vma) ?Label {
+        if (v.label == 0) return null;
+        return @bitCast(v.label);
     }
 
-    fn lockSpin(s: *Segment) void {
-        while (!s.lock.tryLock()) std.atomic.spinLoopHint();
+    pub fn kindOf(l: Label) Kind {
+        return @enumFromInt(l.kind);
     }
 
-    /// The mapped range.
-    fn span(s: *Segment) Span {
-        s.lockSpin();
-        defer s.lock.unlock();
-        return .{ .lo = s.base, .hi = s.top };
-    }
-
-    /// How many address spaces it's attached to.
-    fn refs(s: *Segment) usize {
-        s.lockSpin();
-        defer s.lock.unlock();
-        return s.attached.items.len;
-    }
-
-    /// Maps the segment into `as`. A segment attached to nothing is freed
-    /// if this fails, so callers can hand over a fresh one.
-    pub fn attach(s: *Segment, as: engine.AddressSpace) Error!void {
-        s.lockSpin();
-        attachLocked(s, as) catch |e| {
-            const orphan = s.attached.items.len == 0;
-            s.lock.unlock();
-            if (orphan) s.free();
-            return e;
-        };
-        s.lock.unlock();
-    }
-
-    fn attachLocked(s: *Segment, as: engine.AddressSpace) Error!void {
-        try s.attached.ensureUnusedCapacity(s.gpa, 1);
-        for (s.chunks.items, 0..) |c, i| {
-            as.map(c.va, c.mem, s.perms) catch |e| {
-                for (s.chunks.items[0..i]) |m| as.unmap(m.va);
-                return e;
-            };
-        }
-        s.attached.appendAssumeCapacity(as);
-    }
-
-    /// Unmaps the segment from `as`, and frees it if that was the last.
-    pub fn detach(s: *Segment, as: engine.AddressSpace) void {
-        s.lockSpin();
-        for (s.attached.items, 0..) |a, i| if (std.meta.eql(a, as)) {
-            for (s.chunks.items) |c| as.unmap(c.va);
-            _ = s.attached.swapRemove(i);
-            break;
-        };
-        const last = s.attached.items.len == 0;
-        s.lock.unlock();
-        if (last) s.free();
-    }
-
-    /// A private copy of the segment's pages, attached to nothing (rfork's
-    /// eager copy).
-    pub fn copy(s: *Segment) Error!*Segment {
-        s.lockSpin();
-        defer s.lock.unlock();
-        const n = try create(s.gpa, s.engine, s.kind, s.perms, s.base, s.top - s.base);
-        n.brk = s.brk;
-        n.cexec = s.cexec;
-        for (s.chunks.items) |c| copySparse(n.chunks.items[0].mem[@intCast(c.va - s.base)..][0..c.mem.len], c.mem);
-        return n;
-    }
-
-    /// Adds zeroed pages at [va, va+len) and maps them everywhere the
-    /// segment is attached. The caller holds the lock and keeps the chunks
-    /// contiguous.
-    fn addChunkLocked(s: *Segment, va: u64, len: u64, at: usize) Error!void {
-        try s.chunks.ensureUnusedCapacity(s.gpa, 1);
-        const mem = try s.engine.allocPages(@intCast(len / page));
-        for (s.attached.items, 0..) |as, i| {
-            as.map(va, mem, s.perms) catch |e| {
-                for (s.attached.items[0..i]) |m| m.unmap(va);
-                s.engine.freePages(mem);
-                return e;
-            };
-        }
-        s.chunks.insertAssumeCapacity(at, .{ .va = va, .mem = mem });
-    }
-
-    fn growUpLocked(s: *Segment, top: u64) Error!void {
-        if (top <= s.top) return;
-        try s.addChunkLocked(s.top, top - s.top, s.chunks.items.len);
-        s.top = top;
-    }
-
-    fn growDownLocked(s: *Segment, base: u64) Error!void {
-        if (base >= s.base) return;
-        try s.addChunkLocked(base, s.base - base, 0);
-        s.base = base;
-    }
-
-    /// Zeroes [from, to) within the mapped part of the segment.
-    fn zeroLocked(s: *Segment, from: u64, to: u64) void {
-        for (s.chunks.items) |c| {
-            const lo = @max(from, c.va);
-            const hi = @min(to, c.va + c.mem.len);
-            if (lo < hi) @memset(c.mem[@intCast(lo - c.va)..@intCast(hi - c.va)], 0);
-        }
-    }
-
-    /// Frees the chunks that lie wholly at or above `top`. A chunk that
-    /// straddles it stays, so the segment may end above `top`.
-    fn shrinkLocked(s: *Segment, top: u64) void {
-        while (s.chunks.items.len > 0) {
-            const c = s.chunks.items[s.chunks.items.len - 1];
-            if (c.va < top) break;
-            for (s.attached.items) |as| as.unmap(c.va);
-            s.engine.freePages(c.mem);
-            _ = s.chunks.pop();
-            s.top = c.va;
-        }
-    }
-
-    /// Ends the mapping exactly at `top` (page-aligned, within the
-    /// segment): frees the chunks above it, and splits one that straddles
-    /// it by copying its lower part into a new chunk, which replaces it in
-    /// every address space. Only for a segment no other process can be
-    /// writing, since a write to the old chunk during the copy is lost.
-    fn cutLocked(s: *Segment, top: u64) Error!void {
-        std.debug.assert(top % page == 0 and top >= s.base);
-        s.shrinkLocked(top);
-        if (s.top > top) {
-            const at = s.chunks.items.len - 1;
-            const old = s.chunks.items[at];
-            const mem = try s.engine.allocPages(@intCast((top - old.va) / page));
-            @memcpy(mem, old.mem[0..mem.len]);
-            for (s.attached.items, 0..) |as, i| {
-                as.unmap(old.va);
-                as.map(old.va, mem, s.perms) catch |e| {
-                    // Put the old chunk back where it was taken out.
-                    as.map(old.va, old.mem, s.perms) catch {};
-                    for (s.attached.items[0..i]) |m| {
-                        m.unmap(old.va);
-                        m.map(old.va, old.mem, s.perms) catch {};
-                    }
-                    s.engine.freePages(mem);
-                    return e;
-                };
-            }
-            s.engine.freePages(old.mem);
-            s.chunks.items[at] = .{ .va = old.va, .mem = mem };
-            s.top = top;
-        }
-        s.brk = @min(s.brk, s.top);
-    }
-
-    /// Moves the break to `want` (9front's ibrk), mapping up to `limit`.
-    /// With `headroom`, the mapping grows ahead of the break in steps of at
-    /// least `min_grow`, so a run of small sbrks maps few chunks (brk_);
-    /// without, the segment ends exactly at the break (segbrk). Memory
-    /// above the break reads as zero when it grows back.
-    fn moveBreakLocked(s: *Segment, want: u64, limit: u64, headroom: bool) BrkError!void {
-        std.debug.assert(want % page == 0 and want >= s.base and want <= limit);
-        if (want >= s.brk) {
-            if (want > s.top) {
-                var top = want;
-                if (headroom) {
-                    const step = std.mem.alignForward(u64, std.math.clamp((s.top - s.base) / 2, min_grow, 4 << 20), page);
-                    top = @min(@max(want, s.top + step), limit);
-                }
-                s.growUpLocked(top) catch {
-                    // Without the headroom, if that's what didn't fit.
-                    if (top == want) return error.NoVmem;
-                    s.growUpLocked(want) catch return error.NoVmem;
-                };
-            }
-            s.brk = want;
-            return;
-        }
-        // A shared segment's pages may already be in another process's
-        // syscall, so 9front refuses to shrink it.
-        if (s.attached.items.len > 1) return error.InUse;
-        if (headroom) {
-            s.shrinkLocked(want);
-        } else {
-            s.cutLocked(want) catch return error.NoVmem;
-        }
-        s.zeroLocked(want, s.brk);
-        s.brk = want;
+    fn extra(l: Label) bool {
+        return l.kind == @intFromEnum(Kind.shared) or l.kind == @intFromEnum(Kind.memory);
     }
 };
 
@@ -370,354 +155,414 @@ fn overlap(used: []const Span, sp: Span) ?Span {
     return null;
 }
 
-/// One process's segments.
-pub const Segs = struct {
-    text: ?*Segment = null,
-    data: ?*Segment = null,
-    stack: ?*Segment = null,
-    /// segattach's segments, by slot; a detach leaves its slot empty, and
-    /// the next attach takes the first empty one, as on 9front.
-    extra: [max_extra]?*Segment = @splat(null),
-    /// Lowest address the stack may grow down to; brk stops below it.
-    stack_floor: u64 = 0,
-    /// The top of the stack (USTKTOP), which no segment may reach past.
-    ustktop: u64 = 0,
-    /// The largest segment segattach makes (SEGMAXSIZE).
-    seg_max: u64 = 0,
-    /// Guards the slots against `segmentText`, which another thread calls
-    /// for /proc/n/segment. Only the process's own thread changes them.
-    lock: std.atomic.Mutex = .unlocked,
+/// A segment as its mappings make it: the span of the VMAs with one label.
+pub const Seg = struct {
+    label: Label,
+    lo: u64,
+    hi: u64,
+    prot: kmm.Prot,
+    shared: bool,
 
-    fn lockSpin(s: *Segs) void {
-        while (!s.lock.tryLock()) std.atomic.spinLoopHint();
+    fn span(s: Seg) Span {
+        return .{ .lo = s.lo, .hi = s.hi };
+    }
+};
+
+/// Room for a process's labelled VMAs: text, data, bss, and the heap,
+/// which merge, and segattach's segments, which may be in pieces.
+const max_vmas = 64;
+
+/// One process's address space: its two Mms, mapped into the engine
+/// address space it runs in, which is the caller's.
+pub const Space = struct {
+    /// Text, data and bss, and segattach's segments, shared with RFMEM
+    /// siblings.
+    mm: *Mm,
+    /// The stack, [floor, top), the process's own.
+    stack: *Mm,
+    lay: aout.Layout,
+
+    /// The lowest address the stack may use; brk stops below it.
+    pub fn floor(s: *const Space) u64 {
+        return s.lay.ustktop - s.lay.stack_size;
     }
 
-    /// Detaches every segment from `as`.
-    pub fn release(s: *Segs, as: engine.AddressSpace) void {
-        s.lockSpin();
-        defer s.lock.unlock();
-        s.releaseLocked(as);
+    /// The Mm holding `va`.
+    pub fn mmFor(s: *const Space, va: u64) *Mm {
+        return if (va >= s.floor() and va < s.lay.ustktop) s.stack else s.mm;
     }
 
-    fn releaseLocked(s: *Segs, as: engine.AddressSpace) void {
-        inline for (.{ "text", "data", "stack" }) |f| if (@field(s, f)) |seg| {
-            seg.detach(as);
-            @field(s, f) = null;
-        };
-        for (&s.extra) |*slot| if (slot.*) |seg| {
-            seg.detach(as);
-            slot.* = null;
-        };
+    /// Unmaps the space's pages from `as`, and drops its references.
+    pub fn release(s: *Space, as: engine.AddressSpace) void {
+        s.mm.detach(as);
+        s.mm.put();
+        s.stack.detach(as);
+        s.stack.put();
+        s.* = undefined;
     }
 
-    /// Detaches every segment from `old`, then takes `new`'s (exec).
-    pub fn replace(s: *Segs, old: engine.AddressSpace, new: Segs) void {
-        s.lockSpin();
-        defer s.lock.unlock();
-        s.releaseLocked(old);
-        inline for (.{ "text", "data", "stack", "extra", "stack_floor", "ustktop", "seg_max" }) |f| @field(s, f) = @field(new, f);
-    }
-
-    /// The segments for an rfork child running in `as`: text and `shared`
-    /// segments are shared, the stack is copied, and data and `memory`
-    /// segments are shared with RFMEM (`share`) and copied without it.
-    /// Each segment keeps its slot.
-    pub fn fork(s: *const Segs, as: engine.AddressSpace, share: bool) Error!Segs {
-        var c: Segs = .{ .stack_floor = s.stack_floor, .ustktop = s.ustktop, .seg_max = s.seg_max };
-        errdefer c.release(as);
-        if (s.text) |t| {
-            try t.attach(as);
-            c.text = t;
+    /// The space of an rfork child running in `as`: the stack is its own,
+    /// copy-on-write, and the rest is shared with RFMEM (`share`) or
+    /// forked copy-on-write without, so text and the data and bss are
+    /// each side's own once written, and segattach's `shared` segments
+    /// are the same pages in both.
+    pub fn fork(s: *const Space, as: engine.AddressSpace, share: bool) kmm.Error!Space {
+        const mm = if (share) blk: {
+            try s.mm.attach(as);
+            break :blk s.mm.get();
+        } else try s.mm.forkInto(as);
+        errdefer {
+            mm.detach(as);
+            mm.put();
         }
-        if (s.data) |d| {
-            const n = if (share) d else try d.copy();
-            try n.attach(as);
-            c.data = n;
-        }
-        if (s.stack) |st| {
-            const n = try st.copy();
-            try n.attach(as);
-            c.stack = n;
-        }
-        for (s.extra, &c.extra) |e, *slot| if (e) |seg| {
-            const n = if (share or seg.kind == .shared) seg else try seg.copy();
-            try n.attach(as);
-            slot.* = n;
-        };
-        return c;
+        const st = try s.stack.forkInto(as);
+        return .{ .mm = mm, .stack = st, .lay = s.lay };
     }
 
-    /// exec: attaches `old`'s segattach segments to `as`, the new image's
-    /// address space, in their slots, except those with SG_CEXEC and any
-    /// that overlap the new image. On error, those attached so far stay in
-    /// `s`, so releasing it detaches them.
-    pub fn inherit(s: *Segs, old: *const Segs, as: engine.AddressSpace) Error!void {
-        for (old.extra, &s.extra) |e, *slot| if (e) |seg| {
-            if (seg.cexec) continue;
-            const span = seg.span();
-            var clash = false;
-            for (s.imageSpans()) |o| if (o) |sp| {
-                clash = clash or span.overlaps(sp);
+    // Guest memory, as the kernel reaches it for a syscall: through the
+    // Mms, which fill pages on first touch and make a page copy-on-write
+    // shares the process's own before the host writes it. Access is as
+    // the mapping allows, as 9front's validaddr checks: a write into text
+    // is a bad address.
+
+    /// Copies between `buf` and guest [va, va+buf.len).
+    pub fn copy(s: *const Space, va: u64, buf: []u8, to_guest: bool) gm.Error!void {
+        const end = std.math.add(u64, va, buf.len) catch return error.BadAddress;
+        var at = va;
+        while (at < end) {
+            const m = s.mmFor(at);
+            const hi = if (m == s.stack) @min(end, s.lay.ustktop) else if (at < s.floor()) @min(end, s.floor()) else end;
+            m.copy(at, buf[@intCast(at - va)..@intCast(hi - va)], to_guest) catch return error.BadAddress;
+            at = hi;
+        }
+    }
+
+    pub fn read(s: *const Space, va: u64, dst: []u8) gm.Error!void {
+        return s.copy(va, dst, false);
+    }
+
+    pub fn write(s: *const Space, va: u64, data: []const u8) gm.Error!void {
+        return s.copy(va, @constCast(data), true);
+    }
+
+    /// Makes [va, va+len) ready for the host, as `copy` checks it.
+    pub fn touch(s: *const Space, va: u64, len: u64, write_: bool) gm.Error!void {
+        const end = std.math.add(u64, va, len) catch return error.BadAddress;
+        var at = va;
+        while (at < end) {
+            const m = s.mmFor(at);
+            const hi = if (m == s.stack) @min(end, s.lay.ustktop) else if (at < s.floor()) @min(end, s.floor()) else end;
+            m.touch(at, hi - at, write_) catch return error.BadAddress;
+            at = hi;
+        }
+    }
+
+    /// A little-endian word of `size` bytes (4 or 8), zero-extended.
+    pub fn readWord(s: *const Space, va: u64, size: u64) gm.Error!u64 {
+        var b: [8]u8 = @splat(0);
+        try s.read(va, b[0..@intCast(size)]);
+        return std.mem.readInt(u64, &b, .little);
+    }
+
+    /// Copies a NUL-terminated guest string into `buf`: BadAddress if
+    /// it's unmapped before the NUL, or doesn't fit.
+    pub fn string(s: *const Space, va: u64, buf: []u8) gm.Error![:0]u8 {
+        var i: usize = 0;
+        while (i < buf.len) {
+            const at = va +% i;
+            const n = @min(buf.len - i, page - at % page);
+            try s.read(at, buf[i..][0..n]);
+            if (std.mem.indexOfScalar(u8, buf[i..][0..n], 0)) |z| return buf[0 .. i + z :0];
+            i += n;
+        }
+        return error.BadAddress;
+    }
+
+    /// Copies a NUL-terminated guest string of up to `max` bytes into new
+    /// memory.
+    pub fn stringAlloc(s: *const Space, va: u64, gpa: std.mem.Allocator, max: usize) (gm.Error || std.mem.Allocator.Error)![:0]u8 {
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(gpa);
+        var pg: [page]u8 = undefined;
+        while (true) {
+            const at = va +% out.items.len;
+            const n = page - at % page;
+            try s.read(at, pg[0..n]);
+            if (std.mem.indexOfScalar(u8, pg[0..n], 0)) |z| {
+                if (out.items.len + z > max) return error.BadAddress;
+                try out.appendSlice(gpa, pg[0..z]);
+                return out.toOwnedSliceSentinel(gpa, 0);
+            }
+            if (out.items.len + n > max) return error.BadAddress;
+            try out.appendSlice(gpa, pg[0..n]);
+        }
+    }
+
+    /// Whether a mapping holds `va`.
+    pub fn mapped(s: *const Space, va: u64) bool {
+        return s.mmFor(va).mapped(va);
+    }
+
+    /// A hold on the pages behind a guest buffer (`Mm.pin`).
+    pub const Pin = struct { mm: *Mm, p: Mm.Pinned };
+
+    /// The contiguous host slice behind [va, va+len), held until `unpin`,
+    /// or null if it isn't one (the caller copies through a buffer). With
+    /// `write`, the pages are the process's own first.
+    pub fn pin(s: *const Space, va: u64, len: u64, write_: bool) ?Pin {
+        const m = s.mmFor(va);
+        if (s.mmFor(va +% (len -| 1)) != m) return null;
+        m.touch(va, len, write_) catch return null;
+        return .{ .mm = m, .p = m.pin(va, len, write_) orelse return null };
+    }
+
+    pub fn unpin(_: *const Space, pn: *Pin) void {
+        pn.mm.unpin(&pn.p);
+    }
+
+    /// Whether guest [va, va+len) lies in mappings the guest may write,
+    /// as 9front's okaddr checks before the kernel writes a note
+    /// handler's frame where the guest says.
+    pub fn writable(s: *const Space, va: u64, len: u64) bool {
+        if (va +% len < va) return false;
+        const m = s.mmFor(va);
+        if (len > 0 and s.mmFor(va + len - 1) != m) return false;
+        return m.permits(va, len, true);
+    }
+
+    /// Bytes of guest memory the process has, for /proc/n/status.
+    pub fn bytes(s: *const Space) u64 {
+        return s.mm.bytes() + s.stack.bytes();
+    }
+
+    // The segments.
+
+    /// The segments in the main Mm, by label, from its VMAs: each one's
+    /// span is from its lowest VMA to its highest.
+    fn segs(s: *const Space, out: *[3 + max_extra]?Seg) void {
+        out.* = @splat(null);
+        var buf: [max_vmas]Vma = undefined;
+        for (s.mm.labelled(&buf)) |v| {
+            const l = Label.get(v).?;
+            const i: usize = switch (l.kindOf()) {
+                .text => 0,
+                .data => 1,
+                .stack => 2,
+                .shared, .memory => 3 + @as(usize, l.slot),
             };
-            if (clash) continue;
-            try seg.attach(as);
-            slot.* = seg;
-        };
-    }
-
-    /// Text, data up to its break, and the stack's whole range.
-    fn imageSpans(s: *const Segs) [3]?Span {
-        var out: [3]?Span = @splat(null);
-        if (s.text) |t| out[0] = t.span();
-        if (s.data) |d| {
-            d.lockSpin();
-            defer d.lock.unlock();
-            out[1] = .{ .lo = d.base, .hi = d.brk };
+            if (out[i]) |*g| {
+                g.lo = @min(g.lo, v.start);
+                g.hi = @max(g.hi, v.end);
+            } else out[i] = .{ .label = l, .lo = v.start, .hi = v.end, .prot = v.prot, .shared = v.shared };
         }
-        if (s.stack != null) out[2] = .{ .lo = s.stack_floor, .hi = s.ustktop };
-        return out;
-    }
-
-    /// The segment [va, va+len) would overlap, other than `skip`, with the
-    /// data segment counted only up to its break.
-    fn overlapping(s: *const Segs, sp: Span, skip: ?*Segment) ?Span {
-        for (s.imageSpans()) |o| if (o) |x| if (x.overlaps(sp)) return x;
-        for (s.extra) |e| if (e) |seg| if (seg != skip) {
-            const x = seg.span();
-            if (x.overlaps(sp)) return x;
-        };
-        return null;
-    }
-
-    /// Makes room for a segment at `sp` that overlaps nothing but perhaps
-    /// the data segment's headroom above its break: trims the headroom to
-    /// the break. Fails with Overlap if the data segment is shared, since
-    /// a sibling could write it while a straddling chunk is copied.
-    fn trimHeadroom(s: *Segs, sp: Span) SegError!void {
-        const d = s.data orelse return;
-        d.lockSpin();
-        defer d.lock.unlock();
-        if (!sp.overlaps(.{ .lo = d.brk, .hi = d.top })) return;
-        if (d.attached.items.len > 1) return error.Overlap;
-        d.cutLocked(d.brk) catch return error.NoVmem;
     }
 
     /// The ranges a new segment may not overlap: text, data up to its
-    /// break, the stack's whole range, and segattach's segments.
-    fn used(s: *const Segs, buf: *[3 + max_extra]Span) []const Span {
+    /// break, the stack's whole range, and segattach's segments, but for
+    /// the segment in slot `skip`.
+    fn used(s: *const Space, buf: *[3 + max_extra]Span, skip: ?u3) []const Span {
+        var all: [3 + max_extra]?Seg = undefined;
+        s.segs(&all);
         var n: usize = 0;
-        for (s.imageSpans()) |o| if (o) |x| {
-            buf[n] = x;
+        if (all[0]) |t| {
+            buf[n] = t.span();
             n += 1;
-        };
-        for (s.extra) |e| if (e) |seg| {
-            buf[n] = seg.span();
+        }
+        buf[n] = .{ .lo = s.mm.brk_start, .hi = s.mm.brk };
+        n += 1;
+        buf[n] = .{ .lo = s.floor(), .hi = s.lay.ustktop };
+        n += 1;
+        for (all[3..], 0..) |o, i| if (o) |x| if (skip == null or skip.? != i) {
+            buf[n] = x.span();
             n += 1;
         };
         return buf[0..n];
     }
 
+    /// The segattach segment in slot `i`, if there is one.
+    fn extraAt(s: *const Space, i: usize) ?Seg {
+        var all: [3 + max_extra]?Seg = undefined;
+        s.segs(&all);
+        return all[3 + i];
+    }
+
+    /// The segattach segment containing `addr`, if any.
+    fn extraHolding(s: *const Space, addr: u64) ?Seg {
+        var all: [3 + max_extra]?Seg = undefined;
+        s.segs(&all);
+        for (all[3..]) |o| if (o) |x| if (addr >= x.lo and addr < x.hi) return x;
+        return null;
+    }
+
+    /// Whether other processes have the segment's pages, so 9front won't
+    /// shrink it: RFMEM siblings, or for a `shared` one, rfork children.
+    fn sharedElsewhere(s: *const Space, g: Seg) bool {
+        if (s.mm.nspaces() > 1) return true;
+        if (!g.shared) return false;
+        var at = g.lo - g.lo % kmm.chunk_size;
+        while (at < g.hi) : (at += kmm.chunk_size) if (s.mm.pageRefs(@max(at, g.lo)) > 1) return true;
+        return false;
+    }
+
+    /// Maps segattach's segment `v`, or more of one. A `memory` one's
+    /// pages come on first touch, as any. A `shared` one's are its own,
+    /// made now and beside whatever else is in their chunks
+    /// (`Mm.insertOverlaid`), so an rfork child has the same pages however
+    /// it gets the rest: segattach places segments at any page.
+    fn add(s: *Space, v: Vma) kmm.Error!void {
+        if (v.shared) return s.mm.insertOverlaid(v);
+        return s.mm.insert(v);
+    }
+
     /// segattach(attr, class, va, len), with 9front's placement rules
     /// (`place`), for the class `kind` (null for one h9 doesn't have).
     /// Errors are checked in 9front's order. Returns the base.
-    pub fn segattach(s: *Segs, gpa: std.mem.Allocator, eng: engine.Engine, as: engine.AddressSpace, class: ?Kind, attr: u32, va: u64, len: u64) SegError!u64 {
-        if (va != 0 and va >= s.ustktop) return error.BadArg;
-        const slot = for (&s.extra) |*e| {
-            if (e.* == null) break e;
+    pub fn segattach(s: *Space, io: std.Io, class: ?Kind, attr: u32, va: u64, len: u64) SegError!u64 {
+        s.mm.opLock(io);
+        defer s.mm.opUnlock(io);
+        if (va != 0 and va >= s.lay.ustktop) return error.BadArg;
+        const slot: u3 = for (0..max_extra) |i| {
+            if (s.extraAt(i) == null) break @intCast(i);
         } else return error.NoVmem;
         var buf: [3 + max_extra]Span = undefined;
-        const sp = try place(s.used(&buf), s.stack_floor, s.ustktop, va, len);
+        const sp = try place(s.used(&buf, null), s.floor(), s.lay.ustktop, va, len);
         const kind = class orelse return error.BadArg;
         std.debug.assert(kind == .shared or kind == .memory);
-        if (sp.hi - sp.lo > s.seg_max) return error.NoVmem;
-        try s.trimHeadroom(sp);
-
-        const perms: engine.Perms = .{ .write = attr & SG_RONLY == 0 };
-        const seg = Segment.create(gpa, eng, kind, perms, sp.lo, sp.hi - sp.lo) catch return error.NoVmem;
-        seg.cexec = attr & SG_CEXEC != 0;
-        seg.attach(as) catch return error.NoVmem;
-        s.lockSpin();
-        slot.* = seg;
-        s.lock.unlock();
+        if (sp.hi - sp.lo > s.lay.seg_max) return error.NoVmem;
+        const l: Label = .{ .kind = @intFromEnum(kind), .slot = slot, .cexec = attr & SG_CEXEC != 0 };
+        s.add(.{
+            .start = sp.lo,
+            .end = sp.hi,
+            .prot = .{ .read = true, .write = attr & SG_RONLY == 0 },
+            .shared = kind == .shared,
+            .label = @bitCast(l),
+        }) catch return error.NoVmem;
         return sp.lo;
     }
 
-    /// The segattach segment containing `addr`, or starting at it if it's
-    /// empty, and its slot.
-    fn extraAt(s: *Segs, addr: u64) ?*?*Segment {
-        for (&s.extra) |*slot| if (slot.*) |seg| {
-            const x = seg.span();
-            if ((addr >= x.lo and addr < x.hi) or (x.lo == x.hi and addr == x.lo)) return slot;
-        };
-        return null;
-    }
-
-    /// segdetach(addr): detaches the segattach segment containing `addr`
-    /// from `as`, which frees it if no other process has it. Text, data
-    /// and stack can't be detached.
-    pub fn segdetach(s: *Segs, as: engine.AddressSpace, addr: u64) SegError!void {
-        const slot = s.extraAt(addr) orelse return error.BadArg;
-        const seg = slot.*.?;
-        s.lockSpin();
-        slot.* = null;
-        s.lock.unlock();
-        seg.detach(as);
+    /// segdetach(addr): unmaps the segattach segment containing `addr`.
+    /// Other processes keep their pages. Text, data and stack can't be
+    /// detached.
+    pub fn segdetach(s: *Space, io: std.Io, addr: u64) SegError!void {
+        s.mm.opLock(io);
+        defer s.mm.opUnlock(io);
+        const g = s.extraHolding(addr) orelse return error.BadArg;
+        s.mm.unmap(g.lo, g.hi) catch return error.NoVmem;
     }
 
     /// segbrk(saddr, addr): moves the top of the segattach segment
-    /// containing `saddr` to `addr`, rounded up. `addr` 0 returns its base.
-    pub fn segbrk(s: *Segs, saddr: u64, addr: u64) SegError!u64 {
-        var seg: *Segment = undefined;
-        for (s.extra) |e| if (e) |x| {
-            const sp = x.span();
-            if (saddr >= sp.lo and saddr < sp.hi) {
-                seg = x;
-                break;
-            }
-        } else return error.BadArg;
-        if (addr == 0) return seg.base;
-        if (addr < seg.base) return error.NoVmem;
+    /// containing `saddr` to `addr`, rounded up. `addr` 0 returns its
+    /// base. A segment moved down to its base is detached, since a
+    /// mapping can't be empty.
+    pub fn segbrk(s: *Space, io: std.Io, saddr: u64, addr: u64) SegError!u64 {
+        s.mm.opLock(io);
+        defer s.mm.opUnlock(io);
+        const g = s.extraHolding(saddr) orelse return error.BadArg;
+        if (addr == 0) return g.lo;
+        if (addr < g.lo) return error.NoVmem;
         // Past the top it would overlap the stack, as on 9front.
-        if (addr > s.ustktop) return error.Overlap;
+        if (addr > s.lay.ustktop) return error.Overlap;
         const top = std.mem.alignForward(u64, addr, page);
-        if (top > seg.top) {
-            const grow: Span = .{ .lo = seg.top, .hi = top };
-            if (s.overlapping(grow, seg) != null) return error.Overlap;
-            if (top - seg.base > s.seg_max) return error.NoVmem;
-            try s.trimHeadroom(grow);
+        if (top > g.hi) {
+            const grow: Span = .{ .lo = g.hi, .hi = top };
+            var buf: [3 + max_extra]Span = undefined;
+            if (overlap(s.used(&buf, g.label.slot), grow) != null) return error.Overlap;
+            if (top - g.lo > s.lay.seg_max) return error.NoVmem;
+            s.add(.{ .start = g.hi, .end = top, .prot = g.prot, .shared = g.shared, .label = @bitCast(g.label) }) catch return error.NoVmem;
+        } else if (top < g.hi) {
+            // A shared segment's pages may already be in another
+            // process's syscall, so 9front refuses to shrink it.
+            if (s.sharedElsewhere(g)) return error.InUse;
+            s.mm.unmap(top, g.hi) catch return error.NoVmem;
         }
-        seg.lockSpin();
-        defer seg.lock.unlock();
-        seg.moveBreakLocked(top, top, false) catch |e| return switch (e) {
-            error.InUse => error.InUse,
-            error.NoVmem, error.Overlap => error.NoVmem,
-        };
         return 0;
     }
 
-    /// The segment whose mapped part contains `addr`.
-    fn segmentAt(s: *const Segs, addr: u64) ?*Segment {
-        inline for (.{ "text", "data", "stack" }) |f| if (@field(s, f)) |seg| {
-            const sp = seg.span();
-            if (addr >= sp.lo and addr < sp.hi) return seg;
-        };
-        for (s.extra) |e| if (e) |seg| {
-            const sp = seg.span();
-            if (addr >= sp.lo and addr < sp.hi) return seg;
-        };
+    /// The segment whose span contains `addr`: one in the main Mm, or the
+    /// stack.
+    fn segmentAt(s: *const Space, addr: u64) ?Seg {
+        if (addr >= s.floor() and addr < s.lay.ustktop) return .{ .label = @bitCast(Label.of(.stack)), .lo = s.floor(), .hi = s.lay.ustktop, .prot = .rw, .shared = false };
+        var all: [3 + max_extra]?Seg = undefined;
+        s.segs(&all);
+        for (all) |o| if (o) |x| if (addr >= x.lo and addr < x.hi) return x;
         return null;
     }
 
-    /// segfree(va, len): zeroes the whole pages of the span in a segattach
-    /// segment; for text, data and stack it does nothing, which the manual
-    /// allows. The pages stay allocated, so other processes sharing the
-    /// segment see the zeros.
-    pub fn segfree(s: *Segs, va: u64, len: u64) SegError!void {
+    /// segfree(va, len): the whole pages of the span in a segattach
+    /// segment read as zero again; for text, data and stack it does
+    /// nothing, which the manual allows. A `memory` segment's go back to
+    /// the engine (`Mm.discard`); a `shared` one's are zeroed in place, so
+    /// other processes sharing it see the zeros.
+    pub fn segfree(s: *Space, va: u64, len: u64) SegError!void {
         const to_raw = std.math.add(u64, va, len) catch return error.BadArg;
-        const seg = s.segmentAt(va) orelse return error.BadArg;
+        const g = s.segmentAt(va) orelse return error.BadArg;
         const to = std.mem.alignBackward(u64, to_raw, page);
         if (va > std.math.maxInt(u64) - page) return error.BadArg;
         const from = std.mem.alignForward(u64, va, page);
         if (from >= to) return;
-        seg.lockSpin();
-        defer seg.lock.unlock();
-        if (to > seg.top) return error.BadArg;
-        if (seg.kind == .shared or seg.kind == .memory) seg.zeroLocked(from, to);
+        if (to > g.hi) return error.BadArg;
+        if (!g.label.extra()) return;
+        if (g.shared) {
+            s.mm.hostEach(from, to - from, {}, struct {
+                fn f(_: void, dst: []u8, _: u64) void {
+                    @memset(dst, 0);
+                }
+            }.f) catch return error.NoVmem;
+        } else s.mm.discard(from, to) catch return error.NoVmem;
     }
 
     /// segflush(va, len): checks that the span's pages are all in
-    /// segments. Nothing runs from segattach segments, and the engines
-    /// keep data coherent across vCPUs, so there's nothing to flush.
-    pub fn segflush(s: *Segs, va: u64, len: u64) SegError!void {
+    /// segments. The caller tells the engine the span's code may have
+    /// changed.
+    pub fn segflush(s: *Space, va: u64, len: u64) SegError!void {
         const end = std.math.add(u64, va, len) catch return error.BadArg;
         if (end > std.math.maxInt(u64) - page) return error.BadArg;
         var from = std.mem.alignBackward(u64, va, page);
         const to = std.mem.alignForward(u64, end, page);
         while (from < to) {
-            const seg = s.segmentAt(from) orelse return error.BadArg;
-            from = @min(seg.span().hi, to);
+            const g = s.segmentAt(from) orelse {
+                // Data's span is to its break, and the break is a page.
+                if (from >= s.mm.brk_start and from < s.mm.brk) {
+                    from = @min(s.mm.brk, to);
+                    continue;
+                }
+                return error.BadArg;
+            };
+            from = @min(g.hi, to);
         }
-    }
-
-    /// Whether guest [va, va+len) lies in the data or stack segment or a
-    /// writable segattach segment, which the guest may write. Host access
-    /// to guest memory ignores page permissions, so the kernel checks this
-    /// before writing where the guest says, as 9front's okaddr does for a
-    /// note handler's frame.
-    pub fn writable(s: *const Segs, va: u64, len: u64) bool {
-        if (va +% len < va) return false;
-        inline for (.{ "data", "stack" }) |f| if (@field(s, f)) |seg| {
-            const sp = seg.span();
-            if (va >= sp.lo and va + len <= sp.hi) return true;
-        };
-        for (s.extra) |e| if (e) |seg| if (seg.perms.write) {
-            const sp = seg.span();
-            if (va >= sp.lo and va + len <= sp.hi) return true;
-        };
-        return false;
-    }
-
-    /// Before a host write to [va, va+len) (a debugger's breakpoint
-    /// through /proc/n/mem): if it touches text that other processes
-    /// share (rfork), gives this process, running in `as`, its own copy
-    /// of the text segment, so the write reaches no one else, as
-    /// 9front's txt2data does. The host file is never written; text is
-    /// read into pages at exec. Returns whether the range touches text.
-    /// Called on another thread while the process is stopped.
-    pub fn ownText(s: *Segs, as: engine.AddressSpace, va: u64, len: u64) Error!bool {
-        s.lockSpin();
-        defer s.lock.unlock();
-        const t = s.text orelse return false;
-        const sp = t.span();
-        if (!(va < sp.hi and va +% len > sp.lo)) return false;
-        if (t.refs() <= 1) return true;
-        const n = try t.copy();
-        t.detach(as);
-        n.attach(as) catch |e| {
-            // `attach` freed the copy; put the shared text back.
-            t.attach(as) catch {};
-            return e;
-        };
-        s.text = n;
-        return true;
-    }
-
-    /// Bytes mapped for the process, for /proc/n/status.
-    pub fn mapped(s: *const Segs) u64 {
-        var n: u64 = 0;
-        inline for (.{ "text", "data", "stack" }) |f| if (@field(s, f)) |seg| {
-            const sp = seg.span();
-            n += sp.hi - sp.lo;
-        };
-        for (s.extra) |e| if (e) |seg| {
-            const sp = seg.span();
-            n += sp.hi - sp.lo;
-        };
-        return n;
     }
 
     /// /proc/n/segment, in 9front's format and slot order: the stack,
     /// text, data up to its break, then the segattach segments. The count
-    /// is the address spaces each is attached to. Safe from any thread.
-    pub fn segmentText(s: *Segs, buf: []u8) usize {
-        s.lockSpin();
-        defer s.lock.unlock();
+    /// is how many processes have each: the stack is the process's own,
+    /// text the a.out's mapping's, and the rest the RFMEM siblings', or
+    /// for a `shared` segment, rfork children's too. Safe from any
+    /// thread.
+    pub fn segmentText(s: *const Space, buf: []u8) usize {
         var w: std.Io.Writer = .fixed(buf);
-        if (s.stack) |seg| line(&w, "Stack", false, s.stack_floor, s.ustktop, seg.refs());
-        if (s.text) |seg| line(&w, "Text", true, seg.base, seg.top, seg.refs());
-        if (s.data) |seg| {
-            seg.lockSpin();
-            const base = seg.base;
-            const brk_ = seg.brk;
-            const refs = seg.attached.items.len;
-            seg.lock.unlock();
-            line(&w, "Data", false, base, brk_, refs);
-        }
-        for (s.extra) |e| if (e) |seg| {
-            const sp = seg.span();
-            line(&w, if (seg.kind == .shared) "Shared" else "Bss", !seg.perms.write, sp.lo, sp.hi, seg.refs());
+        var all: [3 + max_extra]?Seg = undefined;
+        s.segs(&all);
+        const spaces = s.mm.nspaces();
+        line(&w, "Stack", false, s.floor(), s.lay.ustktop, 1);
+        if (all[0]) |t| line(&w, "Text", true, t.lo, t.hi, s.textRefs(t.lo));
+        line(&w, "Data", false, s.mm.brk_start, s.mm.brk, spaces);
+        for (all[3..]) |o| if (o) |g| {
+            const refs = if (g.shared) @max(spaces, s.mm.pageRefs(g.lo)) else spaces;
+            line(&w, if (g.label.kindOf() == .shared) "Shared" else "Bss", !g.prot.write, g.lo, g.hi, refs);
         };
         return w.end;
+    }
+
+    /// How many processes run the text at `va`: the references to its
+    /// a.out's mapping (loader.zig's Image), one for each Mm, which RFMEM
+    /// siblings share.
+    fn textRefs(s: *const Space, va: u64) usize {
+        var buf: [max_vmas]Vma = undefined;
+        for (s.mm.labelled(&buf)) |v| if (v.start <= va and va < v.end) {
+            const src = v.src orelse break;
+            return @max(1, src.refs.load(.acquire)) + s.mm.nspaces() - 1;
+        };
+        return s.mm.nspaces();
     }
 
     fn line(w: *std.Io.Writer, name: []const u8, ronly: bool, base: u64, top: u64, refs: usize) void {
@@ -725,47 +570,36 @@ pub const Segs = struct {
     }
 
     /// The current break.
-    pub fn brkTop(s: *const Segs) u64 {
-        const d = s.data orelse return 0;
-        d.lockSpin();
-        defer d.lock.unlock();
-        return d.brk;
+    pub fn brkTop(s: *const Space) u64 {
+        return s.mm.brk;
     }
 
-    /// Moves the break to `addr` (9front's ibrk), rounded up to a page. The
-    /// data segment's mapping grows to cover it, and gives back whole chunks
-    /// above it. With RFMEM the break is shared, since the segment is. It
-    /// stops at the stack's floor, and below any segattach segment above
-    /// the data.
-    pub fn brk(s: *Segs, addr: u64) BrkError!void {
-        const d = s.data orelse return error.NoVmem;
-        if (addr < d.base or addr > s.stack_floor) return error.NoVmem;
+    /// Moves the break to `addr` (9front's ibrk), rounded up to a page.
+    /// Memory above the break reads as zero when it grows back. With
+    /// RFMEM the break is shared, since the Mm is. It stops at the
+    /// stack's floor, and below any segattach segment above the data.
+    pub fn brk(s: *Space, io: std.Io, addr: u64) BrkError!void {
+        s.mm.opLock(io);
+        defer s.mm.opUnlock(io);
+        const m = s.mm;
+        if (addr < m.brk_start or addr > s.floor()) return error.NoVmem;
         const want = std.mem.alignForward(u64, addr, page);
-        if (want > s.stack_floor) return error.NoVmem;
-        var limit = s.stack_floor;
-        for (s.extra) |e| if (e) |seg| if (seg.base >= d.base) {
-            limit = @min(limit, seg.base);
+        if (want > s.floor()) return error.NoVmem;
+        var limit = s.floor();
+        var all: [3 + max_extra]?Seg = undefined;
+        s.segs(&all);
+        for (all[3..]) |o| if (o) |g| if (g.lo >= m.brk_start) {
+            limit = @min(limit, g.lo);
         };
         if (want > limit) return error.Overlap;
-        d.lockSpin();
-        defer d.lock.unlock();
-        return d.moveBreakLocked(want, limit, true);
-    }
-
-    /// Grows the stack down so that `addr` and `stack_slack` below it are
-    /// mapped. Returns whether `addr` is now mapped stack. Called on faults,
-    /// and at each syscall with the SP, so that buffers on the stack that
-    /// the guest hasn't touched yet are mapped before the kernel uses them.
-    pub fn growStack(s: *Segs, addr: u64) bool {
-        const st = s.stack orelse return false;
-        st.lockSpin();
-        defer st.lock.unlock();
-        if (addr >= st.top or addr < s.stack_floor) return false;
-        if (addr >= st.base + stack_slack or (addr >= st.base and st.base == s.stack_floor)) return true;
-        // At least double, so a deep stack takes few chunks.
-        const want = @min(std.mem.alignBackward(u64, addr, page) -| stack_slack, st.base -| (st.top - st.base));
-        st.growDownLocked(@max(want, s.stack_floor)) catch return addr >= st.base;
-        return true;
+        if (want > m.brk) {
+            m.insert(.{ .start = m.brk, .end = want, .prot = .rw, .label = Label.of(.data) }) catch return error.NoVmem;
+        } else if (want < m.brk) {
+            // Another process's syscall may be using the pages.
+            if (m.nspaces() > 1) return error.InUse;
+            m.unmap(want, m.brk) catch return error.NoVmem;
+        }
+        m.brk = want;
     }
 };
 
@@ -810,16 +644,13 @@ test "place: wraparound is a bad arg" {
     try testing.expectError(error.BadArg, place(&.{}, arm64_floor, max, 0, max));
 }
 
-test "segfree, segflush and segbrk check their arguments before using them" {
-    var s: Segs = .{ .stack_floor = arm64_floor, .ustktop = arm64_top, .seg_max = 8 << 30 };
-    const max = std.math.maxInt(u64);
-    try testing.expectError(error.BadArg, s.segfree(max - 0xfff, 0x2000));
-    try testing.expectError(error.BadArg, s.segfree(0x1000, 0x1000));
-    try testing.expectError(error.BadArg, s.segflush(max - 0xfff, 0x2000));
-    try testing.expectError(error.BadArg, s.segflush(max - 0xfff, 0x10));
-    try testing.expectError(error.BadArg, s.segflush(0x1000, 0x1000));
-    try testing.expectError(error.BadArg, s.segbrk(0x1000, 0x2000));
-    try testing.expectError(error.BadArg, s.segdetach(.{ .fake = undefined }, 0x1000));
+test "a label keeps the kind, the slot and SG_CEXEC" {
+    const l: Label = .{ .kind = @intFromEnum(Kind.memory), .slot = 4, .cexec = true };
+    const v: Vma = .{ .start = 0, .end = page, .prot = .rw, .label = @bitCast(l) };
+    try testing.expectEqual(Kind.memory, Label.get(v).?.kindOf());
+    try testing.expectEqual(@as(u3, 4), Label.get(v).?.slot);
+    try testing.expect(Label.get(v).?.cexec);
+    try testing.expectEqual(@as(?Label, null), Label.get(.{ .start = 0, .end = page, .prot = .rw }));
 }
 
 test "errorString matches 9front's" {

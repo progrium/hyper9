@@ -421,8 +421,9 @@ fn expectBreakpoint(arch: aout.Arch, text: []const u8, pc_off: u64) !void {
         defer b.destroy();
         const as = try b.newAddressSpace();
         defer as.destroy();
-        var img = try h9.loader.load(gpa, b, as, bytes, &.{"brk"}, 1);
-        defer img.segs.release(as);
+        var img = try h9.loader.load(gpa, b, as, bytes, &.{"brk"}, 1, null);
+        defer img.space.release(as);
+        try prefault(&img);
         var v = try b.createVcpu();
         defer v.destroy();
         try v.setAddressSpace(as);
@@ -475,8 +476,9 @@ fn expectKick(arch: aout.Arch, text: []const u8) !void {
         defer b.destroy();
         const as = try b.newAddressSpace();
         defer as.destroy();
-        var img = try h9.loader.load(gpa, b, as, bytes, &.{"spin"}, 1);
-        defer img.segs.release(as);
+        var img = try h9.loader.load(gpa, b, as, bytes, &.{"spin"}, 1, null);
+        defer img.space.release(as);
+        try prefault(&img);
         var v = try b.createVcpu();
         defer v.destroy();
         try v.setAddressSpace(as);
@@ -527,8 +529,9 @@ fn expectKickRace(arch: aout.Arch, text: []const u8) !void {
         defer b.destroy();
         const as = try b.newAddressSpace();
         defer as.destroy();
-        var img = try h9.loader.load(gpa, b, as, bytes, &.{"spin"}, 1);
-        defer img.segs.release(as);
+        var img = try h9.loader.load(gpa, b, as, bytes, &.{"spin"}, 1, null);
+        defer img.space.release(as);
+        try prefault(&img);
         var v = try b.createVcpu();
         defer v.destroy();
         try v.setAddressSpace(as);
@@ -972,6 +975,15 @@ test "the memory cap is exact" {
     if (ran == 0) return error.SkipZigTest;
 }
 
+/// Fills an image's text and the top of its stack, which a process's
+/// faults would (src/segment.zig), for the cases that run a vCPU on its
+/// address space with no process around it.
+fn prefault(img: *const h9.loader.Image) !void {
+    const l = aout.layout(img.arch);
+    try img.space.touch(l.utzero, engine.page_size, false);
+    try img.space.touch(img.sp & ~@as(u64, engine.page_size - 1), l.ustktop - (img.sp & ~@as(u64, engine.page_size - 1)), true);
+}
+
 /// Runs `f(engine)` on each engine that can run arm64 here.
 fn eachEngine(comptime f: fn (engine.Engine) anyerror!void) !void {
     var ran: usize = 0;
@@ -988,58 +1000,68 @@ fn eachEngine(comptime f: fn (engine.Engine) anyerror!void) !void {
     if (ran == 0) return error.SkipZigTest;
 }
 
-fn byteAt(as: engine.AddressSpace, va: u64) ?u8 {
-    const s = as.translate(va, 1) orelse return null;
-    return s[0];
+/// The byte at `va` as the process's syscalls see it, filling the page
+/// if it's mapped but not yet touched; null if nothing maps it.
+fn byteAt(sp: *const segment.Space, va: u64) ?u8 {
+    var b: [1]u8 = undefined;
+    sp.read(va, &b) catch return null;
+    return b[0];
 }
 
-fn setByte(as: engine.AddressSpace, va: u64, v: u8) void {
-    as.translate(va, 1).?[0] = v;
+fn setByte(sp: *const segment.Space, va: u64, v: u8) void {
+    sp.write(va, &.{v}) catch unreachable;
 }
+
+/// Loads hello into `as`, for the segment tests below.
+fn loadHello(b: engine.Engine, as: engine.AddressSpace) !h9.loader.Image {
+    const gpa = std.testing.allocator;
+    const bytes = try image(gpa, .arm64, &hello.arm64_text);
+    defer gpa.free(bytes);
+    return h9.loader.load(gpa, b, as, bytes, &.{"hello"}, 1, null);
+}
+
+const segment = h9.segment;
 
 test "segments: fork shares text, copies the stack, and shares data only with RFMEM" {
     try eachEngine(struct {
         fn f(b: engine.Engine) !void {
-            const gpa = std.testing.allocator;
-            const bytes = try image(gpa, .arm64, &hello.arm64_text);
-            defer gpa.free(bytes);
+            const io = std.testing.io;
             const as = try b.newAddressSpace();
             defer as.destroy();
-            var img = try h9.loader.load(gpa, b, as, bytes, &.{"hello"}, 1);
-            defer img.segs.release(as);
+            var img = try loadHello(b, as);
+            defer img.space.release(as);
+            const s = &img.space;
             // hello has no data or bss, so give it some.
-            const data = img.segs.data.?.base;
-            try img.segs.brk(data + engine.page_size);
+            const data = s.brkTop();
+            try s.brk(io, data + engine.page_size);
             const sp = img.sp;
-            setByte(as, data, 1);
-            setByte(as, sp, 1);
+            setByte(s, data, 1);
+            setByte(s, sp, 1);
 
             for ([_]bool{ false, true }) |share| {
                 const cas = try b.newAddressSpace();
                 defer cas.destroy();
-                var c = try img.segs.fork(cas, share);
+                var c = try s.fork(cas, share);
                 defer c.release(cas);
-                try std.testing.expectEqual(img.segs.text.?, c.text.?);
-                try std.testing.expectEqual(share, img.segs.data.? == c.data.?);
-                try std.testing.expect(img.segs.stack.? != c.stack.?);
+                try std.testing.expectEqual(share, s.mm == c.mm);
+                try std.testing.expect(s.stack != c.stack);
                 // The child sees the parent's memory at fork time...
-                try std.testing.expectEqual(@as(?u8, 1), byteAt(cas, data));
-                try std.testing.expectEqual(@as(?u8, 1), byteAt(cas, sp));
-                // ...and then only shared segments follow each other.
-                setByte(cas, data, 2);
-                setByte(cas, sp, 2);
-                try std.testing.expectEqual(@as(?u8, if (share) 2 else 1), byteAt(as, data));
-                try std.testing.expectEqual(@as(?u8, 1), byteAt(as, sp));
-                setByte(as, data, 1);
-                // Growing a shared break maps the pages into both spaces
-                // (past the headroom the parent's mapping already has).
-                const top = img.segs.brkTop();
+                try std.testing.expectEqual(@as(?u8, 1), byteAt(&c, data));
+                try std.testing.expectEqual(@as(?u8, 1), byteAt(&c, sp));
+                // ...and then only what's shared follows the other.
+                setByte(&c, data, 2);
+                setByte(&c, sp, 2);
+                try std.testing.expectEqual(@as(?u8, if (share) 2 else 1), byteAt(s, data));
+                try std.testing.expectEqual(@as(?u8, 1), byteAt(s, sp));
+                setByte(s, data, 1);
+                // A shared break is the same in both.
+                const top = s.brkTop();
                 const far = top + (1 << 20);
-                try c.brk(far + 1);
-                try std.testing.expectEqual(share, byteAt(as, far) != null);
-                try std.testing.expectEqual(@as(?u8, 0), byteAt(cas, far));
+                try c.brk(io, far + 1);
+                try std.testing.expectEqual(share, byteAt(s, far) != null);
+                try std.testing.expectEqual(@as(?u8, 0), byteAt(&c, far));
                 // 9front won't shrink a segment others share.
-                if (share) try std.testing.expectError(error.InUse, c.brk(top)) else try c.brk(top);
+                if (share) try std.testing.expectError(error.InUse, c.brk(io, top)) else try c.brk(io, top);
             }
         }
     }.f);
@@ -1048,64 +1070,55 @@ test "segments: fork shares text, copies the stack, and shares data only with RF
 test "segments: brk grows and shrinks, and memory above the break is zeroed" {
     try eachEngine(struct {
         fn f(b: engine.Engine) !void {
-            const gpa = std.testing.allocator;
-            const bytes = try image(gpa, .arm64, &hello.arm64_text);
-            defer gpa.free(bytes);
+            const io = std.testing.io;
             const as = try b.newAddressSpace();
             defer as.destroy();
-            var img = try h9.loader.load(gpa, b, as, bytes, &.{"hello"}, 1);
-            defer img.segs.release(as);
-            const s = &img.segs;
+            var img = try loadHello(b, as);
+            defer img.space.release(as);
+            const s = &img.space;
             const base = s.brkTop();
-            try std.testing.expectEqual(@as(?u8, null), byteAt(as, base));
+            try std.testing.expectEqual(@as(?u8, null), byteAt(s, base));
 
-            // Small steps don't each add a mapping (hello's data starts empty).
-            for (1..9) |i| try s.brk(base + i * 100);
+            for (1..9) |i| try s.brk(io, base + i * 100);
             try std.testing.expectEqual(base + engine.page_size, s.brkTop());
-            for (1..9) |i| try s.brk(base + i * engine.page_size);
-            try std.testing.expectEqual(@as(usize, 1), s.data.?.chunks.items.len);
-
-            try s.brk(base + (1 << 20) + 1);
+            try s.brk(io, base + (1 << 20) + 1);
             try std.testing.expectEqual(base + (1 << 20) + engine.page_size, s.brkTop());
-            setByte(as, base + 10, 7);
-            setByte(as, base + (1 << 20), 7);
+            // Nothing's allocated until it's touched.
+            try std.testing.expect(s.bytes() < 1 << 20);
+            setByte(s, base + 10, 7);
+            setByte(s, base + (1 << 20), 7);
 
-            try s.brk(base);
+            try s.brk(io, base);
             try std.testing.expectEqual(base, s.brkTop());
-            try s.brk(base + (1 << 20) + 1);
-            try std.testing.expectEqual(@as(?u8, 0), byteAt(as, base + 10));
-            try std.testing.expectEqual(@as(?u8, 0), byteAt(as, base + (1 << 20)));
+            try std.testing.expectEqual(@as(?u8, null), byteAt(s, base));
+            try s.brk(io, base + (1 << 20) + 1);
+            try std.testing.expectEqual(@as(?u8, 0), byteAt(s, base + 10));
+            try std.testing.expectEqual(@as(?u8, 0), byteAt(s, base + (1 << 20)));
 
-            try std.testing.expectError(error.NoVmem, s.brk(s.data.?.base - 1));
-            try std.testing.expectError(error.NoVmem, s.brk(s.stack_floor + 1));
-            try std.testing.expectError(error.NoVmem, s.brk(std.math.maxInt(u64)));
-            // More than --memory.
-            try std.testing.expectError(error.NoVmem, s.brk(base + (128 << 20)));
+            try std.testing.expectError(error.NoVmem, s.brk(io, base - 1));
+            try std.testing.expectError(error.NoVmem, s.brk(io, s.floor() + 1));
+            try std.testing.expectError(error.NoVmem, s.brk(io, std.math.maxInt(u64)));
         }
     }.f);
 }
 
-test "segments: the stack grows down to its 16 MiB limit" {
+test "segments: the stack is its whole 16 MiB, with pages on first touch" {
     try eachEngine(struct {
         fn f(b: engine.Engine) !void {
-            const gpa = std.testing.allocator;
-            const bytes = try image(gpa, .arm64, &hello.arm64_text);
-            defer gpa.free(bytes);
             const as = try b.newAddressSpace();
             defer as.destroy();
-            var img = try h9.loader.load(gpa, b, as, bytes, &.{"hello"}, 1);
-            defer img.segs.release(as);
-            const s = &img.segs;
+            var img = try loadHello(b, as);
+            defer img.space.release(as);
+            const s = &img.space;
             const l = aout.layout(.arm64);
-            try std.testing.expect(s.stack.?.base > s.stack_floor);
+            const before = s.bytes();
             const deep = l.ustktop - (8 << 20);
-            try std.testing.expectEqual(@as(?u8, null), byteAt(as, deep));
-            try std.testing.expect(s.growStack(deep));
-            try std.testing.expectEqual(@as(?u8, 0), byteAt(as, deep));
-            try std.testing.expect(s.growStack(s.stack_floor));
-            try std.testing.expectEqual(s.stack_floor, s.stack.?.base);
-            try std.testing.expect(!s.growStack(s.stack_floor - 1));
-            try std.testing.expect(!s.growStack(l.ustktop));
+            try std.testing.expectEqual(@as(?u8, 0), byteAt(s, deep));
+            try std.testing.expectEqual(@as(?u8, 0), byteAt(s, s.floor()));
+            try std.testing.expect(s.bytes() > before);
+            try std.testing.expect(s.writable(s.floor(), 8));
+            try std.testing.expectEqual(@as(?u8, null), byteAt(s, s.floor() - 1));
+            try std.testing.expectEqual(@as(?u8, null), byteAt(s, l.ustktop));
         }
     }.f);
 }
@@ -1113,26 +1126,29 @@ test "segments: the stack grows down to its 16 MiB limit" {
 test "segments: releasing a process's segments frees its memory" {
     try eachEngine(struct {
         fn f(b: engine.Engine) !void {
-            const gpa = std.testing.allocator;
-            const bytes = try image(gpa, .arm64, &hello.arm64_text);
-            defer gpa.free(bytes);
+            const io = std.testing.io;
             // 64 MiB of guest memory, so 200 processes' worth only fits if
             // each one's pages come back.
             for (0..200) |_| {
                 const as = try b.newAddressSpace();
                 defer as.destroy();
-                var img = try h9.loader.load(gpa, b, as, bytes, &.{"hello"}, 1);
-                defer img.segs.release(as);
-                try img.segs.brk(img.segs.brkTop() + (1 << 20));
-                _ = img.segs.growStack(img.sp - (1 << 20));
+                var img = try loadHello(b, as);
+                defer img.space.release(as);
+                const s = &img.space;
+                try s.brk(io, s.brkTop() + (1 << 20));
+                try s.touch(s.brkTop() - (1 << 20), 1 << 20, true);
+                try s.touch(img.sp - (1 << 20), 1 << 20, true);
                 const cas = try b.newAddressSpace();
                 defer cas.destroy();
-                var c = try img.segs.fork(cas, false);
+                var c = try s.fork(cas, false);
+                // The child's writes copy what they touch.
+                try c.touch(img.sp - (1 << 20), 1 << 20, true);
                 c.release(cas);
             }
         }
     }.f);
 }
+
 
 // A syscall returns with the registers 9front's doesn't preserve zeroed,
 // as its forkret leaves them, so a program that wrongly keeps a value in
@@ -1573,49 +1589,26 @@ test "/proc/n/segment lists every segment [segattach]" {
     );
 }
 
-/// Loads hello into `as`, for the segment tests below.
-fn loadHello(b: engine.Engine, as: engine.AddressSpace) !h9.loader.Image {
-    const gpa = std.testing.allocator;
-    const bytes = try image(gpa, .arm64, &hello.arm64_text);
-    defer gpa.free(bytes);
-    return h9.loader.load(gpa, b, as, bytes, &.{"hello"}, 1);
-}
-
-const segment = h9.segment;
-
-test "segments: segattach trims the data headroom, splitting a chunk, and won't for a shared data segment" {
+test "segments: segattach just above the break, which then can't grow into it" {
     try eachEngine(struct {
         fn f(b: engine.Engine) !void {
-            const gpa = std.testing.allocator;
+            const io = std.testing.io;
             const as = try b.newAddressSpace();
             defer as.destroy();
             var img = try loadHello(b, as);
-            defer img.segs.release(as);
-            const s = &img.segs;
-            const d = s.data.?;
-            // One chunk mapped well past a break that ends mid-chunk.
-            try s.brk(d.base + 3 * engine.page_size);
-            try std.testing.expect(d.top > d.base + 4 * engine.page_size);
-            try std.testing.expectEqual(@as(usize, 1), d.chunks.items.len);
-            setByte(as, d.base + 2 * engine.page_size, 9);
-            const above = d.base + 3 * engine.page_size;
-
-            // An RFMEM sibling shares the data, so its headroom can't be cut.
-            const cas = try b.newAddressSpace();
-            defer cas.destroy();
-            var c = try s.fork(cas, true);
-            try std.testing.expectError(error.Overlap, s.segattach(gpa, b, as, .memory, 0, above, engine.page_size));
-            c.release(cas);
-
-            const va = try s.segattach(gpa, b, as, .memory, 0, above, engine.page_size);
+            defer img.space.release(as);
+            const s = &img.space;
+            const base = s.brkTop();
+            try s.brk(io, base + 3 * engine.page_size);
+            setByte(s, base + 2 * engine.page_size, 9);
+            const above = base + 3 * engine.page_size;
+            const va = try s.segattach(io, .memory, 0, above, engine.page_size);
             try std.testing.expectEqual(above, va);
-            try std.testing.expectEqual(above, d.top);
-            try std.testing.expectEqual(@as(?u8, 9), byteAt(as, d.base + 2 * engine.page_size));
-            try std.testing.expectEqual(@as(?u8, 0), byteAt(as, above));
-            // The break can't grow into it now.
-            try std.testing.expectError(error.Overlap, s.brk(above + 1));
-            try s.segdetach(as, va);
-            try s.brk(above + 1);
+            try std.testing.expectEqual(@as(?u8, 9), byteAt(s, base + 2 * engine.page_size));
+            try std.testing.expectEqual(@as(?u8, 0), byteAt(s, above));
+            try std.testing.expectError(error.Overlap, s.brk(io, above + 1));
+            try s.segdetach(io, va);
+            try s.brk(io, above + 1);
         }
     }.f);
 }
@@ -1623,30 +1616,28 @@ test "segments: segattach trims the data headroom, splitting a chunk, and won't 
 test "segments: segbrk stops at the next segment and the stack, and frees what it shrinks" {
     try eachEngine(struct {
         fn f(b: engine.Engine) !void {
-            const gpa = std.testing.allocator;
+            const io = std.testing.io;
             const as = try b.newAddressSpace();
             defer as.destroy();
             var img = try loadHello(b, as);
-            defer img.segs.release(as);
-            const s = &img.segs;
-            const lo = try s.segattach(gpa, b, as, .memory, 0, 1 << 32, engine.page_size);
-            const hi = try s.segattach(gpa, b, as, .shared, 0, (1 << 32) + 4 * engine.page_size, engine.page_size);
-            try std.testing.expectEqual(lo, try s.segbrk(lo, 0));
-            try std.testing.expectEqual(@as(u64, 0), try s.segbrk(lo, hi));
-            try std.testing.expectError(error.Overlap, s.segbrk(lo, hi + 1));
-            try std.testing.expectError(error.Overlap, s.segbrk(hi, s.ustktop + 1));
-            try std.testing.expectError(error.Overlap, s.segbrk(hi, s.stack_floor + 1));
-            try std.testing.expectError(error.NoVmem, s.segbrk(lo, lo - 1));
-            try std.testing.expectError(error.BadArg, s.segbrk(s.text.?.base, s.text.?.top));
-            try std.testing.expectError(error.BadArg, s.segbrk(s.brkTop() - 1, s.brkTop()));
-            try std.testing.expectEqual(@as(u64, 0), try s.segbrk(lo, lo + 1));
-            try std.testing.expectEqual(@as(?u8, null), byteAt(as, lo + engine.page_size));
-            // More than --memory, with nothing in the way.
-            try s.segdetach(as, hi);
-            try std.testing.expectError(error.NoVmem, s.segbrk(lo, lo + (128 << 20)));
-            try std.testing.expectError(error.NoVmem, s.segattach(gpa, b, as, .memory, 0, 0, 128 << 20));
+            defer img.space.release(as);
+            const s = &img.space;
+            const lo = try s.segattach(io, .memory, 0, 1 << 32, engine.page_size);
+            const hi = try s.segattach(io, .shared, 0, (1 << 32) + 4 * engine.page_size, engine.page_size);
+            try std.testing.expectEqual(lo, try s.segbrk(io, lo, 0));
+            try std.testing.expectEqual(@as(u64, 0), try s.segbrk(io, lo, hi));
+            try std.testing.expectError(error.Overlap, s.segbrk(io, lo, hi + 1));
+            try std.testing.expectError(error.Overlap, s.segbrk(io, hi, s.lay.ustktop + 1));
+            try std.testing.expectError(error.Overlap, s.segbrk(io, hi, s.floor() + 1));
+            try std.testing.expectError(error.NoVmem, s.segbrk(io, lo, lo - 1));
+            try std.testing.expectError(error.BadArg, s.segbrk(io, aout.layout(.arm64).utzero, aout.layout(.arm64).utzero + engine.page_size));
+            setByte(s, lo + engine.page_size, 3);
+            try std.testing.expectEqual(@as(u64, 0), try s.segbrk(io, lo, lo + 1));
+            try std.testing.expectEqual(@as(?u8, null), byteAt(s, lo + engine.page_size));
+            try std.testing.expectEqual(@as(u64, 0), try s.segbrk(io, lo, lo + 2 * engine.page_size));
+            try std.testing.expectEqual(@as(?u8, 0), byteAt(s, lo + engine.page_size));
             // Bigger than SEGMAXSIZE, wherever it'd go.
-            try std.testing.expectError(error.NoVmem, s.segattach(gpa, b, as, .memory, 0, 0, 9 << 30));
+            try std.testing.expectError(error.NoVmem, s.segattach(io, .memory, 0, 0, 9 << 30));
         }
     }.f);
 }
@@ -1654,18 +1645,18 @@ test "segments: segbrk stops at the next segment and the stack, and frees what i
 test "segments: fork shares shared segments and copies memory ones, and exec keeps those without SG_CEXEC" {
     try eachEngine(struct {
         fn f(b: engine.Engine) !void {
-            const gpa = std.testing.allocator;
+            const io = std.testing.io;
             const as = try b.newAddressSpace();
             defer as.destroy();
             var img = try loadHello(b, as);
-            defer img.segs.release(as);
-            const s = &img.segs;
-            const sh = try s.segattach(gpa, b, as, .shared, 0, 0, engine.page_size);
-            const mem = try s.segattach(gpa, b, as, .memory, 0, 0, engine.page_size);
-            const cx = try s.segattach(gpa, b, as, .memory, segment.SG_CEXEC, 0, engine.page_size);
-            // A gap in the slots is kept by fork.
-            try s.segdetach(as, mem);
-            const mem2 = try s.segattach(gpa, b, as, .memory, 0, 0, engine.page_size);
+            defer img.space.release(as);
+            const s = &img.space;
+            const sh = try s.segattach(io, .shared, 0, 0, engine.page_size);
+            const mem = try s.segattach(io, .memory, 0, 0, engine.page_size);
+            const cx = try s.segattach(io, .memory, segment.SG_CEXEC, 0, engine.page_size);
+            // A gap in the slots is filled by the next.
+            try s.segdetach(io, mem);
+            const mem2 = try s.segattach(io, .memory, 0, 0, engine.page_size);
             try std.testing.expectEqual(mem, mem2);
 
             for ([_]bool{ false, true }) |share| {
@@ -1673,24 +1664,27 @@ test "segments: fork shares shared segments and copies memory ones, and exec kee
                 defer cas.destroy();
                 var c = try s.fork(cas, share);
                 defer c.release(cas);
-                for (s.extra, c.extra) |p, q| try std.testing.expectEqual(p == null, q == null);
-                setByte(cas, sh, 1);
-                setByte(cas, mem, 1);
-                try std.testing.expectEqual(@as(?u8, 1), byteAt(as, sh));
-                try std.testing.expectEqual(@as(?u8, if (share) 1 else 0), byteAt(as, mem));
-                setByte(as, sh, 0);
-                setByte(as, mem, 0);
+                setByte(&c, sh, 1);
+                setByte(&c, mem, 1);
+                try std.testing.expectEqual(@as(?u8, 1), byteAt(s, sh));
+                try std.testing.expectEqual(@as(?u8, if (share) 1 else 0), byteAt(s, mem));
+                setByte(s, sh, 0);
+                setByte(s, mem, 0);
             }
 
-            // exec: a new image, and the old segments carried into it.
+            // exec: a new image, with the old segments carried into it.
+            const gpa = std.testing.allocator;
+            const bytes = try image(gpa, .arm64, &hello.arm64_text);
+            defer gpa.free(bytes);
             const nas = try b.newAddressSpace();
             defer nas.destroy();
-            var n = try loadHello(b, nas);
-            defer n.segs.release(nas);
-            try n.segs.inherit(s, nas);
-            try std.testing.expect(byteAt(nas, sh) != null);
-            try std.testing.expect(byteAt(nas, mem) != null);
-            try std.testing.expectEqual(@as(?u8, null), byteAt(nas, cx));
+            const kept = try h9.loader.inherited(s, nas, try h9.loader.imageSpans(bytes));
+            var n = try h9.loader.load(gpa, b, nas, bytes, &.{"hello"}, 1, kept);
+            defer n.space.release(nas);
+            setByte(s, sh, 5);
+            try std.testing.expectEqual(@as(?u8, 5), byteAt(&n.space, sh));
+            try std.testing.expect(byteAt(&n.space, mem) != null);
+            try std.testing.expectEqual(@as(?u8, null), byteAt(&n.space, cx));
         }
     }.f);
 }
@@ -1698,13 +1692,13 @@ test "segments: fork shares shared segments and copies memory ones, and exec kee
 test "segments: /proc/n/segment's text" {
     try eachEngine(struct {
         fn f(b: engine.Engine) !void {
-            const gpa = std.testing.allocator;
+            const io = std.testing.io;
             const as = try b.newAddressSpace();
             defer as.destroy();
             var img = try loadHello(b, as);
-            defer img.segs.release(as);
-            const s = &img.segs;
-            _ = try s.segattach(gpa, b, as, .memory, segment.SG_RONLY, 0, engine.page_size);
+            defer img.space.release(as);
+            const s = &img.space;
+            _ = try s.segattach(io, .memory, segment.SG_RONLY, 0, engine.page_size);
             var buf: [512]u8 = undefined;
             try std.testing.expectEqualStrings(
                 \\Stack     7feff0000 7ffff0000    1
@@ -1716,6 +1710,7 @@ test "segments: /proc/n/segment's text" {
         }
     }.f);
 }
+
 
 // rendezvous and semaphores (design/epoch-0/semaphores.md), from the programs
 // in tests/fixtures/sema.
