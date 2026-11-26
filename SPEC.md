@@ -59,8 +59,6 @@ h9 is a namespace kernel for Plan 9 and Linux executables: a Zig library and a t
 
 ## Architecture
 
-&#91;embedded content: architecture · host process, guest VM, host OS\]
-
 Each process, 9front or Linux, runs in user mode on its own vCPU. On a hypervisor, a syscall traps into the shim and exits through the doorbell; on sud and hcpu it becomes the same kind of exit, with no shim. Either way it's served by the kernel on the host, through the process's ABI. The new code is the machine library (highlighted), the engines, and the shims; the CLI is a thin wrapper.
 
 ## The rest of the spec
