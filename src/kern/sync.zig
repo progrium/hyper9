@@ -33,7 +33,7 @@ pub const can_park = !builtin.cpu.arch.isWasm();
 /// p's kernel continuation, if the scheduler runs it.
 pub fn contOf(p: *c.Proc) ?*sched.Cont {
     if (!can_park) return null;
-    return @ptrCast(@alignCast(p.cont));
+    return @ptrCast(@alignCast(port.hproc(p).cont));
 }
 
 /// The process waits until another unparks it. Callers have taken
@@ -646,7 +646,7 @@ pub const ktest = struct {
         /// continuation.
         pub fn init(s: *Sproc, rq: *sched.RunQueue) void {
             s.* = .{ .p = c.newproc(), .rq = rq };
-            s.p.cont = &s.k;
+            port.hproc(s.p).cont = &s.k;
         }
 
         /// Starts f(args) as its call on e, and reports whether it

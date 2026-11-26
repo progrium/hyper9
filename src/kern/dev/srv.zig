@@ -736,11 +736,11 @@ const kt = port.testing;
 test "a posted channel opens as itself, names are unique, and a lease's close takes its services [kernel-port]" {
     const p = try kt.namespace();
     const m: *c.Hmach = @ptrCast(@alignCast(c.mallocz(@sizeOf(c.Hmach), 1).?));
-    p.mach = m;
+    port.hproc(p).mach = m;
     defer {
         h9_srvmachclose(m);
         h9_srvmachfree(m);
-        p.mach = null;
+        port.hproc(p).mach = null;
         c.free(m);
     }
 

@@ -200,18 +200,31 @@ test {
 /// `Interrupted` when a note interrupted a sleep (the string is Eintr).
 pub const Error = error{ Kernel, Interrupted };
 
-/// The current process, drawterm's `up`.
+/// The current process, drawterm's `up`: the drawterm Proc at the start
+/// of its record (h9proc.h).
 pub inline fn up() *c.Proc {
     return c._getproc();
 }
 
+/// The current process's whole record.
+pub inline fn hup() *c.Hproc {
+    return hproc(c._getproc());
+}
+
+/// The record a drawterm Proc starts: every Proc is made as an Hproc
+/// (proc.zig's newproc).
+pub inline fn hproc(p: *c.Proc) *c.Hproc {
+    return @alignCast(@fieldParentPtr("p", p));
+}
+
 /// proc.c's h9_uphproc for Zig: the current process, if it's a guest
 /// process (it has a machine), and otherwise an error.
-pub fn uphproc() error{Kernel}!*c.Proc {
+pub fn uphproc() error{Kernel}!*c.Hproc {
     const p: *c.Proc = c._getproc() orelse return error.Kernel;
-    if (p.mach == null)
+    const h = hproc(p);
+    if (h.mach == null)
         return kerror("not an h9 process");
-    return p;
+    return h;
 }
 
 pub const ERRMAX = c.ERRMAX;

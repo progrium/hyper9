@@ -65,6 +65,7 @@ const rootdial = @import("../rootdial.zig");
 const hstream = @import("hstream.zig");
 const c = port.c;
 const up = port.up;
+const hup = port.hup;
 const Error = port.Error;
 
 const Chan = c.Chan;
@@ -176,7 +177,7 @@ fn strz(b: []const u8) [*:0]const u8 {
 
 /// The caller's machine, as proc.c's h9_uphproc finds it.
 fn upmach() Error!*anyopaque {
-    const m: ?*anyopaque = @ptrCast(up().mach);
+    const m: ?*anyopaque = @ptrCast(hup().mach);
     return m orelse port.kerror("not an h9 process");
 }
 
@@ -187,7 +188,7 @@ fn lookup(n: c_int) ?*Conv {
     if (n < 0 or n >= Maxconv)
         return null;
     const cv = &convs[@intCast(n)];
-    if (!cv.inuse or cv.mach == null or cv.mach != @as(?*anyopaque, @ptrCast(up().mach)))
+    if (!cv.inuse or cv.mach == null or cv.mach != @as(?*anyopaque, @ptrCast(hup().mach)))
         return null;
     return cv;
 }
@@ -1055,12 +1056,12 @@ fn readfile(name: [*:0]const u8, buf: []u8) ![]const u8 {
 
 /// Makes the case's process a machine's, as a conversation's maker is.
 fn inmach(p: *Proc) void {
-    p.mach = @ptrCast(@alignCast(h9_kern_newmach(null)));
+    port.hproc(p).mach = @ptrCast(@alignCast(h9_kern_newmach(null)));
 }
 
 fn outmach(p: *Proc) void {
-    h9_kern_machdetach(p.mach);
-    p.mach = null;
+    h9_kern_machdetach(port.hproc(p).mach);
+    port.hproc(p).mach = null;
 }
 
 extern fn h9_kern_newmach(kernel: ?*anyopaque) ?*anyopaque;

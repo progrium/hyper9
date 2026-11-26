@@ -1,5 +1,5 @@
-//! h9's proc.c (design/kernel-port.md): the process record, `Proc`
-//! (h9proc.h), drawterm's Proc with what 9front keeps in its Proc and
+//! h9's proc.c (design/kernel-port.md): the process record, `Hproc`
+//! (h9proc.h), drawterm's Proc followed by what 9front keeps in its Proc and
 //! drawterm's lacks (parent, children, wait queue, Egrp, the
 //! machine-local pid, the note queue and a pointer to the ABI's state),
 //! in one record. See SPEC.md, "Process model". drawterm's procinit.c
@@ -44,12 +44,29 @@ const c = port.c;
 const up = port.up;
 const Error = port.Error;
 
-const Proc = c.Proc;
+const Hproc = c.Hproc;
+const hproc = port.hproc;
+const hup = port.hup;
 
-// The C and the Zig must agree on the record: see errlab in h9proc.h.
+// The C and the Zig must agree on the record (h9proc.h): drawterm's C
+// reads and writes every field of its Proc, and the Zig all of the
+// Hproc. MinGW's jmp_buf, in errlab, is 16-aligned and Zig's
+// translation of it 8-aligned, so they could differ there and in every
+// field after it on Windows, and the C's Proc is bigger there by its
+// tail padding. The C's layout comes through as constants (Poff* and
+// the sizes), so a difference on any target fails its build.
 comptime {
-    std.debug.assert(@offsetOf(Proc, "errlab") == 0);
-    std.debug.assert(@sizeOf(@FieldType(Proc, "errlab")) % 16 == 0);
+    @setEvalBranchQuota(10000);
+    for (@typeInfo(c.Proc).@"struct".field_names) |f| {
+        if (@offsetOf(c.Proc, f) != @field(c, "Poff" ++ f))
+            @compileError("Proc." ++ f ++ "'s offset differs from the C's");
+    }
+    if (@offsetOf(Hproc, "p") != 0 or @sizeOf(c.Proc) > c.Procsize or @offsetOf(Hproc, "ref") < c.Procsize)
+        @compileError("Hproc's own fields overlap the C's Proc");
+    if (@offsetOf(Hproc, "ref") != c.Hprocref or @offsetOf(Hproc, "wgen") != c.Hprocwgen or @sizeOf(Hproc) != c.Hprocsize)
+        @compileError("Hproc's layout differs from the C's");
+    if (@alignOf(Hproc) != 16)
+        @compileError("Hproc is not 16-aligned, as newproc allocates it");
 }
 const Hmach = c.Hmach;
 const Hnote = c.Hnote;
@@ -100,9 +117,16 @@ fn strecpy(dst: []u8, src: [*c]const u8) void {
     _ = c.strecpy(dst.ptr, dst.ptr + dst.len, @constCast(src));
 }
 
+/// Names h: its text, and as much of it as fits in drawterm's p.text,
+/// which drawterm's C prints.
+fn settext(h: *Hproc, name: [*c]const u8) void {
+    strecpy(&h.text, name);
+    strecpy(&h.p.text, &h.text);
+}
+
 // A guest process is on its machine's list (Hmach.procs) from its
 // making until h9_kern_exit; pid lookups, /proc and group notes walk it.
-fn enter(p: *Proc) void {
+fn enter(p: *Hproc) void {
     const m: *Hmach = p.mach;
     lock(&m.lk);
     p.mnext = m.procs;
@@ -110,10 +134,10 @@ fn enter(p: *Proc) void {
     unlock(&m.lk);
 }
 
-fn leave(p: *Proc) void {
+fn leave(p: *Hproc) void {
     const m: *Hmach = p.mach;
     lock(&m.lk);
-    var l: *[*c]Proc = &m.procs;
+    var l: *[*c]Hproc = &m.procs;
     while (l.* != null) : (l = &l.*.*.mnext) {
         if (l.* == p) {
             l.* = p.mnext;
@@ -131,7 +155,7 @@ fn freenote(n_: ?*Hnote) void {
 }
 
 /// Called with p.nlk held.
-fn freenotes(p: *Proc) void {
+fn freenotes(p: *Hproc) void {
     while (p.nnote > 0) {
         p.nnote -= 1;
         const i: usize = @intCast(p.nnote);
@@ -151,7 +175,7 @@ fn putmach(m_: ?*Hmach) void {
 /// Drops a reference to p. The last frees what's left once its thread
 /// has gone (pexit closed its groups): wait records, notes and the
 /// machine.
-fn putproc(p_: ?*Proc) void {
+fn putproc(p_: ?*Hproc) void {
     const p = p_ orelse return;
     if (decref(&p.ref) != 0)
         return;
@@ -168,23 +192,29 @@ fn putproc(p_: ?*Proc) void {
 /// Wakes the Linux waits sleeping for h's children (h9_linux_await),
 /// after a change to its wait records, children or deadness. Called
 /// with h.exl.
-fn wakewaits(h: *Proc) callconv(.c) void {
+fn wakewaits(h: *Hproc) callconv(.c) void {
     h.wgen +%= 1;
-    var s: ?*Proc = h.wsleep;
+    var s: ?*Hproc = h.wsleep;
     while (s) |sp| : (s = sp.wnext)
         _ = sync.wakeup(&sp.lwaitr);
 }
 
+/// The calling process's record, or nil on a thread that has none.
+fn current() ?*Hproc {
+    const p: ?*c.Proc = c._getproc();
+    return hproc(p orelse return null);
+}
+
 /// The calling process, if it's a guest process (it has a machine), or
 /// nil.
-fn self() ?*Proc {
-    const p: ?*Proc = c._getproc();
+fn self() ?*Hproc {
+    const p = current();
     if (p == null or p.?.mach == null)
         return null;
     return p;
 }
 
-fn uphproc() Error!*Proc {
+fn uphproc() Error!*Hproc {
     return self() orelse port.kerror("not an h9 process");
 }
 
@@ -194,10 +224,10 @@ fn uphproc() Error!*Proc {
 
 fn procinit0() Error!void {
     const p = newproc() orelse port.kpanic("procinit0: no memory", .{});
-    p.fgrp = try pgrp.dupfgrp(null);
-    p.rgrp = try pgrp.newrgrp();
-    p.pgrp = try pgrp.newpgrp();
-    c._setproc(p);
+    p.p.fgrp = try pgrp.dupfgrp(null);
+    p.p.rgrp = try pgrp.newrgrp();
+    p.p.pgrp = try pgrp.newpgrp();
+    c._setproc(&p.p);
 
     const slash = try chan.namec("#/", c.Atodir, 0, 0);
     up().slash = slash;
@@ -206,15 +236,18 @@ fn procinit0() Error!void {
     up().dot = try chan.cclone(slash);
 }
 
-fn newproc() ?*Proc {
-    const p: *Proc = @ptrCast(@alignCast(c.mallocz(@sizeOf(Proc), 1) orelse return null));
+/// Makes a record: every Proc drawterm's C sees is an Hproc's. malloc's
+/// blocks are 16-aligned (max_align_t) on every target h9 builds for, as
+/// an Hproc needs.
+fn newproc() ?*Hproc {
+    const p: *Hproc = @ptrCast(@alignCast(c.mallocz(@sizeOf(Hproc), 1) orelse return null));
     p.ref.ref = 1;
-    _ = c.strcpy(&p.user, c.eve);
-    p.syserrstr = &p.errbuf0;
-    p.errstr = &p.errbuf1;
-    _ = c.strcpy(&p.text, "drawterm");
+    _ = c.strcpy(&p.p.user, c.eve);
+    p.p.syserrstr = &p.p.errbuf0;
+    p.p.errstr = &p.p.errbuf1;
+    settext(p, "drawterm");
     p.start = c.ticks();
-    c.osnewproc(p);
+    c.osnewproc(&p.p);
     return p;
 }
 
@@ -222,22 +255,22 @@ const Fn = *const fn (?*anyopaque) callconv(.c) void;
 
 fn kproc(name: [*c]const u8, f: Fn, arg: ?*anyopaque) callconv(.c) ?*anyopaque {
     const p = newproc() orelse port.kpanic("kproc: no memory", .{});
-    p.@"fn" = f;
-    p.arg = arg;
-    p.slash = chan.cclone(up().slash) catch |e| port.raise(e);
-    p.dot = chan.cclone(up().dot) catch |e| port.raise(e);
-    p.rgrp = up().rgrp;
-    if (@as(?*Rgrp, p.rgrp)) |r|
+    p.p.@"fn" = f;
+    p.p.arg = arg;
+    p.p.slash = chan.cclone(up().slash) catch |e| port.raise(e);
+    p.p.dot = chan.cclone(up().dot) catch |e| port.raise(e);
+    p.p.rgrp = up().rgrp;
+    if (@as(?*Rgrp, p.p.rgrp)) |r|
         _ = incref(&r.ref);
-    p.pgrp = up().pgrp;
+    p.p.pgrp = up().pgrp;
     if (@as(?*Pgrp, up().pgrp)) |g|
         _ = incref(&g.ref);
-    p.fgrp = up().fgrp;
-    if (@as(?*Fgrp, p.fgrp)) |f_|
+    p.p.fgrp = up().fgrp;
+    if (@as(?*Fgrp, p.p.fgrp)) |f_|
         _ = incref(&f_.ref);
-    strecpy(&p.text, name);
+    settext(p, name);
 
-    c.osproc(p);
+    c.osproc(&p.p);
     return p;
 }
 
@@ -246,31 +279,31 @@ fn kproc(name: [*c]const u8, f: Fn, arg: ?*anyopaque) callconv(.c) ?*anyopaque {
 fn pexit(msg: [*c]u8, freemem: c_int) callconv(.c) void {
     _ = msg;
     _ = freemem;
-    const p = up();
+    const p = hup();
 
-    if (@as(?*Pgrp, p.pgrp)) |g| {
+    if (@as(?*Pgrp, p.p.pgrp)) |g| {
         pgrp.closepgrp(g);
-        p.pgrp = null;
+        p.p.pgrp = null;
     }
-    if (@as(?*Rgrp, p.rgrp)) |r| {
+    if (@as(?*Rgrp, p.p.rgrp)) |r| {
         pgrp.closergrp(r);
-        p.rgrp = null;
+        p.p.rgrp = null;
     }
-    if (@as(?*Fgrp, p.fgrp)) |f| {
+    if (@as(?*Fgrp, p.p.fgrp)) |f| {
         pgrp.closefgrp(f);
-        p.fgrp = null;
+        p.p.fgrp = null;
     }
 
-    chan.cclose(p.dot);
-    p.dot = null;
-    chan.cclose(p.slash);
-    p.slash = null;
+    chan.cclose(p.p.dot);
+    p.p.dot = null;
+    chan.cclose(p.p.slash);
+    p.p.slash = null;
 
     // A process the scheduler runs ends its continuation, not a thread.
     // putproc may free p.
     // And its record, which /proc may hold on to, keeps no pointer to
     // the continuation the scheduler frees.
-    const on_cont = sync.contOf(p) != null;
+    const on_cont = sync.contOf(&p.p) != null;
     p.cont = null;
     putproc(p);
     if (on_cont) sync.exitCont();
@@ -301,7 +334,7 @@ fn mknote(msg: [*:0]const u8, flag: c_int) ?*Hnote {
 /// 9front's pushnote: queues n (taking the caller's reference) and
 /// interrupts the process. A note posted by the system to a process that
 /// can't handle it will kill it, so the notes before it are dropped.
-fn pushnote(h: *Proc, n: *Hnote) bool {
+fn pushnote(h: *Hproc, n: *Hnote) bool {
     lock(&h.nlk);
     if (h.exited != 0) {
         unlock(&h.nlk);
@@ -321,7 +354,7 @@ fn pushnote(h: *Proc, n: *Hnote) bool {
     // kick's flag set, and a call started before the flag is set sees
     // this interrupt.
     if (h.aux != null) if (h9_notekick) |k| k(h.aux);
-    sync.procinterrupt(h);
+    sync.procinterrupt(&h.p);
     unlock(&h.nlk);
     return true;
 }
@@ -329,11 +362,11 @@ fn pushnote(h: *Proc, n: *Hnote) bool {
 /// drawterm's postnote, which the pipe device (src/kern/dev/pipe.zig)
 /// calls. A Proc that isn't an h9 process (a kproc) is only
 /// interrupted, as drawterm's postnote does.
-fn h9_postnote(p_: ?*Proc, dolock: c_int, msg: [*:0]const u8, flag: c_int) callconv(.c) c_int {
+fn h9_postnote(p_: ?*Hproc, dolock: c_int, msg: [*:0]const u8, flag: c_int) callconv(.c) c_int {
     _ = dolock;
     const p = p_ orelse return 0;
     if (p.mach == null) {
-        sync.procinterrupt(p);
+        sync.procinterrupt(&p.p);
         return 0;
     }
     const n = mknote(msg, flag) orelse return 0;
@@ -343,9 +376,9 @@ fn h9_postnote(p_: ?*Proc, dolock: c_int, msg: [*:0]const u8, flag: c_int) callc
 /// 9front's postnotepg, within machine m.
 fn postnotepg(m: *Hmach, noteid: c_uint, msg: [*:0]const u8, flag: c_int) void {
     const n = mknote(msg, flag) orelse return;
-    const me: ?*Proc = c._getproc();
+    const me = current();
     lock(&m.lk);
-    var h_: ?*Proc = m.procs;
+    var h_: ?*Hproc = m.procs;
     while (h_) |h| : (h_ = h.mnext) {
         if (h == me or h.noteid != noteid)
             continue;
@@ -360,7 +393,7 @@ fn postnotepg(m: *Hmach, noteid: c_uint, msg: [*:0]const u8, flag: c_int) void {
 /// machine. Returns 1 if it was queued, 0 if the queue was full, or -1
 /// with the error string set if there's no such process.
 fn h9_kern_postnote(pid: c_uint, msg: [*:0]const u8, flag: c_int) callconv(.c) c_int {
-    const h = (if (self() != null) h9_pidlookup(up().mach, pid) else null) orelse {
+    const h = (if (self() != null) h9_pidlookup(hup().mach, pid) else null) orelse {
         kstrcpy(up().syserrstr, "process exited");
         return -1;
     };
@@ -384,12 +417,12 @@ fn h9_kern_selfref() callconv(.c) ?*anyopaque {
 
 /// Posts a note to the process of a h9_kern_selfref reference: 1 if
 /// queued.
-fn h9_kern_postnoteref(v: *Proc, msg: [*:0]const u8, flag: c_int) callconv(.c) c_int {
+fn h9_kern_postnoteref(v: *Hproc, msg: [*:0]const u8, flag: c_int) callconv(.c) c_int {
     const n = mknote(msg, flag) orelse return 0;
     return @intFromBool(pushnote(v, n));
 }
 
-fn h9_kern_unref(v: ?*Proc) callconv(.c) void {
+fn h9_kern_unref(v: ?*Hproc) callconv(.c) void {
     putproc(v);
 }
 
@@ -418,10 +451,10 @@ fn h9_kern_postmach(m: *Hmach, all: c_int, msg: [*:0]const u8, flag: c_int) call
     lock(&m.lk);
     var noteid: c_uint = 0;
     var found = all != 0;
-    var h_: ?*Proc = m.procs;
+    var h_: ?*Hproc = m.procs;
     while (!found) : (h_ = h_.?.mnext) {
         const h = h_ orelse break;
-        if (h.pid == 1) {
+        if (h.p.pid == 1) {
             noteid = h.noteid;
             found = true;
         }
@@ -454,7 +487,7 @@ var h9_stopkick: ?*const fn (?*anyopaque) callconv(.c) void = null;
 var h9_procdebug: ?*const fn (?*anyopaque, c_int, c_int, u64, ?*anyopaque, c_int) callconv(.c) c_int = null;
 
 /// The calling process's record, raising if it isn't an h9 process.
-fn h9_uphproc() callconv(.c) *Proc {
+fn h9_uphproc() callconv(.c) *Hproc {
     return uphproc() catch |e| port.raise(e);
 }
 
@@ -476,11 +509,11 @@ fn h9_fs_nofollowing() callconv(.c) c_int {
 
 /// The process with machine-local pid in machine m, with a reference,
 /// or nil.
-pub fn h9_pidlookup(m: *Hmach, pid: c_uint) callconv(.c) ?*Proc {
+pub fn h9_pidlookup(m: *Hmach, pid: c_uint) callconv(.c) ?*Hproc {
     lock(&m.lk);
-    var h_: ?*Proc = m.procs;
+    var h_: ?*Hproc = m.procs;
     while (h_) |h| : (h_ = h.mnext) {
-        if (h.pid == pid)
+        if (h.p.pid == pid)
             break;
     }
     if (h_) |h|
@@ -489,7 +522,7 @@ pub fn h9_pidlookup(m: *Hmach, pid: c_uint) callconv(.c) ?*Proc {
     return h_;
 }
 
-pub fn h9_putproc(h: ?*Proc) callconv(.c) void {
+pub fn h9_putproc(h: ?*Hproc) callconv(.c) void {
     putproc(h);
 }
 
@@ -498,11 +531,11 @@ pub fn h9_putproc(h: ?*Proc) callconv(.c) void {
 pub fn h9_pids(m: *Hmach, pids: [*]c_uint, n: c_int) callconv(.c) c_int {
     var count: c_int = 0;
     lock(&m.lk);
-    var h_: ?*Proc = m.procs;
+    var h_: ?*Hproc = m.procs;
     while (h_) |h| : (h_ = h.mnext) {
-        if (h.pid != 0) {
+        if (h.p.pid != 0) {
             if (count < n)
-                pids[@intCast(count)] = h.pid;
+                pids[@intCast(count)] = h.p.pid;
             count += 1;
         }
     }
@@ -528,7 +561,7 @@ pub fn h9_freenote(n: ?*Hnote) callconv(.c) void {
     freenote(n);
 }
 
-pub fn h9_pushnote(h: *Proc, n: *Hnote) callconv(.c) c_int {
+pub fn h9_pushnote(h: *Hproc, n: *Hnote) callconv(.c) c_int {
     return @intFromBool(pushnote(h, n));
 }
 
@@ -539,11 +572,11 @@ pub fn h9_postnotepg(m: *Hmach, noteid: c_uint, msg: [*:0]const u8, flag: c_int)
 /// Moves h into note group noteid, which some process in its machine
 /// must be in already (9front's changenoteid, where users can't
 /// differ). Returns 0, or -1 if there's no such group.
-pub fn h9_setnoteid(h: *Proc, noteid: c_uint) callconv(.c) c_int {
+pub fn h9_setnoteid(h: *Hproc, noteid: c_uint) callconv(.c) c_int {
     const m: *Hmach = h.mach;
     var found = false;
     lock(&m.lk);
-    var q_: ?*Proc = m.procs;
+    var q_: ?*Hproc = m.procs;
     while (!found) : (q_ = q_.?.mnext) {
         const q = q_ orelse break;
         if (q.noteid == noteid)
@@ -557,13 +590,13 @@ pub fn h9_setnoteid(h: *Proc, noteid: c_uint) callconv(.c) c_int {
 
 /// 9front's killproc for ctl kill: the process dies with "Killed" at
 /// its next note delivery, whether or not it has a handler.
-pub fn h9_killproc(h: *Proc) callconv(.c) void {
+pub fn h9_killproc(h: *Hproc) callconv(.c) void {
     lock(&h.nlk);
     if (h.exited == 0) {
         h.killed = 1;
         // The kick first, as in pushnote.
         if (h.aux != null) if (h9_notekick) |k| k(h.aux);
-        sync.procinterrupt(h);
+        sync.procinterrupt(&h.p);
     }
     unlock(&h.nlk);
 }
@@ -728,7 +761,7 @@ fn h9_kern_wantstop() callconv(.c) c_int {
 }
 
 fn notstopped(a: ?*anyopaque) callconv(.c) c_int {
-    const p: *Proc = @ptrCast(@alignCast(a.?));
+    const p: *Hproc = @ptrCast(@alignCast(a.?));
     return @intFromBool(@as(*volatile c_int, &p.stopped).* == 0);
 }
 
@@ -823,12 +856,12 @@ pub fn h9_fgrpclose(f: ?*Fgrp) callconv(.c) void {
 }
 
 /// The boot Proc, whose slash is #/.
-var bootproc: *Proc = undefined;
+var bootproc: *Hproc = undefined;
 
 /// A clone of the boot Proc's slash, #/, which can't fail: cloning
 /// allocates with drawterm's smalloc.
 fn bootslash() *Chan {
-    return chan.cclone(bootproc.slash) catch |e| port.raise(e);
+    return chan.cclone(bootproc.p.slash) catch |e| port.raise(e);
 }
 
 /// For a kproc that a guest process starts lazily, such as hostpoll
@@ -843,19 +876,19 @@ fn bootslash() *Chan {
 /// process whose pages had the same address found the dead machine's
 /// #Olinux as its own and faulted walking it.
 fn h9_kprocdetach() callconv(.c) void {
-    const p = up();
-    fgrpclose(p.fgrp);
-    p.fgrp = null;
-    if (@as(?*Pgrp, p.pgrp)) |g| {
+    const p = hup();
+    fgrpclose(p.p.fgrp);
+    p.p.fgrp = null;
+    if (@as(?*Pgrp, p.p.pgrp)) |g| {
         pgrp.closepgrp(g);
-        p.pgrp = null;
+        p.p.pgrp = null;
     }
-    var ch: ?*Chan = p.dot;
-    p.dot = bootslash();
+    var ch: ?*Chan = p.p.dot;
+    p.p.dot = bootslash();
     if (ch) |o|
         chan.cclose(o);
-    ch = p.slash;
-    p.slash = bootslash();
+    ch = p.p.slash;
+    p.p.slash = bootslash();
     if (ch) |o|
         chan.cclose(o);
 }
@@ -874,10 +907,10 @@ fn checkflags(flag: c_int) Error!void {
 
 /// Swaps the error strings after an error, as sysfile's wrappers do.
 fn syserr() c_int {
-    const p = up();
-    const s = p.syserrstr;
-    p.syserrstr = p.errstr;
-    p.errstr = s;
+    const p = hup();
+    const s = p.p.syserrstr;
+    p.p.syserrstr = p.p.errstr;
+    p.p.errstr = s;
     return -1;
 }
 
@@ -903,7 +936,7 @@ fn takespawn(v: ?*anyopaque) Spawn {
 /// the timer kproc that tsleep needs, and sets up the semaphore wait
 /// lists.
 fn h9_proc_boot() callconv(.c) void {
-    bootproc = up();
+    bootproc = hup();
     @import("sema.zig").semainit();
     @import("tsleep.zig").tsleepinit();
 }
@@ -911,12 +944,12 @@ fn h9_proc_boot() callconv(.c) void {
 /// A new process's groups, as the boot Proc's: just #/, no fds, and its
 /// own rendezvous group.
 fn freshgroups() Error!void {
-    const p = up();
-    p.slash = try chan.cclone(bootproc.slash);
-    p.dot = try chan.cclone(bootproc.slash);
-    p.pgrp = try pgrp.newpgrp();
-    p.fgrp = try pgrp.dupfgrp(null);
-    p.rgrp = try pgrp.newrgrp();
+    const p = hup();
+    p.p.slash = try chan.cclone(bootproc.p.slash);
+    p.p.dot = try chan.cclone(bootproc.p.slash);
+    p.p.pgrp = try pgrp.newpgrp();
+    p.p.fgrp = try pgrp.dupfgrp(null);
+    p.p.rgrp = try pgrp.newrgrp();
 }
 
 fn spawntramp(v: ?*anyopaque) callconv(.c) void {
@@ -939,13 +972,13 @@ fn spawntramp(v: ?*anyopaque) callconv(.c) void {
 /// Starts p, made by h9_kern_spawn or fork: on its machine's scheduler
 /// (design/scheduler.md), if it has one and p may go there, and otherwise
 /// on a host thread of its own.
-fn startproc(p: *Proc, hostthread: bool) void {
+fn startproc(p: *Hproc, hostthread: bool) void {
     if (sync.can_park and !hostthread) {
         if (@as(?*Hmach, p.mach)) |m| if (m.schedstart) |start| {
             if (start(m.sched, p) == 0) return;
         };
     }
-    c.osproc(p);
+    c.osproc(&p.p);
 }
 
 fn h9_kern_newmach(kernel: ?*anyopaque) callconv(.c) ?*anyopaque {
@@ -957,7 +990,7 @@ fn h9_kern_newmach(kernel: ?*anyopaque) callconv(.c) ?*anyopaque {
 
 /// Has machine m's processes start on a scheduler (design/scheduler.md):
 /// start(sched, p) takes each, or returns -1 to give it a host thread.
-fn h9_kern_setsched(m: *Hmach, s: ?*anyopaque, start: ?*const fn (?*anyopaque, ?*Proc) callconv(.c) c_int) callconv(.c) void {
+fn h9_kern_setsched(m: *Hmach, s: ?*anyopaque, start: ?*const fn (?*anyopaque, ?*Hproc) callconv(.c) c_int) callconv(.c) void {
     m.sched = s;
     m.schedstart = start;
 }
@@ -998,9 +1031,9 @@ fn h9_kern_spawn(mach: *Hmach, name: [*c]const u8, f: Fn, arg: ?*anyopaque) call
     mach.nlive += 1;
     unlock(&mach.lk);
     p.noteid = newnoteid(mach);
-    p.@"fn" = spawntramp;
-    p.arg = s;
-    strecpy(&p.text, name);
+    p.p.@"fn" = spawntramp;
+    p.p.arg = s;
+    settext(p, name);
     enter(p);
     startproc(p, false);
     return 0;
@@ -1030,8 +1063,8 @@ fn h9_kern_kprocdetached(name: [*c]const u8, f: Fn, arg: ?*anyopaque) callconv(.
 /// Returns 0, or -1 if allocation fails.
 fn h9_kern_adopt(name: [*c]const u8) callconv(.c) c_int {
     const p = newproc() orelse return -1;
-    strecpy(&p.text, name);
-    c._setproc(p);
+    settext(p, name);
+    c._setproc(&p.p);
     freshgroups() catch port.kpanic("h9_kern_adopt: %s", .{up().errstr});
     return 0;
 }
@@ -1044,28 +1077,28 @@ fn h9_kern_adopt(name: [*c]const u8) callconv(.c) c_int {
 /// which can raise: it's called through dev.zig's `raising`, and its error raised
 /// again once the Proc's own are back.
 fn h9_kern_isolated(f: Fn, arg: ?*anyopaque) callconv(.c) void {
-    const p = up();
-    const pg = p.pgrp;
-    const fg = p.fgrp;
-    const rg = p.rgrp;
-    const slash = p.slash;
-    const dot = p.dot;
-    p.pgrp = pgrp.newpgrp() catch |e| port.raise(e);
-    p.fgrp = pgrp.dupfgrp(null) catch |e| port.raise(e);
-    p.rgrp = pgrp.newrgrp() catch |e| port.raise(e);
-    p.slash = bootslash();
-    p.dot = bootslash();
+    const p = hup();
+    const pg = p.p.pgrp;
+    const fg = p.p.fgrp;
+    const rg = p.p.rgrp;
+    const slash = p.p.slash;
+    const dot = p.p.dot;
+    p.p.pgrp = pgrp.newpgrp() catch |e| port.raise(e);
+    p.p.fgrp = pgrp.dupfgrp(null) catch |e| port.raise(e);
+    p.p.rgrp = pgrp.newrgrp() catch |e| port.raise(e);
+    p.p.slash = bootslash();
+    p.p.dot = bootslash();
     const rc = dev.raising(f, .{arg});
-    pgrp.closepgrp(p.pgrp);
-    fgrpclose(p.fgrp);
-    pgrp.closergrp(p.rgrp);
-    chan.cclose(p.slash);
-    chan.cclose(p.dot);
-    p.pgrp = pg;
-    p.fgrp = fg;
-    p.rgrp = rg;
-    p.slash = slash;
-    p.dot = dot;
+    pgrp.closepgrp(p.p.pgrp);
+    fgrpclose(p.p.fgrp);
+    pgrp.closergrp(p.p.rgrp);
+    chan.cclose(p.p.slash);
+    chan.cclose(p.p.dot);
+    p.p.pgrp = pg;
+    p.p.fgrp = fg;
+    p.p.rgrp = rg;
+    p.p.slash = slash;
+    p.p.dot = dot;
     rc catch |e| port.raise(e);
 }
 
@@ -1076,12 +1109,12 @@ fn forktramp(v: ?*anyopaque) callconv(.c) void {
 }
 
 /// A child h9_kern_fork failed to make: what it has so far goes.
-fn forkundo(p: *Proc) void {
-    if (@as(?*Fgrp, p.fgrp)) |f| fgrpclose(f);
-    if (@as(?*Pgrp, p.pgrp)) |g| pgrp.closepgrp(g);
-    if (@as(?*Rgrp, p.rgrp)) |r| pgrp.closergrp(r);
-    if (@as(?*Chan, p.dot)) |ch| chan.cclose(ch);
-    if (@as(?*Chan, p.slash)) |ch| chan.cclose(ch);
+fn forkundo(p: *Hproc) void {
+    if (@as(?*Fgrp, p.p.fgrp)) |f| fgrpclose(f);
+    if (@as(?*Pgrp, p.p.pgrp)) |g| pgrp.closepgrp(g);
+    if (@as(?*Rgrp, p.p.rgrp)) |r| pgrp.closergrp(r);
+    if (@as(?*Chan, p.p.dot)) |ch| chan.cclose(ch);
+    if (@as(?*Chan, p.p.slash)) |ch| chan.cclose(ch);
     if (@as(?*Chan, p.textc)) |ch| chan.cclose(ch);
     if (p.egrp != null) h9_egrpclose(p.egrp);
     putmach(p.mach);
@@ -1100,15 +1133,15 @@ pub fn fork(flag: c_int, pid: c_uint, f: Fn, arg: ?*anyopaque) Error!void {
     try checkflags(flag);
     const ph = try uphproc();
     // A Linux thread's children are its group leader's.
-    const wp: *Proc = if (@as(?*Proc, ph.waiter)) |w| w else ph;
+    const wp: *Hproc = if (@as(?*Hproc, ph.waiter)) |w| w else ph;
 
     const s = newspawn(f, arg) orelse return port.kerror(&port.Enomem);
     errdefer c.free(s);
     const p = newproc() orelse return port.kerror(&port.Enomem);
     errdefer forkundo(p);
     const h = p;
-    h.pid = pid;
-    h.ppid = wp.pid;
+    h.p.pid = pid;
+    h.ppid = wp.p.pid;
     h.mach = ph.mach;
     _ = incref(&h.mach.*.ref);
     h.notify = ph.notify;
@@ -1121,40 +1154,40 @@ pub fn fork(flag: c_int, pid: c_uint, f: Fn, arg: ?*anyopaque) Error!void {
     if (@as(?*Chan, h.textc)) |t|
         _ = incref(&t.ref);
     unlock(&ph.nlk);
-    strecpy(&p.text, &up().text);
+    settext(p, &hup().text);
 
-    const me = up();
-    p.slash = me.slash;
-    _ = incref(&p.slash.*.ref);
-    p.dot = me.dot;
-    _ = incref(&p.dot.*.ref);
+    const me = hup();
+    p.p.slash = me.p.slash;
+    _ = incref(&p.p.slash.*.ref);
+    p.p.dot = me.p.dot;
+    _ = incref(&p.p.dot.*.ref);
 
     // File descriptors
     if ((flag & (c.RFFDG | c.RFCFDG)) != 0) {
         if ((flag & c.RFFDG) != 0)
-            p.fgrp = try pgrp.dupfgrp(me.fgrp)
+            p.p.fgrp = try pgrp.dupfgrp(me.p.fgrp)
         else
-            p.fgrp = try pgrp.dupfgrp(null);
+            p.p.fgrp = try pgrp.dupfgrp(null);
     } else {
-        p.fgrp = me.fgrp;
-        _ = incref(&me.fgrp.*.ref);
+        p.p.fgrp = me.p.fgrp;
+        _ = incref(&me.p.fgrp.*.ref);
     }
 
     // Process groups
     if ((flag & (c.RFNAMEG | c.RFCNAMEG)) != 0) {
-        p.pgrp = try pgrp.newpgrp();
-        try pgrp.pgrpcpy(p.pgrp, me.pgrp, flag);
+        p.p.pgrp = try pgrp.newpgrp();
+        try pgrp.pgrpcpy(p.p.pgrp, me.p.pgrp, flag);
     } else {
-        p.pgrp = me.pgrp;
-        _ = incref(&me.pgrp.*.ref);
+        p.p.pgrp = me.p.pgrp;
+        _ = incref(&me.p.pgrp.*.ref);
     }
 
     // Rendezvous group
     if ((flag & c.RFREND) != 0)
-        p.rgrp = try pgrp.newrgrp()
+        p.p.rgrp = try pgrp.newrgrp()
     else {
-        p.rgrp = me.rgrp;
-        _ = incref(&me.rgrp.*.ref);
+        p.p.rgrp = me.p.rgrp;
+        _ = incref(&me.p.rgrp.*.ref);
     }
 
     // Environment group
@@ -1174,7 +1207,7 @@ pub fn fork(flag: c_int, pid: c_uint, f: Fn, arg: ?*anyopaque) Error!void {
         _ = incref(&r.ref);
 
     if ((flag & c.RFNOMNT) != 0)
-        pgrp.devmask(p.pgrp, true, nomntdevs);
+        pgrp.devmask(p.p.pgrp, true, nomntdevs);
 
     if ((flag & c.RFNOWAIT) == 0) {
         _ = incref(&wp.ref);
@@ -1193,8 +1226,8 @@ pub fn fork(flag: c_int, pid: c_uint, f: Fn, arg: ?*anyopaque) Error!void {
     h.mach.*.nlive += 1;
     unlock(&h.mach.*.lk);
 
-    p.@"fn" = forktramp;
-    p.arg = s;
+    p.p.@"fn" = forktramp;
+    p.p.arg = s;
     enter(h);
     startproc(p, (flag & c.RFHOSTTHREAD) != 0);
 }
@@ -1206,13 +1239,13 @@ fn h9_kern_fork(flag: c_int, pid: c_uint, f: Fn, arg: ?*anyopaque) callconv(.c) 
 }
 
 /// Swap the caller's groups under h.debug, for devproc's readers.
-fn swapfgrp(h: *Proc, f: ?*Fgrp) void {
+fn swapfgrp(h: *Hproc, f: ?*Fgrp) void {
     sync.qlock(&h.debug);
     up().fgrp = f;
     sync.qunlock(&h.debug);
 }
 
-fn swappgrp(h: *Proc, pg: ?*Pgrp) void {
+fn swappgrp(h: *Hproc, pg: ?*Pgrp) void {
     sync.qlock(&h.debug);
     up().pgrp = pg;
     sync.qunlock(&h.debug);
@@ -1240,26 +1273,26 @@ pub fn rfork(flag: c_int) Error!void {
     if ((flag & (c.RFPROC | c.RFMEM | c.RFNOWAIT)) != 0)
         return port.kerror(&port.Ebadarg);
     const h = try uphproc();
-    const me = up();
+    const me = hup();
 
-    const ofg: ?*Fgrp = me.fgrp;
-    const opg: ?*Pgrp = me.pgrp;
-    const org: ?*Rgrp = me.rgrp;
+    const ofg: ?*Fgrp = me.p.fgrp;
+    const opg: ?*Pgrp = me.p.pgrp;
+    const org: ?*Rgrp = me.p.rgrp;
     const oeg = h.egrp;
 
     {
         errdefer {
-            if (me.fgrp != ofg) {
-                fgrpclose(me.fgrp);
+            if (me.p.fgrp != ofg) {
+                fgrpclose(me.p.fgrp);
                 swapfgrp(h, ofg);
             }
-            if (me.pgrp != opg) {
-                pgrp.closepgrp(me.pgrp);
+            if (me.p.pgrp != opg) {
+                pgrp.closepgrp(me.p.pgrp);
                 swappgrp(h, opg);
             }
-            if (me.rgrp != org) {
-                pgrp.closergrp(me.rgrp);
-                me.rgrp = org;
+            if (me.p.rgrp != org) {
+                pgrp.closergrp(me.p.rgrp);
+                me.p.rgrp = org;
             }
             if (h.egrp != oeg) {
                 h9_egrpclose(h.egrp);
@@ -1278,12 +1311,12 @@ pub fn rfork(flag: c_int) Error!void {
         // Process group
         if ((flag & (c.RFNAMEG | c.RFCNAMEG)) != 0) {
             swappgrp(h, try pgrp.newpgrp());
-            try pgrp.pgrpcpy(me.pgrp, opg.?, flag);
+            try pgrp.pgrpcpy(me.p.pgrp, opg.?, flag);
         }
 
         // Rendezvous group
         if ((flag & c.RFREND) != 0)
-            me.rgrp = try pgrp.newrgrp();
+            me.p.rgrp = try pgrp.newrgrp();
 
         // Environment group
         if ((flag & (c.RFENVG | c.RFCENVG)) != 0) {
@@ -1294,17 +1327,17 @@ pub fn rfork(flag: c_int) Error!void {
         }
     }
 
-    if (ofg != me.fgrp)
+    if (ofg != me.p.fgrp)
         fgrpclose(ofg);
-    if (opg != me.pgrp)
+    if (opg != me.p.pgrp)
         pgrp.closepgrp(opg.?);
-    if (org != me.rgrp)
+    if (org != me.p.rgrp)
         pgrp.closergrp(org.?);
     if (oeg != h.egrp)
         h9_egrpclose(oeg);
 
     if ((flag & c.RFNOMNT) != 0)
-        pgrp.devmask(me.pgrp, true, nomntdevs);
+        pgrp.devmask(me.p.pgrp, true, nomntdevs);
     if ((flag & c.RFNOTEG) != 0) {
         const id = newnoteid(h.mach);
         lock(&h.mach.*.lk); // postnotepg reads noteid under the machine's lock
@@ -1327,20 +1360,20 @@ fn h9_kern_rfork(flag: c_int) callconv(.c) c_int {
 /// last process to get here also closes what's posted in its /srv
 /// (devsrv.c), which nothing else holds.
 fn h9_kern_release() callconv(.c) void {
-    const p = up();
-    if (@as(?*Fgrp, p.fgrp)) |f| {
+    const p = hup();
+    if (@as(?*Fgrp, p.p.fgrp)) |f| {
         fgrpclose(f);
-        p.fgrp = null;
+        p.p.fgrp = null;
     }
-    if (@as(?*Pgrp, p.pgrp)) |g| {
+    if (@as(?*Pgrp, p.p.pgrp)) |g| {
         pgrp.closepgrp(g);
-        p.pgrp = null;
+        p.p.pgrp = null;
     }
-    var ch: ?*Chan = p.dot;
-    p.dot = bootslash();
+    var ch: ?*Chan = p.p.dot;
+    p.p.dot = bootslash();
     chan.cclose(ch);
-    ch = p.slash;
-    p.slash = bootslash();
+    ch = p.p.slash;
+    p.p.slash = bootslash();
     chan.cclose(ch);
 
     const h_ = self();
@@ -1414,15 +1447,15 @@ fn h9_kern_exit() callconv(.c) void {
         up().fgrp = null;
     }
 
-    if (@as(?*Proc, h.parent)) |ph| {
+    if (@as(?*Hproc, h.parent)) |ph| {
         var w_: ?*Hwait = @ptrCast(@alignCast(c.mallocz(@sizeOf(Hwait), 1)));
         if (w_) |w| {
-            w.pid = h.pid;
+            w.pid = h.p.pid;
             w.time[0] = h.cputime[0];
             w.time[1] = h.cputime[1];
             w.time[2] = c.ticks() -% h.start;
             if (h.exitstr[0] != 0)
-                _ = c.snprint(&w.msg, w.msg.len, @constCast("%s %lud: %s"), @as([*]u8, &h.text), h.pid, @as([*]u8, &h.exitstr));
+                _ = c.snprint(&w.msg, w.msg.len, @constCast("%s %lud: %s"), @as([*]u8, &h.text), h.p.pid, @as([*]u8, &h.exitstr));
         }
         // A Linux parent gets SIGCHLD (design/epoch-0/linux-personality.md),
         // posted under exl with the wait record, so that a wait sees the
@@ -1463,7 +1496,7 @@ fn h9_kern_exit() callconv(.c) void {
         putproc(ph);
     }
 
-    if (@as(?*Proc, h.waiter)) |w| {
+    if (@as(?*Hproc, h.waiter)) |w| {
         putproc(w);
         h.waiter = null;
     }
@@ -1490,7 +1523,7 @@ fn h9_kern_exit() callconv(.c) void {
 }
 
 fn haswaitq(x: ?*anyopaque) callconv(.c) c_int {
-    const p: *Proc = @ptrCast(@alignCast(x.?));
+    const p: *Hproc = @ptrCast(@alignCast(x.?));
     return @intFromBool(@as(*volatile [*c]Hwait, &p.waitq).* != null);
 }
 
@@ -1540,7 +1573,7 @@ fn h9_kern_setexits(msg: [*c]const u8) callconv(.c) void {
 
 /// The calling process's machine-local pid, and setting it.
 fn h9_kern_gpid() callconv(.c) c_uint {
-    return if (self()) |h| h.pid else 0;
+    return if (self()) |h| h.p.pid else 0;
 }
 
 /// The calling process's parent's pid when it was made, as
@@ -1551,12 +1584,12 @@ fn h9_kern_gppid() callconv(.c) c_uint {
 
 fn h9_kern_setgpid(pid: c_uint) callconv(.c) void {
     if (self()) |h|
-        h.pid = pid;
+        h.p.pid = pid;
 }
 
 /// The process's name in wait records; exec sets it to the program's.
 fn h9_kern_settext(text: [*c]const u8) callconv(.c) void {
-    strecpy(&up().text, text);
+    settext(hup(), text);
 }
 
 /// The Zig process behind the calling kernel process.
@@ -1606,19 +1639,19 @@ fn h9_kprocsrc() callconv(.c) ?*anyopaque {
     return h;
 }
 
-fn h9_kprocput(v: ?*Proc) callconv(.c) void {
+fn h9_kprocput(v: ?*Hproc) callconv(.c) void {
     putproc(v);
 }
 
-fn h9_kprocshare(src_: ?*Proc, text: [*c]const u8) callconv(.c) c_int {
+fn h9_kprocshare(src_: ?*Hproc, text: [*c]const u8) callconv(.c) c_int {
     const src = src_ orelse return -1;
     if (self() != null)
         return -1;
-    const h = up();
-    strecpy(&h.text, text);
+    const h = hup();
+    settext(h, text);
     h.mach = src.mach;
     _ = incref(&h.mach.*.ref);
-    h.ppid = src.pid;
+    h.ppid = src.p.pid;
     if (src.egrp != null) {
         h9_egrpincref(src.egrp);
         h.egrp = src.egrp;
@@ -1645,7 +1678,7 @@ fn h9_kprocunshare() callconv(.c) void {
     // A kproc again: no machine.
     putmach(h.mach);
     h.mach = null;
-    h.pid = 0;
+    h.p.pid = 0;
     h.ppid = 0;
     h.noteid = 0;
 }
@@ -1655,7 +1688,7 @@ fn h9_kprocunshare() callconv(.c) void {
 fn c_procinit0() callconv(.c) void {
     procinit0() catch |e| port.raise(e);
 }
-fn c_newproc() callconv(.c) ?*Proc {
+fn c_newproc() callconv(.c) ?*Hproc {
     return newproc();
 }
 
@@ -1745,17 +1778,17 @@ const kt = port.testing;
 const Guest = struct {
     m: *Hmach,
 
-    fn begin(p: *Proc) !Guest {
+    fn begin(p: *Hproc) !Guest {
         const m: *Hmach = @ptrCast(@alignCast(h9_kern_newmach(null) orelse return error.OutOfMemory));
         p.mach = m;
         _ = incref(&m.ref);
-        p.pid = 1;
+        p.p.pid = 1;
         p.noteid = newnoteid(m);
         enter(p);
         return .{ .m = m };
     }
 
-    fn end(g: Guest, p: *Proc) void {
+    fn end(g: Guest, p: *Hproc) void {
         leave(p);
         lock(&p.nlk);
         freenotes(p);
@@ -1766,8 +1799,8 @@ const Guest = struct {
         unlock(&p.nlk);
         putmach(p.mach);
         p.mach = null;
-        p.pid = 0;
-        p.notepending = 0;
+        p.p.pid = 0;
+        p.p.notepending = 0;
         h9_kern_machdetach(g.m);
     }
 };
@@ -1784,12 +1817,12 @@ test "rfork's flags are checked, and only a guest process may rfork [kernel-port
 }
 
 test "a note queues, popnote takes it with the pc on a sys: note, and a system note with no handler drops the queue [kernel-port]" {
-    const p = try kt.begin();
+    const p = hproc(try kt.begin());
     const g = try Guest.begin(p);
     defer g.end(p);
 
     try testing.expectEqual(1, h9_kern_postnote(1, "one", c.NUser));
-    try testing.expectEqual(1, p.notepending);
+    try testing.expectEqual(1, p.p.notepending);
     try testing.expectEqual(1, h9_kern_notepending());
     try testing.expectEqual(-1, h9_kern_postnote(2, "nobody", c.NUser));
 
@@ -1818,15 +1851,15 @@ test "a note queues, popnote takes it with the pc on a sys: note, and a system n
 }
 
 test "pids are listed in order, and a note group must exist to be joined [kernel-port]" {
-    const p = try kt.begin();
+    const p = hproc(try kt.begin());
     const g = try Guest.begin(p);
     defer g.end(p);
 
-    var others: [3]Proc = undefined;
+    var others: [3]Hproc = undefined;
     for (&others, [_]c_uint{ 7, 3, 5 }) |*o, pid| {
-        o.* = std.mem.zeroes(Proc);
+        o.* = std.mem.zeroes(Hproc);
         o.ref.ref = 1;
-        o.pid = pid;
+        o.p.pid = pid;
         o.noteid = 99;
         o.mach = g.m;
         enter(o);

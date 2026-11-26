@@ -35,7 +35,7 @@ const Dir = c.Dir;
 const Dirtab = c.Dirtab;
 const Walkqid = c.Walkqid;
 const Qid = c.Qid;
-const Proc = c.Proc;
+const Hproc = c.Hproc;
 
 const Devc = 'L'; // #λ before design/epoch-0/mounts.md
 
@@ -277,7 +277,7 @@ fn mkentry(ch: *Chan, q: c_int, pid: c_uint, fd: c_int, dp: *Dir) void {
 
 /// h9_pidlookup in the caller's machine: nil if the caller isn't an h9
 /// process, as C's lookup raised there.
-fn pidlookup(pid: c_uint) Error!?*Proc {
+fn pidlookup(pid: c_uint) Error!?*Hproc {
     return c.h9_pidlookup(try upmach(), pid);
 }
 
@@ -293,7 +293,7 @@ fn pidfds(pid: c_uint, fds: []c_int) Error!usize {
     const h = try pidlookup(pid) orelse return 0;
     var count: usize = 0;
     sync.qlock(&h.debug);
-    if (h.exited == 0) if (@as(?*c.Fgrp, h.fgrp)) |f| {
+    if (h.exited == 0) if (@as(?*c.Fgrp, h.p.fgrp)) |f| {
         c.lock(&f.ref.lk);
         var i: usize = 0;
         while (i <= f.maxfd) : (i += 1) {
@@ -416,7 +416,7 @@ fn linuxgen(ch: *Chan, name: ?[*:0]const u8, dt: ?[*]Dirtab, ntab: c_int, s_: c_
     if (q == q_(.proc)) if (name) |nm| {
         // self and thread-self are the caller's own directory.
         if (dev.streq(nm, "self") or dev.streq(nm, "thread-self")) {
-            pid = (try port.uphproc()).pid;
+            pid = (try port.uphproc()).p.pid;
             mkentry(ch, q_(.pid), pid, 0, dp);
             const g = genbuf();
             _ = c.strecpy(g.ptr, g.ptr + g.len, @constCast(nm));
@@ -682,6 +682,6 @@ pub fn exportC() void {
 }
 
 /// h's text, for snprint's %s.
-fn textof(h: *Proc) [*:0]const u8 {
+fn textof(h: *Hproc) [*:0]const u8 {
     return @ptrCast(&h.text);
 }

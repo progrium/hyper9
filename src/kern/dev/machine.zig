@@ -39,6 +39,7 @@ const sysfile = @import("../sysfile.zig");
 const devmnt = @import("../devmnt.zig");
 const c = port.c;
 const up = port.up;
+const hup = port.hup;
 const Error = port.Error;
 
 const Chan = c.Chan;
@@ -180,7 +181,7 @@ fn blockread(id: c_ulong, kind: c_int, va: ?*anyopaque, n: c_int, off: i64) Erro
 
 /// The caller must be a machine's process.
 fn upmach() Error!void {
-    if (up().mach == null) return port.kerror("not an h9 process");
+    if (hup().mach == null) return port.kerror("not an h9 process");
 }
 
 fn topdir(ch: *Chan, dp: *Dir) void {

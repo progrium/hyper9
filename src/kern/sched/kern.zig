@@ -69,7 +69,7 @@ fn h9_sched_pool_mapped(p: *sched.Pool) callconv(.c) usize {
 fn h9_sched_task_new(p: *c.Proc, readyf: Ready, ctx: ?*anyopaque) callconv(.c) ?*Task {
     const t = gpa.create(Task) catch return null;
     t.* = .{ .p = p, .readyf = readyf, .ctx = ctx };
-    p.cont = &t.k;
+    port.hproc(p).cont = &t.k;
     return t;
 }
 

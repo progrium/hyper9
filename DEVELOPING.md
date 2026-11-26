@@ -424,7 +424,7 @@ development builds report `git describe` (`-Dversion=V` overrides it).
 | `src/nskernel.zig`, `src/nskernel/`, `src/kern/dev/ns.zig`, `src/kern/nstab.c` | the namespace kernel: its Zig root (ctl lines, dials, serving, the native API), `h9ns.h`, the `#N` device, and its device table and stubs; `src/web/h9ns.js` and `h9ns-worker.js` are its JS host |
 | `src/capi.zig`, `src/capi/` | libh9: machines behind a C ABI (`h9.h`), configured with the CLI's flags through `src/cli.zig`; `docs/embedding/hello.c` uses it |
 | `src/arch/` | per-architecture Ureg/ABI and the guest shims |
-| `third_party/drawterm` | vendored drawterm (git subtree; kern and libraries). Local changes: `kern/dat.h`'s include of h9's Proc ([spec/kernel.md](spec/kernel.md), "drawterm's C") |
+| `third_party/drawterm` | vendored drawterm (git subtree; kern and libraries). h9 builds its files unpatched ([spec/kernel.md](spec/kernel.md), "drawterm's C") |
 | `tests/engines.zig` | engine conformance tests |
 | `tests/integration.zig` | real 9front binaries through the h9 CLI |
 | `tests/term.zig` | a pty (ConPTY on Windows) for the interactive integration cases |

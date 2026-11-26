@@ -20,10 +20,10 @@ const up = port.up;
 const Error = port.Error;
 
 const Chan = c.Chan;
-const Proc = c.Proc;
+const Hproc = c.Hproc;
 
 /// The current process, or nil on a thread that isn't one.
-fn upq() ?*Proc {
+fn upq() ?*c.Proc {
     return c._getproc();
 }
 
@@ -353,7 +353,7 @@ fn h9_linux_fds(fds: [*]c_int, n: c_int) callconv(.c) c_int {
 }
 
 const Wsleep = struct {
-    ph: *Proc,
+    ph: *Hproc,
     gen: c_uint,
 };
 
@@ -362,8 +362,8 @@ fn waitchanged(a: ?*anyopaque) callconv(.c) c_int {
     return @intFromBool(@as(*volatile c_uint, &x.ph.wgen).* != x.gen);
 }
 
-fn unsleep(ph: *Proc, h: *Proc) void {
-    var l: *?*Proc = @ptrCast(&ph.wsleep);
+fn unsleep(ph: *Hproc, h: *Hproc) void {
+    var l: *?*Hproc = @ptrCast(&ph.wsleep);
     while (l.*) |p| : (l = @ptrCast(&p.wnext)) {
         if (p == h) {
             l.* = h.wnext;
@@ -386,7 +386,7 @@ fn unsleep(ph: *Proc, h: *Proc) void {
 /// can wait at once.
 fn await_(buf: [*]u8, n: c_int, block: bool, want: c_int, peek: bool) Error!c_int {
     const h = try port.uphproc();
-    const ph: *Proc = h.waiter orelse h;
+    const ph: *Hproc = h.waiter orelse h;
     c.lock(&ph.exl);
     var l: *?*c.Hwait = undefined;
     var w: *c.Hwait = undefined;
