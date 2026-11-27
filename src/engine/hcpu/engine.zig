@@ -212,6 +212,11 @@ pub fn Emu(comptime A64: type, comptime X86: type, comptime X64: type) type {
             stopping: std.atomic.Value(u32) = .init(0),
             /// Serializes flushes.
             world: std.Io.Mutex = .init,
+            /// The last generation given to any space (HcpuSpace.bump).
+            /// One counter for them all, so a space never has a generation
+            /// another has had: a vCPU whose space was freed, and a new
+            /// one made at its address, sees a generation it hasn't synced.
+            generations: std.atomic.Value(usize) = .init(1),
             /// On the web, when a vCPU last let the other tasks run,
             /// in monotonic ns.
             yielded: u64 = 0,
@@ -442,13 +447,25 @@ pub fn Emu(comptime A64: type, comptime X86: type, comptime X64: type) type {
             engine: *HcpuEngine,
             /// Sorted by address, not overlapping.
             regions: std.ArrayList(Region) = .empty,
-            /// Bumped on every change. A usize: wasm32 has no 64-bit atomics.
+            /// Moved on every change, to a value no space has had (`bump`).
+            /// A usize: wasm32 has no 64-bit atomics.
             generation: std.atomic.Value(usize) = .init(1),
             /// Guards `regions`: a process's threads change and read them
             /// at once.
             lock: std.atomic.Mutex = .unlocked,
 
             const Region = struct { va: u64, mem: []align(engine.page_size) u8, perms: engine.Perms };
+
+            /// A new generation, from the engine's counter: compared by
+            /// value alone, as a vCPU's sync does, it's this space's, as
+            /// it is now. A space freed and another allocated at its
+            /// address, with as many changes, would otherwise have the
+            /// same generation and pointer, and a vCPU that last ran the
+            /// old one would run the new one through the old's mappings
+            /// and TLB.
+            fn bump(as: *HcpuSpace) void {
+                as.generation.store(as.engine.generations.fetchAdd(1, .seq_cst) + 1, .seq_cst);
+            }
 
             fn lockSpin(as: *HcpuSpace) void {
                 while (!as.lock.tryLock()) std.atomic.spinLoopHint();
@@ -491,7 +508,7 @@ pub fn Emu(comptime A64: type, comptime X86: type, comptime X64: type) type {
                 }
                 if (i < as.regions.items.len and as.regions.items[i].va < va + m.len) return error.BadAddress;
                 try as.regions.insert(as.engine.gpa, i, .{ .va = va, .mem = m, .perms = perms });
-                _ = as.generation.fetchAdd(1, .seq_cst);
+                as.bump();
             }
 
             pub fn unmap(as: *HcpuSpace, va: u64) void {
@@ -500,7 +517,7 @@ pub fn Emu(comptime A64: type, comptime X86: type, comptime X64: type) type {
                 const i = as.lowerBound(va);
                 if (i < as.regions.items.len and as.regions.items[i].va == va) {
                     _ = as.regions.orderedRemove(i);
-                    _ = as.generation.fetchAdd(1, .seq_cst);
+                    as.bump();
                 }
             }
 
@@ -978,6 +995,38 @@ test "vcpus: run through the view, fault exactly, and stop on a kick" {
     const e2 = try v.run();
     try testing.expectEqual(@as(u64, 0x10008), e2.fault.addr);
     try testing.expectEqual(@as(u64, 0), e2.fault.syndrome >> 8); // unmapped
+}
+
+test "a new space at a freed space's address isn't taken for it" {
+    const b = try testEngine();
+    defer b.destroy();
+    const as = try b.newAddressSpace();
+    defer as.destroy();
+    const m1 = try b.allocPages(1);
+    defer b.freePages(m1);
+    const m2 = try b.allocPages(1);
+    defer b.freePages(m2);
+    m1[8] = 1;
+    m2[8] = 2;
+    try as.map(0x10000, m1, .{ .write = true });
+    var v = try b.createVcpu();
+    defer v.destroy();
+    try v.setAddressSpace(as);
+    const prog = [_]Toy.Op{ .{ .load = 0x10008 }, .{ .store = 0x10010 }, .svc };
+    v.s.cpu.arm64.prog = &prog;
+    try testing.expectEqual(engine.Exit.syscall, try v.run());
+    try testing.expectEqual(@as(u8, 1), m1[0x10]);
+    // The process exits and its space is freed; the next process's space
+    // is allocated in the same memory and maps the same address, as often
+    // as the first did, but to its own page.
+    as.regions.deinit(b.gpa);
+    as.* = .{ .engine = b };
+    try as.map(0x10000, m2, .{ .write = true });
+    try v.setAddressSpace(as);
+    v.s.cpu.arm64.pc = 0;
+    try testing.expectEqual(engine.Exit.syscall, try v.run());
+    try testing.expectEqual(@as(u8, 2), m2[0x10]);
+    try testing.expectEqual(@as(u8, 1), m1[0x10]);
 }
 
 /// A vCPU on its own thread, running `prog` until it exits with anything
