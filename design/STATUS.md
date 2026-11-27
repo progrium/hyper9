@@ -6,21 +6,21 @@ Every proposal at the top of [design/](README.md), in the order they were writte
 
 | Proposal | Issue | Status | State | Title |
 | --- | --- | --- | --- | --- |
-| [host-sandbox](host-sandbox.md) |  | draft | needs host-handles | Host self-sandboxing |
+| [host-sandbox](host-sandbox.md) |  | draft |  | Host self-sandboxing |
 | [audio](audio.md) | [#314](../../../issues/314) | proposed |  | Audio (--audio) |
 | [host-cmd](host-cmd.md) |  | draft | in progress on host-cmd | Rethinking host commands |
-| [child-machines](child-machines.md) | [#109](../../../issues/109) | proposed |  | Child machines |
+| [child-machines](child-machines.md) | [#109](../../../issues/109) | implemented |  | Child machines |
 | [wine-draw](wine-draw.md) | [#158](../../../issues/158) | proposed | in progress on wine-draw | Wine windows through draw |
 | [baseline-1](baseline-1.md) |  | implemented |  | Baseline 1 (h9 at the end of epoch 0) |
-| [file-interface](file-interface.md) |  | draft | needs kernel-port | A wider file interface inside the kernel, with 9P2000 as a view |
-| [host-handles](host-handles.md) |  | draft | needs kernel-port | Host access through handles |
-| [kernel-port](kernel-port.md) |  | draft |  | Port the kernel core to Zig, as an instance |
-| [memory-model](memory-model.md) |  | draft |  | One memory model under both ABIs |
-| [plan-format](plan-format.md) |  | draft | needs child-machines | The plan as a file, and the one way in |
-| [scheduler](scheduler.md) |  | draft | needs kernel-port | A scheduler, with processes on per-core executors |
+| [file-interface](file-interface.md) |  | implemented |  | A wider file interface inside the kernel, with 9P2000 as a view |
+| [host-handles](host-handles.md) |  | implemented |  | Host access through handles |
+| [kernel-port](kernel-port.md) |  | implemented |  | Port the kernel core to Zig, as an instance |
+| [memory-model](memory-model.md) |  | implemented |  | One memory model under both ABIs |
+| [plan-format](plan-format.md) |  | implemented |  | The plan as a file, and the one way in |
+| [scheduler](scheduler.md) |  | implemented |  | A scheduler, with processes on per-core executors |
 | [virtual-loopback](virtual-loopback.md) | [#315](../../../issues/315) | proposed |  | A loopback network per machine |
 | [file-watch](file-watch.md) | [#316](../../../issues/316) | proposed |  | Watching files for changes, on the host and in the guest |
-| [linux-dns](linux-dns.md) |  | draft |  | Name patterns for a Linux guest's DNS |
+| [linux-dns](linux-dns.md) |  | implemented |  | Name patterns for a Linux guest's DNS |
 | [libh9](libh9.md) |  | draft | in progress on claude/project-thread-prxykq | libh9, machines behind a C ABI |
 | [linux-window-tty](linux-window-tty.md) |  | draft |  | Linux terminals in 9front windows |
 
@@ -33,18 +33,18 @@ flowchart LR
   p_host_sandbox["host-sandbox<br/>draft"]:::draft
   p_audio["audio<br/>proposed"]:::draft
   p_host_cmd["host-cmd<br/>draft"]:::draft
-  p_child_machines["child-machines<br/>proposed"]:::draft
+  p_child_machines["child-machines<br/>implemented"]:::implemented
   p_wine_draw["wine-draw<br/>proposed"]:::draft
   p_baseline_1["baseline-1<br/>implemented"]:::implemented
-  p_file_interface["file-interface<br/>draft"]:::draft
-  p_host_handles["host-handles<br/>draft"]:::draft
-  p_kernel_port["kernel-port<br/>draft"]:::draft
-  p_memory_model["memory-model<br/>draft"]:::draft
-  p_plan_format["plan-format<br/>draft"]:::draft
-  p_scheduler["scheduler<br/>draft"]:::draft
+  p_file_interface["file-interface<br/>implemented"]:::implemented
+  p_host_handles["host-handles<br/>implemented"]:::implemented
+  p_kernel_port["kernel-port<br/>implemented"]:::implemented
+  p_memory_model["memory-model<br/>implemented"]:::implemented
+  p_plan_format["plan-format<br/>implemented"]:::implemented
+  p_scheduler["scheduler<br/>implemented"]:::implemented
   p_virtual_loopback["virtual-loopback<br/>proposed"]:::draft
   p_file_watch["file-watch<br/>proposed"]:::draft
-  p_linux_dns["linux-dns<br/>draft"]:::draft
+  p_linux_dns["linux-dns<br/>implemented"]:::implemented
   p_libh9["libh9<br/>draft"]:::draft
   p_linux_window_tty["linux-window-tty<br/>draft"]:::draft
   p_host_handles --> p_host_sandbox
