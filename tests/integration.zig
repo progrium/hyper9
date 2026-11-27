@@ -8163,8 +8163,12 @@ test "mkdir of anything already there is EEXIST and leaves it alone, and makes d
 test "a Linux process that touches a page past --memory is killed, as by the OOM killer, and h9 says why [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
-    // Each 1 MiB written takes a new chunk; 64m runs out well before 128.
-    const r = try runLinux(&le, false, &.{ "--memory", "64m", "sh", "-c", "head -c 134217728 /dev/zero | tr '\\000' x | (v=$(cat); echo ${#v}); echo status $?" });
+    // awk doubles a string until a copy into a fresh mapping touches a
+    // page past 64m, in a few dozen syscalls. A shell reading 128 MiB
+    // through $(cat) made about 750,000 (ash reads 128 bytes at a time),
+    // each an exit on a hypervisor engine, which under the load of a full
+    // run took WHP past the timeout.
+    const r = try runLinux(&le, false, &.{ "--memory", "64m", "sh", "-c", "awk 'BEGIN { s = \"x\"; for (;;) s = s s }'; echo status $?" });
     defer r.deinit();
     errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
     try std.testing.expect(std.mem.indexOf(u8, r.out, "status 137") != null);
