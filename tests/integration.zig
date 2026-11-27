@@ -5632,6 +5632,7 @@ test "a ws:// root goes through HTTP_PROXY with CONNECT, and NO_PROXY skips it [
     defer w.stop();
     var p: wsrelay.Proxy = undefined;
     try p.start(std.testing.io, null);
+    defer p.stop();
     const via = try runEnv(e, firstEngine(e), &.{ "--url", w.url(), "/bin/ls", "/bin/ls" }, &.{.{ "HTTP_PROXY", p.url() }}, 30_000);
     defer via.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{via.err});
@@ -5648,6 +5649,7 @@ test "a proxy answering 407 exits 125 with the status [websocket-9p]" {
     const e = try env(@src());
     var p: wsrelay.Proxy = undefined;
     try p.start(std.testing.io, 407);
+    defer p.stop();
     const r = try runEnv(e, firstEngine(e), &.{ "--url", "ws://127.0.0.1:1/9p", "/bin/echo" }, &.{.{ "HTTP_PROXY", p.url() }}, 30_000);
     defer r.deinit();
     try std.testing.expectEqual(125, r.code);
@@ -5661,6 +5663,7 @@ test "a /net/ws connect ignores HTTP_PROXY [websocket-9p]" {
     defer rl.stop();
     var p: wsrelay.Proxy = undefined;
     try p.start(std.testing.io, null);
+    defer p.stop();
     var cmd: [512]u8 = undefined;
     const r = try runEnv(e, firstEngine(e), &.{ "--rc", try rcWs(&cmd, rl.url(), "", "echo hi >/net/ws/$n/data && read </net/ws/$n/data") }, &.{.{ "HTTP_PROXY", p.url() }}, 30_000);
     defer r.deinit();

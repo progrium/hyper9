@@ -72,6 +72,11 @@ pub const Relay = struct {
     /// The accepting thread, which `stop` ends before closing the socket.
     thread: ?std.Thread = null,
     stopping: std.atomic.Value(bool) = .init(false),
+    /// Connection threads still running. They're detached and each holds
+    /// `rl`, so `stop` waits for them: a Relay usually lives in a case's
+    /// stack frame, and a thread outliving it writes over whatever a later
+    /// case puts there.
+    active: std.atomic.Value(u32) = .init(0),
 
     pub fn start(rl: *Relay, io: Io, port: u16, opts: Options) !void {
         const addr: net.IpAddress = .{ .ip4 = .loopback(port) };
@@ -111,10 +116,11 @@ pub const Relay = struct {
         };
     }
 
-    /// Stops accepting. Open connections run on until their peers end.
-    /// The accepting thread is woken with a connection of its own and
-    /// joined first: closing the socket under it would have it accept on
-    /// a closed (or reused) descriptor, after the Relay is gone.
+    /// Stops accepting, hangs up open connections, and waits for every
+    /// connection thread to end, so none touches the Relay after it's
+    /// gone. The accepting thread is woken with a connection of its own
+    /// and joined first: closing the socket under it would have it accept
+    /// on a closed (or reused) descriptor, after the Relay is gone.
     pub fn stop(rl: *Relay) void {
         rl.stopping.store(true, .release);
         if (rl.thread) |t| {
@@ -124,6 +130,12 @@ pub const Relay = struct {
             rl.thread = null;
         }
         rl.server.socket.close(rl.io);
+        // A connection still in its handshake isn't tracked yet. It's hung
+        // up on a later pass once it is, or ends when its peer does.
+        while (rl.active.load(.acquire) != 0) {
+            rl.hangupAll();
+            rl.io.sleep(.fromMilliseconds(10), .awake) catch {};
+        }
     }
 
     fn locked(rl: *Relay) void {
@@ -138,12 +150,21 @@ pub const Relay = struct {
                 return;
             }
             noDelay(st);
-            const t = std.Thread.spawn(.{}, conn, .{ rl, st }) catch {
+            _ = rl.active.fetchAdd(1, .acq_rel);
+            const t = std.Thread.spawn(.{}, connThread, .{ rl, st }) catch {
+                _ = rl.active.fetchSub(1, .acq_rel);
                 st.close(rl.io);
                 continue;
             };
             t.detach();
         }
+    }
+
+    /// Runs `conn`, then counts it done. Nothing may touch `rl` after the
+    /// decrement: `stop` can return, and the Relay go, right away.
+    fn connThread(rl: *Relay, st: net.Stream) void {
+        conn(rl, st);
+        _ = rl.active.fetchSub(1, .acq_rel);
     }
 
     fn track(rl: *Relay, st: net.Stream, add: bool) void {
@@ -392,13 +413,32 @@ pub const Proxy = struct {
     status: ?u16,
     connects: std.atomic.Value(u32) = .init(0),
     url_buf: [64]u8 = undefined,
+    thread: ?std.Thread = null,
+    stopping: std.atomic.Value(bool) = .init(false),
+    /// Connection threads still running, which `stop` waits for, as
+    /// Relay's does.
+    active: std.atomic.Value(u32) = .init(0),
 
     pub fn start(p: *Proxy, io: Io, status: ?u16) !void {
         const addr: net.IpAddress = .{ .ip4 = .loopback(0) };
         p.* = .{ .io = io, .server = try addr.listen(io, .{ .reuse_address = true }), .port = 0, .status = status };
         p.port = p.server.socket.address.getPort();
-        const t = try std.Thread.spawn(.{}, serve, .{p});
-        t.detach();
+        p.thread = try std.Thread.spawn(.{}, serve, .{p});
+    }
+
+    /// Stops accepting and waits for open tunnels to end, which they do
+    /// when their clients do. The accepting thread is woken and joined
+    /// first, as in Relay.stop.
+    pub fn stop(p: *Proxy) void {
+        p.stopping.store(true, .release);
+        if (p.thread) |t| {
+            const addr: net.IpAddress = .{ .ip4 = .loopback(p.port) };
+            if (addr.connect(p.io, .{ .mode = .stream })) |c| c.close(p.io) else |_| {}
+            t.join();
+            p.thread = null;
+        }
+        p.server.socket.close(p.io);
+        while (p.active.load(.acquire) != 0) p.io.sleep(.fromMilliseconds(10), .awake) catch {};
     }
 
     /// `http://127.0.0.1:PORT`.
@@ -409,12 +449,24 @@ pub const Proxy = struct {
     fn serve(p: *Proxy) void {
         while (true) {
             const st = deadline.accept(&p.server, p.io) catch return;
-            const t = std.Thread.spawn(.{}, conn, .{ p, st }) catch {
+            if (p.stopping.load(.acquire)) {
+                st.close(p.io);
+                return;
+            }
+            _ = p.active.fetchAdd(1, .acq_rel);
+            const t = std.Thread.spawn(.{}, connThread, .{ p, st }) catch {
+                _ = p.active.fetchSub(1, .acq_rel);
                 st.close(p.io);
                 continue;
             };
             t.detach();
         }
+    }
+
+    /// Runs `conn`, then counts it done, touching `p` no more.
+    fn connThread(p: *Proxy, st: net.Stream) void {
+        conn(p, st);
+        _ = p.active.fetchSub(1, .acq_rel);
     }
 
     fn conn(p: *Proxy, st: net.Stream) void {
@@ -476,6 +528,45 @@ pub const Proxy = struct {
         from.shutdown(io, .both) catch {};
     }
 };
+
+// A Relay or Proxy usually lives in a case's stack frame, so `stop` must
+// leave no thread holding it. One that did wrote into a later case's frame
+// on Windows CI, which crashed unlocking a `lock` that wasn't locked.
+
+test "a relay's stop hangs up an open connection and waits for its thread" {
+    const io = std.testing.io;
+    var rl: Relay = undefined;
+    try rl.start(io, 0, .{ .echo = true });
+    const addr: net.IpAddress = .{ .ip4 = .loopback(rl.port) };
+    const c = try addr.connect(io, .{ .mode = .stream });
+    defer c.close(io);
+    var w = c.writer(io, &.{});
+    try w.interface.writeAll("GET /9p HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" ++
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n");
+    var rb: [512]u8 = undefined;
+    var r = c.reader(io, &rb);
+    try std.testing.expect(std.mem.startsWith(u8, try r.interface.takeDelimiterInclusive('\n'), "HTTP/1.1 101"));
+    while (rl.accepted.load(.acquire) == 0) try io.sleep(.fromMilliseconds(1), .awake);
+    try std.testing.expectEqual(1, rl.active.load(.acquire));
+    rl.stop();
+    try std.testing.expectEqual(0, rl.active.load(.acquire));
+}
+
+test "a proxy's stop waits for its connection threads" {
+    const io = std.testing.io;
+    var p: Proxy = undefined;
+    try p.start(io, 407);
+    const addr: net.IpAddress = .{ .ip4 = .loopback(p.port) };
+    const c = try addr.connect(io, .{ .mode = .stream });
+    var w = c.writer(io, &.{});
+    try w.interface.writeAll("CONNECT 127.0.0.1:1 HTTP/1.1\r\n\r\n");
+    var rb: [512]u8 = undefined;
+    var r = c.reader(io, &rb);
+    try std.testing.expect(std.mem.startsWith(u8, try r.interface.takeDelimiterInclusive('\n'), "HTTP/1.1 407"));
+    c.close(io);
+    p.stop();
+    try std.testing.expectEqual(0, p.active.load(.acquire));
+}
 
 pub fn main(init: std.process.Init) !u8 {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
