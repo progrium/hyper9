@@ -136,6 +136,9 @@ jobs:
       # amd64 Alpine root the Linux cases run in.
       - run: scripts/fetch.sh diod alpine-amd64
       - run: zig build integration -Darch=amd64 -Dengines=kvm -Droot="$PWD/.local/9front/rootamd64"
+      # The namespace conformance script, against 9front's recorded
+      # transcript (design/kernel-port.md).
+      - run: zig build conformance -Darch=amd64 -Dengines=kvm -Droot="$PWD/.local/9front/rootamd64"
 
   # The demo page and its canvas cases in Chromium, over the 386 root.
   web:
@@ -163,6 +166,8 @@ jobs:
       - run: |
           npm install --no-save --no-package-lock playwright@1.63.0
           npx playwright install --with-deps chromium
+      # The pinned wasm-opt, for the web build's Asyncify pass.
+      - run: scripts/fetch.sh binaryen
       - run: zig build web-test -Doptimize=ReleaseSafe
 
   # hcpu's Done criteria (design/epoch-0/hcpu.md) on every host GitHub has: the

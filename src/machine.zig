@@ -3,10 +3,10 @@
 //! and I/O".
 //!
 //! Each guest process runs on its own kernel thread with its own vCPU. The
-//! first is made with kern.spawn: it builds the machine's namespace, loads
-//! the program and runs the exit loop. rfork makes the others with
-//! kern.fork, and they run the same loop. Machine.run waits for the first
-//! to exit, then stops the rest.
+//! first is spawned into the run's kern.Kernel: it builds the machine's
+//! namespace, loads the program and runs the exit loop. rfork makes the
+//! others with kern.fork, and they run the same loop. Machine.run waits
+//! for the first to exit, then stops the rest.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -18,7 +18,7 @@ const syscall = @import("abi/plan9/syscall.zig");
 const policy = @import("policy.zig");
 const segment = @import("segment.zig");
 const newns = @import("newns.zig");
-const cpupool = @import("cpupool.zig");
+const executor = @import("executor.zig");
 const gm = @import("guestmem.zig");
 const consin = @import("consin.zig");
 const web = @import("web.zig");
@@ -30,6 +30,7 @@ const ws = @import("ws.zig");
 const cred = @import("cred.zig");
 const statictree = @import("statictree.zig");
 const serve = @import("serve.zig");
+const resolver = @import("resolver.zig");
 const lsys = @import("abi/linux/sys.zig");
 const lsig = @import("abi/linux/signal.zig");
 const lexec = @import("abi/linux/exec.zig");
@@ -40,6 +41,8 @@ const kc = @import("abi/linux/kc.zig");
 const attr = @import("dotl/attr.zig");
 const gfx = @import("gfx.zig");
 const hostpty = @import("hostpty.zig");
+const handles = @import("host/host.zig");
+const child = @import("child.zig");
 
 pub const Status = union(enum) {
     /// The `exits` string; empty means success.
@@ -226,8 +229,11 @@ pub const Machine = struct {
         /// The host's DNS servers, as addresses: a Linux root without an
         /// /etc/resolv.conf gets one naming them, and the network policy
         /// lets port 53 reach them even when they're link-local
-        /// (design/epoch-0/linux-net.md). The CLI reads the host's
-        /// resolv.conf.
+        /// (design/epoch-0/linux-net.md). A machine that resolves for the
+        /// guest forwards its queries to them, in order
+        /// (design/linux-dns.md). Each may give a port, `ADDR!PORT`, for a
+        /// server of an embedder's or a test's own; resolv.conf names
+        /// the address. The CLI reads the host's resolv.conf.
         nameservers: []const []const u8 = &.{},
         /// Resolve a guest program in the 9front view even with a Linux
         /// root: `--rc` always means 9front's rc.
@@ -250,6 +256,16 @@ pub const Machine = struct {
         /// The sandbox policy (SPEC.md, "Sandbox policy"). Host paths in
         /// it, like `root` and `cwd`, must be absolute and resolved.
         policy: policy.Policy = .{},
+        /// The handles the kernel reaches outside through
+        /// (design/host-handles.md), for an embedder that supplies its
+        /// own: an in-memory tree, a dialer through its own proxy, or a
+        /// clock it controls. A handle left null is a capability the
+        /// machine doesn't have; `.{}` reaches nothing. The policy is
+        /// still compiled and checked beside it, and the embedder keeps
+        /// its handles open for the Machine's life and closes them after.
+        /// Its console, when it has one, replaces `stdio`'s. Null builds
+        /// the host the policy describes, as the CLI does.
+        host: ?handles.Host = null,
         /// Bind h9's own commands, `#H/bin`, after /bin; false leaves the
         /// bind out and masks `#H` (design/epoch-0/guest-tools.md).
         guest_tools: bool = true,
@@ -262,10 +278,6 @@ pub const Machine = struct {
         /// up (design/epoch-0/mounts.md, "Namespace files"). They're text: the
         /// CLI reads `--ns @FILE` on the host.
         ns: []const []const u8 = &.{},
-        /// How many processes may own a vCPU before the rest share the
-        /// pool (src/cpupool.zig); null means the engine's limit less the
-        /// pool. For tests of the pool.
-        owned_vcpus: ?u32 = null,
         /// Host events to deliver while a run is in progress (Ctrl-C,
         /// hangup); see `Signals`.
         signals: ?*Signals = null,
@@ -295,7 +307,121 @@ pub const Machine = struct {
         /// hands the machine to serve (design/epoch-0/port-streams.md), as
         /// `serve`'s connections are served, with no listener.
         serve_ports: bool = false,
+        /// A plan (design/plan-format.md), the text `h9 --plan` takes. Its
+        /// lines replace the fields a plan covers (the mounts, binds, and
+        /// namespace lines, the policy, the engine and architecture, the
+        /// environment, the cwd, the window, and serving), and the rest
+        /// (stdio, trace, signals, caches, credential helpers, and the
+        /// like) are taken from these options, as are `serve_token`, when
+        /// the plan has no `servetoken`, and `.fd` mounts, which a plan
+        /// can't hold as text. Host paths in it are taken as written, so
+        /// they're absolute. Its run line is `Machine.planRun`. A plan
+        /// that doesn't parse is `error.BadPlan`, with the line and why in
+        /// `initExplained`'s `conflict`.
+        plan: ?[]const u8 = null,
         stdio: Stdio,
+
+        /// The plan these options describe (design/plan-format.md), as
+        /// its lines would give it. A token in `serve_token`, which a plan
+        /// names by its file, and an embedder's `.fd` connections are left
+        /// out, with a note. Allocations go in `arena`.
+        pub fn toSpec(o: Options, arena: std.mem.Allocator) error{OutOfMemory}!policy.Spec {
+            const env = try arena.alloc([]const u8, o.env.len);
+            for (o.env, env) |e, *out| out.* = try std.fmt.allocPrint(arena, "{s}={s}", .{ e.name, e.value });
+            const listen = try arena.alloc([]const u8, o.serve.len);
+            for (o.serve, listen) |l, *out| out.* = try std.fmt.allocPrint(arena, "{f}", .{l});
+            var notes: std.ArrayList([]const u8) = .empty;
+            if (o.serve_token != null) try notes.append(arena, "servetoken: the embedder's, which a plan names by its file (servetoken @FILE)");
+            return .{
+                .mounts = o.mounts,
+                .binds = o.binds,
+                .ns = o.ns,
+                .policy = o.policy,
+                .guest_tools = o.guest_tools,
+                .engine = std.meta.stringToEnum(policy.EngineChoice, @tagName(o.engine)).?,
+                .arch = o.arch orelse engine.host_arch,
+                .env = env,
+                .cwd = o.cwd,
+                .gfx = if (o.gfx) |g| .{
+                    .headless = g.screen == .headless,
+                    .clipboard = g.clipboard,
+                    .scale = if (g.screen == .headless or g.scale == 1) null else g.scale,
+                    .size = if (g.size) |sz| .{ sz.dx, sz.dy } else null,
+                } else null,
+                .serve = listen,
+                .serve_root = if (std.mem.eql(u8, o.serve_root, "/")) null else o.serve_root,
+                .serve_origins = o.serve_origins,
+                .serve_net = o.serve_net,
+                .notes = notes.items,
+            };
+        }
+
+        /// The plan's text: what `toSpec` gives, written as a plan file.
+        pub fn toPlan(o: Options, arena: std.mem.Allocator) error{OutOfMemory}![]const u8 {
+            return (try o.toSpec(arena)).text(arena);
+        }
+
+        /// These options with plan `text`'s lines in place of the fields
+        /// a plan covers (see `plan`), allocated in `arena`; the run line
+        /// is in `run`. `io` reads a `servetoken @FILE`.
+        pub fn withPlan(o: Options, arena: std.mem.Allocator, io: std.Io, text: []const u8, run_line: *?[]const []const u8, why: *[]const u8) error{ OutOfMemory, BadPlan }!Options {
+            var perr: policy.PlanError = .{};
+            const s = policy.parsePlan(arena, text, &perr) catch |e| {
+                if (e == error.OutOfMemory) return error.OutOfMemory;
+                why.* = try std.fmt.allocPrint(arena, "plan: line {d}: {s}", .{ perr.line, perr.msg });
+                return error.BadPlan;
+            };
+            var r = o;
+            r.plan = null;
+            var mounts: std.ArrayList(Mount) = .empty;
+            try mounts.appendSlice(arena, s.mounts);
+            for (o.mounts) |m| if (m.kind == .fd) try mounts.append(arena, m);
+            r.mounts = mounts.items;
+            // The root's `index=`, which the CLI takes from its mounts
+            // too.
+            r.root_index = null;
+            for (s.mounts) |m| if (m.kind == .url) if (m.stack()) |st| if (st[0] == .root) {
+                if (m.index) |ix| r.root_index = rootIndexOf(ix);
+                break;
+            };
+            r.binds = s.binds;
+            r.ns = s.ns;
+            r.policy = s.policy;
+            r.guest_tools = s.guest_tools;
+            if (s.engine) |e| r.engine = std.meta.stringToEnum(engine.Choice, @tagName(e)).?;
+            r.arch = s.arch orelse o.arch;
+            const env = try arena.alloc(EnvVar, s.env.len);
+            for (s.env, env) |e, *out| {
+                const eq = std.mem.indexOfScalar(u8, e, '=').?;
+                out.* = .{ .name = e[0..eq], .value = e[eq + 1 ..] };
+            }
+            r.env = env;
+            r.cwd = s.cwd;
+            r.gfx = if (s.gfx) |g| .{
+                .screen = if (g.headless) .headless else .window,
+                .clipboard = g.clipboard,
+                .scale = g.scale orelse 1,
+                .size = if (g.size) |sz| .{ .dx = sz[0], .dy = sz[1] } else null,
+            } else null;
+            const listen = try arena.alloc(Listen, s.serve.len);
+            for (s.serve, listen) |a, *out| out.* = Listen.parse(a) catch {
+                why.* = try std.fmt.allocPrint(arena, "plan: serve {s}: not an address h9 can listen on", .{a});
+                return error.BadPlan;
+            };
+            r.serve = listen;
+            r.serve_root = s.serve_root orelse "/";
+            if (s.serve_token) |f| {
+                const tok = std.Io.Dir.cwd().readFileAlloc(io, f[1..], arena, .limited(4096)) catch {
+                    why.* = try std.fmt.allocPrint(arena, "plan: servetoken {s}: can't read it", .{f});
+                    return error.BadPlan;
+                };
+                r.serve_token = std.mem.trim(u8, tok, " \t\r\n");
+            }
+            r.serve_origins = s.serve_origins;
+            r.serve_net = s.serve_net;
+            run_line.* = s.run;
+            return r;
+        }
     };
 
     /// Host-held pseudoterminals (src/hostpty.zig).
@@ -312,10 +438,25 @@ pub const Machine = struct {
         /// Bumped by each call, for `run` to wait on.
         seq: std.atomic.Value(u32) = .init(0),
         pending: std.atomic.Value(u8) = .init(0),
+        /// A note `note` posts, for `run` to copy; guarded by `note_lock`.
+        note_buf: [kern.ERRMAX]u8 = undefined,
+        note_len: usize = 0,
+        note_lock: std.atomic.Mutex = .unlocked,
 
         const interrupt_bit = 1;
         const hangup_bit = 2;
         const stop_bit = 4;
+        const note_bit = 8;
+
+        /// Posts `msg` to the foreground note group, as a host process's
+        /// note (a child machine's `note` file, design/child-machines.md).
+        pub fn note(s: *Signals, io: std.Io, msg: []const u8) void {
+            while (!s.note_lock.tryLock()) std.atomic.spinLoopHint();
+            s.note_len = @min(msg.len, s.note_buf.len - 1);
+            @memcpy(s.note_buf[0..s.note_len], msg[0..s.note_len]);
+            s.note_lock.unlock();
+            s.raise(io, note_bit);
+        }
 
         /// Posts `interrupt` to the foreground note group (Ctrl-C).
         pub fn interrupt(s: *Signals, io: std.Io) void {
@@ -340,34 +481,42 @@ pub const Machine = struct {
         }
     };
 
-    pub const InitError = engine.CreateError || gfx.Error || error{PolicyConflict};
+    pub const InitError = engine.CreateError || gfx.Error || error{ PolicyConflict, BadPlan };
 
     /// Host streams behind the guest's console: reads from `in` (none means
-    /// EOF), writes to fd 1 go to `out` and to fd 2 to `err`.
-    pub const Stdio = struct {
-        in: ?*std.Io.Reader = null,
-        /// Makes a blocked read of `in` return, so a run can end while a
-        /// console read is pending. Without it such a run ends `stuck`.
-        in_cancel: ?consin.Cancel = null,
-        out: *std.Io.Writer,
-        err: *std.Io.Writer,
-        /// Called when the guest turns raw mode on or off (writing `rawon`
-        /// or `rawoff` to /dev/consctl, or closing its last consctl), and
-        /// echo (`echooff`, `echoon`). The CLI puts the host terminal in
-        /// raw mode or turns its echo off. The machine turns both back
-        /// when a run ends.
-        raw: ?Raw = null,
-    };
+    /// EOF), writes to fd 1 go to `out` and to fd 2 to `err`. They're the
+    /// machine's `Host` console (design/host-handles.md).
+    pub const Stdio = handles.Console;
 
     pub const Raw = kern.Console.Raw;
 
     gpa: std.mem.Allocator,
     io: std.Io,
+    /// The engine, with this machine's quota on its memory.
     engine: engine.Engine,
+    /// The engine itself, which child machines share with the machine
+    /// that started them (design/child-machines.md): it's destroyed with
+    /// the last machine that uses it.
+    backend: *Backend,
+    /// This machine's share of the engine's memory, which `engine`
+    /// counts against: its `--memory`, or a child's reservation from its
+    /// parent's. In `arena`.
+    quota: *engine.Quota,
+    /// A child machine's link to the machine that started it; null for a
+    /// root machine. In `arena`.
+    parent: ?*Parent = null,
     arch: engine.Arch,
     opts: Options,
     /// The compiled policy; allocated in `arena`.
     plan: policy.Plan,
+    /// The host the plan describes (design/host-handles.md), or
+    /// `Options.host`, in `arena`: the handles the kernel reaches outside
+    /// through. Built at init, with its directories opened; `plan.host`
+    /// points at the arena's copy.
+    host: handles.Host,
+    /// Whether `host`'s directory handles are the machine's to close: not
+    /// an embedder's.
+    owns_dirs: bool = true,
     arena: *std.heap.ArenaAllocator,
     msg_buf: [256]u8 = undefined,
     err_buf: [256]u8 = undefined,
@@ -386,6 +535,8 @@ pub const Machine = struct {
     out_of_memory: bool = false,
     /// The machine's claim on the screen, with `Options.gfx`; in `arena`.
     gfx_claim: ?*gfx.Claim = null,
+    /// `Options.plan`'s run line, in `arena`.
+    plan_run: ?[]const []const u8 = null,
     /// The listeners' bound addresses, once a run has opened them; in
     /// `arena`.
     serve_addrs: []const []const u8 = &.{},
@@ -400,6 +551,202 @@ pub const Machine = struct {
     /// server for `#ι` to ask.
     conn_static: bool = false,
 
+    /// An engine that one or more machines use (design/child-machines.md).
+    const Backend = struct {
+        gpa: std.mem.Allocator,
+        engine: engine.Engine,
+        refs: std.atomic.Value(u32) = .init(1),
+
+        fn get(b: *Backend) void {
+            _ = b.refs.fetchAdd(1, .acq_rel);
+        }
+
+        fn put(b: *Backend) void {
+            if (b.refs.fetchSub(1, .acq_rel) != 1) return;
+            b.engine.destroy();
+            b.gpa.destroy(b);
+        }
+    };
+
+    /// What a child machine (design/child-machines.md) has of the machine
+    /// that started it.
+    pub const Parent = struct {
+        /// The parent's run, which waits for its children before it
+        /// ends, and whose pool and process count the child's are under.
+        job: *Job,
+        /// The channels of the caller's paths (`policy.fromCaller`), held
+        /// until the child's namespace is built, which the machine device
+        /// hands out as `#μsN`.
+        sources: []?*anyopaque,
+        sources_taken: std.atomic.Value(bool) = .init(false),
+        /// Where the child starts, in its own namespace: the caller's cwd,
+        /// or the `cwd` line's. `/` if it isn't there.
+        cwd: ?[]const u8,
+    };
+
+    /// The machine of the guest process making the current kernel call,
+    /// for the machine device (design/child-machines.md).
+    pub const Caller = struct {
+        job: *Job,
+
+        /// The calling thread's guest process's machine, or null for a
+        /// thread that isn't one.
+        pub fn current() ?Caller {
+            const p: *Proc = @ptrCast(@alignCast(kern.aux() orelse return null));
+            return .{ .job = p.job };
+        }
+
+        pub fn machine(c: Caller) *const Machine {
+            return c.job.m;
+        }
+
+        /// What the machine device keys a machine's children by.
+        pub fn key(c: Caller) usize {
+            return @intFromPtr(c.job);
+        }
+
+        /// The bytes of memory the machine hasn't used or reserved.
+        pub fn memoryLeft(c: Caller) u64 {
+            return c.job.m.quota.left();
+        }
+
+        /// How many more processes the machine and its ancestors may
+        /// start, or null for no cap.
+        pub fn pidsLeft(c: Caller) ?u32 {
+            var left: ?u32 = null;
+            var a: ?*Job = c.job;
+            while (a) |q| : (a = q.parent_job) {
+                const cap = q.m.plan.pids orelse continue;
+                q.lockSpin();
+                const n = cap -| q.n_program;
+                q.lock.unlock();
+                left = if (left) |l| @min(l, n) else n;
+            }
+            return left;
+        }
+
+        /// The time left until the machine's deadline, or null for none.
+        pub fn timeLeft(c: Caller) ?u64 {
+            const t = c.job.m.plan.timeout_ns orelse return null;
+            const gone: u64 = @intCast(@max(0, kern.monoNs() - c.job.start_ns));
+            return @max(1, t -| gone);
+        }
+
+        /// The plan the machine was made from.
+        pub fn spec(c: Caller, arena: std.mem.Allocator) error{OutOfMemory}!policy.Spec {
+            return c.job.m.opts.toSpec(arena);
+        }
+
+        /// The machine's `#μsN`: the channel a child machine's plan named,
+        /// while its namespace is being built.
+        pub fn source(c: Caller, n: usize) ?*anyopaque {
+            const pa = c.job.m.parent orelse return null;
+            if (pa.sources_taken.load(.acquire) or n >= pa.sources.len) return null;
+            return pa.sources[n];
+        }
+    };
+
+    /// A child machine's plan (design/child-machines.md): `opts` compiled
+    /// with its mounts' and paths' sources in the caller's namespace,
+    /// whose paths are added to `paths` in the order the plan's `#μsN`
+    /// name them, its devices masked as the parent's are and more, and
+    /// devfs's checks of the parent's channels made by the parent's rules.
+    pub fn compileChild(arena: std.mem.Allocator, caller: Caller, opts: Options, paths: *std.ArrayList([]const u8), err_msg: *[]const u8) policy.CompileError!policy.Plan {
+        const pm = caller.job.m;
+        // opts.cwd is a path in the caller's namespace: its cwd, or the
+        // child's `cwd` line.
+        const in: policy.Inputs = .{ .mounts = opts.mounts, .binds = opts.binds, .cwd = opts.cwd, .arch = pm.arch, .guest_tools = opts.guest_tools, .nameservers = opts.nameservers, .caller = true };
+        var plan = try policy.compile(arena, in, opts.policy, err_msg);
+        try policy.fromCaller(arena, &plan, paths);
+        var mask: std.ArrayList(u8) = .empty;
+        try mask.appendSlice(arena, plan.devmask);
+        var dv = (std.unicode.Utf8View.init(pm.plan.devmask) catch unreachable).iterator();
+        while (dv.nextCodepointSlice()) |d| if (std.mem.indexOf(u8, mask.items, d) == null) try mask.appendSlice(arena, d);
+        plan.devmask = mask.items;
+        plan.rules = pm.plan.rules;
+        return plan;
+    }
+
+    /// The job a child machine's parent runs, for childGone.
+    pub fn parentJob(m: *const Machine) ?*Job {
+        return if (m.parent) |pa| pa.job else null;
+    }
+
+    /// Tells parent job `j` a child of it has ended and been freed, with
+    /// everything it allocated, so the parent's run may end; the last
+    /// thing a child's thread does (endChildren waits for it).
+    pub fn childGone(j: *Job, io: std.Io) void {
+        _ = j.kids.fetchSub(1, .acq_rel);
+        io.futexWake(u32, &j.kids.raw, std.math.maxInt(u32));
+    }
+
+    /// A child machine (design/child-machines.md) of the machine `caller`
+    /// runs in: it shares the parent's engine, its memory is reserved
+    /// from the parent's (`opts.policy.memory`, which must be set), and
+    /// its namespace is built from `sources`, the channels of the paths
+    /// `compileChild` gave, which it holds until then. On PolicyConflict,
+    /// `conflict` explains it. Free it with `deinit` and `gpa.destroy`, then `childGone`.
+    pub fn initChild(gpa: std.mem.Allocator, io: std.Io, caller: Caller, opts: Options, sources: []?*anyopaque, cwd: ?[]const u8, conflict: *[]const u8) InitError!*Machine {
+        const pj = caller.job;
+        const pm = pj.m;
+        const mem = opts.policy.memory orelse return error.PolicyConflict;
+        if (!pm.quota.take(mem)) {
+            conflict.* = "memory: more than the parent has left";
+            return error.PolicyConflict;
+        }
+        errdefer pm.quota.give(mem);
+        const arena = try gpa.create(std.heap.ArenaAllocator);
+        arena.* = .init(gpa);
+        errdefer {
+            arena.deinit();
+            gpa.destroy(arena);
+        }
+        const a = arena.allocator();
+        var paths: std.ArrayList([]const u8) = .empty;
+        var msg: []const u8 = "";
+        const plan = compileChild(a, caller, opts, &paths, &msg) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Conflict => {
+                conflict.* = msg;
+                return error.PolicyConflict;
+            },
+        };
+        if (paths.items.len != sources.len) return error.PolicyConflict;
+        const quota = try a.create(engine.Quota);
+        quota.* = .{ .limit = mem };
+        const pa = try a.create(Parent);
+        pa.* = .{ .job = pj, .sources = try a.dupe(?*anyopaque, sources), .cwd = if (cwd) |c| try a.dupe(u8, c) else null };
+        const plan_at = try a.create(policy.Plan);
+        plan_at.* = plan;
+        // No directory handles: the child's files are its caller's,
+        // reached through the caller's namespace.
+        const hst_at = try a.create(handles.Host);
+        hst_at.* = try handles.fromPlan(a, io, plan_at, .{ .console = opts.stdio });
+        var pl = plan;
+        pl.host = hst_at;
+        const m = try gpa.create(Machine);
+        pm.backend.get();
+        _ = pj.kids.fetchAdd(1, .acq_rel);
+        m.* = .{ .gpa = gpa, .io = io, .opts = opts, .arch = pm.arch, .engine = pm.backend.engine.withQuota(quota), .backend = pm.backend, .quota = quota, .parent = pa, .plan = pl, .host = hst_at.*, .arena = arena };
+        return m;
+    }
+
+    /// A child that never ran leaves the caller's channels held; they're
+    /// leaked rather than closed off a kernel process.
+    fn dropSourcesLeaked(m: *Machine) void {
+        const pa = m.parent orelse return;
+        pa.sources_taken.store(true, .release);
+    }
+
+    /// Closes the caller's channels a child machine holds, once its
+    /// namespace has them, or it won't build one. On the child's first
+    /// process.
+    fn dropSources(m: *Machine) void {
+        const pa = m.parent orelse return;
+        if (pa.sources_taken.swap(true, .acq_rel)) return;
+        for (pa.sources) |src| if (src) |ch| kern.childDropSource(ch);
+    }
+
     /// Each `serve` listener's bound address, in the order given, with
     /// port 0 resolved, once a run has opened them; empty before.
     pub fn serving(m: *const Machine) []const []const u8 {
@@ -409,6 +756,10 @@ pub const Machine = struct {
     /// Compiles a policy for a machine with these options, as `init` does,
     /// without creating one (for `--print`).
     pub fn compilePlan(arena: std.mem.Allocator, opts: Options, err_msg: *[]const u8) policy.CompileError!policy.Plan {
+        comptime {
+            // A plan's engine names are engine.Choice's.
+            for (std.meta.fieldNames(engine.Choice)) |f| std.debug.assert(@hasField(policy.EngineChoice, f));
+        }
         const arch = opts.arch orelse engine.host_arch orelse .arm64;
         var in: policy.Inputs = .{ .mounts = opts.mounts, .binds = opts.binds, .cwd = opts.cwd, .arch = arch, .guest_tools = opts.guest_tools, .nameservers = opts.nameservers };
         if (opts.serve.len > 0 or opts.serve_ports) {
@@ -514,20 +865,25 @@ pub const Machine = struct {
         const DUPLICATE_SAME_ACCESS: w.DWORD = 2;
     };
 
+    /// The run line of the plan the machine was made from
+    /// (design/plan-format.md), or null: `m.run(.{ .guest = argv[0] },
+    /// argv)` runs it.
+    pub fn planRun(m: *const Machine) ?[]const []const u8 {
+        return m.plan_run;
+    }
+
     /// Whether the options put a tree on `#L`.
     pub fn hasLinux(opts: Options) bool {
         for (opts.mounts) |mt| if (mt.stack()) |st| if (st[0] == .linux) return true;
         return false;
     }
 
-
     /// On PolicyConflict, `conflict` (if given) explains it.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, opts: Options) InitError!Machine {
         return initExplained(gpa, io, opts, null);
     }
 
-    pub fn initExplained(gpa: std.mem.Allocator, io: std.Io, opts: Options, conflict: ?*[]const u8) InitError!Machine {
-        const arch = opts.arch orelse engine.host_arch orelse return error.WrongArch;
+    pub fn initExplained(gpa: std.mem.Allocator, io: std.Io, given: Options, conflict: ?*[]const u8) InitError!Machine {
         const arena = try gpa.create(std.heap.ArenaAllocator);
         arena.* = .init(gpa);
         errdefer {
@@ -535,6 +891,17 @@ pub const Machine = struct {
             gpa.destroy(arena);
         }
         var msg: []const u8 = "";
+        // A plan's lines in place of the fields it covers
+        // (design/plan-format.md).
+        var plan_run: ?[]const []const u8 = null;
+        const opts = if (given.plan) |text| given.withPlan(arena.allocator(), io, text, &plan_run, &msg) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.BadPlan => {
+                if (conflict) |c| c.* = msg;
+                return error.BadPlan;
+            },
+        } else given;
+        const arch = opts.arch orelse engine.host_arch orelse return error.WrongArch;
         const plan = compilePlan(arena.allocator(), opts, &msg) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Conflict => {
@@ -543,8 +910,22 @@ pub const Machine = struct {
             },
         };
         var o = opts;
+        // The host's handles read the plan through a pointer, so they get
+        // a copy of it in the arena, which stays put when the Machine is
+        // moved; the plan isn't changed after it's compiled.
+        const plan_at = try arena.allocator().create(policy.Plan);
+        plan_at.* = plan;
+        // Its directory handles are opened now, before anything runs, and
+        // devfs opens beneath them (design/host-handles.md); the plan the
+        // machine's threads find holds it, in the arena.
+        const hst_at = try arena.allocator().create(handles.Host);
+        hst_at.* = if (o.host) |given_host| given_host else try handles.fromPlan(arena.allocator(), io, plan_at, .{ .console = o.stdio, .gfx = o.gfx, .open_dirs = !web.enabled });
+        const owns_dirs = o.host == null;
+        errdefer if (owns_dirs) handles.closeDirs(hst_at.*);
+        var pl = plan;
+        pl.host = hst_at;
         var claim: ?*gfx.Claim = null;
-        if (opts.gfx) |g| {
+        if (hst_at.window) |window| {
             // Closing the window is a hangup, so a machine without
             // Signals gets its own.
             const sig = o.signals orelse blk: {
@@ -555,12 +936,25 @@ pub const Machine = struct {
             o.signals = sig;
             const cl = try arena.allocator().create(GfxClose);
             cl.* = .{ .signals = sig, .io = io, .claim = .{ .ctx = cl, .close = GfxClose.close } };
-            try gfx.acquire(io, &cl.claim, g);
+            try window.acquire(io, &cl.claim);
             claim = &cl.claim;
         }
-        errdefer if (claim) |cl| gfx.release(cl);
+        errdefer if (claim) |cl| hst_at.window.?.release(cl);
         const eng = try engine.create(gpa, io, opts.engine, .{ .arch = arch, .memory = plan.memory });
-        return .{ .gpa = gpa, .io = io, .opts = o, .arch = arch, .engine = eng, .plan = plan, .arena = arena, .gfx_claim = claim };
+        errdefer eng.destroy();
+        // The machine's quota is all of the engine's memory; its children
+        // reserve theirs from it (design/child-machines.md).
+        const quota = try arena.allocator().create(engine.Quota);
+        quota.* = .{ .limit = plan.memory orelse engine.default_memory };
+        const backend = try gpa.create(Backend);
+        backend.* = .{ .gpa = gpa, .engine = eng };
+        return .{ .gpa = gpa, .io = io, .opts = o, .arch = arch, .engine = eng.withQuota(quota), .backend = backend, .quota = quota, .plan = pl, .host = hst_at.*, .owns_dirs = owns_dirs, .arena = arena, .gfx_claim = claim, .plan_run = plan_run };
+    }
+
+    /// Entropy from the machine's host (design/host-handles.md), for
+    /// AT_RANDOM and /proc's uuids.
+    fn entropy(m: *const Machine, buf: []u8) void {
+        if (m.host.random) |r| r.fill(buf) else m.io.random(buf);
     }
 
     /// What closing the window does: a hangup, as for a closed terminal.
@@ -582,9 +976,17 @@ pub const Machine = struct {
         // A stuck process still uses the engine and the plan, so they're
         // leaked rather than freed under it.
         if (m.stuck) return;
-        if (m.gfx_claim) |cl| gfx.release(cl);
+        if (m.gfx_claim) |cl| if (m.host.window) |w| w.release(cl) else gfx.release(cl);
+        if (m.owns_dirs) handles.closeDirs(m.host);
         vclock.forget(m.engine);
-        m.engine.destroy();
+        // A child gives its reservation back to its parent
+        // (design/child-machines.md); childGone then lets the parent's
+        // run end.
+        if (m.parent) |pa| {
+            m.dropSourcesLeaked();
+            pa.job.m.quota.give(m.quota.limit);
+        }
+        m.backend.put();
         m.arena.deinit();
         m.gpa.destroy(m.arena);
     }
@@ -598,6 +1000,29 @@ pub const Machine = struct {
         const want = m.plan.cpus orelse host;
         const max = m.engine.maxVcpus() catch want;
         return @max(1, @min(want, max));
+    }
+
+    /// Starts the machine's resolver when its plan resolves for the guest
+    /// (design/linux-dns.md), forwarding to `Options.nameservers`. It's in
+    /// the arena, so a stuck process that still asks for it finds its
+    /// ports closed rather than freed memory.
+    fn startResolver(m: *Machine) ?*resolver.Resolver {
+        m.plan.dns = null;
+        if (!m.plan.resolves or !resolver.supported) return null;
+        const names = m.plan.names orelse return null;
+        const a = m.arena.allocator();
+        var servers: std.ArrayList(resolver.Server) = .empty;
+        for (m.opts.nameservers) |ns| if (resolver.parseServer(ns)) |s| servers.append(a, s) catch return null;
+        // Its sockets are the host's dialer's and listener's
+        // (design/host-handles.md); a plan that resolves has a network,
+        // so both are there.
+        const dial = m.host.dial orelse return null;
+        const listen = m.host.listen orelse return null;
+        const r = a.create(resolver.Resolver) catch return null;
+        r.* = .{ .gpa = m.gpa, .patterns = m.plan.net_allow, .names = names, .servers = servers.items, .dial = dial, .listen = listen };
+        r.start() catch return null;
+        m.plan.dns = r;
+        return r;
     }
 
     /// Runs a program to completion. `argv[0]` is the program's name as it
@@ -667,14 +1092,21 @@ pub const Machine = struct {
             break :blk s;
         } else null;
         defer if (srv) |s| s.close();
+        // The machine's resolver, while it runs (design/linux-dns.md).
+        // Without one, port 53 is refused.
+        const dns = m.startResolver();
+        defer if (dns) |r| r.stop();
         // Heap-allocated, with its own copy of the machine, so a stuck
         // process never refers to the caller's Machine.
+        // The guest's console is the host's (design/host-handles.md): an
+        // embedder's host's, or `Options.stdio` as it is for this run,
+        // since an embedder may change it between runs.
+        const given_console = if (m.opts.host) |h| h.console else null;
+        m.host.console = given_console orelse m.opts.stdio;
+        if (m.plan.host) |h| @constCast(h).console = m.host.console;
+        const sc = m.host.console.?;
         const job = try m.gpa.create(Job);
-        const pool = cpupool.Pool.init(m.gpa, m.io, m.engine, m.plan.cpus, m.opts.owned_vcpus) catch |e| {
-            m.gpa.destroy(job);
-            return e;
-        };
-        job.* = .{ .m = undefined, .mc = m.*, .prog = prog, .argv = argv, .con = .{ .in = null, .out = m.opts.stdio.out, .err = m.opts.stdio.err, .raw = m.opts.stdio.raw }, .pool = pool, .srv = srv };
+        job.* = .{ .m = undefined, .mc = m.*, .prog = prog, .argv = argv, .con = .{ .in = null, .out = sc.out, .err = sc.err, .raw = sc.raw }, .srv = srv, .parent_job = if (m.parent) |pa| pa.job else null };
         // Host ptys can be asked for from here; the pty server takes them
         // once the namespace is built. Every process has exited (or is
         // stuck) by the time `end` fails the rest.
@@ -682,7 +1114,6 @@ pub const Machine = struct {
         if (ptys) |ps| ps.begin();
         defer if (ptys) |ps| ps.end();
         if (srv) |s| s.cfg.trace_lock = &job.trace_lock;
-        job.pool.gpa = m.gpa;
         job.ncpu = m.cpuCount();
         kern.setNoteKick(Proc.noteKick);
         kern.setProcStatus(Proc.status);
@@ -701,24 +1132,51 @@ pub const Machine = struct {
             m.gpa.destroy(job);
             return e;
         };
-        if (m.opts.stdio.in) |src| {
-            job.con_in = .{ .io = m.io, .src = src, .cancel = m.opts.stdio.in_cancel, .id = job.con_id, .wake = kern.wakeConsole };
+        if (sc.in) |src| {
+            job.con_in = .{ .io = m.io, .src = src, .cancel = sc.in_cancel, .id = job.con_id, .wake = kern.wakeConsole };
             job.con.in = &job.con_in.?;
         }
-        const first = job.newProc(.program) catch |e| {
+        // The run's kernel (design/kernel-port.md): its processes, note
+        // groups, #s board and /proc are this run's alone.
+        const kernel = kern.Kernel.init(m.gpa, &m.host) catch |e| {
             kern.removeConsole(job.con_id);
-            job.pool.deinit();
+            m.gpa.destroy(job);
+            return e;
+        };
+        job.kernel = kernel;
+        const first = job.newProc(.program) catch |e| {
+            kernel.deinit();
+            kern.removeConsole(job.con_id);
             m.gpa.destroy(job);
             return switch (e) {
                 error.OutOfMemory => error.OutOfMemory,
-                error.TooManyProcs => unreachable, // the cap is at least 1
+                // The cap is at least 1, but a child machine's parent's
+                // processes count too (design/child-machines.md).
+                error.TooManyProcs => m.fail("too many processes: the parent's --pids is reached", .{}),
             };
         };
-        kern.spawn("h9", Proc, firstMain, first) catch |e| {
+        // Its processes run on executors (design/scheduler.md), where the
+        // engine has them.
+        if (executor.enabled and executor.usable(m.engine.kind())) {
+            job.sched = executor.Sched.create(m.gpa, m.io, m.engine, job.ncpu, .{ .thread_init = Job.threadInit, .init_ctx = job }) catch |e| {
+                job.dropProc(first);
+                kernel.deinit();
+                kern.removeConsole(job.con_id);
+                job.procs.deinit(m.gpa);
+                m.gpa.destroy(job);
+                return switch (e) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    else => error.Kern,
+                };
+            };
+            kernel.setScheduler(job.sched.?, executor.Sched.startC);
+        }
+        kernel.spawn("h9", Proc, firstMain, first) catch |e| {
+            if (job.sched) |s| _ = s.shutdown(grace_ms);
             job.dropProc(first);
+            kernel.deinit();
             kern.removeConsole(job.con_id);
             job.procs.deinit(m.gpa);
-            job.pool.deinit();
             m.gpa.destroy(job);
             return e;
         };
@@ -727,14 +1185,25 @@ pub const Machine = struct {
         // A machine that's ending doesn't redial: a 9P2000.L.Z mount whose
         // host stream drops as the processes stop would run its credential
         // helper and dial again for nothing, maybe still at it as h9 exits.
-        if (job.mach.load(.acquire)) |mc| hstream.unregisterHost(@intFromPtr(mc));
+        hstream.unregisterHost(kernel);
         // The machine ends with its first process: any others are stopped,
         // as at a timeout.
         job.stopAll();
         if (!job.waitAll()) {
+            // The executors stay for what's stuck, with the Job.
+            if (job.sched) |s| _ = s.shutdown(0);
             m.stuck = true;
             m.root_changes = job.rootChanges();
             m.out_of_memory = job.out_of_memory.load(.acquire);
+            kern.removeConsole(job.con_id);
+            job.con.reset();
+            return .{ .killed = if (timed_out) timeout_note else stopped_note };
+        }
+        // Children never outlive the machine that started them
+        // (design/child-machines.md), and use its pool and engine.
+        if (!job.endChildren()) {
+            m.stuck = true;
+            m.root_changes = job.rootChanges();
             kern.removeConsole(job.con_id);
             job.con.reset();
             return .{ .killed = if (timed_out) timeout_note else stopped_note };
@@ -743,13 +1212,16 @@ pub const Machine = struct {
         job.con.reset();
         m.root_changes = job.rootChanges();
         m.out_of_memory = job.out_of_memory.load(.acquire);
+        if (job.sched) |s| if (!s.shutdown(grace_ms)) {
+            m.stuck = true;
+            return .{ .killed = if (timed_out) timeout_note else stopped_note };
+        };
         if (job.mach.load(.acquire)) |mc| {
-            dotl.unregister(@intFromPtr(mc));
             hidx.unregister(@intFromPtr(mc));
-            hstream.unregisterHost(@intFromPtr(mc));
             _ = hstream.waitConnects(@intFromPtr(mc), grace_ms);
             mc.put();
         }
+        kernel.deinit();
         // The static trees the run's mounts served, now nothing dials them.
         if (comptime !no_threads) for (job.mc.static_servers.items) |sv| sv.stop();
         job.mc.static_servers.deinit(m.gpa);
@@ -759,7 +1231,6 @@ pub const Machine = struct {
         if (!freed) m.stuck = true;
         defer if (freed) {
             job.procs.deinit(m.gpa);
-            job.pool.deinit();
             m.gpa.destroy(job);
         };
         if (timed_out) return .{ .killed = timeout_note };
@@ -805,6 +1276,9 @@ pub const Machine = struct {
         /// The first process's outcome, set before `first_done`.
         result: RunError!Status = error.Kern,
         first_done: std.Io.Event = .unset,
+        /// The run's kernel; `run` deinits it once every process has
+        /// ended (and leaks it with the rest when one is stuck).
+        kernel: ?*kern.Kernel = null,
         /// The kernel's machine, set by the first process once it's a
         /// kernel process, for posting host-side notes. `run` releases it.
         mach: std.atomic.Value(?*kern.Mach) = .init(null),
@@ -818,6 +1292,9 @@ pub const Machine = struct {
         out_of_memory: std.atomic.Value(bool) = .init(false),
         /// Set to end every process; exit loops check it after every exit.
         stopping: std.atomic.Value(bool) = .init(false),
+        /// The executors its processes run on (design/scheduler.md), or
+        /// null on the web host, whose processes are tasks on its one.
+        sched: ?*executor.Sched = null,
         /// Guards `procs`, `next_pid` and each Proc's `kproc` and `lease`.
         lock: std.atomic.Mutex = .unlocked,
         /// Live processes. A process is only made by a live one, so once
@@ -830,8 +1307,11 @@ pub const Machine = struct {
         /// The listeners, with `--serve` (design/epoch-0/serve.md).
         srv: ?*serve.Server = null,
         trace_lock: std.atomic.Mutex = .unlocked,
-        /// vCPUs for the processes.
-        pool: cpupool.Pool,
+        /// A child machine's parent's run (design/child-machines.md),
+        /// whose `--pids` its processes count against too.
+        parent_job: ?*Job = null,
+        /// The child machines this run has started that haven't ended.
+        kids: std.atomic.Value(u32) = .init(0),
         /// The CPUs /dev/sysstat lists (design/epoch-0/go-compat.md).
         ncpu: u32 = 1,
         /// When the run started, for /proc/uptime.
@@ -885,8 +1365,10 @@ pub const Machine = struct {
         }
 
         /// Posts a host-side note, if the first process has started.
-        fn post(j: *Job, to: kern.Mach.To, msg: [*:0]const u8) void {
-            if (j.mach.load(.acquire)) |mc| _ = mc.post(to, msg);
+        /// Returns whether the note reached a process.
+        fn post(j: *Job, to: kern.Mach.To, msg: [*:0]const u8) bool {
+            const mc = j.mach.load(.acquire) orelse return false;
+            return mc.post(to, msg) > 0;
         }
 
         /// Whose a new process is: the program's, or serving's: the server
@@ -903,7 +1385,11 @@ pub const Machine = struct {
             errdefer gpa.destroy(p);
             j.lockSpin();
             defer j.lock.unlock();
-            if (owner == .program) if (j.m.plan.pids) |cap| if (j.n_program >= cap) return error.TooManyProcs;
+            if (owner == .program) {
+                if (j.m.plan.pids) |cap| if (j.n_program >= cap) return error.TooManyProcs;
+                if (!j.takeAncestors()) return error.TooManyProcs;
+            }
+            errdefer if (owner == .program) j.giveAncestors(null);
             try j.procs.append(gpa, p);
             if (owner == .program) j.n_program += 1;
             p.* = .{ .job = j, .pid = j.next_pid, .serving = owner == .serving };
@@ -925,8 +1411,62 @@ pub const Machine = struct {
 
         /// Takes a leaving process out of the counts. Called with `lock`
         /// held.
+        /// An executor's host thread, set up for the machine: devfs
+        /// checks its accesses against the plan, as a process's thread's.
+        fn threadInit(ctx: ?*anyopaque) void {
+            const j: *Job = @ptrCast(@alignCast(ctx.?));
+            kern.setPlan(&j.m.plan);
+            kern.setPages(&j.pages);
+            kern.setCpus(j.ncpu);
+        }
+
         fn uncount(j: *Job, p: *Proc) void {
-            if (!p.serving) j.n_program -= 1;
+            if (p.serving) return;
+            j.n_program -= 1;
+            j.giveAncestors(null);
+        }
+
+        /// Counts a new process against each ancestor's `--pids`
+        /// (design/child-machines.md), or none if one is full.
+        fn takeAncestors(j: *Job) bool {
+            var a = j.parent_job;
+            while (a) |q| : (a = q.parent_job) {
+                q.lockSpin();
+                const full = if (q.m.plan.pids) |cap| q.n_program >= cap else false;
+                if (!full) q.n_program += 1;
+                q.lock.unlock();
+                if (full) {
+                    j.giveAncestors(q);
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        /// Takes a process out of the ancestors' counts, up to `upto`.
+        fn giveAncestors(j: *Job, upto: ?*Job) void {
+            var a = j.parent_job;
+            while (a) |q| : (a = q.parent_job) {
+                if (q == upto) return;
+                q.lockSpin();
+                q.n_program -= 1;
+                q.lock.unlock();
+            }
+        }
+
+        /// Stops the run's child machines and waits for them to end.
+        /// Returns false if some are stuck.
+        fn endChildren(j: *Job) bool {
+            if (j.kids.load(.acquire) == 0) return true;
+            child.stopAll(@intFromPtr(j));
+            var waited: u32 = 0;
+            while (true) {
+                const n = j.kids.load(.acquire);
+                if (n == 0) return true;
+                if (waited >= grace_ms + teardown_ms) return false;
+                j.m.io.futexWaitTimeout(u32, &j.kids.raw, n, .{ .duration = .{ .raw = .fromMilliseconds(10), .clock = .awake } }) catch {};
+                waited += 10;
+            }
         }
 
         /// Waits for the first process to exit, delivering host signals
@@ -943,23 +1483,38 @@ pub const Machine = struct {
             while (true) {
                 const seq = @atomicLoad(u32, futex, .acquire);
                 if (j.first_done.isSet()) break;
+                // A note sent before the first process is up reaches
+                // nobody: it stays pending, and is tried again shortly.
+                var held: u8 = 0;
                 if (sig) |s| {
                     const bits = s.pending.swap(0, .acq_rel);
                     if (bits & Signals.stop_bit != 0) break;
-                    if (bits & Signals.interrupt_bit != 0) j.post(.foreground, "interrupt");
+                    if (bits & Signals.interrupt_bit != 0 and !j.post(.foreground, "interrupt")) held |= Signals.interrupt_bit;
+                    if (bits & Signals.note_bit != 0) {
+                        var nb: [kern.ERRMAX]u8 = undefined;
+                        while (!s.note_lock.tryLock()) std.atomic.spinLoopHint();
+                        const msg = std.fmt.bufPrintSentinel(&nb, "{s}", .{s.note_buf[0..s.note_len]}, 0) catch "interrupt";
+                        s.note_lock.unlock();
+                        if (!j.post(.foreground, msg)) held |= Signals.note_bit;
+                    }
                     if (bits & Signals.hangup_bit != 0 and !hung_up) {
                         hung_up = true;
-                        j.post(.all, "hangup");
+                        _ = j.post(.all, "hangup");
                         deadline = std.Io.Timestamp.now(io, .awake).addDuration(.fromMilliseconds(hangup_grace_ms));
                     }
+                    if (held != 0) _ = s.pending.fetchOr(held, .acq_rel);
                 }
+                const retry: std.Io.Duration = .fromMilliseconds(10);
                 const d = deadline orelse {
-                    io.futexWaitUncancelable(u32, futex, seq);
+                    if (held != 0) {
+                        io.futexWaitTimeout(u32, futex, seq, .{ .duration = .{ .raw = retry, .clock = .awake } }) catch {};
+                    } else io.futexWaitUncancelable(u32, futex, seq);
                     continue;
                 };
                 const left = std.Io.Timestamp.now(io, .awake).durationTo(d);
                 if (left.nanoseconds > 0) {
-                    io.futexWaitTimeout(u32, futex, seq, .{ .duration = .{ .raw = left, .clock = .awake } }) catch {};
+                    const wait = if (held != 0 and left.nanoseconds > retry.nanoseconds) retry else left;
+                    io.futexWaitTimeout(u32, futex, seq, .{ .duration = .{ .raw = wait, .clock = .awake } }) catch {};
                     continue;
                 }
                 // The grace period after a hangup is over.
@@ -967,7 +1522,7 @@ pub const Machine = struct {
                 // The timeout: hangup first, then the grace period.
                 hung_up = true;
                 j.timed_out.store(true, .release);
-                j.post(.all, "hangup");
+                _ = j.post(.all, "hangup");
                 deadline = std.Io.Timestamp.now(io, .awake).addDuration(.fromMilliseconds(hangup_grace_ms));
             }
             return j.timed_out.load(.acquire);
@@ -1028,10 +1583,13 @@ pub const Machine = struct {
         /// Set on the process's own thread; guarded by `job.lock`.
         kproc: ?*kern.Proc = null,
         /// How it runs guest code, while it does.
-        lease: ?*cpupool.Lease = null,
-        lease_store: cpupool.Lease = undefined,
+        lease: ?*executor.Lease = null,
+        lease_store: executor.Lease = undefined,
         as: ?engine.AddressSpace = null,
-        segs: segment.Segs = .{},
+        /// A 9front process's memory: its segments, as mappings in the
+        /// kernel's Mms (src/segment.zig), mapped into `as`. Swapped by
+        /// exec under `dbg_lock`.
+        space: ?segment.Space = null,
         sys: syscall.Process = undefined,
         /// Registers to start from.
         ureg: engine.Ureg = undefined,
@@ -1064,7 +1622,7 @@ pub const Machine = struct {
         lx: ?*lsys.Process = null,
         /// Set in a vfork child: its parent waits on it until the child
         /// execs or exits.
-        vfork_done: ?*std.Io.Event = null,
+        vfork_done: ?*executor.Event = null,
         /// Set by the stop kick hook when a debugger asks the process to
         /// stop, so the exit loop asks the kernel at its next stop point.
         stop_flag: std.atomic.Value(bool) = .init(false),
@@ -1088,7 +1646,7 @@ pub const Machine = struct {
         }
 
         fn noteMem(p: *Proc) void {
-            const n = if (p.lx) |l| l.mm.bytes() else p.segs.mapped();
+            const n = if (p.lx) |l| l.mm.bytes() else if (p.space) |*s| s.bytes() else 0;
             p.mem_kb.store(n / 1024, .release);
         }
 
@@ -1117,7 +1675,10 @@ pub const Machine = struct {
         /// thread.
         fn segments(aux: ?*anyopaque, buf: [*]u8, n: c_int) callconv(.c) c_int {
             const p: *Proc = @ptrCast(@alignCast(aux orelse return 0));
-            return @intCast(p.segs.segmentText(buf[0..@intCast(n)]));
+            p.dbgLock();
+            defer p.dbg_lock.unlock();
+            const s = if (p.space) |*sp| sp else return 0;
+            return @intCast(s.segmentText(buf[0..@intCast(n)]));
         }
 
         /// The kernel's hook for /proc/n/status: the state, as 9front's
@@ -1129,7 +1690,7 @@ pub const Machine = struct {
             const out = buf[0..@intCast(n)];
             const nr = p.in_sys.load(.acquire);
             var name: []const u8 = "Running";
-            if (nr != 0) name = std.enums.tagName(syscall.Nr, @enumFromInt(nr - 1)) orelse "Syscall";
+            if (nr != 0) name = std.enums.tagName(syscall.Nr, @fromBackingInt(@intCast(nr - 1))) orelse "Syscall";
             const len = @min(name.len, out.len - 1);
             @memcpy(out[0..len], name[0..len]);
             if (nr != 0 and len > 0) out[0] = std.ascii.toUpper(out[0]);
@@ -1198,7 +1759,7 @@ pub const Machine = struct {
             const data = b[0..@intCast(@max(n, 0))];
             p.dbgLock();
             defer p.dbg_lock.unlock();
-            const r: kern.DebugError!usize = switch (@as(kern.DebugFile, @enumFromInt(file))) {
+            const r: kern.DebugError!usize = switch (@as(kern.DebugFile, @fromBackingInt(@intCast(file)))) {
                 .mem => p.memIo(off, data, write != 0),
                 .regs => p.regsIo(off, data, write != 0),
                 .fpregs => p.fpregsIo(off, data, write != 0),
@@ -1207,13 +1768,39 @@ pub const Machine = struct {
         }
 
         /// /proc/n/mem: the process's memory at `addr`, as 9front's
-        /// procctlmemio, through its address space, so only what's mapped
-        /// there. A write into text first gives the process its own copy
-        /// of the text (9front's txt2data), then makes its vCPU fetch the
-        /// new code. Called with `dbg_lock` held.
+        /// procctlmemio, through its mappings, so only what's mapped
+        /// there, a page at a time. A write goes in whatever the mapping
+        /// allows, text included, into the process's own copy of a page a
+        /// fork shares (9front's txt2data, by copy-on-write), and then
+        /// makes its vCPU fetch the new code. Called with `dbg_lock` held.
         fn memIo(p: *Proc, addr: u64, data: []u8, write: bool) kern.DebugError!usize {
+            if (p.lx != null) return p.memIoAs(addr, data, write);
             const as = p.as orelse return error.BadAddress;
-            const text = write and (p.segs.ownText(as, addr, data.len) catch return error.NoMemory);
+            const sp = if (p.space) |*s| s else return error.BadAddress;
+            var done: usize = 0;
+            while (done < data.len) {
+                const va = addr +% done;
+                if (va < addr) break;
+                const chunk = @min(data.len - done, engine.page_size - va % engine.page_size);
+                const piece = data[done..][0..chunk];
+                const mm = sp.mmFor(va);
+                if (!mm.mapped(va)) break;
+                if (write) {
+                    mm.hostWrite(va, piece) catch |e| return if (e == error.NoSpace) error.NoMemory else error.BadAddress;
+                } else {
+                    sp.read(va, piece) catch break;
+                }
+                done += chunk;
+            }
+            if (done == 0 and data.len > 0) return error.BadAddress;
+            if (write) as.codeChanged(addr, done);
+            return done;
+        }
+
+        /// /proc/n/mem for a Linux process, through its address space,
+        /// so only what's mapped there.
+        fn memIoAs(p: *Proc, addr: u64, data: []u8, write: bool) kern.DebugError!usize {
+            const as = p.as orelse return error.BadAddress;
             var done: usize = 0;
             while (done < data.len) {
                 const va = addr +% done;
@@ -1223,7 +1810,6 @@ pub const Machine = struct {
                 done += chunk;
             }
             if (done == 0 and data.len > 0) return error.BadAddress;
-            if (text) as.codeChanged(addr, done);
             return done;
         }
 
@@ -1267,7 +1853,7 @@ pub const Machine = struct {
             return n;
         }
 
-        fn setLease(p: *Proc, l: ?*cpupool.Lease) void {
+        fn setLease(p: *Proc, l: ?*executor.Lease) void {
             p.job.lockSpin();
             defer p.job.lock.unlock();
             p.lease = l;
@@ -1280,7 +1866,8 @@ pub const Machine = struct {
                 .gpa = m.gpa,
                 .engine = m.engine,
                 .as = p.as.?,
-                .segs = &p.segs,
+                .space = &p.space.?,
+                .io = m.io,
                 .trace = m.opts.trace,
                 .trace_lock = &p.job.trace_lock,
             };
@@ -1317,7 +1904,8 @@ pub const Machine = struct {
             if (p.lx != null) {
                 p.dropLinux();
             } else if (p.as) |as| {
-                p.segs.release(as);
+                if (p.space) |*s| s.release(as);
+                p.space = null;
                 as.destroy();
             }
             // The namespace and fds can hold overlays, whose pages are the
@@ -1352,15 +1940,18 @@ pub const Machine = struct {
         p.setKproc();
         const mc = kern.mach();
         j.mach.store(mc, .release);
-        // What #ℓ's translators send as the machine's user.
-        if (mc) |x| {
-            dotl.register(@intFromPtr(x), .{ .user = kern.user(), .user_map = m.opts.user_map, .io = m.io });
+        // The kernel keeps what its devices look up for the machine:
+        // what #ℓ's translators send as the machine's user.
+        if (mc != null) {
+            const k = j.kernel.?;
+            dotl.register(k, .{ .user = kern.user(), .user_map = m.opts.user_map, .io = m.io });
             // Where #ι caches compiled indexes.
-            hidx.register(@intFromPtr(x), .{ .cache_dir = m.opts.index_cache, .io = m.io });
+            hidx.register(k, .{ .cache_dir = m.opts.index_cache, .io = m.io });
             // What #ℓ redials a WebSocket root or mount with.
-            hstream.registerHost(@intFromPtr(x), if (m.rootUrl()) |r| if (r.kind == .ws) r.addr else null else null, m.rootStreamOptions(), m.mountStreamOptions());
+            hstream.registerHost(k, if (m.rootUrl()) |r| if (r.kind == .ws) r.addr else null else null, m.rootStreamOptions(), m.mountStreamOptions());
         }
         const r = m.startFirst(p);
+        m.dropSources();
         // What the root's index saved, for -v.
         if (m.opts.verbose) if (m.hidx_root) |n| m.indexCounts(n);
         // The status and err_msg can point into the Proc or its errstr,
@@ -1399,7 +1990,18 @@ pub const Machine = struct {
     fn startFirst(m: *Machine, p: *Proc) RunError!Status {
         const j = p.job;
         if (j.stopping.load(.acquire)) return .{ .killed = timeout_note };
-        const built = try m.buildNamespace(j.con_id);
+        const built = m.buildNamespace(j.con_id) catch |e| {
+            m.dropSources();
+            return e;
+        };
+        // A child machine's namespace holds the caller's channels now,
+        // and it starts where the caller is (design/child-machines.md).
+        m.dropSources();
+        if (m.parent) |pa| if (pa.cwd) |cwd| {
+            var cb: [std.fs.max_path_bytes + 1]u8 = undefined;
+            const at = std.fmt.bufPrintSentinel(&cb, "{s}", .{cwd}, 0) catch "/";
+            kern.chdir(at) catch kern.chdir("/") catch {};
+        };
         const root_ov = built.root_overlay;
         if (m.opts.ns.len > 0) {
             var cd = false;
@@ -1495,9 +2097,11 @@ pub const Machine = struct {
         kern.setText(std.fmt.bufPrintSentinel(&name_buf, "{s}", .{basename(name)}, 0) catch "a.out");
 
         p.as = try m.engine.newAddressSpace();
-        const img = try loader.load(m.gpa, m.engine, p.as.?, bytes, argv, p.pid);
+        const img = try loader.load(m.gpa, m.engine, p.as.?, bytes, argv, p.pid, null);
         // Under the lock, since /proc/n/segment may be read already.
-        p.segs.replace(p.as.?, img.segs);
+        p.dbgLock();
+        p.space = img.space;
+        p.dbg_lock.unlock();
         p.tos = img.tos;
         p.ureg = .initExec(img.arch, img.entry, img.sp, img.tos);
         p.extra = .initExec(img.arch);
@@ -1520,7 +2124,8 @@ pub const Machine = struct {
             error.OutOfMemory => return error.OutOfMemory,
             error.TooManyProcs => unreachable, // the cap is at least 1
         };
-        const flags = kern.RF.PROC | kern.RF.NAMEG | kern.RF.FDG | kern.RF.ENVG | kern.RF.NOTEG | kern.RF.NOWAIT;
+        // It waits in the host for connections: a host thread of its own.
+        const flags = kern.RF.PROC | kern.RF.NAMEG | kern.RF.FDG | kern.RF.ENVG | kern.RF.NOTEG | kern.RF.NOWAIT | kern.RF.HOSTTHREAD;
         kern.fork(flags, p.pid, Proc, serverMain, p) catch {
             j.dropProc(p);
             return m.fail("serve: can't start the server process: {s}", .{kern.errstr()});
@@ -1566,7 +2171,9 @@ pub const Machine = struct {
             error.OutOfMemory => return error.OutOfMemory,
             error.TooManyProcs => unreachable, // the cap is at least 1
         };
-        const flags = kern.RF.PROC | kern.RF.NAMEG | kern.RF.FDG | kern.RF.ENVG | kern.RF.NOTEG | kern.RF.NOWAIT;
+        // It waits in the host for the host's requests, as do the control
+        // processes it starts: host threads of their own.
+        const flags = kern.RF.PROC | kern.RF.NAMEG | kern.RF.FDG | kern.RF.ENVG | kern.RF.NOTEG | kern.RF.NOWAIT | kern.RF.HOSTTHREAD;
         kern.fork(flags, p.pid, Proc, ptyServerMain, p) catch {
             j.dropProc(p);
             return m.fail("ptys: can't start the pty server: {s}", .{kern.errstr()});
@@ -1591,7 +2198,7 @@ pub const Machine = struct {
             };
             // The server's reference becomes the control process's.
             c.pty = pty;
-            kern.fork(kern.RF.PROC | kern.RF.FDG | kern.RF.NOWAIT, c.pid, Proc, ptyCtlMain, c) catch {
+            kern.fork(kern.RF.PROC | kern.RF.FDG | kern.RF.NOWAIT | kern.RF.HOSTTHREAD, c.pid, Proc, ptyCtlMain, c) catch {
                 j.dropProc(c);
                 pty.finish(.failed);
                 pty.unref();
@@ -1824,7 +2431,7 @@ pub const Machine = struct {
 
     fn runLoop(m: *Machine, p: *Proc) RunError!Status {
         const j = p.job;
-        try j.pool.acquire(&p.lease_store);
+        p.lease_store = .{ .eng = j.m.engine };
         p.setLease(&p.lease_store);
         const vcpu = &p.lease_store;
         try vcpu.setAddressSpace(p.as.?);
@@ -2019,12 +2626,36 @@ pub const Machine = struct {
                     },
                 },
                 .fault => |f| {
-                    // The stack grows down on demand, as 9front's does.
-                    if (f.access != .exec and p.segs.growStack(f.addr)) {
+                    // A first touch fills the page, and a write to one a
+                    // fork shares copy-on-write copies it. The same fault
+                    // again at once, with no remap of the Mm in between,
+                    // means the retry didn't help: it's real, as for a
+                    // Linux process (an exception at the PC, or another
+                    // process's change caught in the middle).
+                    const same = f.addr == last_fault.addr and f.access == last_fault.access and u.pc() == last_fault.pc;
+                    var alloc_failed = false;
+                    if (p.space.?.mmFor(f.addr).fault(f.addr, switch (f.access) {
+                        .read => .read,
+                        .write => .write,
+                        .exec => .exec,
+                    }) catch |e| blk: {
+                        alloc_failed = e != error.Bus;
+                        break :blk null;
+                    }) |gen| if (!same or gen != last_fault.gen) {
+                        last_fault = .{ .addr = f.addr, .access = f.access, .pc = u.pc(), .gen = gen };
                         p.noteMem();
                         continue;
+                    };
+                    last_fault = .{};
+                    if (m.opts.trace) |w| {
+                        if (alloc_failed) traceLine(w, &p.job.trace_lock, "h9: fault: virtual memory allocation failed (out of --memory)\n");
+                        dumpFault(w, &p.job.trace_lock, &u, f, p.image orelse "");
                     }
-                    if (m.opts.trace) |w| dumpFault(w, &p.job.trace_lock, &u, f, p.image orelse "");
+                    // A page the mapping allows but that can't be had (the
+                    // machine's --memory is used up) is a fault note too,
+                    // as 9front's when it can't get a page, and h9 says
+                    // why after the run.
+                    if (alloc_failed) j.out_of_memory.store(true, .release);
                     // 9front's faultnote; popnote adds the pc. If the note
                     // can't be queued, the fault would only repeat.
                     var buf: [kern.ERRMAX]u8 = undefined;
@@ -2056,7 +2687,7 @@ pub const Machine = struct {
     /// before it runs on. Returns the status it ends with if the machine
     /// is torn down meanwhile. A note doesn't end the stop; ctl kill does,
     /// and the note delivery after it kills the process.
-    fn stopPoint(p: *Proc, vcpu: *cpupool.Lease, u: *engine.Ureg) RunError!?Status {
+    fn stopPoint(p: *Proc, vcpu: *executor.Lease, u: *engine.Ureg) RunError!?Status {
         // A stop request flags the process, and Ptraceme waits for a note,
         // which flags it too; the kernel decides.
         if (!p.stop_flag.swap(false, .acq_rel) and !p.note_flag.load(.acquire)) return null;
@@ -2100,7 +2731,7 @@ pub const Machine = struct {
     /// and enters the handler; without one, or for a note that arrives in
     /// the handler, or if the frame doesn't fit, returns the note the
     /// process dies with. `u` holds the current registers.
-    fn deliver(p: *Proc, vcpu: *cpupool.Lease, u: *engine.Ureg) engine.Error!?[]const u8 {
+    fn deliver(p: *Proc, vcpu: *executor.Lease, u: *engine.Ureg) engine.Error!?[]const u8 {
         var msg: [kern.ERRMAX]u8 = undefined;
         switch (kern.popNote(&msg, u.pc())) {
             .none => return null,
@@ -2109,9 +2740,8 @@ pub const Machine = struct {
         }
         const f = u.notifyFrame(p.sys.notify, kern.ERRMAX) orelse return p.keepNote(&msg);
         const end = f.nureg + u.size();
-        _ = p.segs.growStack(f.sp);
-        if (!p.segs.writable(f.sp, end -% f.sp)) return p.keepNote(&msg);
-        const as = p.as.?;
+        const sp = &p.space.?;
+        if (!sp.writable(f.sp, end -% f.sp)) return p.keepNote(&msg);
         const w: usize = @intCast(u.wordSize());
         var words: [3 * 8]u8 = undefined;
         putWords(&words, w, &.{ 0, f.nureg, f.msg });
@@ -2119,11 +2749,11 @@ pub const Machine = struct {
         putWords(&prev, w, &.{p.noteureg});
         const zmsg = std.mem.sliceTo(&msg, 0);
         @memset(msg[zmsg.len..], 0);
-        gm.write(as, f.nureg, u.bytes()) catch return p.keepNote(&msg);
-        gm.write(as, f.msg, &msg) catch return p.keepNote(&msg);
+        sp.write(f.nureg, u.bytes()) catch return p.keepNote(&msg);
+        sp.write(f.msg, &msg) catch return p.keepNote(&msg);
         // The word under the Ureg is the previous saved Ureg.
-        gm.write(as, f.nureg - w, prev[0..w]) catch return p.keepNote(&msg);
-        gm.write(as, f.sp, words[0 .. 3 * w]) catch return p.keepNote(&msg);
+        sp.write(f.nureg - w, prev[0..w]) catch return p.keepNote(&msg);
+        sp.write(f.sp, words[0 .. 3 * w]) catch return p.keepNote(&msg);
         var x: engine.Extra = undefined;
         try vcpu.getExtra(&x);
         p.note_extra = x;
@@ -2139,9 +2769,9 @@ pub const Machine = struct {
     /// the note for NDFLT. Outside a handler, anything but NRSTR fails
     /// with "bad arg in system call". Returns the note the process dies
     /// with, if it does.
-    fn noted(p: *Proc, vcpu: *cpupool.Lease, u: *engine.Ureg, arg: i32) engine.Error!?[]const u8 {
+    fn noted(p: *Proc, vcpu: *executor.Lease, u: *engine.Ureg, arg: i32) engine.Error!?[]const u8 {
         var msg: [kern.ERRMAX]u8 = undefined;
-        const how: kern.Noted = @enumFromInt(arg);
+        const how: kern.Noted = @fromBackingInt(@intCast(arg));
         switch (kern.noted(how, &msg) catch {
             p.sys.traceRet("noted", -1);
             u.sysReturn(@bitCast(@as(i64, -1)));
@@ -2155,26 +2785,26 @@ pub const Machine = struct {
             vcpu.setExtra(&x);
             p.note_extra = null;
         }
-        const as = p.as.?;
+        const space = &p.space.?;
         const nureg = p.noteureg;
         var saved: [@sizeOf(engine.Ureg)]u8 = undefined;
         const w = u.wordSize();
         const n = u.size();
         if (nureg < w or nureg % w != 0) return suicide;
-        const prev = gm.readWord(as, nureg - w, w) catch return suicide;
-        gm.read(as, nureg, saved[0..n]) catch return suicide;
+        const prev = space.readWord(nureg - w, w) catch return suicide;
+        space.read(nureg, saved[0..n]) catch return suicide;
         var r = u.restored(saved[0..n]);
         switch (how) {
             .cont, .rstr => {
                 p.noteureg = prev;
-                if (!r.aligned() or as.translate(r.pc(), 1) == null or as.translate(r.stackPointer(), w) == null) return suicide;
+                if (!r.aligned() or !space.mapped(r.pc()) or !space.mapped(r.stackPointer())) return suicide;
             },
             .save => {
                 const sp = nureg - 4 * w - kern.ERRMAX;
                 var words: [2 * 8]u8 = undefined;
                 putWords(&words, w, &.{ 0, nureg });
-                if (as.translate(r.pc(), 1) == null or sp % w != 0 or !p.segs.writable(sp, 4 * w)) return suicide;
-                gm.write(as, sp, words[0 .. 2 * @as(usize, @intCast(w))]) catch return suicide;
+                if (!space.mapped(r.pc()) or sp % w != 0 or !space.writable(sp, 4 * w)) return suicide;
+                space.write(sp, words[0 .. 2 * @as(usize, @intCast(w))]) catch return suicide;
                 r.setNoteSave(sp, nureg);
             },
             // kern.noted kills for every other argument.
@@ -2262,7 +2892,7 @@ pub const Machine = struct {
     /// space and makes it the process's, as exec does for an a.out: the
     /// process is unchanged until the image is built. With `vcpu` null
     /// (the first process) the exit loop sets the address space.
-    fn execLinux(m: *Machine, p: *Proc, vcpu: ?*cpupool.Lease, arena: std.mem.Allocator, path: []const u8, bytes: []const u8, argv: []const []const u8, envp: []const []const u8) error{Failed}!void {
+    fn execLinux(m: *Machine, p: *Proc, vcpu: ?*executor.Lease, arena: std.mem.Allocator, path: []const u8, bytes: []const u8, argv: []const []const u8, envp: []const []const u8) error{Failed}!void {
         const exe = elf.check(bytes, m.arch) catch return failWith(ebadexec);
         var interp: ?elf.Image = null;
         if (exe.interp) |ip| {
@@ -2277,7 +2907,7 @@ pub const Machine = struct {
         const interp_src = if (interp) |ii| imageSrc(m.gpa, exe.interp.?, ii.bytes, true) else null;
         defer if (interp_src) |s| s.put();
         var random: [16]u8 = undefined;
-        m.io.random(&random);
+        m.entropy(&random);
         const prog = lexec.build(m.gpa, m.engine, .{
             .arch = m.arch,
             .exe = &exe,
@@ -2339,7 +2969,8 @@ pub const Machine = struct {
             };
             p.dbgLock();
             if (p.as) |old| {
-                p.segs.release(old);
+                if (p.space) |*s| s.release(old);
+                p.space = null;
                 old.destroy();
             }
             l.cpu0 = lsys.cputime.thread();
@@ -2469,11 +3100,11 @@ pub const Machine = struct {
     /// execve from a Linux process: follows #! lines as Linux does (the
     /// interpreter, its one optional argument, the script's path, then
     /// the caller's arguments after argv[0]) and loads the ELF binary.
-    fn linuxExec(m: *Machine, p: *Proc, vcpu: ?*cpupool.Lease, e: lsys.Exec) error{Failed}!void {
+    fn linuxExec(m: *Machine, p: *Proc, vcpu: ?*executor.Lease, e: lsys.Exec) error{Failed}!void {
         return m.linuxExecPath(p, vcpu, e.path, @ptrCast(e.argv), @ptrCast(e.envp));
     }
 
-    fn linuxExecPath(m: *Machine, p: *Proc, vcpu: ?*cpupool.Lease, path0: []const u8, argv0: []const []const u8, envp: []const []const u8) error{Failed}!void {
+    fn linuxExecPath(m: *Machine, p: *Proc, vcpu: ?*executor.Lease, path0: []const u8, argv0: []const []const u8, envp: []const []const u8) error{Failed}!void {
         var arena_state: std.heap.ArenaAllocator = .init(m.gpa);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
@@ -2567,7 +3198,7 @@ pub const Machine = struct {
 
     /// Serves a Linux process's syscall exit. Returns the status when the
     /// process exits.
-    fn linuxSyscall(m: *Machine, p: *Proc, l: *lsys.Process, vcpu: *cpupool.Lease, u: *engine.Ureg) RunError!?Status {
+    fn linuxSyscall(m: *Machine, p: *Proc, l: *lsys.Process, vcpu: *executor.Lease, u: *engine.Ureg) RunError!?Status {
         // See the 9front branch of `loop`.
         if (p.note_flag.load(.acquire)) kern.interrupt(kern.self());
         if (u.* == .i386) {
@@ -2740,7 +3371,7 @@ pub const Machine = struct {
     /// gives it.
     const ExecReq = struct {
         e: lsys.Exec,
-        done: std.Io.Event = .unset,
+        done: executor.Event = .{},
         ok: bool = false,
         err: [kern.ERRMAX]u8 = undefined,
     };
@@ -2752,7 +3383,7 @@ pub const Machine = struct {
     /// hands the exec to the leader and ends (`.handed_off`). A path that
     /// doesn't name a file fails before any thread is killed, so execvp's
     /// search along PATH leaves them be.
-    fn groupExec(m: *Machine, p: *Proc, l: *lsys.Process, vcpu: *cpupool.Lease, e: lsys.Exec) enum { alone, handed_off, failed } {
+    fn groupExec(m: *Machine, p: *Proc, l: *lsys.Process, vcpu: *executor.Lease, e: lsys.Exec) enum { alone, handed_off, failed } {
         _ = vcpu;
         {
             const swap = !kc.inView();
@@ -2775,7 +3406,7 @@ pub const Machine = struct {
         var req: ExecReq = .{ .e = e };
         g.exec_req = &req;
         _ = kern.postNote(g.tgid, exec_note, .user) catch {};
-        req.done.waitUncancelable(m.io);
+        req.done.wait(m.io);
         if (req.ok) return .handed_off;
         kern.setErrstr(std.mem.sliceTo(&req.err, 0));
         return .failed;
@@ -2790,7 +3421,7 @@ pub const Machine = struct {
     /// The leader's side of a thread's execve: once only it and the
     /// thread are left, runs the exec, and tells the thread how it went.
     /// Returns whether there was one.
-    fn leaderExec(m: *Machine, p: *Proc, vcpu: *cpupool.Lease, u: *engine.Ureg) bool {
+    fn leaderExec(m: *Machine, p: *Proc, vcpu: *executor.Lease, u: *engine.Ureg) bool {
         const l = p.lx.?;
         const g = l.g;
         const req: *ExecReq = @ptrCast(@alignCast(g.exec_req orelse return false));
@@ -2863,7 +3494,7 @@ pub const Machine = struct {
         if (cl.flags & lsys.CLONE_CHILD_CLEARTID != 0) cx.clear_tid = cl.ctid;
         if (cl.flags & lsys.CLONE_CHILD_SETTID != 0) cx.writeU32(cl.ctid, c.pid) catch {};
         if (cl.flags & lsys.CLONE_PARENT_SETTID != 0) l.writeU32(cl.ptid, c.pid) catch {};
-        var done: std.Io.Event = .unset;
+        var done: executor.Event = .{};
         if (vfork) c.vfork_done = &done;
         c.noteMem();
         var flag: c_int = kern.RF.PROC;
@@ -2877,7 +3508,7 @@ pub const Machine = struct {
             j.dropProc(c);
             return -attr.E.AGAIN;
         };
-        if (vfork) done.waitUncancelable(m.io);
+        if (vfork) done.wait(m.io);
         return pid;
     }
 
@@ -2887,7 +3518,7 @@ pub const Machine = struct {
     /// the stack. A call that returned EINTR is restarted when no handler
     /// ran, or when the handler has SA_RESTART. Returns the note the
     /// process dies with, if it does.
-    fn deliverLinux(m: *Machine, p: *Proc, vcpu: *cpupool.Lease, u: *engine.Ureg, flagged: bool) engine.Error!?[]const u8 {
+    fn deliverLinux(m: *Machine, p: *Proc, vcpu: *executor.Lease, u: *engine.Ureg, flagged: bool) engine.Error!?[]const u8 {
         const l = p.lx.?;
         if (flagged) {
             var msg: [kern.ERRMAX]u8 = undefined;
@@ -2985,7 +3616,7 @@ pub const Machine = struct {
         }
     }
 
-    /// devlinux's text files (src/kern/devlinux.c): /proc and /sys files
+    /// devlinux's text files (src/kern/dev/linux.zig): /proc and /sys files
     /// made from the machine's state. `aux` is the process, for /proc/n
     /// files; the machine is the reader's. Runs on the reading thread,
     /// with the process's note lock held, so it doesn't block.
@@ -3059,7 +3690,7 @@ pub const Machine = struct {
             w.writeAll("nodev\tproc\nnodev\ttmpfs\n") catch {};
         } else if (eq(u8, name, "uuid") or eq(u8, name, "boot_id")) {
             var r: [16]u8 = undefined;
-            j.m.io.random(&r);
+            j.m.entropy(&r);
             r[6] = (r[6] & 0x0f) | 0x40;
             r[8] = (r[8] & 0x3f) | 0x80;
             const x = std.fmt.bytesToHex(r, .lower);
@@ -3069,7 +3700,7 @@ pub const Machine = struct {
         } else if (eq(u8, name, "hostname")) {
             w.writeAll("h9\n") catch {};
         } else if (eq(u8, name, "resolv.conf")) {
-            for (j.m.opts.nameservers) |ns| w.print("nameserver {s}\n", .{ns}) catch {};
+            for (j.m.opts.nameservers) |ns| w.print("nameserver {s}\n", .{resolver.serverHost(ns)}) catch {};
         } else if (eq(u8, name, "online") or eq(u8, name, "possible")) {
             if (ncpu <= 1) w.writeAll("0\n") catch {} else w.print("0-{d}\n", .{ncpu - 1}) catch {};
         } else return -1;
@@ -3166,12 +3797,12 @@ pub const Machine = struct {
             return failWith("no procs");
         };
         c.as = cas;
-        c.segs = p.segs.fork(cas, flags & kern.RF.MEM != 0) catch {
+        c.space = p.space.?.fork(cas, flags & kern.RF.MEM != 0) catch {
             cas.destroy();
             j.dropProc(c);
             return failWith("virtual memory allocation failed");
         };
-        loader.setTosPid(cas, m.arch, p.tos, c.pid);
+        loader.setTosPid(&c.space.?, m.arch, p.tos, c.pid);
         c.tos = p.tos;
         c.ureg = u.*;
         // The child returns through forkret too.
@@ -3186,7 +3817,7 @@ pub const Machine = struct {
         const pid = c.pid;
         kern.fork(flag, pid, Proc, childMain, c) catch {
             if (c.image) |b| m.gpa.free(b);
-            c.segs.release(cas);
+            c.space.?.release(cas);
             cas.destroy();
             j.dropProc(c);
             return error.Failed;
@@ -3207,7 +3838,7 @@ pub const Machine = struct {
     /// replaces the process's memory, closes its close-on-exec fds and
     /// resets its registers. On error the process is unchanged and the
     /// error string is set.
-    fn exec(m: *Machine, p: *Proc, vcpu: *cpupool.Lease, e: syscall.Exec) error{Failed}!void {
+    fn exec(m: *Machine, p: *Proc, vcpu: *executor.Lease, e: syscall.Exec) error{Failed}!void {
         var arena_state: std.heap.ArenaAllocator = .init(m.gpa);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
@@ -3224,39 +3855,43 @@ pub const Machine = struct {
         const hdr = aout.parse(bytes) catch return failWith(ebadexec);
         if (hdr.arch != m.arch) return failWith(ebadexec);
 
+        const spans = loader.imageSpans(bytes) catch return failWith(ebadexec);
         const nas = m.engine.newAddressSpace() catch return failWith("virtual memory allocation failed");
-        var img = loader.load(m.gpa, m.engine, nas, bytes, prog.argv, p.pid) catch |err| {
+        // segattach's segments carry over, except SG_CEXEC ones and any
+        // in the new image's way.
+        const kept = if (p.space) |*s| loader.inherited(s, nas, spans) catch {
+            nas.destroy();
+            return failWith("virtual memory allocation failed");
+        } else null;
+        var img = loader.load(m.gpa, m.engine, nas, bytes, prog.argv, p.pid, kept) catch |err| {
+            if (kept) |k| {
+                k.detach(nas);
+                k.put();
+            }
             nas.destroy();
             return failWith(switch (err) {
                 error.BadExec, error.Truncated, error.BadMagic => ebadexec,
                 else => "virtual memory allocation failed",
             });
         };
-        // segattach's segments carry over, except SG_CEXEC ones.
-        img.segs.inherit(&p.segs, nas) catch {
-            img.segs.release(nas);
-            nas.destroy();
-            return failWith("virtual memory allocation failed");
-        };
         vcpu.setAddressSpace(nas) catch {
-            img.segs.release(nas);
+            img.space.release(nas);
             nas.destroy();
             return failWith("virtual memory allocation failed");
         };
 
         // Committed.
         const was_linux = p.lx != null;
+        // /proc/n/mem and segment may be reading through the old space.
+        p.dbgLock();
         if (was_linux) {
-            p.segs.replace(nas, img.segs);
-            // /proc/n/mem may be reading through the old space.
-            p.dbgLock();
             p.dropLinux();
         } else {
             const old = p.as.?;
-            p.segs.replace(old, img.segs);
-            p.dbgLock();
+            if (p.space) |*s| s.release(old);
             old.destroy();
         }
+        p.space = img.space;
         p.as = nas;
         p.dbg_lock.unlock();
         if (was_linux) {
@@ -3375,7 +4010,19 @@ pub const Machine = struct {
         var cwd_at: ?[:0]const u8 = null;
         // Named unions the plan made but never bound go when it's built.
         defer for ([_]policy.mount.Stack{ .root, .linux }) |st| kern.unionUnpin(st.name());
-        for (m.plan.binds) |b| {
+        var cow_buf: [24]u8 = undefined;
+        for (m.plan.binds) |b0| {
+            var b = b0;
+            // A caller's channel the child only reads, under an overlay
+            // of the child's own (design/child-machines.md).
+            if (b0.parent_cow) {
+                const src = try std.fmt.bufPrintSentinel(&buf, "{s}", .{b0.from}, 0);
+                const id = kern.overlayNew(src) catch {
+                    if (b0.optional) continue;
+                    return m.fail("{s}: {s}", .{ b0.parent orelse b0.from, kern.errstr() });
+                };
+                b.from = std.fmt.bufPrint(&cow_buf, "#O{d}", .{id}) catch unreachable;
+            }
             if (b.make) if (!try m.makeTarget(b)) continue;
             if (b.make_from and m.plan.root_overlay) {
                 // Made through the stack's overlay: /root takes no creates.
@@ -3748,13 +4395,25 @@ pub const Machine = struct {
         // server's `.fs/index`.
         var num: ?u32 = null;
         const first_root = is_root and !m.root_indexed;
+        // A pinned tree (design/plan-format.md, "Pinned roots") needs an
+        // index h9 checks: a static tree's, which serveStatic checked, or
+        // an `index=` one, which giveRootIndex checks. A server's own
+        // `.fs/index` is read in #ι, after the connection is made, so
+        // it's refused rather than taken unchecked.
+        if (r.b3 != null and !static) {
+            const given = if (first_root) m.opts.root_index != null else r.index == .given;
+            if (std.mem.startsWith(u8, b.to, "/srv/") or m.opts.index == .none or !given) {
+                kern.close(conn) catch {};
+                return m.fail("{s} {f}: b3=: pinned, but h9 checks only an index= index or a static tree's, and {s}", .{ what, shown, if (m.opts.index == .none) "this run is --index none" else "this has neither" });
+            }
+        }
         const fd = if (std.mem.startsWith(u8, b.to, "/srv/") or static) conn else if (first_root) blk: {
             m.root_indexed = true;
             break :blk try m.indexRoot(r, conn);
         } else switch (r.index) {
             // `index=` on a mount: the index it names, as the root's.
             .given => |g| blk: {
-                const got = m.giveRootIndex(what, r.addr, rootIndexOf(g.from)) catch |e| {
+                const got = m.giveRootIndex(what, r.addr, rootIndexOf(g.from), r.b3) catch |e| {
                     kern.close(conn) catch {};
                     return e;
                 };
@@ -3995,6 +4654,12 @@ pub const Machine = struct {
             else => null,
         }) orelse return m.fail(what ++ " {f}: no 9P server (the WebSocket handshake: {s}) and no static tree (/.fs/index: {s})", .{ shown, ws_said, why_buf[0..why_len] });
         defer gpa.free(text);
+        if (r.b3) |want| {
+            var got: [32]u8 = undefined;
+            std.crypto.hash.Blake3.hash(text, &got, .{});
+            if (!std.mem.eql(u8, &got, &want))
+                return m.fail(what ++ " {f}: b3=: its index has hash {x}…, not the pinned {x}…", .{ shown, got[0..8], want[0..8] });
+        }
         const tree = statictree.Tree.create(gpa, m.io, url, text, opts) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return m.fail(what ++ " {f}: static tree: /.fs/index: bad index", .{shown}),
@@ -4054,7 +4719,7 @@ pub const Machine = struct {
         if (m.opts.index == .none and !m.opts.verbose) return conn;
         var arg: [std.fs.max_path_bytes + 64]u8 = undefined;
         const ctl = if (m.opts.index == .none) "" else if (m.opts.root_index) |given| blk: {
-            const got = m.giveRootIndex("root", r.addr, given) catch |e| {
+            const got = m.giveRootIndex("root", r.addr, given, r.b3) catch |e| {
                 kern.close(conn) catch {};
                 return e;
             };
@@ -4070,18 +4735,25 @@ pub const Machine = struct {
 
     /// Reads, compiles, and hands `#ι` a 9P member's `index=` index (the
     /// root's, or a mount's), and returns its number; null when it's to be ignored. One that can't
-    /// be read fails the run, as an unreachable root does.
-    fn giveRootIndex(m: *Machine, what: []const u8, addr: []const u8, given: RootIndex) RunError!?u32 {
+    /// be read fails the run, as an unreachable root does. With `pin`,
+    /// `b3=`'s hash (design/plan-format.md, "Pinned roots"), the index's
+    /// text must have that BLAKE3 hash, and one that's ignored without a
+    /// pin fails the run, as one with another hash does.
+    fn giveRootIndex(m: *Machine, what: []const u8, addr: []const u8, given: RootIndex, pin: ?[32]u8) RunError!?u32 {
         const a = hidx.allocator;
         const from = switch (given) {
             inline else => |x| x,
         };
-        const cache: ?rootindex.cache.Cache = if (m.opts.index_cache) |d| .{ .gpa = a, .io = m.io, .dir = d } else null;
+        const pinned = "{s} {f}: b3=: its index ";
+        // The text is hashed, so it's fetched, not taken compiled from
+        // the cache.
+        const cache: ?rootindex.cache.Cache = if (pin != null) null else if (m.opts.index_cache) |d| .{ .gpa = a, .io = m.io, .dir = d } else null;
         var etag: ?[]u8 = null;
         defer if (etag) |e| a.free(e);
         const text: []u8 = switch (given) {
             .path => |path| std.Io.Dir.cwd().readFileAlloc(m.io, path, a, .limited(rootindex.max_text + 1)) catch |e| switch (e) {
                 error.StreamTooLong => {
+                    if (pin != null) return m.fail(pinned ++ "is larger than 256 MB", .{ what, ws.Url.elide(addr) });
                     m.indexNote("index: {s} is larger than 256 MB; ignored", .{path});
                     return null;
                 },
@@ -4093,13 +4765,20 @@ pub const Machine = struct {
                 .cache = if (cache) |*c| c else null,
             }, &m.msg_buf) catch |e| switch (e) {
                 error.TooBig => {
+                    if (pin != null) return m.fail(pinned ++ "is larger than 256 MB", .{ what, ws.Url.elide(addr) });
                     m.indexNote("index: {f} is larger than 256 MB; ignored", .{ws.Url.elide(url)});
                     return null;
                 },
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return m.fail("{s} {f}: index={f}: {s}", .{ what, ws.Url.elide(addr), ws.Url.elide(url), hstream.fetchError(e, &m.msg_buf) }),
             }) {
-                .compiled => |b| return m.giveCompiled(b, from, true),
+                .compiled => |b| {
+                    if (pin != null) {
+                        a.free(b);
+                        return m.fail(pinned ++ "came compiled, so its hash can't be checked", .{ what, ws.Url.elide(addr) });
+                    }
+                    return m.giveCompiled(b, from, true);
+                },
                 .text => |t| blk: {
                     etag = t.etag;
                     break :blk t.bytes;
@@ -4107,6 +4786,12 @@ pub const Machine = struct {
             },
         };
         defer a.free(text);
+        if (pin) |want| {
+            var got: [32]u8 = undefined;
+            std.crypto.hash.Blake3.hash(text, &got, .{});
+            if (!std.mem.eql(u8, &got, &want))
+                return m.fail(pinned ++ "has hash {x}…, not the pinned {x}…", .{ what, ws.Url.elide(addr), got[0..8], want[0..8] });
+        }
         var vbuf: [64]u8 = undefined;
         const version = rootindex.cache.textVersion(text, &vbuf);
         const hit = if (cache) |*c| c.lookup(rootindex.cache.text_key, version) else null;
@@ -4119,6 +4804,7 @@ pub const Machine = struct {
                     error.TooBig => m.indexNote("index: {f} is larger than 256 MB; ignored", .{ws.Url.elide(from)}),
                     error.BadIndex => m.indexNote("index: {f}: line {d}: {s}; ignored", .{ ws.Url.elide(from), diag.line, diag.msg }),
                 }
+                if (pin != null) return m.fail(pinned ++ "doesn't compile", .{ what, ws.Url.elide(addr) });
                 return null;
             };
             if (cache) |*c| c.store(rootindex.cache.text_key, version, b);
@@ -4354,6 +5040,9 @@ pub const Machine = struct {
             try kern.bind(from, to, flag);
             return null;
         };
+        // A device path: a child machine's caller's channel, `#μsN`
+        // (design/child-machines.md).
+        if (l.len > 0 and l[0] == '#') return try overlay(std.fmt.bufPrintSentinel(buf, "{s}", .{l}, 0) catch return error.Kern, to, flag);
         return try overlay(std.fmt.bufPrintSentinel(buf, "#U{s}{s}", .{ if (contained) "!c" else "", l }, 0) catch return error.Kern, to, flag);
     }
 

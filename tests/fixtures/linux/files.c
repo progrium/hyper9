@@ -4,6 +4,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -104,6 +105,40 @@ static void ofd_flock(void) {
 	CHECK("ofd_flock", flock(b, LOCK_EX | LOCK_NB) == 0);
 	close(b);
 	printf("ok ofd_flock\n");
+}
+
+/* A blocked F_SETLKW or flock wakes when the lock goes (design/
+ * file-interface.md, Part 3): each round a child blocks on the lock the
+ * parent holds, and runs once the parent lets it go, and not before. How
+ * soon is the engine's, so this checks only that it happens: that the
+ * wait is a waker and not a poll is src/kern/linuxnet.zig's case. */
+static void lock_wake(void) {
+	int fd = fresh("lockwake");
+	CHECK("lock_wake", fd >= 0);
+	for (int i = 0; i < 20; i++) {
+		int fl = i & 1, p[2];
+		CHECK("lock_wake", pipe(p) == 0);
+		CHECK("lock_wake", fl ? flock(fd, LOCK_EX) == 0 : setlk(fd, F_SETLK, F_WRLCK, 0, 1) == 0);
+		pid_t c = fork();
+		if (c == 0) {
+			int f = open(path, O_RDWR);
+			if (f < 0) _exit(1);
+			if (fl ? flock(f, LOCK_EX) != 0 : setlk(f, F_SETLKW, F_WRLCK, 0, 1) != 0) _exit(2);
+			if (write(p[1], "x", 1) != 1) _exit(3);
+			_exit(0);
+		}
+		close(p[1]);
+		/* Still blocked while the parent holds it. */
+		struct pollfd pf = {.fd = p[0], .events = POLLIN};
+		CHECK("lock_wake", poll(&pf, 1, i == 0 ? 200 : 10) == 0);
+		CHECK("lock_wake", fl ? flock(fd, LOCK_UN) == 0 : setlk(fd, F_SETLK, F_UNLCK, 0, 1) == 0);
+		char b;
+		CHECK("lock_wake", read(p[0], &b, 1) == 1);
+		close(p[0]);
+		CHECK("lock_wake", child_status(c) == 0);
+	}
+	close(fd);
+	printf("ok lock_wake\n");
 }
 
 /* A flock goes with the last fd of its open file, even when that's a
@@ -273,6 +308,36 @@ static void gs_base(void) {
 	CHECK("gs_base", child_status(c) == 0);
 #endif
 	printf("ok gs_base\n");
+}
+
+/* An fsync and an fdatasync of a file in $DIR, which the [file-interface]
+ * case puts on a .L mount whose server counts its Tfsyncs. */
+static void fsync_file(void) {
+	int fd = fresh("fsyncf");
+	CHECK("fsync_file", fd >= 0 && write(fd, "x", 1) == 1 && fsync(fd) == 0 && fdatasync(fd) == 0);
+	close(fd);
+	printf("ok fsync_file\n");
+}
+
+/* chmod, truncate, and utimensat on a file in $DIR, which the
+ * [file-interface] case puts on a .L mount: each is the device's setattr,
+ * so the server keeps a time's nanoseconds, which a wstat can't carry. */
+static void setattr_ns(void) {
+	int fd = fresh("setattrf");
+	CHECK("setattr_ns", fd >= 0 && write(fd, "hello", 5) == 5);
+	struct timespec ts[2] = {{.tv_nsec = UTIME_OMIT}, {.tv_sec = 1234567890, .tv_nsec = 123456789}};
+	CHECK("setattr_ns", utimensat(AT_FDCWD, path, ts, 0) == 0);
+	CHECK("setattr_ns", chmod(path, 0600) == 0 && truncate(path, 3) == 0);
+	struct stat st;
+	CHECK("setattr_ns", stat(path, &st) == 0);
+	CHECK("setattr_ns", (st.st_mode & 0777) == 0600 && st.st_size == 3);
+	CHECK("setattr_ns", st.st_mtim.tv_sec == 1234567890 && st.st_mtim.tv_nsec == 123456789);
+	ts[1].tv_nsec = 5;
+	CHECK("setattr_ns", futimens(fd, ts) == 0 && ftruncate(fd, 1) == 0 && fchmod(fd, 0640) == 0);
+	CHECK("setattr_ns", fstat(fd, &st) == 0);
+	CHECK("setattr_ns", (st.st_mode & 0777) == 0640 && st.st_size == 1 && st.st_mtim.tv_nsec == 5);
+	close(fd);
+	printf("ok setattr_ns\n");
 }
 
 static void fsync_rusage(void) {
@@ -1033,12 +1098,15 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "posix_locks")) posix_locks();
 		if (all || !strcmp(n, "ofd_flock")) ofd_flock();
 		if (all || !strcmp(n, "flock_exec")) flock_exec();
+		if (!strcmp(n, "lock_wake")) lock_wake();
 		if (all || !strcmp(n, "shared_map")) shared_map();
 		if (all || !strcmp(n, "fixed_shared")) fixed_shared();
 		if (all || !strcmp(n, "private_sees")) private_sees();
 		if (all || !strcmp(n, "gs_base")) gs_base();
 		if (all || !strcmp(n, "prctl_name")) prctl_name();
 		if (all || !strcmp(n, "fsync_rusage")) fsync_rusage();
+		if (!strcmp(n, "fsync_file")) fsync_file();
+		if (!strcmp(n, "setattr_ns")) setattr_ns();
 		if (all || !strcmp(n, "dir_sync")) dir_sync();
 		if (all || !strcmp(n, "sync_open")) sync_open();
 		if (all || !strcmp(n, "read_cache")) read_cache();

@@ -1,0 +1,320 @@
+
+-- bind replaces a directory
+% ls c
+h
+% bind a c
+% ls c
+f
+% cat c/f
+a
+% unmount c
+% ls c
+h
+
+-- bind -b puts the new directory first
+% bind -b a b
+% ls b
+f
+f
+g
+% cat b/f
+a
+% unmount a b
+% ls b
+f
+g
+
+-- bind -a puts it last
+% bind -a a b
+% ls b
+f
+g
+f
+% cat b/f
+b
+% cat b/g
+b
+% unmount a b
+
+-- a three-way union, and unmounting its middle
+% bind -a a b
+% bind -a c b
+% ls b
+f
+g
+f
+h
+% unmount a b
+% ls b
+f
+g
+h
+% unmount b
+% ls b
+f
+g
+
+-- creates in a union without -c
+% bind -a a b
+% touch b/n1
+touch: b/n1: cannot create: mounted directory forbids creation: 'b/n1'
+! failed
+% mkdir b/d1
+mkdir: can't create b/d1: mounted directory forbids creation: 'b/d1'
+! failed
+% unmount a b
+% ls a b
+f
+f
+g
+
+-- creates in a union go to the first member with -c
+% bind -ac a b
+% touch b/n2
+% ls a b
+f
+n2
+f
+g
+f
+n2
+% unmount a b
+% bind -bc a b
+% touch b/n3
+% unmount a b
+% bind -b a b
+% touch b/n4
+touch: b/n4: cannot create: mounted directory forbids creation: 'b/n4'
+! failed
+% unmount a b
+% ls a b
+f
+n2
+n3
+f
+g
+
+-- removes in a union take the first member
+% bind -b a b
+% rm b/f
+% ls b
+n2
+n3
+f
+g
+% cat b/f
+b
+% unmount a b
+% ls a b
+n2
+n3
+f
+g
+
+-- a mount of ramfs over 9P
+% ramfs -S confram
+% mount -c /srv/confram m
+% mkdir m/d m/d/dd
+% ls m
+d
+x
+% mount -a /srv/confram c
+% ls c
+h
+d
+x
+% unmount /srv/confram c
+% unmount c
+% unmount c
+unmount: c: not mounted
+! failed
+
+-- .. across mounts and binds
+% cd m/d/dd
+% pwd
+/tmp/conf/m/d/dd
+% cd ..
+% pwd
+/tmp/conf/m/d
+% cd ..
+% pwd
+/tmp/conf/m
+% cd ..
+% pwd
+/tmp/conf
+% cat m/d/../x
+x
+% bind a m/d
+% cd m/d
+% pwd
+/tmp/conf/m/d
+% cd ..
+% pwd
+/tmp/conf/m
+% cat m/d/../x
+x
+% cat m/d/f
+a
+% ls m/d/..
+m/d/../d
+m/d/../x
+% unmount m/d
+% bind -a c b
+% cd b/..
+% pwd
+/tmp/conf
+% unmount c b
+% touch b/n5
+touch: b/n5: cannot create: mounted directory forbids creation: 'b/n5'
+! failed
+% unmount b
+% touch b/n5
+% ls b
+f
+g
+n5
+% cd /
+% cd ..
+% pwd
+/
+% cat b/../a/f
+a
+
+-- a mount in a union, and a file bound on a file
+% mount -b /srv/confram b
+% ls b
+d
+x
+f
+g
+n5
+% cat b/x
+x
+% unmount b
+% bind a/f b/g
+% cat b/g
+a
+% rm b/g
+rm: b/g: is a mount point
+! failed
+% ls a b
+n2
+n3
+f
+f
+g
+n5
+% unmount b/g
+% ls b
+f
+g
+n5
+
+-- removing a mount point
+% bind a c
+% rm c
+rm: c: is a mount point
+! failed
+% ls c
+n2
+n3
+f
+% unmount c
+% rm c/h
+% mkdir c/sub
+% bind a c/sub
+% rm c/sub
+rm: c/sub: is a mount point
+! failed
+% ls c
+sub
+% unmount c/sub
+% rm c/sub
+% ls c
+
+-- errors
+% bind nonexistent b
+bind: nonexistent: file not found: 'nonexistent'
+! failed
+% bind a/f b
+bind a/f b: inconsistent mount
+! failed
+% bind a b/f
+bind a b/f: inconsistent mount
+! failed
+% unmount a c
+unmount: c: not mounted
+! failed
+% mount /tmp/conf/a/f c
+mount: mount c: EOF receiving fversion reply
+! failed
+% cat b/../nonexistent
+cat: can't open b/../nonexistent: file not found: 'b/../nonexistent'
+! failed
+
+-- ORCLOSE on a create
+% src/orclose create m/oc
+m/oc exists
+closed
+m/oc is gone
+% ls m
+d
+x
+
+-- ORCLOSE on an open in a union
+% bind -b a b
+% src/orclose open b/u
+b/u exists
+closed
+b/u is gone
+% ls a b
+n2
+n3
+f
+n2
+n3
+f
+f
+g
+n5
+% unmount a b
+
+-- ORCLOSE with the fd duplicated
+% src/orclose dup m/v
+m/v exists
+closed one of two
+m/v exists
+closed
+m/v is gone
+
+-- ORCLOSE on a create in a union with -c
+% bind -bc a b
+% src/orclose create b/oc2
+b/oc2 exists
+closed
+b/oc2 is gone
+% ls a b
+n2
+n3
+f
+n2
+n3
+f
+f
+g
+n5
+% unmount a b
+
+-- flush of a blocked 9P read
+% bind #| p
+% srvfs confp /tmp/conf/p
+% mount /srv/confp e
+% ls e
+data
+data1
+reader interrupted
+% read -c 6
+after
+% unmount e
+
+-- end

@@ -91,8 +91,11 @@ pub const Process = struct {
     gpa: std.mem.Allocator,
     engine: engine.Engine,
     as: engine.AddressSpace,
-    /// Text, data, stack and segattach's segments; brk_ moves the end of data.
-    segs: *segment.Segs,
+    /// Text, data, stack and segattach's segments, as mappings in its Mms;
+    /// brk_ moves the end of data. Guest memory is reached through it.
+    space: *segment.Space,
+    /// For the Mm's lock on layout changes, which RFMEM siblings share.
+    io: std.Io,
     /// The note handler from notify, or 0.
     notify: u64 = 0,
     trace: ?*std.Io.Writer = null,
@@ -153,14 +156,38 @@ fn ok(v: anytype) Outcome {
 
 /// A call's arguments on the user stack, in slots of the architecture's
 /// word: 8 bytes on arm64 and amd64, where every argument takes one slot;
-/// 4 on 386, in 8c's layout, where a vlong takes two (`vlongSlots`).
+/// 4 on 386, in 8c's layout, where a vlong takes two (`vlongSlots`). They
+/// were just written there, so the pages are in and read through the
+/// address space, or through the process's Mms (`space`) if not.
 const Args = struct {
     as: engine.AddressSpace,
+    space: ?*const segment.Space = null,
     base: u64,
     word: u64 = 8,
+    /// The first slots, copied at entry, as 9front copies its Sargs, when
+    /// they're in one run the address space translates: a call reads its
+    /// arguments with one translate, not one each. Otherwise none, and
+    /// each slot is read where it lies.
+    slots: [max_slots]u64 = undefined,
+    nslots: u8 = 0,
+
+    const max_slots = 6;
+
+    fn init(as: engine.AddressSpace, space: ?*const segment.Space, base: u64, word: u64) Args {
+        var a: Args = .{ .as = as, .space = space, .base = base, .word = word };
+        const b = as.translate(base, max_slots * word) orelse return a;
+        for (&a.slots, 0..) |*s, i| s.* = if (word == 4)
+            std.mem.readInt(u32, b[i * 4 ..][0..4], .little)
+        else
+            std.mem.readInt(u64, b[i * 8 ..][0..8], .little);
+        a.nslots = max_slots;
+        return a;
+    }
 
     fn u(a: Args, i: u64) gm.Error!u64 {
-        return gm.readWord(a.as, a.base + a.word * i, a.word);
+        if (i < a.nslots) return a.slots[@intCast(i)];
+        return gm.readWord(a.as, a.base + a.word * i, a.word) catch
+            (a.space orelse return error.BadAddress).readWord(a.base + a.word * i, a.word);
     }
     /// The slots a vlong argument takes, for the index of the next one.
     fn vlongSlots(a: Args) u64 {
@@ -173,15 +200,17 @@ const Args = struct {
         return @truncate(try a.u(i));
     }
     fn vlong(a: Args, i: u64) gm.Error!i64 {
-        return @bitCast(try gm.readU64(a.as, a.base + a.word * i));
+        if (i + a.vlongSlots() <= a.nslots) {
+            const lo = a.slots[@intCast(i)];
+            return @bitCast(if (a.word == 4) lo | a.slots[@intCast(i + 1)] << 32 else lo);
+        }
+        return @bitCast(gm.readU64(a.as, a.base + a.word * i) catch
+            try (a.space orelse return error.BadAddress).readWord(a.base + a.word * i, 8));
     }
 };
 
 pub fn dispatch(p: *Process, u: *const engine.Ureg) Outcome {
-    // Arguments, and buffers on the stack the guest hasn't touched yet,
-    // may lie below the stack's mapped part; 9front would fault them in.
-    _ = p.segs.growStack(u.syscallArgs());
-    const a: Args = .{ .as = p.as, .base = u.syscallArgs(), .word = u.wordSize() };
+    const a: Args = .init(p.as, p.space, u.syscallArgs(), u.wordSize());
     p.targs_len = 0;
     const nr: Nr = @enumFromInt(u.syscallNumber());
     const out = serve(p, nr, a) catch |e| switch (e) {
@@ -233,27 +262,24 @@ fn serve(p: *Process, nr: Nr, a: Args) (gm.Error || std.mem.Allocator.Error)!Out
             const len = kern.await(&tmp) catch return fail;
             if (n == 0) return ok(0);
             const m = @min(len, n - 1, tmp.len - 1);
-            try gm.write(p.as, buf, tmp[0..m]);
-            try gm.write(p.as, buf + m, "\x00");
+            try p.space.write(buf, tmp[0..m]);
+            try p.space.write(buf + m, "\x00");
             return ok(m);
         },
         .pipe => {
             const fds = try a.u(0);
             // Check the array before making the pipe, so a bad one leaks nothing.
-            if (gm.contiguous(p.as, fds, 8) == null) {
-                var probe: [8]u8 = undefined;
-                try gm.read(p.as, fds, &probe);
-            }
+            try p.space.touch(fds, 8, true);
             const fd = kern.pipe() catch return fail;
             var b: [8]u8 = undefined;
             std.mem.writeInt(i32, b[0..4], fd[0], .little);
             std.mem.writeInt(i32, b[4..8], fd[1], .little);
-            try gm.write(p.as, fds, &b);
+            try p.space.write(fds, &b);
             return ok(0);
         },
         .exits => {
             const ptr = try a.u(0);
-            const s = if (ptr == 0) "" else gm.string(p.as, ptr, p.msg[0..kern.ERRMAX]) catch
+            const s = if (ptr == 0) "" else p.space.string(ptr, p.msg[0..kern.ERRMAX]) catch
                 // 9front truncates over-long exit strings rather than failing.
                 truncated(p, ptr);
             return .{ .exits = s };
@@ -263,22 +289,22 @@ fn serve(p: *Process, nr: Nr, a: Args) (gm.Error || std.mem.Allocator.Error)!Out
             const len = @min(try a.uint(1), kern.ERRMAX);
             if (len == 0) return fail;
             var tmp: [kern.ERRMAX]u8 = @splat(0);
-            const s = gm.string(p.as, buf, tmp[0..len]) catch "";
+            const s = p.space.string(buf, tmp[0..len]) catch "";
             tmp[s.len] = 0;
             kern.swapErrstr(&tmp);
             const n = std.mem.indexOfScalar(u8, &tmp, 0) orelse len - 1;
             const m = @min(n, len - 1);
-            try gm.write(p.as, buf, tmp[0..m]);
-            try gm.write(p.as, buf + m, "\x00");
+            try p.space.write(buf, tmp[0..m]);
+            try p.space.write(buf + m, "\x00");
             return ok(0);
         },
         .open => {
-            const path = try gm.string(p.as, try a.u(0), &p.name_buf);
+            const path = try p.space.string(try a.u(0), &p.name_buf);
             p.note("\"{s}\" {d}", .{ path, try a.int(1) });
             return result(kern.open(path, try a.int(1)));
         },
         .create => {
-            const path = try gm.string(p.as, try a.u(0), &p.name_buf);
+            const path = try p.space.string(try a.u(0), &p.name_buf);
             p.note("\"{s}\" {d} {o}", .{ path, try a.int(1), try a.uint(2) });
             return result(kern.create(path, try a.int(1), try a.uint(2)));
         },
@@ -290,15 +316,20 @@ fn serve(p: *Process, nr: Nr, a: Args) (gm.Error || std.mem.Allocator.Error)!Out
             const fd0 = fdArg(try a.int(0)) orelse return badFd();
             return result(kern.dup(fd0, try a.int(1)));
         },
+        // Each argument read once: these are the hot calls.
         .pread => {
-            p.note("{d} {d}", .{ try a.int(0), @as(u32, @truncate(try a.u(2))) });
-            const fd = fdArg(try a.int(0)) orelse return badFd();
-            return io(p, fd, try a.u(1), @as(u32, @truncate(try a.u(2))), try a.vlong(3), .read);
+            const fdn = try a.int(0);
+            const n: u32 = @truncate(try a.u(2));
+            p.note("{d} {d}", .{ fdn, n });
+            const fd = fdArg(fdn) orelse return badFd();
+            return io(p, fd, try a.u(1), n, try a.vlong(3), .read);
         },
         .pwrite => {
-            p.note("{d} {d}", .{ try a.int(0), @as(u32, @truncate(try a.u(2))) });
-            const fd = fdArg(try a.int(0)) orelse return badFd();
-            return io(p, fd, try a.u(1), @as(u32, @truncate(try a.u(2))), try a.vlong(3), .write);
+            const fdn = try a.int(0);
+            const n: u32 = @truncate(try a.u(2));
+            p.note("{d} {d}", .{ fdn, n });
+            const fd = fdArg(fdn) orelse return badFd();
+            return io(p, fd, try a.u(1), n, try a.vlong(3), .write);
         },
         .seek => {
             // seek(vlong *ret, int fd, vlong off, int whence)
@@ -307,7 +338,7 @@ fn serve(p: *Process, nr: Nr, a: Args) (gm.Error || std.mem.Allocator.Error)!Out
             const r = kern.seek(fd, try a.vlong(2), try a.int(2 + a.vlongSlots())) catch return fail;
             var b: [8]u8 = undefined;
             std.mem.writeInt(i64, &b, r, .little);
-            try gm.write(p.as, retp, &b);
+            try p.space.write(retp, &b);
             return ok(0);
         },
         .fd2path => {
@@ -316,8 +347,8 @@ fn serve(p: *Process, nr: Nr, a: Args) (gm.Error || std.mem.Allocator.Error)!Out
             const len = @min(try a.uint(2), p.name_buf.len);
             kern.fd2path(fd, p.name_buf[0..len]) catch return fail;
             const s = std.mem.sliceTo(p.name_buf[0..len], 0);
-            try gm.write(p.as, buf, s);
-            if (s.len < len) try gm.write(p.as, buf + s.len, "\x00");
+            try p.space.write(buf, s);
+            if (s.len < len) try p.space.write(buf + s.len, "\x00");
             return ok(0);
         },
         .stat, .fstat => {
@@ -326,24 +357,24 @@ fn serve(p: *Process, nr: Nr, a: Args) (gm.Error || std.mem.Allocator.Error)!Out
             var tmp: [65536]u8 = undefined;
             const want = @min(len, tmp.len);
             const n = if (nr == .stat)
-                kern.stat(try gm.string(p.as, try a.u(0), &p.name_buf), tmp[0..want]) catch return fail
+                kern.stat(try p.space.string(try a.u(0), &p.name_buf), tmp[0..want]) catch return fail
             else
                 kern.fstat(fdArg(try a.int(0)) orelse return badFd(), tmp[0..want]) catch return fail;
-            try gm.write(p.as, buf, tmp[0..@min(n, want)]);
+            try p.space.write(buf, tmp[0..@min(n, want)]);
             return ok(n);
         },
-        .chdir => return result0(kern.chdir(try gm.string(p.as, try a.u(0), &p.name_buf))),
+        .chdir => return result0(kern.chdir(try p.space.string(try a.u(0), &p.name_buf))),
         .bind => {
-            const old = try gm.string(p.as, try a.u(0), &p.name_buf);
-            const new = try gm.string(p.as, try a.u(1), &p.name2_buf);
+            const old = try p.space.string(try a.u(0), &p.name_buf);
+            const new = try p.space.string(try a.u(1), &p.name2_buf);
             return result0(kern.bind(old, new, try a.int(2)));
         },
         .mount => {
             // mount(int fd, int afd, char *old, int flag, char *aname)
             // (design/epoch-0/devsrv.md): drawterm's sysmount, which closes fd.
-            const old = try gm.string(p.as, try a.u(2), &p.name_buf);
+            const old = try p.space.string(try a.u(2), &p.name_buf);
             const spec_va = try a.u(4);
-            const spec: [:0]const u8 = if (spec_va == 0) "" else try gm.string(p.as, spec_va, &p.spec_buf);
+            const spec: [:0]const u8 = if (spec_va == 0) "" else try p.space.string(spec_va, &p.spec_buf);
             const flag = try a.int(3);
             p.note("{d} {d} \"{s}\" {d} \"{s}\"", .{ try a.int(0), try a.int(1), old, flag, spec });
             const fd = fdArg(try a.int(0)) orelse return badFd();
@@ -352,36 +383,27 @@ fn serve(p: *Process, nr: Nr, a: Args) (gm.Error || std.mem.Allocator.Error)!Out
         .unmount => {
             // unmount(char *name, char *old): name may be nil.
             const name_va = try a.u(0);
-            const name: ?[:0]const u8 = if (name_va == 0) null else try gm.string(p.as, name_va, &p.name2_buf);
-            const old = try gm.string(p.as, try a.u(1), &p.name_buf);
+            const name: ?[:0]const u8 = if (name_va == 0) null else try p.space.string(name_va, &p.name2_buf);
+            const old = try p.space.string(try a.u(1), &p.name_buf);
             p.note("\"{s}\" \"{s}\"", .{ name orelse "nil", old });
             return result0(kern.unmount(if (name) |n| n.ptr else null, old));
         },
         .fauth => {
             // fauth(int fd, char *aname)
             const spec_va = try a.u(1);
-            const spec: [:0]const u8 = if (spec_va == 0) "" else try gm.string(p.as, spec_va, &p.spec_buf);
+            const spec: [:0]const u8 = if (spec_va == 0) "" else try p.space.string(spec_va, &p.spec_buf);
             p.note("{d} \"{s}\"", .{ try a.int(0), spec });
             const fd = fdArg(try a.int(0)) orelse return badFd();
             return result(kern.fauth(fd, spec));
         },
-        .remove => return result0(kern.remove(try gm.string(p.as, try a.u(0), &p.name_buf))),
+        .remove => return result0(kern.remove(try p.space.string(try a.u(0), &p.name_buf))),
         .wstat, .fwstat => {
             const len = try a.uint(2);
             var tmp: [65536]u8 = undefined;
             if (len > tmp.len) return fail;
-            const Ctx = struct {
-                dst: []u8,
-                fn f(cx: *@This(), src: []u8) gm.Error!usize {
-                    @memcpy(cx.dst[0..src.len], src);
-                    cx.dst = cx.dst[src.len..];
-                    return src.len;
-                }
-            };
-            var cx: Ctx = .{ .dst = tmp[0..len] };
-            _ = try gm.each(p.as, try a.u(1), len, &cx, Ctx.f);
+            try p.space.read(try a.u(1), tmp[0..len]);
             const n = if (nr == .wstat)
-                kern.wstat(try gm.string(p.as, try a.u(0), &p.name_buf), tmp[0..len]) catch return fail
+                kern.wstat(try p.space.string(try a.u(0), &p.name_buf), tmp[0..len]) catch return fail
             else
                 kern.fwstat(fdArg(try a.int(0)) orelse return badFd(), tmp[0..len]) catch return fail;
             return ok(n);
@@ -408,8 +430,8 @@ fn serve(p: *Process, nr: Nr, a: Args) (gm.Error || std.mem.Allocator.Error)!Out
             var cls_buf: [32]u8 = undefined;
             const cls_va = try a.u(1);
             // A name too long for any class is just an unknown one.
-            const cls: []const u8 = gm.string(p.as, cls_va, &cls_buf) catch |e|
-                if (p.as.translate(cls_va, 1) != null) "" else return e;
+            const cls: []const u8 = p.space.string(cls_va, &cls_buf) catch |e|
+                if (p.space.mapped(cls_va)) "" else return e;
             const va = try a.u(2);
             const len = try a.uint(3);
             p.note("0x{x} \"{s}\" 0x{x} {d}", .{ try a.uint(0), cls, va, len });
@@ -419,27 +441,28 @@ fn serve(p: *Process, nr: Nr, a: Args) (gm.Error || std.mem.Allocator.Error)!Out
                 .memory
             else
                 null;
-            const base = p.segs.segattach(p.gpa, p.engine, p.as, kind, try a.uint(0), va, len) catch |e| return segFail(e);
+            const base = p.space.segattach(p.io, kind, try a.uint(0), va, len) catch |e| return segFail(e);
             return .{ .ret = base };
         },
         .segdetach => {
             p.note("0x{x}", .{try a.u(0)});
-            p.segs.segdetach(p.as, try a.u(0)) catch |e| return segFail(e);
+            p.space.segdetach(p.io, try a.u(0)) catch |e| return segFail(e);
             return ok(0);
         },
         .segbrk => {
             p.note("0x{x} 0x{x}", .{ try a.u(0), try a.u(1) });
-            const r = p.segs.segbrk(try a.u(0), try a.u(1)) catch |e| return segFail(e);
+            const r = p.space.segbrk(p.io, try a.u(0), try a.u(1)) catch |e| return segFail(e);
             return .{ .ret = r };
         },
         .segfree => {
             p.note("0x{x} {d}", .{ try a.u(0), try a.uint(1) });
-            p.segs.segfree(try a.u(0), try a.uint(1)) catch |e| return segFail(e);
+            p.space.segfree(try a.u(0), try a.uint(1)) catch |e| return segFail(e);
             return ok(0);
         },
         .segflush => {
             p.note("0x{x} {d}", .{ try a.u(0), try a.uint(1) });
-            p.segs.segflush(try a.u(0), try a.uint(1)) catch |e| return segFail(e);
+            p.space.segflush(try a.u(0), try a.uint(1)) catch |e| return segFail(e);
+            p.as.codeChanged(try a.u(0), try a.uint(1));
             return ok(0);
         },
         .rendezvous => {
@@ -450,20 +473,23 @@ fn serve(p: *Process, nr: Nr, a: Args) (gm.Error || std.mem.Allocator.Error)!Out
         .semacquire => {
             // semacquire(long *addr, int block)
             p.note("0x{x} {d}", .{ try a.u(0), try a.int(1) });
-            const w = try semWord(p, try a.u(0)) orelse return fail;
-            return ok(@intFromBool(kern.semacquire(w, try a.int(1) != 0) catch return fail));
+            var sw = try semWord(p, try a.u(0)) orelse return fail;
+            defer p.space.unpin(&sw);
+            return ok(@intFromBool(kern.semacquire(semPtr(sw), try a.int(1) != 0) catch return fail));
         },
         .tsemacquire => {
             // tsemacquire(long *addr, ulong ms)
             p.note("0x{x} {d}", .{ try a.u(0), try a.uint(1) });
-            const w = try semWord(p, try a.u(0)) orelse return fail;
-            return ok(@intFromBool(kern.tsemacquire(w, try a.uint(1)) catch return fail));
+            var sw = try semWord(p, try a.u(0)) orelse return fail;
+            defer p.space.unpin(&sw);
+            return ok(@intFromBool(kern.tsemacquire(semPtr(sw), try a.uint(1)) catch return fail));
         },
         .semrelease => {
             // semrelease(long *addr, long count)
             p.note("0x{x} {d}", .{ try a.u(0), try a.int(1) });
-            const w = try semWord(p, try a.u(0)) orelse return fail;
-            return ok(kern.semrelease(w, try a.int(1)) catch return fail);
+            var sw = try semWord(p, try a.u(0)) orelse return fail;
+            defer p.space.unpin(&sw);
+            return ok(kern.semrelease(semPtr(sw), try a.int(1)) catch return fail);
         },
         ._nsec => {
             // _nsec(vlong*): wall nanoseconds in the return register on
@@ -475,7 +501,7 @@ fn serve(p: *Process, nr: Nr, a: Args) (gm.Error || std.mem.Allocator.Error)!Out
             if (ptr & 3 != 0) return sysNote(p, "sys: odd address");
             var b: [8]u8 = undefined;
             std.mem.writeInt(i64, &b, now, .little);
-            try gm.write(p.as, ptr, &b);
+            try p.space.write(ptr, &b);
             return ok(0);
         },
         _ => return sysNote(p, "sys: bad sys call"),
@@ -487,25 +513,34 @@ fn serve(p: *Process, nr: Nr, a: Args) (gm.Error || std.mem.Allocator.Error)!Out
 /// posts "sys: odd address", an unmapped one is a bad address, and one
 /// outside a writable segment fails; those two fail with "bad arg in system
 /// call" and return null. A Plan 9 long is 32 bits, and an aligned one
-/// never crosses a page. The word stays valid while the call blocks: the
-/// caller's address space keeps the segment attached, and a shared
-/// segment's pages never move (src/segment.zig).
-fn semWord(p: *Process, addr: u64) gm.Error!?*i32 {
+/// never crosses a page.
+///
+/// The wait lists are keyed by the word's host address (src/kern/sema.zig),
+/// so its page mustn't move while the call blocks: the word's pages are
+/// the process's own, not shared copy-on-write with a fork, and held
+/// (`Mm.pin`) until the call returns, so an rfork meanwhile by an RFMEM
+/// sibling copies them for its child rather than sharing them, and no
+/// write moves them. The caller unpins.
+fn semWord(p: *Process, addr: u64) gm.Error!?segment.Space.Pin {
     if (addr & 3 != 0) {
         _ = sysNote(p, "sys: odd address");
         return null;
     }
-    const s = gm.contiguous(p.as, addr, 4) orelse return error.BadAddress;
-    if (!p.segs.writable(addr, 4)) {
+    if (!p.space.mapped(addr)) return error.BadAddress;
+    if (!p.space.writable(addr, 4)) {
         kern.setErrstr("bad arg in system call");
         return null;
     }
-    return @ptrCast(@alignCast(s.ptr));
+    return p.space.pin(addr, 4, true) orelse error.BadAddress;
+}
+
+fn semPtr(pn: segment.Space.Pin) *i32 {
+    return @ptrCast(@alignCast(pn.p.s.ptr));
 }
 
 /// Copies exec's file name and argv out of guest memory.
 fn execArgs(p: *Process, file: u64, argp: u64, word: u64) (gm.Error || std.mem.Allocator.Error)!Outcome {
-    const path = try gm.stringAlloc(p.as, file, p.gpa, 1024);
+    const path = try p.space.stringAlloc(file, p.gpa, 1024);
     errdefer p.gpa.free(path);
     p.note("\"{s}\"", .{path});
     var argv: std.ArrayList([:0]u8) = .empty;
@@ -515,9 +550,9 @@ fn execArgs(p: *Process, file: u64, argp: u64, word: u64) (gm.Error || std.mem.A
     }
     var total: usize = 0;
     while (true) {
-        const ptr = try gm.readWord(p.as, argp + word * argv.items.len, word);
+        const ptr = try p.space.readWord(argp + word * argv.items.len, word);
         if (ptr == 0) break;
-        const s = try gm.stringAlloc(p.as, ptr, p.gpa, max_exec_args - total);
+        const s = try p.space.stringAlloc(ptr, p.gpa, max_exec_args - total);
         total += s.len + 1;
         argv.append(p.gpa, s) catch |e| {
             p.gpa.free(s);
@@ -536,7 +571,8 @@ fn execArgs(p: *Process, file: u64, argp: u64, word: u64) (gm.Error || std.mem.A
 fn truncated(p: *Process, ptr: u64) []const u8 {
     var i: usize = 0;
     while (i < kern.ERRMAX - 1) : (i += 1) {
-        const b = p.as.translate(ptr + i, 1) orelse break;
+        var b: [1]u8 = undefined;
+        p.space.read(ptr + i, &b) catch break;
         if (b[0] == 0) break;
         p.msg[i] = b[0];
     }
@@ -569,11 +605,23 @@ const Dir = enum { read, write };
 /// calls reach the kernel too: a zero-length write to a pipe is a message.
 fn io(p: *Process, fd: u31, buf: u64, len: u32, off: i64, comptime dir: Dir) gm.Error!Outcome {
     if (len > gm.max_chunk) return ioSplit(p, fd, buf, len, off, dir);
-    if (if (len == 0) @as([]u8, &.{}) else gm.contiguous(p.as, buf, len)) |s| {
+    if (len == 0) return ok((switch (dir) {
+        .read => kern.pread(fd, &.{}, off),
+        .write => kern.pwrite(fd, &.{}, off),
+    }) catch return fail);
+    // The buffer's pages, held for the call, so another process's unmap
+    // can't free them under it, and for a read, the process's own first,
+    // so it can't land in pages a fork shares copy-on-write.
+    if (p.space.pin(buf, len, dir == .read)) |pn_| {
+        var pn = pn_;
+        defer p.space.unpin(&pn);
+        const s = pn.p.s;
         const n = switch (dir) {
             .read => kern.pread(fd, s, off),
             .write => kern.pwrite(fd, s, off),
         } catch return fail;
+        // What was compiled or decoded from the pages read into goes.
+        if (dir == .read) p.as.hostWrote(s[0..n]);
         return ok(n);
     }
     const tmp = std.heap.page_allocator.alloc(u8, len) catch {
@@ -584,48 +632,37 @@ fn io(p: *Process, fd: u31, buf: u64, len: u32, off: i64, comptime dir: Dir) gm.
     switch (dir) {
         .read => {
             // Check the range before the read, so a bad buffer has no side effects.
-            _ = try gm.each(p.as, buf, len, &{}, struct {
-                fn f(_: *const void, s: []u8) gm.Error!usize {
-                    return s.len;
-                }
-            }.f);
+            try p.space.touch(buf, len, true);
             const n = kern.pread(fd, tmp, off) catch return fail;
-            try gm.write(p.as, buf, tmp[0..n]);
+            try p.space.write(buf, tmp[0..n]);
             return ok(n);
         },
         .write => {
-            try gm.read(p.as, buf, tmp);
+            try p.space.read(buf, tmp);
             return ok(kern.pwrite(fd, tmp, off) catch return fail);
         },
     }
 }
 
 fn ioSplit(p: *Process, fd: u31, buf: u64, len: u32, off: i64, comptime dir: Dir) gm.Error!Outcome {
-    const Ctx = struct {
-        fd: u31,
-        off: i64,
-        failed: bool = false,
-        fn f(c: *@This(), chunk: []u8) gm.Error!usize {
-            const n = switch (dir) {
-                .read => kern.pread(c.fd, chunk, c.off),
-                .write => kern.pwrite(c.fd, chunk, c.off),
-            } catch {
-                c.failed = true;
-                return 0;
-            };
-            if (c.off != -1) c.off += @intCast(n);
-            return n;
-        }
-    };
-    var ctx: Ctx = .{ .fd = fd, .off = off };
-    const n = try gm.each(p.as, buf, len, &ctx, Ctx.f);
-    if (ctx.failed and n == 0) return fail;
-    return ok(n);
+    try p.space.touch(buf, len, dir == .read);
+    var done: u64 = 0;
+    var o = off;
+    while (done < len) {
+        const n: u32 = @intCast(@min(len - done, gm.max_chunk));
+        const r = try io(p, fd, buf + done, n, o, dir);
+        const got: i64 = @bitCast(r.ret);
+        if (got < 0) return if (done == 0) fail else ok(done);
+        done += @intCast(got);
+        if (o != -1) o += got;
+        if (got < n) break;
+    }
+    return ok(done);
 }
 
 fn brk(p: *Process, addr: u64) gm.Error!Outcome {
-    if (addr == 0) return ok(p.segs.brkTop());
-    p.segs.brk(addr) catch |e| return segFail(e);
+    if (addr == 0) return ok(p.space.brkTop());
+    p.space.brk(p.io, addr) catch |e| return segFail(e);
     return ok(0);
 }
 
@@ -645,9 +682,20 @@ test "386 arguments: 4-byte slots, and a vlong takes two" {
         }
     };
     const as: engine.AddressSpace = .initFake(&stack, Ctx.t);
-    const a: Args = .{ .as = as, .base = 0x100, .word = 4 };
-    try std.testing.expectEqual(@as(u64, 0x1000), try a.u(0));
-    try std.testing.expectEqual(@as(i32, 3), try a.int(1));
-    try std.testing.expectEqual(@as(i64, 0x0123456789abcdef), try a.vlong(2));
-    try std.testing.expectEqual(@as(i32, 2), try a.int(2 + a.vlongSlots()));
+    // Read where they lie, and copied at entry (the six slots fit).
+    const where: Args = .{ .as = as, .base = 0x100, .word = 4 };
+    const copied: Args = .init(as, null, 0x100, 4);
+    try std.testing.expectEqual(@as(u8, Args.max_slots), copied.nslots);
+    for ([_]Args{ where, copied }) |a| {
+        try std.testing.expectEqual(@as(u64, 0x1000), try a.u(0));
+        try std.testing.expectEqual(@as(i32, 3), try a.int(1));
+        try std.testing.expectEqual(@as(i64, 0x0123456789abcdef), try a.vlong(2));
+        try std.testing.expectEqual(@as(i32, 2), try a.int(2 + a.vlongSlots()));
+    }
+    // Slots past the run's end aren't copied: each is read, and the
+    // missing one is a bad address.
+    const short: Args = .init(as, null, 0x104, 4);
+    try std.testing.expectEqual(@as(u8, 0), short.nslots);
+    try std.testing.expectEqual(@as(i32, 3), try short.int(0));
+    try std.testing.expectError(error.BadAddress, short.u(5));
 }

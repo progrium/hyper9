@@ -30,12 +30,13 @@ pub const usage =
     \\           [--gfx[=noclip|=headless]] [--gfx-scale N] [--gfx-size WxH]
     \\           [--serve unix!PATH|tcp!HOST!PORT|ws://HOST:PORT[/PATH]]...
     \\           [--serve-root PATH] [--serve-token @FILE] [--serve-origin ORIGIN]...
-    \\           [--serve-net]
+    \\           [--serve-net] [--children]
     \\           [--print] [--trace[=FILE]] [-v|--verbose]
     \\           [--] program [args...]
     \\       h9 [flags] --rc 'command' [args...]
     \\       h9 [flags] --rc
     \\       h9 [flags] --serve ADDR...
+    \\       h9 --plan FILE|- [narrowing flags] [program [args...]]
     \\       h9 [--engine E] [mount flags] [--memory SIZE] --check
     \\       h9 --version
     \\       h9 --help
@@ -86,6 +87,12 @@ pub const Config = struct {
     /// --cwd: the host directory bound at /mnt/term/cwd; null means the
     /// host cwd.
     cwd: ?[]const u8 = null,
+    /// Whether the cwd is writable, from a plan's `cwd PATH rw|ro`
+    /// (design/plan-format.md); null means the profile's default.
+    cwd_writable: ?bool = null,
+    /// --plan: the plan file to run, `-` for stdin (design/plan-format.md).
+    /// The caller reads it and applies it with `withPlan`.
+    plan: ?[]const u8 = null,
     /// --env values, as name=value.
     env: []const []const u8 = &.{},
     profile: policy.Profile = .default,
@@ -106,6 +113,9 @@ pub const Config = struct {
     /// them, or `@FILE` for a host file (design/epoch-0/mounts.md).
     ns: []const []const u8 = &.{},
     host_fs: bool = false,
+    /// --children: the guest can start child machines
+    /// (design/child-machines.md).
+    children: bool = false,
     /// --no-guest-tools: leave out `#H/bin` and mask `#H`
     /// (design/epoch-0/guest-tools.md).
     guest_tools: bool = true,
@@ -194,6 +204,8 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
             c.host_fs = true;
         } else if (flag(a, "--no-guest-tools")) {
             c.guest_tools = false;
+        } else if (flag(a, "--children")) {
+            c.children = true;
         } else if (flag(a, "--gfx")) {
             gfx_window = true;
         } else if (flag(a, "--gfx=noclip")) {
@@ -227,6 +239,9 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
             try serve_addrs.append(gpa, addr);
         } else if (flag(a, "--print")) {
             c.print = true;
+        } else if (value(args, &i, "--plan")) |v| {
+            c.plan = v orelse return error.Usage;
+            if (c.plan.?.len == 0) return error.Usage;
         } else if (flag(a, "--verbose")) {
             c.verbose = true;
         } else if (value(args, &i, "--index-cache")) |v| {
@@ -347,10 +362,11 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
     for (serve_origins.items) |o| if (std.mem.eql(u8, o, "*") and c.serve_token == null) return error.Usage;
     // The tool functions take no program, so `h9 --check ls` is a mistake.
     // No program is a run that only serves, with --serve.
+    // A plan may have its own run line (design/plan-format.md).
     const rc = c.rc != null or c.rc_login;
     if (c.mode != .run) {
-        if (rc or i < args.len or serving) return error.Usage;
-    } else if (!rc and i >= args.len and !serving) return error.Usage;
+        if (rc or i < args.len or serving or c.plan != null) return error.Usage;
+    } else if (!rc and i >= args.len and !serving and c.plan == null) return error.Usage;
     c.serve = try serve_addrs.toOwnedSlice(gpa);
     c.serve_origins = try serve_origins.toOwnedSlice(gpa);
     c.env = try env.toOwnedSlice(gpa);
@@ -364,6 +380,139 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
     c.ns = try ns.toOwnedSlice(gpa);
     c.argv = args[i..];
     return c;
+}
+
+/// The plan's run line for the program the flags name: `--rc 'cmd'` is
+/// `/bin/rc -c cmd`, `--rc` alone `/bin/rc -l`, and otherwise the
+/// program and its arguments. Null when there's none (`--serve` only).
+pub fn runLine(gpa: std.mem.Allocator, c: Config) Error!?[]const []const u8 {
+    if (c.rc) |cmd| return try std.mem.concat(gpa, []const u8, &.{ &.{ "/bin/rc", "-c", cmd }, c.argv });
+    if (c.rc_login) return try gpa.dupe([]const u8, &.{ "/bin/rc", "-l" });
+    if (c.argv.len == 0) return null;
+    return c.argv;
+}
+
+/// The plan the flags give, as `narrow` takes it: only what they set
+/// (design/plan-format.md). The program isn't in it.
+pub fn flagSpec(c: Config) policy.Spec {
+    return .{
+        .mounts = c.mounts,
+        .binds = c.binds,
+        .ns = c.ns,
+        .policy = .{
+            .profile = c.profile,
+            .readable = c.readable,
+            .writable = c.writable,
+            .read_deny = c.read_deny,
+            .write = c.write,
+            .net = c.net,
+            .net_allow = c.net_allow,
+            .memory = c.memory,
+            .timeout_ns = c.timeout_ns,
+            .pids = c.pids,
+            .cpus = c.cpus,
+            .cwd_writable = if (c.sandbox != null) true else c.cwd_writable,
+            .host_fs = c.host_fs,
+            .children = c.children,
+        },
+        .guest_tools = c.guest_tools,
+        .engine = if (c.engine == .auto) null else std.meta.stringToEnum(policy.EngineChoice, @tagName(c.engine)),
+        .arch = c.arch,
+        .env = c.env,
+        .cwd = c.sandbox orelse c.cwd,
+        .gfx = if (c.gfx) |g| .{
+            .headless = g.screen == .headless,
+            .clipboard = g.clipboard,
+            .scale = if (g.screen == .headless or g.scale == 1) null else g.scale,
+            .size = if (g.size) |sz| .{ sz.dx, sz.dy } else null,
+        } else null,
+        .serve = c.serve,
+        .serve_root = c.serve_root,
+        .serve_token = c.serve_token,
+        .serve_origins = c.serve_origins,
+        .serve_net = c.serve_net,
+    };
+}
+
+/// Applies plan `text` (`--plan`, design/plan-format.md) to the flags in
+/// `c`: the flags narrow the plan (`policy.narrow`), a program on the
+/// command line replaces its run line, and the flags the plan doesn't
+/// cover (`--trace`, `-v`, `--index`, `--cred`, `--print`, and the like)
+/// stay as given. A line the plan can't parse, a flag that widens it, and
+/// a plan without a program when the command line has none, are usage
+/// errors, with `why` saying which.
+pub fn withPlan(gpa: std.mem.Allocator, c: Config, text: []const u8) Error!Config {
+    var perr: policy.PlanError = .{};
+    const base = policy.parsePlan(gpa, text, &perr) catch |e| {
+        if (e == error.OutOfMemory) return error.OutOfMemory;
+        why = try std.fmt.allocPrint(gpa, "--plan {s}: line {d}: {s}", .{ c.plan orelse "", perr.line, perr.msg });
+        return error.Usage;
+    };
+    var w: []const u8 = "";
+    const p = policy.narrow(gpa, base, flagSpec(c), &w) catch |e| {
+        if (e == error.OutOfMemory) return error.OutOfMemory;
+        why = try std.fmt.allocPrint(gpa, "--plan {s}: {s}", .{ c.plan orelse "", w });
+        return error.Usage;
+    };
+    var r = c;
+    r.mounts = p.mounts;
+    r.binds = p.binds;
+    r.ns = p.ns;
+    r.profile = p.policy.profile;
+    r.readable = p.policy.readable;
+    r.writable = p.policy.writable;
+    r.read_deny = p.policy.read_deny;
+    r.write = p.policy.write;
+    r.net = p.policy.net;
+    r.net_allow = p.policy.net_allow;
+    r.memory = p.policy.memory;
+    r.timeout_ns = p.policy.timeout_ns;
+    r.pids = p.policy.pids;
+    r.cpus = p.policy.cpus;
+    r.host_fs = p.policy.host_fs;
+    r.children = p.policy.children;
+    r.guest_tools = p.guest_tools;
+    r.cwd = p.cwd;
+    r.cwd_writable = p.policy.cwd_writable;
+    r.sandbox = null;
+    if (p.engine) |e| r.engine = std.meta.stringToEnum(engine.Choice, @tagName(e)).?;
+    r.arch = p.arch;
+    r.env = p.env;
+    r.gfx = if (p.gfx) |g| .{
+        .screen = if (g.headless) .headless else .window,
+        .clipboard = g.clipboard,
+        .scale = g.scale orelse 1,
+        .size = if (g.size) |sz| .{ .dx = sz[0], .dy = sz[1] } else null,
+    } else null;
+    r.serve = p.serve;
+    for (r.serve) |addr| _ = serve.Listen.parse(addr) catch {
+        why = try std.fmt.allocPrint(gpa, "--plan {s}: serve {s}: not an address h9 can listen on", .{ c.plan orelse "", addr });
+        return error.Usage;
+    };
+    r.serve_root = p.serve_root;
+    r.serve_token = p.serve_token;
+    r.serve_origins = p.serve_origins;
+    r.serve_net = p.serve_net;
+    for (r.serve_origins) |o| if (std.mem.eql(u8, o, "*") and r.serve_token == null) {
+        why = try std.fmt.allocPrint(gpa, "--plan {s}: serveorigin * needs servetoken", .{c.plan orelse ""});
+        return error.Usage;
+    };
+    // The command line's program, or the plan's run line, which may be
+    // rc as --rc gives it.
+    if (c.rc == null and !c.rc_login and c.argv.len == 0) if (p.run) |argv| {
+        if (argv.len >= 3 and std.mem.eql(u8, argv[0], "/bin/rc") and std.mem.eql(u8, argv[1], "-c")) {
+            r.rc = argv[2];
+            r.argv = argv[3..];
+        } else if (argv.len == 2 and std.mem.eql(u8, argv[0], "/bin/rc") and std.mem.eql(u8, argv[1], "-l")) {
+            r.rc_login = true;
+            r.argv = &.{};
+        } else r.argv = argv;
+    };
+    if (r.rc == null and !r.rc_login and r.argv.len == 0 and r.serve.len == 0 and r.mode == .run) {
+        why = try std.fmt.allocPrint(gpa, "--plan {s}: no program: the plan has no run line, and none was given", .{c.plan orelse ""});
+        return error.Usage;
+    }
+    return r;
 }
 
 /// The flags design/epoch-0/mounts.md removed, and what replaces each, for the

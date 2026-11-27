@@ -15,7 +15,12 @@ pub const RootChanges = @import("machine.zig").RootChanges;
 pub const Program = @import("machine.zig").Program;
 pub const EnvVar = @import("machine.zig").EnvVar;
 pub const policy = @import("policy.zig");
+/// The machine's resolver for guest DNS (design/linux-dns.md).
+pub const resolver = @import("resolver.zig");
 pub const Policy = policy.Policy;
+/// What a machine reaches outside through (design/host-handles.md).
+pub const host = @import("host/host.zig");
+pub const Host = host.Host;
 pub const guestmem = @import("guestmem.zig");
 pub const syscall = @import("abi/plan9/syscall.zig");
 pub const newns = @import("newns.zig");
@@ -57,7 +62,9 @@ test {
     _ = guestmem;
     _ = syscall;
     _ = policy;
+    _ = host;
     _ = @import("mount.zig");
+    _ = @import("resolver.zig");
     _ = newns;
     _ = consin;
     _ = ws;
@@ -66,9 +73,10 @@ test {
     _ = cred;
     _ = serve;
     _ = gfx;
-    _ = @import("cpupool.zig");
+    _ = @import("child.zig");
     _ = @import("abi/linux/nr.zig");
     _ = @import("abi/linux/mm.zig");
+    _ = @import("kern/mm.zig");
     _ = @import("abi/linux/elf.zig");
     _ = @import("abi/linux/vclock.zig");
     _ = @import("abi/linux/signal.zig");

@@ -91,10 +91,13 @@ in that runs here), and the Go cases run on sud when it's among them.
 ```sh
 zig build          # builds and ad-hoc signs zig-out/bin/h9 with h9.entitlements
 zig build test     # unit tests, and the engine tests on every engine built in (not the integration cases)
-zig build kern     # compiles drawterm's kern and the libraries it uses
+zig build kern     # compiles drawterm's kern and the libraries it uses, with the parts ported to Zig (src/kern/port.zig)
+zig build kern-test  # the ported kernel's own cases (src/kern/*.zig), on the native namespace kernel; zig build test runs them too
+zig build sched-test  # the scheduler's kernel stacks and park and resume (src/kern/sched/), with no kernel or engine; compiled only for a -Dtarget the host can't run, and for wasm32 run through Asyncify under Node if Binaryen's wasm-opt is on PATH; zig build test runs them too
 zig build embed    # builds docs/embedding/embed.zig, the embedding guide's example, as zig-out/bin/embed
 zig build integration  # real 9front binaries from the root tree through the h9 CLI
 zig build proposal -Dp=baseline  # one proposal's demos, web cases, and integration cases, by slug
+zig build conformance            # tests/conformance/ns.rc on h9, against 9front's transcript; -- --oracle records that under QEMU
 zig build design -- check        # validate design/, the test tags, and links to design/ (also list, ready, new, propose, log, sign, archive)
 zig build mkroot -- --src        # build the root tree from the pinned image (also --force, --arch arm64,386,amd64)
 zig build slim     # 9box, 9front's commands as one multi-call binary, and a slim root around it in .local/9front/slim-<release>-<arch>
@@ -158,6 +161,7 @@ zig build test                                   # tests/engines.zig on T1 and o
 zig build integration -Dengines=hcpu             # the integration cases on hcpu
 zig build integration -Dengines=hcpu -Djit-check # every compiled region checked against T0
 zig build bench                                  # compute and syscall speed, hcpu against the hypervisor
+zig build bench -- syscall --engine hcpu --arch arm64  # only those system call rows (also compute, loop, --repeat N)
 ```
 
 Unicorn is kept as a test oracle only: `zig build lockstep`
@@ -306,6 +310,29 @@ doesn't build it. "Linux v9fs
 mounts --serve over a unix socket" runs only on Linux with the kernel's
 9p, as root or with `sudo -n`, as in the `linux-kvm` VM.
 
+### Namespace conformance
+
+[tests/conformance/ns.rc](tests/conformance/ns.rc) is a script of
+namespace operations (binds, unions, mounts, `..` across mounts, creates
+in unions, `ORCLOSE`, and flush) that prints what each one showed, and
+[tests/conformance/9front.out](tests/conformance/9front.out) is what it
+printed on 9front's own kernel ([kernel-port](design/kernel-port.md)).
+`zig build conformance` runs it on h9, on each engine `-Dengines` picks,
+with the root tree (`-Droot`, and `-Darch`), and fails on any difference,
+showing the first one; each engine's transcript is left in
+`zig-out/conformance`. It skips without a root tree, and needs no QEMU.
+When the script changes, record the transcript again on 9front:
+
+```sh
+zig build conformance -- --oracle   # boots the pinned arm64 image under QEMU (scripts/fetch.sh image), as mkroot does
+```
+
+It runs the script there with rc and writes `9front.out`
+([tools/conformance.zig](tools/conformance.zig)). On TCG, with no
+hypervisor for arm64, that takes well under a minute. A difference that
+is a bug in h9's kernel is noted in kernel-port's Updates, not hidden by
+changing the script.
+
 ### Workloads
 
 The workloads in [tests/workloads](tests/workloads) run real programs on
@@ -379,13 +406,14 @@ development builds report `git describe` (`-Dversion=V` overrides it).
 | Path | Contents |
 | --- | --- |
 | `src/main.zig`, `src/cli.zig`, `src/stdin.zig`, `src/hostsig.zig`, `src/tools.zig` | CLI: entry point, flag parsing with no I/O, the host stdin reader (cancellable, for the console's reader thread), Ctrl-C, hangup, and raw mode on the host terminal, and `--check`/`--version` |
-| `src/gfx.zig`, `src/kern/gfx*.c`, `src/kern/nogfx.c` | `--gfx`: the window claim and `h9.gfx.main`, the kernel glue around drawterm's GUI backends (lazy `#i`, the kbdfs `/dev/kbd`, `/dev/screen`, `/dev/mousein`, `/dev/kbdin`, the clipboard, and the choice of screen), the headless screen, and the stubs for builds without graphics |
+| `src/gfx.zig`, `src/kern/gfx.c`, `src/host/gfx-*`, `src/kern/dev/gfx.zig`, `src/kern/nogfx.c` | `--gfx`: the window claim and `h9.gfx.main`, the kernel glue around drawterm's GUI backends (lazy `#i`, the kbdfs `/dev/kbd`, `/dev/screen`, `/dev/mousein`, `/dev/kbdin`, the clipboard, and the choice of screen), the headless screen, and the stubs for builds without graphics |
 | `src/root.zig` | library root; [docs/embedding.md](docs/embedding.md) explains using it |
 | `docs/` | guides that go further than the manual; `docs/embedding/embed.zig` is the embedding guide's example program |
 | `src/machine.zig` | one machine: builds its namespace, runs a process, and serves its syscalls |
 | `src/consin.zig` | a machine run's console input: the reader thread a guest's console read waits on, so notes can interrupt it |
 | `src/policy.zig` | the sandbox policy: profiles, the compiled plan, `--print`, and the access rules devfs checks |
-| `src/kern.zig`, `src/kern/` | the Zig/C seam into drawterm's kern; boot and spawn (`glue.c`), process records and notes (`proc.c`), our device table, the machine console `#y`, devenv, and devproc ported from 9front, the copy-on-write overlay device `#O` (`devoverlay.c`), h9's guest commands `#H` (`devhtools.c`), and the devfs policy hooks (`fscheck.c`) |
+| `src/kern.zig`, `src/kern/` | the kernel as h9 calls it; the parts of drawterm's kern ported to Zig ([kernel-port](design/kernel-port.md): `port.zig`, with queues and blocks in `qio.zig`, locks and sleep in `sync.zig`, the device helpers and switch in `dev.zig`, which calls C devices through `raising`, under the one error label in `third_party/drawterm-glue/catch.c`, the mount table in `pgrp.zig`, channels and `namec` in `chan.zig`, the file system calls in `sysfile.zig`, the 9P client in `devmnt.zig`, and pipes, the root device, and the copy-on-write overlay device `#O` in `dev/`); boot and spawn (`glue.zig`), process records and notes (`proc.zig`), devproc ported from 9front (`dev/proc.zig`), our device table, the machine console `#y`, devenv, and h9's guest commands `#H` (`devhtools.c`). Nothing in it includes a host OS header |
+| `src/host/` | the machine's host ([host-handles](design/host-handles.md)): the `Host` table and the one a plan describes, directory handles and the opens beneath them (`dirs.zig`, `dirs.c`), h9's own sockets (`net.zig`), and the host's devices, native devices the kernel's switch names: the host tree `#U` (`devfs*.zig`, with the policy checks in `fscheck.c`), the network `#I` (`devip.zig`, over `ipsock-*.c` and `hostsock-*.c`), and host descriptors `#φ` (`devlfd.zig`); plus the GUI backends and the Windows glue |
 | `src/guest/` | h9's own guest commands (rc scripts), as the guest sees them under `#H`; embedded by the build through `tools/guesttree.zig`. |
 | `src/abi/plan9/syscall.zig`, `src/guestmem.zig` | the 9front syscall table, and checked access to guest memory |
 | `src/abi/plan9/loader.zig` | loads an a.out into an address space, builds the stack and Tos |
@@ -393,10 +421,10 @@ development builds report `git describe` (`-Dversion=V` overrides it).
 | `src/engine.zig`, `src/engine/` | the engine interface and engines (HVF, KVM, WHP, sud, and hcpu, h9's own CPUs, which the web host uses too), with the guest-physical allocator and page tables the hypervisor engines share |
 | `src/engine/hcpu/hcpu.zig`, `src/engine/hcpu/jit/`, `src/engine/hcpu/interp/` | h9's own CPUs for the emulator (hcpu): the JIT's IR and its reference evaluator, the runtime ABI, the emitters (arm64, wasm), the front ends (`a64/`), and the interpreters and software TLB the two tiers share. `src/engine/hcpu/jit/README.md` has the contracts |
 | `src/web.zig`, `src/web/` | the web host: coroutines on JSPI, its `std.Io` and console, the JS host (`h9-web.js`, `h9-node`, `worker.js`, `wasi-mem.js`, and `statictree.js` for static dotfs trees) and the demo page |
-| `src/nskernel.zig`, `src/nskernel/`, `src/kern/devns.c`, `src/kern/nstab.c` | the namespace kernel: its Zig root (ctl lines, dials, serving, the native API), `h9ns.h`, the `#N` device, and its device table and stubs; `src/web/h9ns.js` and `h9ns-worker.js` are its JS host |
+| `src/nskernel.zig`, `src/nskernel/`, `src/kern/dev/ns.zig`, `src/kern/nstab.c` | the namespace kernel: its Zig root (ctl lines, dials, serving, the native API), `h9ns.h`, the `#N` device, and its device table and stubs; `src/web/h9ns.js` and `h9ns-worker.js` are its JS host |
 | `src/capi.zig`, `src/capi/` | libh9: machines behind a C ABI (`h9.h`), configured with the CLI's flags through `src/cli.zig`; `docs/embedding/hello.c` uses it |
 | `src/arch/` | per-architecture Ureg/ABI and the guest shims |
-| `third_party/drawterm` | vendored drawterm (git subtree; kern and libraries). Local changes: the sandbox hooks in `kern/devfs-posix.c` and `kern/devfs-win32.c` |
+| `third_party/drawterm` | vendored drawterm (git subtree; kern and libraries). h9 builds its files unpatched ([spec/kernel.md](spec/kernel.md), "drawterm's C") |
 | `tests/engines.zig` | engine conformance tests |
 | `tests/integration.zig` | real 9front binaries through the h9 CLI |
 | `tests/term.zig` | a pty (ConPTY on Windows) for the interactive integration cases |

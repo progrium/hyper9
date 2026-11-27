@@ -44,6 +44,7 @@ h9 is a namespace kernel for Plan 9 and Linux executables: a Zig library and a t
 | ABIs | Two, picked at exec by the binary's format: 9front's for a.out binaries, and Linux's for ELF binaries on arm64, amd64, and 386 | A Linux process is the same kernel process, with a second syscall table and its own root, the Linux view, with the 9front root at `/9` ([linux-personality](design/epoch-0/linux-personality.md)) |
 | Kernel | drawterm's `kern/`, with h9's devices, ABIs, and policy hooks around it in C and Zig | `third_party/drawterm` is a squashed subtree, changed only where necessary and updated only with `scripts/vendor-drawterm.sh` |
 | Root filesystem | Mount flags stacked into `#Oroot` behind the kernel's `#/`: host trees, 9P servers over TCP, a unix socket, or a WebSocket, static dotfs trees over HTTP, archives, and the built-in root | A 9P root is mounted through devmnt ([ninep-roots](design/epoch-0/ninep-roots.md), [websocket-9p](design/epoch-0/websocket-9p.md), [mounts](design/epoch-0/mounts.md)); disk images were declined ([image-roots](design/epoch-0/image-roots.md)) |
+| Child machines | Under `--children`, a guest starts machines of its own through `#μ`, each another `Machine` in the process sharing the parent's engine and kernel, built from the caller's namespace, and bounded by the parent's plan and what's left of its limits ([child-machines](design/child-machines.md)) | See spec/kernel.md, Child machines |
 | Sandbox | The namespace, plus a `Policy` of capabilities, host paths, network rules, and limits that the kernel enforces, with `default` and `tight` profiles | The default root is a copy-on-write overlay with a private `/tmp`, and the network is outbound only ([overlay](design/epoch-0/overlay.md), [ephemeral-writes](design/epoch-0/ephemeral-writes.md), [net-policy](design/epoch-0/net-policy.md)) |
 | Serving | The kernel's own 9P2000 server, per connection, on a unix socket, TCP, or a WebSocket; 9P2000.L through the same translator that mounts .L servers | No guest process per connection ([kernel-serve](design/epoch-0/kernel-serve.md), [dotl](design/epoch-0/dotl.md)) |
 | Toolchain inside | The 9front compilers (7c/6c, 7l/6l, mk) must run | It's a goal ([self-host](design/epoch-0/self-host.md)), and a source of test binaries |
@@ -69,7 +70,7 @@ This file is the overview. Each part of h9 is described, as built, in a file und
 | --- | --- |
 | [spec/engines.md](spec/engines.md) | The `engine` interface; the hypervisor engines (HVF, KVM, and WHP), the sud engine, and the hcpu engine; and the guest shims |
 | [spec/jit.md](spec/jit.md), [spec/h86.md](spec/h86.md), [spec/hx64.md](spec/hx64.md), [spec/ha64.md](spec/ha64.md) | h9's own CPUs for the emulator: the layer they share, and each architecture |
-| [spec/kernel.md](spec/kernel.md) | The process model; and the kernel: drawterm's `kern/`, what h9 adds to it, and the Zig/C seam rules |
+| [spec/kernel.md](spec/kernel.md) | The process model; and the kernel: h9's Zig, ported from drawterm's `kern/`, what h9 adds to it, and the drawterm C it still builds |
 | [spec/abi-plan9.md](spec/abi-plan9.md) | The 9front binary ABI, a.out loading, the syscall table, and Go programs |
 | [spec/abi-linux.md](spec/abi-linux.md) | The Linux ABI |
 | [spec/ninep.md](spec/ninep.md) | Mounts and the root, static trees, the 9P dialects, and serving |
@@ -90,7 +91,7 @@ Proposals and other docs written before the split name sections of this file, su
 | Process model | [spec/kernel.md](spec/kernel.md#process-model) |
 | Go programs | [spec/abi-plan9.md](spec/abi-plan9.md#go-programs) |
 | Linux personality | [spec/abi-linux.md](spec/abi-linux.md) |
-| Kernel: drawterm `kern/` and the Zig seam | [spec/kernel.md](spec/kernel.md#kernel-drawterm-kern-and-the-zig-seam) |
+| Kernel: h9's Zig and drawterm's C | [spec/kernel.md](spec/kernel.md#kernel-h9s-zig-and-drawterms-c) |
 | Filesystem, boot, and I/O | The root filesystem and 9P dialects in [spec/ninep.md](spec/ninep.md); slim roots, the boot sequence, the terminal, and graphics in [spec/machine.md](spec/machine.md) |
 | Serving | [spec/ninep.md](spec/ninep.md#serving) |
 | Security, debugging, and testing | The security stance and the sandbox policy in [spec/sandbox.md](spec/sandbox.md); debugging, and testing and CI, in [spec/testing.md](spec/testing.md) |

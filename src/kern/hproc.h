@@ -1,6 +1,9 @@
 /*
- * h9's per-process records (proc.c), shared with devproc.c. See proc.c.
+ * h9's machines, notes and wait records (proc.c), shared with devproc.c
+ * and the other devices that look at processes. The process record is
+ * Hproc (h9proc.h). See proc.c.
  */
+#include "h9proc.h"
 
 enum
 {
@@ -18,10 +21,6 @@ enum
 	RFNOMNT		= (1<<14),
 
 	Maxwait		= 128,	/* wait records a parent keeps, as 9front */
-	PROCHASH	= 64,
-	TEXTLEN		= 64,
-	ARGSLEN		= 128,	/* args kept for /proc, as 9front's exec */
-	NNOTE		= 5,	/* queued notes, as 9front */
 
 	/* procctl, as 9front's Proc_stopme and Proc_traceme */
 	Pstopme		= 1,	/* stop at the next stop point */
@@ -40,25 +39,28 @@ enum
 /* ns.c */
 extern void	pgrpcpy(Pgrp*, Pgrp*, int);
 
-/* devenv.c */
-extern void	*h9_egrpnew(void);
-extern void	*h9_egrpcopy(void*);
-extern void	h9_egrpincref(void*);
-extern void	h9_egrpclose(void*);
-
-typedef struct Hwait Hwait;
-typedef struct Hproc Hproc;
-typedef struct Hmach Hmach;
-typedef struct Hnote Hnote;
-
-/* A machine: the processes descended from one h9_kern_spawn. */
+/*
+ * A machine: the C half of a Kernel (src/kern.zig), which makes it with
+ * h9_kern_newmach, and the processes spawned into it and their
+ * descendants.
+ */
 struct Hmach
 {
-	Ref	ref;		/* one per record */
+	Ref	ref;		/* the Kernel's, and one per process */
+	void	*kernel;	/* the Kernel, until h9_kern_machdetach; under lk */
 	Lock	lk;
 	ulong	nextnoteid;
 	int	nlive;		/* processes not yet released (h9_kern_release); under lk */
 	void	*srv;		/* devsrv.c's registry, made on first attach; under lk */
+	Hproc	*procs;		/* its processes, on mnext, until they exit; under lk */
+	/*
+	 * Its scheduler (design/scheduler.md), or nil: a process it starts
+	 * runs on the scheduler's executors rather than a host thread of its
+	 * own. schedstart returns 0, or -1 to have the process get a thread.
+	 * Set before the first spawn.
+	 */
+	void	*sched;
+	int	(*schedstart)(void *sched, Hproc *p);
 };
 
 /* 9front's Note. One note posted to a group is shared by its queues. */
@@ -77,74 +79,18 @@ struct Hwait
 	char	msg[ERRMAX];
 };
 
-struct Hproc
-{
-	Ref	ref;
-	Proc	*p;
-	Hproc	*hash;		/* table chain */
-
-	ulong	pid;		/* machine-local */
-	char	text[TEXTLEN];
-	ulong	start;		/* ticks() at creation, for the real time */
-	ulong	ppid;		/* the parent's pid when created, for /proc/n/ppid */
-	Lock	alk;		/* guards args, nargs and setargs */
-	char	args[ARGSLEN];	/* exec's argv, NUL-separated, as 9front's p->args */
-	int	nargs;
-	int	setargs;	/* args was written through /proc */
-	int	hang;		/* ctl hang: exec stops the process before it runs */
-	int	killed;		/* ctl kill: die with "Killed" at the next delivery; under nlk */
-	char	exitstr[ERRMAX];
-	ulong	cputime[2];	/* user and sys ms for the wait record, set by the Linux ABI */
-	void	*egrp;		/* devenv.c's HEgrp */
-	void	*aux;		/* the Zig process */
-	Hmach	*mach;
-	int	released;	/* h9_kern_release has run; only its own thread looks */
-	QLock	debug;		/* held to swap or drop p's fgrp, pgrp and dot, and to read them from devproc */
-
-	Lock	nlk;		/* guards the note fields below */
-	ulong	noteid;
-	int	notify;		/* has a note handler */
-	int	notified;	/* in the handler */
-	int	nnote;
-	Hnote	*note[NNOTE];
-	Hnote	*lastnote;	/* the note being handled, or that killed it */
-
-	/* Debugging (design/epoch-0/self-host.md); under nlk. */
-	int	procctl;	/* Pstopme or Ptraceme: stop at the next stop point */
-	int	stopped;	/* parked at a stop point until ctl start */
-	int	pdbg;		/* a debugger waits in stopr for it to stop */
-	int	stopwait;	/* this process waits for another to stop, for status */
-	Rendez	startr;		/* the stopped process sleeps here */
-	Rendez	stopr;		/* its debugger sleeps here */
-	Chan	*textc;		/* the executed image, open, for /proc/n/text; or nil */
-
-	Hproc	*parent;	/* nil with RFNOWAIT or for a machine's first process */
-	int	nofollow;	/* the next lookup acts on a link in its last name (h9_fs_nofollow); only its own thread looks */
-	Chan	*lroot;		/* the Linux root chroot(2) set (design/epoch-0/linux-chroot.md), or nil for #L; only its own thread looks */
-	/*
-	 * A Linux thread's group leader (RFLXTHREAD), or nil: its forks are
-	 * the leader's children, and its Linux waits read the leader's wait
-	 * records, as a Linux process's threads share its children.
-	 */
-	Hproc	*waiter;
-	Hproc	*wnext;		/* on the waiter's wsleep list */
-	Rendez	lwaitr;		/* a Linux wait sleeps here */
-	Lock	exl;		/* guards the fields below */
-	int	dead;		/* exited; children leave no wait records */
-	int	nchild;
-	int	nwait;
-	Hwait	*waitq;
-	QLock	qwaitr;		/* one waiter at a time */
-	Rendez	waitr;
-	Hproc	*wsleep;	/* Linux waits sleeping for this process's children */
-	ulong	wgen;		/* bumped when waitq, nchild or dead change, for them */
-};
-
 /*
  * h9_kern_fork's flag for a Linux thread (with RFNOWAIT): the child's
  * waiter is the caller's group leader. Not a 9front flag.
  */
 enum { RFLXTHREAD = 1<<30 };
+
+/*
+ * h9_kern_fork's flag for a process that keeps a host thread of its own
+ * where the machine has a scheduler: a helper that waits in the host
+ * (the pty and 9P servers). Not a 9front flag.
+ */
+enum { RFHOSTTHREAD = 1<<29 };
 
 
 /* proc.c, for devproc.c. Lookups take a reference; release it with h9_putproc. */

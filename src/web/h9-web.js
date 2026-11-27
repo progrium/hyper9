@@ -1,6 +1,7 @@
 // h9's JS host (design/epoch-0/browser-host.md): instantiates h9.wasm, runs
-// its coroutines on JavaScript Promise Integration, and compiles the
-// modules its JIT builds (wasmJit). The same code runs under Node
+// its executor (src/kern/sched/web.zig) on JavaScript Promise Integration,
+// does the ops its tasks wait on, and compiles the modules its JIT builds
+// (wasmJit). The same code runs under Node
 // (h9-node) and in a Web Worker (worker.js), with the page's side of it in
 // createMachine.
 
@@ -142,7 +143,16 @@ export function wasmJit({ memory, table, exports, log = console.error }) {
 }
 
 // Runs fn on a later turn of the event loop. setTimeout(0) is clamped to
-// 4 ms after a few nested calls, which would throttle every yield.
+// 4 ms after a few nested calls, which would throttle every idle.
+/**
+ * An import that waits on JavaScript, as an op (src/kern/sched/web.zig):
+ * run() makes it start f and return the op's id at once, and the task
+ * that called it waits in h9_task_await until the executor's idle sees
+ * f's result. f gets the import's arguments; it may write into wasm
+ * memory when it ends, since a waiting task's stack stays put.
+ */
+const asOp = (f) => ({ op: f });
+
 const nextTask = (() => {
   if (typeof setImmediate === 'function') return (fn) => setImmediate(fn);
   const ch = new MessageChannel();
@@ -161,7 +171,7 @@ const nextTask = (() => {
  *   readStdin(n) -> Promise<Uint8Array|null|'cancelled'>, cancelStdin(),
  *   waitSignal() -> Promise<number>, stopSignals(), setRaw(on).
  * - stats({ maxStack }): called once h9 ends, with the deepest any
- *   coroutine's stack got at a park, in bytes.
+ *   task's stack got at a park, in bytes.
  * - gfx: a GfxHost, the page's canvas in a Worker
  *   (design/epoch-0/browser-gfx.md); without one, --gfx fails as on a build
  *   without graphics.
@@ -193,10 +203,18 @@ export async function run({ h9, wasi, host, log = console.error, stats, gfx, cre
   const mem = new WebAssembly.Memory({ initial: Math.max(h9pages, 1), maximum: maxPages });
   const str = (p, n) => new TextDecoder().decode(new Uint8Array(mem.buffer, p >>> 0, n >>> 0));
 
-  // Coroutines. A park is a Promise that unpark resolves; an unpark
-  // before the park leaves a permit, so the park returns at once.
-  const waiters = new Map();
-  const permits = new Set();
+  // The executor's ops: started by an import, and handed back by
+  // ops_done once they end. idle suspends the executor until one does,
+  // or for ms when that isn't negative.
+  let nextOp = 1;
+  const opsDone = [];
+  let wake = null;
+  const opWake = () => { if (wake) { const w = wake; wake = null; w(); } };
+  const startOp = (f) => (...a) => {
+    const id = nextOp++;
+    (async () => f(...a))().then((r) => { opsDone.push(id, r | 0); opWake(); }, die);
+    return id;
+  };
   let fatal = null;
   let finish;
   const done = new Promise((res) => { finish = res; });
@@ -205,30 +223,29 @@ export async function run({ h9, wasi, host, log = console.error, stats, gfx, cre
     fatal = e;
     finish(e instanceof Exit ? e.code : Promise.reject(e));
   };
-  let entry, hx;
+  let hx;
   const h9table = h9tableSize === null ? null : new WebAssembly.Table({ element: 'anyfunc', initial: h9tableSize });
   const jit = h9table && wasmJit({ memory: mem, table: h9table, exports: () => hx, log });
   const h9imports = {
-    park: new WebAssembly.Suspending((id, ms) => {
-      if (permits.delete(id)) return 1;
+    idle: new WebAssembly.Suspending((ms) => {
+      if (opsDone.length) return 0;
       return new Promise((res) => {
         let t = null;
-        if (ms >= 0) t = setTimeout(() => { waiters.delete(id); res(0); }, ms);
-        waiters.set(id, () => { if (t !== null) clearTimeout(t); res(1); });
+        wake = () => { if (t !== null) clearTimeout(t); res(0); };
+        if (ms === 0) nextTask(opWake);
+        else if (ms > 0) t = setTimeout(opWake, ms);
       });
     }),
-    unpark: (id) => {
-      const w = waiters.get(id);
-      if (w) { waiters.delete(id); w(); } else permits.add(id);
+    ops_done: (p, n) => {
+      const k = Math.min(n >>> 0, opsDone.length / 2);
+      new Int32Array(mem.buffer, p >>> 0, k * 2).set(opsDone.splice(0, k * 2));
+      return k;
     },
-    start: (c) => nextTask(() => entry(c).catch(die)),
-    yield: new WebAssembly.Suspending(() => new Promise((res) => nextTask(res))),
-    sleep: new WebAssembly.Suspending((ms) => new Promise((res) => setTimeout(res, ms))),
     panic: (p, n) => { throw new Panic(str(p, n)); },
     random: (p, n) => { crypto.getRandomValues(new Uint8Array(mem.buffer, p >>> 0, n >>> 0)); },
     now_ms: () => Date.now(),
     mono_ms: () => performance.now(),
-    read_stdin: new WebAssembly.Suspending(async (p, n) => {
+    read_stdin: asOp(async (p, n) => {
       const got = await host.readStdin(n >>> 0);
       if (got === 'cancelled') return -2;
       if (got === null) return 0;
@@ -237,13 +254,14 @@ export async function run({ h9, wasi, host, log = console.error, stats, gfx, cre
       return got.length;
     }),
     cancel_stdin: () => host.cancelStdin(),
-    wait_signal: new WebAssembly.Suspending(() => host.waitSignal()),
+    wait_signal: asOp(() => host.waitSignal()),
     stop_signals: () => host.stopSignals(),
     set_raw: (on) => host.setRaw(!!on),
     ...wsImports(() => mem, str, credentials, ports instanceof Ports ? ports : new Ports(ports)),
     ...(jit ? { jit_compile: jit.jit_compile, jit_drop: jit.jit_drop } : {}),
     ...(gfx ?? noGfx).imports(() => mem),
   };
+  for (const [k, v] of Object.entries(h9imports)) if (v && typeof v === 'object' && v.op) h9imports[k] = startOp(v.op);
   const wimports = wasi(mem);
   wimports.proc_exit = (code) => { throw new Exit(code); };
   const inst = new WebAssembly.Instance(h9mod, {
@@ -254,17 +272,16 @@ export async function run({ h9, wasi, host, log = console.error, stats, gfx, cre
   hx = inst.exports;
   // Table slots from here on are the JIT's (src/engine/hcpu/jit/wasm_t1.zig).
   if (h9table && hx.jit_table_base) hx.jit_table_base(h9table.length);
-  entry = WebAssembly.promising(hx.h9_coro_entry);
-  // _start is the first coroutine, on the linker's stack.
+  // _start runs the executor, which idle suspends.
   WebAssembly.promising(hx._start)().then(() => finish(0), die);
   if (!stats) return done;
-  return done.finally(() => stats({ maxStack: Number(hx.h9_coro_maxdepth()) }));
+  return done.finally(() => stats({ maxStack: Number(hx.h9_task_maxdepth()) }));
 }
 
 // WebSockets for src/hstream.zig (design/epoch-0/websocket-9p.md, "On the
 // web host"): the page's WebSocket, or Node's, does the handshake,
-// TLS and framing. ws_opened and ws_recv are Suspending: each parks only
-// the stream's reader coroutine.
+// TLS and framing. ws_opened and ws_recv are ops: each parks only the
+// stream's reader task.
 // Whether this host's WebSocket takes handshake headers: Node's does, as
 // an option a browser's doesn't have.
 const wsHeaders = typeof process !== 'undefined' && !!process.versions?.node;
@@ -392,7 +409,7 @@ function wsImports(memory, str, credentials, ports) {
   const enc = new TextEncoder();
   const u8 = (p, n) => new Uint8Array(memory().buffer, p >>> 0, n >>> 0);
   const setU32 = (p, v) => new DataView(memory().buffer).setUint32(p >>> 0, v, true);
-  // Resolves the socket's waiter, if a coroutine is parked on it.
+  // Resolves the socket's waiter, if a task is waiting on it.
   const poke = (s) => { const w = s.waiter; s.waiter = null; w?.(); };
   const until = (s, ready) => (ready() ? null : new Promise((res) => { s.waiter = res; }));
   const addSock = (s) => {
@@ -416,7 +433,7 @@ function wsImports(memory, str, credentials, ports) {
     },
     // The next port the page serves the machine on, opened; -1 once the
     // machine stops serving.
-    port_accept: new WebAssembly.Suspending(async () => {
+    port_accept: asOp(async () => {
       for (;;) {
         if (ports.stopped) return -1;
         const e = ports.served.shift();
@@ -440,7 +457,7 @@ function wsImports(memory, str, credentials, ports) {
     },
     port_stop: () => ports.stop(),
     port_serving: () => (ports.serving ? 1 : 0) | (ports.serveNet ? 2 : 0),
-    ws_cred: new WebAssembly.Suspending(async (up, un, fp, fn, ap, an, op, on) => {
+    ws_cred: asOp(async (up, un, fp, fn, ap, an, op, on) => {
       const helper = an ? str(ap, an).split('\n') : undefined;
       const put = (t) => {
         const b = enc.encode(t);
@@ -514,7 +531,7 @@ function wsImports(memory, str, credentials, ports) {
       socks.set(id, s);
       return id;
     },
-    ws_opened: new WebAssembly.Suspending(async (id, p, n) => {
+    ws_opened: asOp(async (id, p, n) => {
       const s = socks.get(id);
       if (!s) return -1;
       await until(s, () => s.open !== 0);
@@ -523,7 +540,7 @@ function wsImports(memory, str, credentials, ports) {
       u8(p, b.length).set(b);
       return b.length;
     }),
-    ws_recv: new WebAssembly.Suspending(async (id, p, n, infop) => {
+    ws_recv: asOp(async (id, p, n, infop) => {
       const s = socks.get(id);
       if (!s) return -1;
       for (;;) {
@@ -607,7 +624,7 @@ function wsImports(memory, str, credentials, ports) {
   };
 }
 
-// Graphics (design/epoch-0/browser-gfx.md). src/kern/gfx-web.c's imports:
+// Graphics (design/epoch-0/browser-gfx.md). src/host/gfx-web.c's imports:
 // the screen is in wasm memory, and the host copies changed rectangles
 // onto an OffscreenCanvas once a frame; the page's input waits in a queue
 // for gfxinput, a kernel process, to take with gfx_wait.
@@ -622,7 +639,7 @@ const noGfx = {
     gfx_size: () => {},
     gfx_screen: () => {},
     gfx_flush: () => {},
-    gfx_wait: new WebAssembly.Suspending(async () => 0),
+    gfx_wait: asOp(async () => 0),
     gfx_paste: () => 0,
     gfx_snarf: () => {},
     gfx_cursor: () => {},
@@ -684,7 +701,7 @@ export class GfxHost {
   }
 
   // Copies the dirty rectangle of the screen onto the canvas, with each
-  // pixel's X byte set to 255, outside any coroutine.
+  // pixel's X byte set to 255, while the executor idles.
   #frame() {
     this.framing = false;
     const s = this.screen, d = this.dirty;
@@ -730,7 +747,7 @@ export class GfxHost {
         this.#mark([0, 0, dx, dy]);
       },
       gfx_flush: (x0, y0, x1, y1) => this.#mark([x0, y0, x1, y1]),
-      gfx_wait: new WebAssembly.Suspending(async (p, n) => {
+      gfx_wait: asOp(async (p, n) => {
         while (!this.q.length) await new Promise((res) => { this.waiter = res; });
         const k = Math.min(this.q.length, (n / 4) | 0);
         const out = new Int32Array(memory().buffer, p >>> 0, k * 4);
@@ -818,6 +835,96 @@ export function mountFlag(m, src = m.src) {
   if (m.dst || m.opts) parts.push(m.dst || '/');
   if (m.opts) parts.push(m.opts);
   return parts.length ? `--${kind}=${parts.join(':')}` : `--${kind}`;
+}
+
+// Plans (design/plan-format.md) on the page: createMachine({ plan }) gives
+// h9 the text as a file for --plan, with its archive lines' sources
+// fetched as the mounts' are.
+
+const mountKinds = ['archive', 'url', 'dir', 'builtin', 'tmp'];
+
+/**
+ * A plan's lines as h9 splits them (src/policy.zig's parsePlan and
+ * src/newns.zig's split): a line that starts with `#` is a comment to its
+ * end, a `#` that starts a word is one to the next `;`, `'` quotes, `''`
+ * is a quote in quotes, and `;` or a newline ends a line. Each is
+ * { start, end, words }, `start` and `end` its offsets in `text`.
+ */
+export function planLines(text) {
+  const lines = [];
+  let i = 0;
+  while (i < text.length) {
+    const eol = text.indexOf('\n', i) < 0 ? text.length : text.indexOf('\n', i);
+    if (/^[ \t\r]*#/.test(text.slice(i, eol))) { i = eol + 1; continue; }
+    let start = i, words = [];
+    const end = () => { if (words.length) lines.push({ start, end: i, words }); words = []; };
+    while (i < eol) {
+      const c = text[i];
+      if (c === ' ' || c === '\t' || c === '\r') { i++; if (!words.length) start = i; continue; }
+      if (c === ';') { end(); i++; start = i; continue; }
+      if (c === '#') {
+        const semi = text.indexOf(';', i);
+        if (semi < 0 || semi > eol) { i = eol; break; }
+        end(); i = semi + 1; start = i; continue;
+      }
+      let w = '', quoted = false;
+      for (; i < eol; i++) {
+        const ch = text[i];
+        if (ch === "'") {
+          if (quoted && text[i + 1] === "'") { w += "'"; i++; } else quoted = !quoted;
+          continue;
+        }
+        if (!quoted && (ch === ' ' || ch === '\t' || ch === '\r' || ch === ';')) break;
+        w += ch;
+      }
+      if (quoted) throw new Error('plan: a quote that isn\'t closed');
+      words.push(w);
+    }
+    end();
+    i = eol + 1;
+  }
+  return lines;
+}
+
+/** A word as a plan writes it: quoted if it has to be. */
+export function planWord(w) {
+  return w !== '' && /^[^\s'#;]+$/.test(w) ? w : `'${w.replaceAll("'", "''")}'`;
+}
+
+/** Whether a plan has a mount line: dir, url, archive, builtin, or tmp. */
+export function planHasMounts(text) {
+  return planLines(text).some((l) => mountKinds.includes(l.words[0]));
+}
+
+/**
+ * `text` with each `archive VALUE` line's source replaced by what
+ * `f(src, index)` returns, `index` counting the archive lines; the line
+ * becomes `kind` (`dir`, for a tree unpacked into the Worker's files) if
+ * given. A value is a mount flag's (src/mount.zig): SRC:DST:OPTS, or the
+ * long form src=…,dst=…. Other lines, and line numbers, are unchanged.
+ */
+export function mapPlanArchives(text, f, kind = 'archive') {
+  const lines = planLines(text).filter((l) => l.words[0] === 'archive' && l.words.length === 2);
+  let out = '', at = 0;
+  lines.forEach((l, i) => {
+    const v = l.words[1];
+    let src, rest, long = false;
+    const lf = v.match(/^src=("(?:[^"]|"")*"|[^,]*)/);
+    if (lf) {
+      long = true;
+      src = lf[1].startsWith('"') ? lf[1].slice(1, -1).replaceAll('""', '"') : lf[1];
+      rest = v.slice(lf[0].length);
+    } else {
+      const d = dstStart(v);
+      src = d < 0 ? v : v.slice(0, d);
+      rest = d < 0 ? '' : v.slice(d);
+    }
+    const s = f(src, i);
+    const nv = long ? `src=${/[,"]/.test(s) ? `"${s.replaceAll('"', '""')}"` : s}${rest}` : s + rest;
+    out += text.slice(at, l.start) + `${kind} ${planWord(nv)}`;
+    at = l.end;
+  });
+  return out + text.slice(at);
 }
 
 function policyFlags(policy = {}) {
@@ -1055,6 +1162,15 @@ function attachCanvas(canvas, worker, { clipboard, scale, size, events }) {
  *   (design/epoch-0/serve.md), with no listener, origin, or token;
  *   machine.serve(port) adds one while it runs, to a machine made with
  *   serve. serveNet: true exports /net with it, as --serve-net does
+ * - plan: a plan's text (design/plan-format.md), which h9 runs as
+ *   --plan does, in place of mounts and binds, which are then an error.
+ *   An `archive` line's source is a URL, relative to the page, fetched
+ *   and unpacked as a mount's is; a `url port://NAME` line names one of
+ *   `ports`. A plan without mount lines gets root.h9a beside this file
+ *   as its first line, so the line numbers h9 reports are one more. The
+ *   other options are flags given with the plan, so they can only narrow
+ *   it: memory and policy lower or remove, and gfx needs the plan's gfx
+ *   window line. machine.run([]) runs the plan's run line
  * - credentials: async (url, failed, helper) => lines, the page's
  *   credential helper (design/epoch-0/credential-helpers.md), called in place
  *   of running a --cred helper, before each WebSocket handshake h9 makes:
@@ -1077,8 +1193,15 @@ function attachCanvas(canvas, worker, { clipboard, scale, size, events }) {
  * /dev/snarf that the page's clipboard refuses fires a `snarf` event
  * whose `text` is what was written.
  */
-export async function createMachine({ mounts, binds = [], memory, backend, arch, policy, terminal, tty = false, gfx, env, credentials, ports = {}, serve, serveNet = false } = {}) {
+export async function createMachine({ mounts, binds = [], plan, memory, backend, arch, policy, terminal, tty = false, gfx, env, credentials, ports = {}, serve, serveNet = false } = {}) {
   if (!haveJSPI) throw new Error('this browser lacks JavaScript Promise Integration');
+  if (plan != null && (mounts || binds.length)) throw new Error('createMachine: a plan has its own mount and bind lines, so mounts and binds go in it');
+  if (plan != null) {
+    // Archives by URL from the page, so the Worker can fetch them.
+    const root = new URL('root.h9a', import.meta.url);
+    if (!planHasMounts(plan)) plan = `archive ${planWord(String(root))}\n${plan}`;
+    plan = mapPlanArchives(String(plan), (src) => String(new URL(src, location.href)));
+  }
   if (gfx && typeof gfx.canvas?.transferControlToOffscreen !== 'function') throw new Error("this browser can't draw from a Worker");
   const clipboard = (gfx?.clipboard ?? 'page') !== 'private';
   const scale = Math.max(0, Math.min(255, gfx?.scale ?? 0) | 0);
@@ -1095,7 +1218,7 @@ export async function createMachine({ mounts, binds = [], memory, backend, arch,
     run(argv) {
       if (started) return Promise.reject(new Error('a machine runs once'));
       started = true;
-      const ms = (mounts ?? [{ archive: new URL('root.h9a', import.meta.url) }]).map((m) => mountOf(m, portMap));
+      const ms = plan != null ? [] : (mounts ?? [{ archive: new URL('root.h9a', import.meta.url) }]).map((m) => mountOf(m, portMap));
       const flags = [...(backend ? ['--engine', backend] : []), ...(arch ? ['--arch', arch] : []), ...(memory ? [`--memory=${memory}`] : []), ...policyFlags(policy)];
       let onGfx = () => false;
       let start = {}, transfer = [];
@@ -1130,7 +1253,7 @@ export async function createMachine({ mounts, binds = [], memory, backend, arch,
         for (const m of ms) if (m.kind === 'archive' || (m.kind === 'url' && /^https?:/i.test(m.src))) m.src = url(m.src);
         const bindFlags = binds.flatMap((b) => ['--bind', b]);
         const portList = [...Object.values(portMap), ...served];
-        worker.postMessage({ type: 'start', argv: [...flags, ...bindFlags, ...argv], mounts: ms, tty, env, credentials: typeof credentials === 'function', ports: portMap, serve: served, serving, serveNet: !!serveNet, ...start }, [...transfer, ...portList]);
+        worker.postMessage({ type: 'start', argv: [...flags, ...bindFlags, ...argv], mounts: ms, plan, tty, env, credentials: typeof credentials === 'function', ports: portMap, serve: served, serving, serveNet: !!serveNet, ...start }, [...transfer, ...portList]);
       });
     },
     addPort(name, port) {

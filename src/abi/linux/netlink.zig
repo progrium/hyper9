@@ -2,7 +2,7 @@
 //! the dumps that list interfaces and their addresses, which Go's
 //! net.Interfaces and net.InterfaceAddrs and musl's getifaddrs make.
 //! Everything else is answered with EOPNOTSUPP. The interfaces are the
-//! host's (src/kern/hostsock.h's h9so_ifaddrs), or loopback alone where
+//! host's (src/host/hostsock.h's h9so_ifaddrs), or loopback alone where
 //! the host can't list them or the machine has no network.
 
 const std = @import("std");

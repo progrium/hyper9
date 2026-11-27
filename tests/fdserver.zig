@@ -400,12 +400,14 @@ pub fn readFd(fd: fd_t, buf: []u8) !usize {
     }
 }
 
-pub fn writeFd(fd: fd_t, data: []const u8) !void {
+pub fn writeFd(fd: fd_t, data: []const u8) error{ Closed, WriteFailed }!void {
     var off: usize = 0;
     while (off < data.len) {
         if (builtin.os.tag == .windows) {
             var put: u32 = 0;
-            if (!win.WriteFile(fd, data[off..].ptr, @intCast(data.len - off), &put, null).toBool()) return error.WriteFailed;
+            // A failed write is the other end gone, as readFd takes a
+            // failed read on Windows.
+            if (!win.WriteFile(fd, data[off..].ptr, @intCast(data.len - off), &put, null).toBool()) return error.Closed;
             off += put;
             continue;
         }

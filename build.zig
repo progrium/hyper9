@@ -3,29 +3,30 @@ const frontmatter = @import("tools/frontmatter.zig");
 const guesttree = @import("tools/guesttree.zig");
 
 const drawterm = "third_party/drawterm";
+// h9's C at the edge of drawterm's (third_party/drawterm-glue/catch.c).
+const drawterm_glue = "third_party/drawterm-glue";
 
 // drawterm's kern/Makefile OFILES with AUDIO=none, without devtab.c and
-// devenv.c (src/kern/ has our own), devpipe.c (built with kern_notes
-// below), or devcmd.c (host commands live on the host-cmd branch while
-// design/host-cmd.md rethinks them), plus the OS files below.
+// devenv.c (src/kern/dev/env.zig is our own), procinit.c (src/kern/proc.c has it,
+// for the one process record), devcmd.c (host commands live on the
+// host-cmd branch while design/host-cmd.md rethinks them), or the files
+// ported to Zig (design/kernel-port.md, src/kern/port.zig): allocb.c,
+// chan.c, dev.c, devcons.c, devmnt.c, devpipe.c, devroot.c, pgrp.c, qio.c, qlock.c,
+// rwlock.c, sleep.c, and sysfile.c, nor the host's devices, devfs and
+// devip, which are src/host's (design/host-handles.md). Plus the OS files
+// below.
 const kern_sources = [_][]const u8{
-    "alloc.c",    "allocb.c",        "chan.c",     "data.c",    "dev.c",
-    "devaudio.c", "devaudio-none.c", "devcons.c",  "devdraw.c", "devip.c",
-    "devkbd.c",   "devmnt.c",        "devmouse.c", "devroot.c", "devssl.c",
-    "devtls.c",   "error.c",         "parse.c",    "pgrp.c",    "procinit.c",
-    "rwlock.c",   "sleep.c",         "stub.c",     "sysfile.c", "qio.c",
-    "qlock.c",    "term.c",          "waserror.c",
+    "alloc.c",    "data.c",     "devaudio.c", "devaudio-none.c",
+    "devdraw.c",  "devkbd.c",   "devmouse.c",
+    "devssl.c",   "devtls.c",   "error.c",    "parse.c",
+    "stub.c",     "term.c",     "waserror.c",
 };
-// drawterm files that post notes, built so their notes reach h9's note
-// queue (src/kern/proc.c) instead of drawterm's postnote.
-const kern_notes = [_][]const u8{"devpipe.c"};
-// OS=posix (Make.unix), and OS=win32 with FS=fs-win32 (Make.win64).
-const kern_posix = [_][]const u8{ "devfs-posix.c", "devip-posix.c", "devlfd-posix.c", "posix.c" };
-const kern_win32 = [_][]const u8{ "devfs-win32.c", "devip-win32.c", "devlfd-win32.c", "win32.c" };
-// The web host (design/epoch-0/browser-host.md): devfs and devlfd build
-// against wasi-libc; posix.c and devip-posix.c are replaced by
-// src/kern/os-wasm.c and devip-wasm.c.
-const kern_web = [_][]const u8{ "devfs-posix.c", "devlfd-posix.c" };
+// OS=posix (Make.unix), and OS=win32 (Make.win64), without devlfd,
+// which is src/host's. The web host (design/epoch-0/browser-host.md)
+// builds none: posix.c is replaced by src/kern/os-wasm.c.
+const kern_posix = [_][]const u8{"posix.c"};
+const kern_win32 = [_][]const u8{"win32.c"};
+const kern_web = [_][]const u8{};
 
 /// The drawterm libraries kern needs, with each Makefile's OFILES. The GUI,
 /// exportfs, libauth and drawterm's own main/cpu code are left out.
@@ -151,9 +152,13 @@ const sema_fixtures = [_][]const u8{
     "rendezvous", "semacquire", "count", "badarg", "odd", "unmapped", "interrupt",
 };
 
+/// Programs in tests/fixtures/badptr, for tests/engines.zig; they include
+/// the segattach fixtures' lib.S.
+const badptr_fixtures = [_][]const u8{ "read", "write", "stat" };
+
 /// Programs in tests/fixtures/net, for tests/engines.zig. They share
 /// tests/fixtures/segattach/lib.S.
-const net_fixtures = [_][]const u8{ "ctl", "cs" };
+const net_fixtures = [_][]const u8{ "ctl", "cs", "dns" };
 /// C programs in tests/fixtures/linux, built static for Linux on arm64 and
 /// amd64, for the linux-personality cases in tests/integration.zig.
 const linux_fixture_names = [_][]const u8{ "hello", "probe", "die", "sigreturn", "net", "threads", "files", "tls386", "bigexe", "pty", "fifo", "cowfork", "symlink", "chroot" };
@@ -592,29 +597,28 @@ fn builtinArches(target: std.Target, emu: Emu) []const []const u8 {
 /// drawterm's kern and the libraries it uses, as a static library for
 /// `target`. `web` builds it for the web host
 /// (design/epoch-0/browser-host.md): wasm32-wasi, with src/kern/os-wasm.c in
-/// place of posix.c, the coroutines it runs on (src/web/coro.c), and
-/// setjmp/longjmp on wasm exception handling.
+/// place of posix.c, the executor its processes run on
+/// (src/kern/sched/web.zig), and setjmp/longjmp on wasm exception
+/// handling.
 fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, web: bool, gfx: Gfx, exported: bool) *std.Build.Step.Compile {
     const os = target.result.os.tag;
+    const flags: []const []const u8 = if (web) &kern_flags_web else if (os == .windows) &kern_flags_win32 else &kern_flags;
+    // The library's root is the kernel's Zig, which exports the C
+    // functions of the drawterm files it replaces.
     const kern = b.addLibrary(.{
         .name = if (gfx == .headless and !exported) "kern-headless" else "kern",
         .linkage = .static,
-        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
+        .root_module = kernPort(b, target, optimize, flags, gfx != .none),
     });
     kern.root_module.addIncludePath(b.path(drawterm));
     kern.root_module.addIncludePath(b.path(drawterm ++ "/include"));
     kern.root_module.addIncludePath(b.path(drawterm ++ "/kern"));
-    kern.root_module.addIncludePath(b.path("src/kern")); // fscheck.h and netcheck.h, for devfs and devip
-    const flags: []const []const u8 = if (web) &kern_flags_web else if (os == .windows) &kern_flags_win32 else &kern_flags;
+    kern.root_module.addIncludePath(b.path("src/kern")); // netcheck.h, for devip
+    kern.root_module.addIncludePath(b.path("src/host")); // the host's C (design/host-handles.md)
     kern.root_module.addCSourceFiles(.{
         .root = b.path(drawterm ++ "/kern"),
         .files = &kern_sources,
         .flags = flags,
-    });
-    kern.root_module.addCSourceFiles(.{
-        .root = b.path(drawterm ++ "/kern"),
-        .files = &kern_notes,
-        .flags = std.mem.concat(b.allocator, []const u8, &.{ flags, &.{"-Dpostnote=h9_postnote"} }) catch @panic("OOM"),
     });
     kern.root_module.addCSourceFiles(.{
         .root = b.path(drawterm ++ "/kern"),
@@ -623,15 +627,20 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.O
     });
     kern.root_module.addCSourceFiles(.{
         .root = b.path("src/kern"),
-        .files = &.{ "glue.c", "proc.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "devproc.c", "devoverlay.c", "devsrv.c", "devhtools.c", "fscheck.c", "netcheck.c", "consx.c", "tsleep.c", "sema.c", "rootdial.c", "devhstream.c", "devdotl.c", "devhidx.c", "kserve.c", "ns.c" },
+        .files = &.{ "devtab.c", "devdup.c", "devhtools.c", "consx.c", "consprint.c", "werrstr.c" },
         .flags = flags,
     });
+    // The host's half of the policy's file checks.
+    kern.root_module.addCSourceFiles(.{ .root = b.path("src/host"), .files = &.{"fscheck.c"}, .flags = flags });
+    // The one label the Zig calls drawterm's raising C under.
+    kern.root_module.addCSourceFiles(.{ .root = b.path(drawterm_glue), .files = &.{"catch.c"}, .flags = flags });
+    // devfs's opens beneath the host's directory handles (design/host-handles.md).
+    kern.root_module.addCSourceFiles(.{ .root = b.path("src/host"), .files = &.{"dirs.c"}, .flags = flags });
     // The Linux ABI (design/epoch-0/linux-personality.md) and its host
     // sockets (design/epoch-0/linux-net.md).
-    kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{ "linux.c", "devlinux.c", "linuxnet.c", "devpty.c", "fifo.c" }, .flags = flags });
     if (web) {
-        kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"hostsock-wasm.c"}, .flags = flags });
-    } else if (os != .windows) kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{ "hostsock-posix.c", "hostif-posix.c" }, .flags = flags });
+        kern.root_module.addCSourceFiles(.{ .root = b.path("src/host"), .files = &.{ "hostsock-wasm.c", "ipsock-wasm.c" }, .flags = flags });
+    } else if (os != .windows) kern.root_module.addCSourceFiles(.{ .root = b.path("src/host"), .files = &.{ "hostsock-posix.c", "hostif-posix.c", "ipsock-posix.c" }, .flags = flags });
     addGfxSources(b, kern, gfx, flags);
     for (kern_libs) |l| kern.root_module.addCSourceFiles(.{
         .root = b.path(b.pathJoin(&.{ drawterm, l.dir })),
@@ -644,17 +653,16 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.O
         kern.root_module.addCMacro("memccpy", "h9_memccpy");
     }
     if (os == .windows) {
-        kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{ "glue-win32.c", "hostsock-win32.c" }, .flags = flags });
+        kern.root_module.addCSourceFiles(.{ .root = b.path("src/host"), .files = &.{ "glue-win32.c", "hostsock-win32.c", "ipsock-win32.c" }, .flags = flags });
         kern.root_module.linkSystemLibrary("ws2_32", .{});
         kern.root_module.linkSystemLibrary("advapi32", .{});
+        kern.root_module.linkSystemLibrary("ntdll", .{}); // NtCreateFile, src/host/dirs.c
     }
     if (os == .macos) addSdkPaths(b, kern.root_module);
     if (web) {
         // No __builtin_return_address on wasm: os-wasm.c has getcallerpc.
         kern.root_module.addCSourceFiles(.{ .root = b.path(drawterm ++ "/posix-port"), .files = &.{"tas.c"}, .flags = flags });
-        kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{ "os-wasm.c", "devip-wasm.c" }, .flags = flags });
-        kern.root_module.addCSourceFiles(.{ .root = b.path("src/web"), .files = &.{"coro.c"}, .flags = flags });
-        kern.root_module.addAssemblyFile(b.path("src/web/stack.S"));
+        kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"os-wasm.c"}, .flags = flags });
         kern.root_module.addAssemblyFile(b.path("src/web/sjlj_tag.S"));
         // wasi-libc's setjmp/longjmp runtime for wasm exception handling,
         // which Zig's wasi-libc doesn't build.
@@ -672,6 +680,67 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.O
     return kern;
 }
 
+/// The kernel's Zig (design/kernel-port.md): src/kern/port.zig, the root
+/// of the drawterm files ported so far, with the C kernel's types
+/// translated from src/kern/port.h under the same macros as the C files
+/// it's linked with (`flags`), so the two agree on every layout.
+fn kernPort(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, flags: []const []const u8, gfx: bool) *std.Build.Module {
+    const tc = b.addTranslateC(.{ .root_source_file = b.path("src/kern/port.h"), .target = target, .optimize = optimize });
+    // On the web, wasi-libc's setjmp.h (for Label) wants exception
+    // handling, which the C kernel is built with (webTarget) and
+    // translate-c isn't told of; it changes no layout.
+    if (target.result.cpu.arch == .wasm32) tc.defineCMacroRaw("__wasm_exception_handling__=1");
+    tc.addIncludePath(b.path(drawterm));
+    tc.addIncludePath(b.path(drawterm ++ "/include"));
+    tc.addIncludePath(b.path(drawterm ++ "/kern"));
+    tc.addIncludePath(b.path("src/kern"));
+    tc.addIncludePath(b.path("src/host"));
+    for (flags) |f| if (std.mem.startsWith(u8, f, "-D")) tc.defineCMacroRaw(f[2..]);
+    if (target.result.os.tag == .macos) if (b.graph.environ_map.get("SDKROOT")) |sdk|
+        tc.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr/include" }) });
+    // Which kernel the Zig is built into, for the files only one of them
+    // has: the namespace kernel leaves out devip, the Linux ABI, and the
+    // screen.
+    const options = b.addOptions();
+    var nskernel = false;
+    var hostfs = false;
+    for (flags) |f| {
+        nskernel = nskernel or std.mem.eql(u8, f, "-DH9_NSKERNEL");
+        hostfs = hostfs or std.mem.eql(u8, f, "-DH9_NSKERNEL_HOSTFS");
+    }
+    options.addOption(bool, "nskernel", nskernel);
+    // devfs (#U), which the full kernel always has.
+    options.addOption(bool, "hostfs", hostfs or !nskernel);
+    // A screen (src/kern/gfx.c and src/kern/dev/gfx.zig), not nogfx.c.
+    options.addOption(bool, "gfx", gfx);
+    const port = b.createModule(.{
+        .root_source_file = b.path("src/kern/port.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "kern_c", .module = tc.createModule() },
+            .{ .name = "kern_options", .module = options.createModule() },
+        },
+    });
+    // The host's devices (design/host-handles.md): src/host's Zig, which
+    // the kernel's Zig names and which calls back into it, with the host
+    // C library through translate-c (src/host/libc.h).
+    const libc = b.addTranslateC(.{ .root_source_file = b.path("src/host/libc.h"), .target = target, .optimize = optimize });
+    const devices = b.createModule(.{
+        .root_source_file = b.path("src/host/devices.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "kern", .module = port },
+            .{ .name = "host_libc", .module = libc.createModule() },
+        },
+    });
+    port.addImport("host_dev", devices);
+    return port;
+}
+
 /// The web target. kern alone turns on wasm exception handling, for
 /// setjmp and longjmp: wasi-libc doesn't build with it.
 fn webTarget(b: *std.Build, eh: bool) std.Build.ResolvedTarget {
@@ -680,6 +749,43 @@ fn webTarget(b: *std.Build, eh: bool) std.Build.ResolvedTarget {
         .os_tag = .wasi,
         .cpu_features_add = if (eh) std.Target.wasm.featureSet(&.{.exception_handling}) else .empty,
     });
+}
+
+/// What Asyncify leaves alone (asyncifyWasm): the emulator's CPUs, from
+/// the engine's run (which yields before it calls them) down, and its
+/// JIT's compilers. Patterns match functions' names.
+const asyncify_skip = "interp.*,jit.*,engine.hcpu.h86.*,engine.hcpu.ha64.*,engine.hcpu.hx64.*";
+
+/// A web build's module after Binaryen's Asyncify pass, which the web
+/// host's executor switches its tasks with (src/kern/sched/cont.zig,
+/// design/scheduler.md). Asyncify takes the wasm exception handling the
+/// C kernel's setjmp uses, since a task never parks in a handler. No
+/// import starts an unwind but Asyncify's own, which cont.zig calls.
+///
+/// With `cpus`, h9.wasm's, the emulator's CPUs and JIT (`asyncify_skip`)
+/// are left as they are: a task parks or yields only between runs of
+/// guest code, never under them, and instrumented they're half the module
+/// and slow for the JS engine to compile. h9ns.wasm has none, and
+/// wasm-opt warns of patterns that match nothing. The build takes
+/// `wasmOpt`'s.
+fn asyncifyWasm(b: *std.Build, exe: *std.Build.Step.Compile, optimize: std.lang.Optimize, cpus: bool) std.Build.LazyPath {
+    const run = b.addSystemCommand(&.{ wasmOpt(b), "--enable-exception-handling", "--asyncify", "--pass-arg=asyncify-imports@asyncify.none", "-g" });
+    if (cpus) run.addArg("--pass-arg=asyncify-removelist@" ++ asyncify_skip);
+    run.addArg(switch (optimize) { .debug => "-O1", .small => "-Oz", else => "-O2" });
+    run.addArtifactArg(exe);
+    run.addArg("-o");
+    return run.addOutputFileArg(b.fmt("{s}.wasm", .{exe.name}));
+}
+
+/// Binaryen's wasm-opt: the pinned one `scripts/fetch.sh binaryen` puts
+/// in .local/binaryen if it's there, or else the one on PATH. Not every
+/// release reads the DWARF in a Debug build's module (133 stops at
+/// DW_LNE_define_file), so the pin is the one the web cases pass with.
+fn wasmOpt(b: *std.Build) []const u8 {
+    const bin = if (b.graph.host.result.os.tag == .windows) "wasm-opt.cmd" else "wasm-opt";
+    const pinned = pathFromRoot(b, b.fmt(".local/binaryen/node_modules/.bin/{s}", .{bin}));
+    std.Io.Dir.cwd().access(b.graph.io, pinned, .{}) catch return "wasm-opt";
+    return pinned;
 }
 
 const Web = struct {
@@ -720,13 +826,14 @@ fn addWeb(b: *std.Build, optimize: std.lang.Optimize, parts: ModuleParts, gfx: G
     // The function table too, so h9-web.js can grow it: the JIT installs
     // its regions there (src/engine/hcpu/jit/emit/wasm.zig).
     exe.import_table = true;
-    // The main coroutine's stack; kernel processes get their own.
+    // The executor's loop's stack, and the JS host's calls in; every task
+    // has its own (src/kern/sched/web.zig).
     exe.stack_size = 1 << 20;
     exe.rdynamic = true;
     exe.use_lld = true;
     const dir: std.Build.InstallDir = .{ .custom = "web" };
     const all = b.step("web-install", "");
-    all.dependOn(&b.addInstallArtifact(exe, .{ .dest_dir = .{ .override = dir } }).step);
+    all.dependOn(&b.addInstallFileWithDir(asyncifyWasm(b, exe, optimize, true), dir, "h9.wasm").step);
     for ([_][]const u8{ "h9-web.js", "h9-node", "worker.js", "wasi-mem.js", "statictree.js", "index.html", "package.json" }) |f|
         all.dependOn(&b.addInstallFileWithDir(b.path(b.pathJoin(&.{ "src/web", f })), dir, f).step);
     return .{ .exe = exe, .install = all };
@@ -737,21 +844,16 @@ fn addWeb(b: *std.Build, optimize: std.lang.Optimize, parts: ModuleParts, gfx: G
 // programs. src/kern/nstab.c is its device table and stands in for what
 // the left-out files would define.
 const nskern_sources = [_][]const u8{
-    "alloc.c",  "allocb.c", "chan.c",   "data.c",   "dev.c",    "devmnt.c",
-    "devroot.c", "error.c", "parse.c",  "pgrp.c",   "procinit.c", "rwlock.c",
-    "sleep.c",  "stub.c",   "sysfile.c", "qio.c",   "qlock.c",  "waserror.c",
+    "alloc.c", "data.c", "error.c", "parse.c", "stub.c", "waserror.c",
 };
-const nskern_h9 = [_][]const u8{
-    "glue.c",    "proc.c",      "ns.c",     "devns.c", "nstab.c",    "devoverlay.c", "devsrv.c",
-    "devhstream.c", "devdotl.c", "kserve.c", "tsleep.c", "rootdial.c",
-};
+const nskern_h9 = [_][]const u8{ "nstab.c", "werrstr.c" };
 // libc's files the kernel subset uses, from kern_libs' list.
 const nskern_libc_skip = [_][]const u8{ "pushssl.c", "pushtls.c", "crypt.c", "dial.c" };
 
 /// The namespace kernel for `target`: natively a static library with the
 /// C API in src/nskernel/h9ns.h, and for wasm32-wasi h9ns.wasm, run by
 /// h9ns.js in a Worker. `hostfs` keeps devfs (#U) natively.
-fn addNsKernel(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, web: bool, hostfs: bool) struct { artifact: *std.Build.Step.Compile, mod: *std.Build.Module } {
+fn addNsKernel(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, web: bool, hostfs: bool) struct { artifact: *std.Build.Step.Compile, mod: *std.Build.Module, port: *std.Build.Module } {
     const options = b.addOptions();
     options.addOption(bool, "kern", true);
     options.addOption(bool, "nskernel", true);
@@ -778,16 +880,18 @@ fn addNsKernel(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.la
     m.addIncludePath(b.path(drawterm ++ "/include"));
     m.addIncludePath(b.path(drawterm ++ "/kern"));
     m.addIncludePath(b.path("src/kern"));
-    const base: []const []const u8 = if (web) &kern_flags_web else &kern_flags;
+    m.addIncludePath(b.path("src/host"));
+    const windows = !web and target.result.os.tag == .windows;
+    const base: []const []const u8 = if (web) &kern_flags_web else if (windows) &kern_flags_win32 else &kern_flags;
     const extra: []const []const u8 = if (hostfs and !web) &.{ "-DH9_NSKERNEL", "-DH9_NSKERNEL_HOSTFS" } else &.{"-DH9_NSKERNEL"};
     const flags = std.mem.concat(b.allocator, []const u8, &.{ base, extra }) catch @panic("OOM");
+    // The kernel's Zig (src/kern/port.zig), which src/nskernel.zig
+    // imports.
+    const port = kernPort(b, root.resolved_target.?, optimize, flags, false);
+    root.addImport("kern_port", port);
     m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/kern"), .files = &nskern_sources, .flags = flags });
-    m.addCSourceFiles(.{
-        .root = b.path(drawterm ++ "/kern"),
-        .files = &kern_notes,
-        .flags = std.mem.concat(b.allocator, []const u8, &.{ flags, &.{"-Dpostnote=h9_postnote"} }) catch @panic("OOM"),
-    });
     m.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &nskern_h9, .flags = flags });
+    m.addCSourceFiles(.{ .root = b.path(drawterm_glue), .files = &.{"catch.c"}, .flags = flags });
     var libc: std.ArrayList([]const u8) = .empty;
     for (kern_libs[0].files) |f| {
         for (nskern_libc_skip) |skip| {
@@ -804,8 +908,6 @@ fn addNsKernel(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.la
     if (web) {
         m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/posix-port"), .files = &.{"tas.c"}, .flags = flags });
         m.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"os-wasm.c"}, .flags = flags });
-        m.addCSourceFiles(.{ .root = b.path("src/web"), .files = &.{"coro.c"}, .flags = flags });
-        m.addAssemblyFile(b.path("src/web/stack.S"));
         m.addAssemblyFile(b.path("src/web/sjlj_tag.S"));
         m.addCSourceFile(.{
             .file = b.graph.path(.zig_lib, "libc/wasi/libc-top-half/musl/src/setjmp/wasm32/rt.c"),
@@ -813,11 +915,23 @@ fn addNsKernel(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.la
         });
         for ([_][]const u8{ "wasi-emulated-signal", "wasi-emulated-process-clocks", "wasi-emulated-mman", "wasi-emulated-getpid" }) |l|
             m.linkSystemLibrary(l, .{});
-    } else {
-        m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/kern"), .files = &.{ "posix.c", "devlfd-posix.c" }, .flags = flags });
+    } else if (windows) {
+        // As the kern library builds for Windows (addKern): drawterm's
+        // win32.c and h9's host lock and timers in glue-win32.c, with no
+        // host sockets (src/nskernel.zig has h9so_errstr).
+        m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/kern"), .files = &.{"win32.c"}, .flags = flags });
+        m.addCSourceFiles(.{ .root = b.path("src/host"), .files = &.{"glue-win32.c"}, .flags = flags });
         if (hostfs) {
-            m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/kern"), .files = &.{"devfs-posix.c"}, .flags = flags });
-            m.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"fscheck.c"}, .flags = flags });
+            m.addCSourceFiles(.{ .root = b.path("src/host"), .files = &.{ "fscheck.c", "dirs.c" }, .flags = flags });
+        }
+        m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/posix-port"), .files = &kern_port, .flags = flags });
+        m.linkSystemLibrary("ws2_32", .{});
+        m.linkSystemLibrary("advapi32", .{});
+        if (hostfs) m.linkSystemLibrary("ntdll", .{});
+    } else {
+        m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/kern"), .files = &.{"posix.c"}, .flags = flags });
+        if (hostfs) {
+            m.addCSourceFiles(.{ .root = b.path("src/host"), .files = &.{ "fscheck.c", "dirs.c" }, .flags = flags });
         }
         m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/posix-port"), .files = &kern_port, .flags = flags });
         if (target.result.os.tag == .macos) addSdkPaths(b, m);
@@ -828,9 +942,9 @@ fn addNsKernel(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.la
         exe.stack_size = 1 << 20;
         exe.rdynamic = true;
         exe.use_lld = true;
-        return .{ .artifact = exe, .mod = root };
+        return .{ .artifact = exe, .mod = root, .port = port };
     }
-    return .{ .artifact = b.addLibrary(.{ .name = "h9ns", .linkage = .static, .root_module = root }), .mod = root };
+    return .{ .artifact = b.addLibrary(.{ .name = "h9ns", .linkage = .static, .root_module = root }), .mod = root, .port = port };
 }
 
 /// The compute benchmarks (tests/bench/*.c): each built as an arm64 and a
@@ -887,7 +1001,7 @@ fn pin(pins: []const u8, comptime name: []const u8) []const u8 {
 pub const Gfx = enum {
     /// No screen: src/kern/nogfx.c, and --gfx fails with GfxNotBuilt.
     none,
-    /// Only the screen in memory (src/kern/gfx-headless.c,
+    /// Only the screen in memory (src/host/gfx-headless.c,
     /// design/epoch-0/headless-screen.md): --gfx=headless, and no window. The
     /// window backends below link it too.
     headless,
@@ -897,7 +1011,7 @@ pub const Gfx = enum {
     win32,
     /// drawterm's gui-cocoa, built with the macOS SDK.
     cocoa,
-    /// A page's canvas, on the web host (src/kern/gfx-web.c,
+    /// A page's canvas, on the web host (src/host/gfx-web.c,
     /// design/epoch-0/browser-gfx.md).
     web,
 
@@ -1008,8 +1122,8 @@ fn addH9Module(b: *std.Build, p: ModuleParts, gfx: Gfx, exported: bool) H9Module
 }
 
 /// The screen for kern: src/kern/nogfx.c, or src/kern/gfx.c with a
-/// backend. drawterm's backends compile unmodified, with
-/// src/kern/gfx-gui.h included first to rename what gfx.c wraps and to
+/// backend (src/host's, or drawterm's). drawterm's backends compile
+/// unmodified, with src/host/gfx-gui.h included first to rename what gfx.c wraps and to
 /// send their exits through the machine's hangup path.
 fn addGfxSources(b: *std.Build, kern: *std.Build.Step.Compile, gfx: Gfx, flags: []const []const u8) void {
     const m = kern.root_module;
@@ -1024,15 +1138,15 @@ fn addGfxSources(b: *std.Build, kern: *std.Build.Step.Compile, gfx: Gfx, flags: 
     // one; src/kern/gfx.c calls one or the other per machine.
     if (gfx != .web) {
         m.addCMacro("H9_GFX_HEADLESS", "1");
-        m.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"gfx-headless.c"}, .flags = flags });
+        m.addCSourceFiles(.{ .root = b.path("src/host"), .files = &.{"gfx-headless.c"}, .flags = flags });
     }
     if (gfx != .web and gfx != .headless) m.addCMacro("H9_GFX_WINDOW", "1");
-    const gui = std.mem.concat(b.allocator, []const u8, &.{ flags, &.{ "-include", pathFromRoot(b, "src/kern/gfx-gui.h") } }) catch @panic("OOM");
+    const gui = std.mem.concat(b.allocator, []const u8, &.{ flags, &.{ "-include", pathFromRoot(b, "src/host/gfx-gui.h") } }) catch @panic("OOM");
     const gui_exit = std.mem.concat(b.allocator, []const u8, &.{ gui, &.{"-DH9_GUI_EXIT"} }) catch @panic("OOM");
     switch (gfx) {
         .none => unreachable,
         .headless => {},
-        .web => m.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"gfx-web.c"}, .flags = flags }),
+        .web => m.addCSourceFiles(.{ .root = b.path("src/host"), .files = &.{"gfx-web.c"}, .flags = flags }),
         .x11 => {
             m.addCMacro("H9_GFX_X11", "1");
             m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/gui-x11"), .files = &.{"x11.c"}, .flags = gui_exit });
@@ -1047,7 +1161,7 @@ fn addGfxSources(b: *std.Build, kern: *std.Build.Step.Compile, gfx: Gfx, flags: 
         .cocoa => {
             const objc = std.mem.concat(b.allocator, []const u8, &.{ gui, &.{"-fobjc-arc"} }) catch @panic("OOM");
             m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/gui-cocoa"), .files = &.{"screen.m"}, .flags = objc, .language = .objective_c });
-            m.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"gfx-cocoa.m"}, .flags = &.{"-fobjc-arc"}, .language = .objective_c });
+            m.addCSourceFiles(.{ .root = b.path("src/host"), .files = &.{"gfx-cocoa.m"}, .flags = &.{"-fobjc-arc"}, .language = .objective_c });
             m.linkFramework("Cocoa", .{});
             m.linkFramework("Metal", .{});
             m.linkFramework("QuartzCore", .{});
@@ -1252,7 +1366,7 @@ pub fn build(b: *std.Build) void {
     const ns_step = b.step("nskernel", "Build the namespace kernel into zig-out/nskernel (design/epoch-0/namespace-kernel.md)");
     const ns_dir: std.Build.InstallDir = .{ .custom = "nskernel" };
     const ns_web = addNsKernel(b, webTarget(b, false), optimize, true, false).artifact;
-    ns_step.dependOn(&b.addInstallArtifact(ns_web, .{ .dest_dir = .{ .override = ns_dir } }).step);
+    ns_step.dependOn(&b.addInstallFileWithDir(asyncifyWasm(b, ns_web, optimize, false), ns_dir, "h9ns.wasm").step);
     for ([_][]const u8{ "h9ns.js", "h9ns-worker.js" }) |f|
         ns_step.dependOn(&b.addInstallFileWithDir(b.path(b.pathJoin(&.{ "src/web", f })), ns_dir, f).step);
     for ([_][]const u8{ "h9-web.js", "wasi-mem.js", "statictree.js" }) |f|
@@ -1273,6 +1387,13 @@ pub fn build(b: *std.Build) void {
         },
     }) });
     ns_test_step.dependOn(&b.addRunArtifact(ns_tests).step);
+    // The kernel's Zig's own cases (src/kern/*.zig), on the
+    // native namespace kernel, which they import for its C and the boot.
+    const kport_ns = addNsKernel(b, target, optimize, false, false);
+    kport_ns.port.addImport("h9ns", kport_ns.mod);
+    const kport_tests = b.addTest(.{ .name = "kern-port", .root_module = kport_ns.port });
+    const kern_test_step = b.step("kern-test", "Run the kernel's Zig cases (src/kern/*.zig, design/kernel-port.md)");
+    kern_test_step.dependOn(&b.addRunArtifact(kport_tests).step);
     const ns_node = b.addSystemCommand(&.{ "node", "tests/web/nskernel.mjs" });
     ns_node.addDirectoryArg2(b.graph.path(.install_prefix, "nskernel"), .{ .make_absolute = true });
     ns_node.setCwd(b.path("."));
@@ -1587,6 +1708,30 @@ pub fn build(b: *std.Build) void {
         if (jit_check and b.graph.environ_map.get("H9_TEST_SLOW") == null) run_integration.setEnvironmentVariable("H9_TEST_SLOW", "40");
     }
 
+    // The namespace conformance check (design/kernel-port.md,
+    // tools/conformance.zig): tests/conformance/ns.rc on h9, on each engine
+    // -Dengines picks, against what 9front printed for it
+    // (tests/conformance/9front.out). `-- --oracle` records that on 9front
+    // under QEMU instead.
+    const conformance_tool = b.addExecutable(.{
+        .name = "conformance",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/conformance.zig"),
+            .target = b.graph.host,
+        }),
+    });
+    const run_conformance = b.addRunArtifact(conformance_tool);
+    run_conformance.setCwd(b.path("."));
+    run_conformance.has_side_effects = true;
+    run_conformance.stdio = .inherit;
+    run_conformance.addArg("--h9");
+    run_conformance.addFileArg2(h9, .{ .make_absolute = true });
+    run_conformance.addArgs(&.{ "--root", root, "--engines", engine_list });
+    if (test_arch) |a| run_conformance.addArgs(&.{ "--arch", a });
+    run_conformance.addPassthruArgs();
+    run_conformance.step.dependOn(signed_step);
+    b.step("conformance", "Run tests/conformance/ns.rc on h9 and compare it with 9front's transcript; -- --oracle records that under QEMU").dependOn(&run_conformance.step);
+
     // The workloads (tests/workloads): real programs on real roots, in
     // parallel, timed, by scripts/workloads.sh. Too slow for every PR, so
     // a workflow runs them every two days (.github/workflows/workloads.yml).
@@ -1792,6 +1937,12 @@ pub fn build(b: *std.Build) void {
     b.step("isoroot", "Unpack a 9front release ISO into a root tree: zig build isoroot -- ISO DIR").dependOn(&run_isoroot.step);
 
     const mod_tests = b.addTest(.{ .root_module = test_mod.mod });
+    // The module's cases reach the engines' code, HVF's among them, so
+    // its test binary links the framework as h9 does.
+    if (os == .macos) {
+        addSdkPaths(b, mod_tests.root_module);
+        mod_tests.root_module.linkFramework("Hypervisor", .{});
+    }
     const exe_tests = b.addTest(.{ .root_module = exe.root_module });
     // Runs the same programs on every engine built in and compares them.
     const engine_tests = b.addTest(.{ .root_module = b.createModule(.{
@@ -1816,6 +1967,7 @@ pub fn build(b: *std.Build) void {
         .{ .dir = "fdmount", .prefix = "fdmount", .names = &fdmount_fixtures },
         .{ .dir = "htools", .prefix = "htools", .names = &htools_fixtures },
         .{ .dir = "sema", .prefix = "sema", .names = &sema_fixtures },
+        .{ .dir = "badptr", .prefix = "badptr", .names = &badptr_fixtures },
         .{ .dir = "net", .prefix = "net", .names = &net_fixtures },
         .{ .dir = "gfx", .prefix = "gfx", .names = &gfx_fixtures },
     }) |set| for (set.names) |name| {
@@ -1833,6 +1985,10 @@ pub fn build(b: *std.Build) void {
     };
     const test_step = b.step("test", "Run unit tests and the engine tests (not the integration cases)");
     test_step.dependOn(&b.addRunArtifact(mod_tests).step);
+    // The kernel's Zig's own cases (design/kernel-port.md).
+    test_step.dependOn(kern_test_step);
+    // The scheduler's primitives (design/scheduler.md).
+    test_step.dependOn(addSchedTests(b, target, optimize));
     // h9.wasm too, so a change to the shared engine or JIT code that breaks
     // wasm32 (64-bit atomics, threads) is caught where it's made.
     test_step.dependOn(&web.exe.step);
@@ -1971,7 +2127,10 @@ pub fn build(b: *std.Build) void {
         run_c.addFileArg(host_hello);
         run_c.addArgs(&.{ "--engine", "hcpu" });
         run_c.addCheck(.{ .expect_stdout_match = "engine hcpu, arch " });
-        run_c.addCheck(.{ .expect_stdout_match = "hello\nexited \"\"\n" });
+        // The guest's line arrives as it wrote it, but hello.c's printf
+        // goes through the C runtime, whose stdout is in text mode on
+        // Windows and ends each line with \r\n.
+        run_c.addCheck(.{ .expect_stdout_match = if (os == .windows) "hello\nexited \"\"\r\n" else "hello\nexited \"\"\n" });
         run_c.addCheck(.{ .expect_term = .{ .exited = 0 } });
         test_step.dependOn(&run_c.step);
     }
@@ -2088,6 +2247,47 @@ fn addX64check(b: *std.Build, hcpu: *std.Build.Module) void {
     cmp.addFileArg(cases);
     cmp.addFileArg(answers);
     step.dependOn(&cmp.step);
+}
+
+/// The scheduler's primitives' cases (src/kern/sched/, design/scheduler.md):
+/// kernel stacks, and park and resume, with no kernel or engine. They run
+/// for -Dtarget where the host can run it, and are only compiled for one
+/// it can't. On wasm32-wasi they're compiled too, and with Binaryen's
+/// wasm-opt on PATH, run through its Asyncify pass and under Node's WASI.
+fn addSchedTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) *std.Build.Step {
+    const step = b.step("sched-test", "Run the scheduler's kernel stack and park and resume cases (src/kern/sched/, design/scheduler.md)");
+    const mk = struct {
+        fn tests(bb: *std.Build, t: std.Build.ResolvedTarget, o: std.lang.Optimize) *std.Build.Step.Compile {
+            return bb.addTest(.{ .name = "sched", .root_module = bb.createModule(.{
+                .root_source_file = bb.path("src/kern/sched/sched.zig"),
+                .target = t,
+                .optimize = o,
+                .link_libc = t.result.os.tag != .windows,
+            }) });
+        }
+    };
+    const native = mk.tests(b, target, optimize);
+    const run = b.addRunArtifact(native);
+    run.skip_foreign_checks = true;
+    step.dependOn(&run.step);
+
+    const wasm = mk.tests(b, webTarget(b, false), optimize);
+    const wasm_opt_path = wasmOpt(b);
+    const found: ?[]const u8 = if (!std.mem.eql(u8, wasm_opt_path, "wasm-opt")) wasm_opt_path else b.findProgram(.{ .names = &.{"wasm-opt"} });
+    if (found) |wasm_opt| {
+        const asyncify = b.addSystemCommand(&.{ wasm_opt, "--asyncify" });
+        for ([_][]const u8{ "bulk-memory", "mutable-globals", "sign-ext", "nontrapping-float-to-int", "multivalue", "reference-types" }) |f|
+            asyncify.addArg(b.fmt("--enable-{s}", .{f}));
+        asyncify.addArtifactArg(wasm);
+        asyncify.addArg("-o");
+        const out = asyncify.addOutputFileArg("sched.wasm");
+        const node = b.addSystemCommand(&.{ "node", "--no-warnings", "tests/web/wasi-test.mjs" });
+        node.addFileArg(out);
+        node.setCwd(b.path("."));
+        node.expectExitCode(0);
+        step.dependOn(&node.step);
+    } else step.dependOn(&wasm.step);
+    return step;
 }
 
 /// The JIT's test tools (src/engine/hcpu/jit/README.md, "Test tools"): lockstep against

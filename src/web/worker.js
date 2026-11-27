@@ -2,7 +2,8 @@
 // page's mounts and argv, and passes the console through messages. The
 // page's side is createMachine in h9-web.js.
 //
-// Page to Worker: { type: 'start', argv, env, mounts, tty, gfx } once, then
+// Page to Worker: { type: 'start', argv, env, mounts, plan, tty, gfx } once
+// (plan is a plan's text, design/plan-format.md, run with --plan), then
 // { type: 'input', data }, { type: 'interrupt' } and { type: 'hangup' },
 // and { type: 'put', path, data, mode } at any time, which adds a file to
 // the first archive's tree (before start, once it's loaded).
@@ -26,7 +27,7 @@
 // { type: 'gfx-size', width, height }; the Worker sends { type: 'cursor',
 // data } and { type: 'snarf', text }.
 
-import { run, Panic, GfxHost, canDrawInWorker, mountFlag, Ports } from './h9-web.js';
+import { run, Panic, GfxHost, canDrawInWorker, mountFlag, mapPlanArchives, Ports } from './h9-web.js';
 import { parseRoot, putNode, wasiImports } from './wasi-mem.js';
 
 const post = (m, t) => self.postMessage(m, t);
@@ -90,7 +91,7 @@ const askPage = (url, failed, helper) => new Promise((resolve, reject) => {
   post({ type: 'cred', id, url, failed, helper });
 });
 
-async function start({ argv, env = {}, mounts = [], tty = false, gfx: canvas, credentials = false, ports: given = {}, serve = [], serving = false, serveNet = false }) {
+async function start({ argv, env = {}, mounts = [], plan = null, tty = false, gfx: canvas, credentials = false, ports: given = {}, serve = [], serving = false, serveNet = false }) {
   ports.serving = serving;
   ports.serveNet = serveNet;
   for (const [name, port] of Object.entries(given)) portOp(() => ports.add(name, port));
@@ -111,6 +112,14 @@ async function start({ argv, env = {}, mounts = [], tty = false, gfx: canvas, cr
   // mounted from there as a --dir (design/epoch-0/mounts.md), so archives on one
   // destination stack as the CLI's do.
   const archives = mounts.map((m, i) => ({ m, at: `/.mnt/${i}` })).filter(({ m }) => m.kind === 'archive');
+  // A plan's archive lines (design/plan-format.md), fetched as the
+  // mounts' archives are, become dir lines on their trees.
+  if (plan != null) {
+    plan = mapPlanArchives(plan, (src, i) => {
+      archives.push({ m: { kind: 'archive', src }, at: `/.mnt/${i}` });
+      return `/.mnt/${i}`;
+    }, 'dir');
+  }
   const [h9, ...bytes] = await Promise.all([
     fetchBytes(new URL('h9.wasm', import.meta.url)),
     ...archives.map(({ m }) => fetchBytes(m.src)),
@@ -120,6 +129,10 @@ async function start({ argv, env = {}, mounts = [], tty = false, gfx: canvas, cr
   putAt = archives.length ? archives[0].at : '';
   puts.splice(0).forEach(put);
   const flags = mounts.map((m, i) => mountFlag(m, m.kind === 'archive' ? `/.mnt/${i}` : m.src));
+  if (plan != null) {
+    putNode(tree, '/.plan', 0o100644, new TextEncoder().encode(plan));
+    flags.push('--plan', '/.plan');
+  }
   return run({
     h9,
     wasi: (memory) => wasiImports({

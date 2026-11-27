@@ -27,13 +27,25 @@ pub const Node = struct {
     uid: u32 = 1000,
     gid: u32 = 1000,
     mtime: u64 = 0,
+    mtime_ns: u64 = 0,
     data: std.ArrayList(u8) = .empty,
     target: []u8 = &.{},
     parent: ?*Node = null,
     children: std.ArrayList(*Node) = .empty,
     path: u64,
+    /// The node a Tlink named again, whose data, qid, and nlink this
+    /// name shares; null for a first name.
+    same: ?*Node = null,
+    /// The names the file has, on a first name.
+    nlink: u32 = 1,
+
+    /// The file this name is: its first name.
+    pub fn inode(n: *Node) *Node {
+        return n.same orelse n;
+    }
 
     fn qid(n: *const Node) wire.Qid {
+        if (n.same) |f| return f.qid();
         return .{ .type = switch (n.kind) {
             .dir => wire.QTDIR,
             .link => wire.QTSYMLINK,
@@ -42,13 +54,14 @@ pub const Node = struct {
     }
 
     fn stat(n: *const Node) wire.Stat {
+        if (n.same) |f| return f.stat();
         const fmt: u32 = switch (n.kind) {
             .dir => attr.S_IFDIR,
             .file => attr.S_IFREG,
             .link => attr.S_IFLNK,
             .fifo => attr.S_IFIFO,
         };
-        return .{ .qid = n.qid(), .mode = fmt | n.mode, .uid = n.uid, .gid = n.gid, .nlink = 1, .size = if (n.kind == .link) n.target.len else n.data.items.len, .mtime_sec = n.mtime };
+        return .{ .qid = n.qid(), .mode = fmt | n.mode, .uid = n.uid, .gid = n.gid, .nlink = n.nlink, .size = if (n.kind == .link) n.target.len else n.data.items.len, .mtime_sec = n.mtime, .mtime_nsec = n.mtime_ns };
     }
 
     pub fn child(n: *const Node, name: []const u8) ?*Node {
@@ -76,6 +89,8 @@ pub const Server = struct {
     log: std.ArrayList(u8) = .empty,
     /// Every name a Twalk asked for, one per line, across connections.
     walked: std.ArrayList(u8) = .empty,
+    /// Tfsyncs, by datasync (0 or 1), across connections.
+    fsyncs: [2]u32 = .{ 0, 0 },
     /// The uname and n_uname of the last attach.
     attached_as: ?struct { []const u8, u32 } = null,
     /// `9P2000.L.Z` was negotiated on this connection.
@@ -389,7 +404,7 @@ pub const Server = struct {
             .Tlopen => |o| {
                 const f = s.fids.getPtr(o.fid) orelse return s.lerr(tag, E.BADF);
                 if (f.node.kind == .dir and o.flags & L.ACCMODE != L.RDONLY) return s.lerr(tag, E.ISDIR);
-                if (o.flags & L.TRUNC != 0) f.node.data.items.len = 0;
+                if (o.flags & L.TRUNC != 0) f.node.inode().data.items.len = 0;
                 f.open = true;
                 try s.send(tag, l.Rlopen{ .qid = f.node.qid(), .iounit = 0 });
             },
@@ -399,16 +414,16 @@ pub const Server = struct {
                 const f = s.fids.get(o.fid) orelse return s.lerr(tag, E.BADF);
                 if (f.open or s.fids.contains(o.newfid)) return s.lerr(tag, E.BADF);
                 if (f.node.kind == .dir) return s.lerr(tag, E.ISDIR);
-                if (o.flags & L.TRUNC != 0) f.node.data.items.len = 0;
+                if (o.flags & L.TRUNC != 0) f.node.inode().data.items.len = 0;
                 try s.fids.put(s.gpa, o.newfid, .{ .node = f.node, .open = true });
-                const data = f.node.data.items;
+                const data = f.node.inode().data.items;
                 const n = @min(data.len, o.count, s.msize - (wire.header_size + wire.Qid.wire_size + 4 + 1 + 4));
                 try s.send(tag, l.Rlopenatread{ .qid = f.node.qid(), .iounit = 0, .eof = @intFromBool(n == data.len), .data = .{ .bytes = data[0..n] } });
             },
             .Tread => |r| {
                 const f = s.fids.get(r.fid) orelse return s.lerr(tag, E.BADF);
                 if (!f.open) return s.lerr(tag, E.BADF);
-                const data = f.node.data.items;
+                const data = f.node.inode().data.items;
                 const off = @min(r.offset, data.len);
                 const n = @min(data.len - off, r.count);
                 try s.send(tag, wire.common.Rread{ .data = .{ .bytes = data[off..][0..n] } });
@@ -417,8 +432,8 @@ pub const Server = struct {
                 const f = s.fids.get(w.fid) orelse return s.lerr(tag, E.BADF);
                 if (!f.open) return s.lerr(tag, E.BADF);
                 const end = w.offset + w.data.bytes.len;
-                if (f.node.data.items.len < end) try f.node.data.appendNTimes(a, 0, end - f.node.data.items.len);
-                @memcpy(f.node.data.items[w.offset..end], w.data.bytes);
+                if (f.node.inode().data.items.len < end) try f.node.inode().data.appendNTimes(a, 0, end - f.node.inode().data.items.len);
+                @memcpy(f.node.inode().data.items[w.offset..end], w.data.bytes);
                 try s.send(tag, wire.common.Rwrite{ .count = @intCast(w.data.bytes.len) });
             },
             .Treaddir => |r| {
@@ -470,12 +485,24 @@ pub const Server = struct {
                 n.target = try s.arena.allocator().dupe(u8, m.symtgt);
                 try s.send(tag, l.Rsymlink{ .qid = n.qid() });
             },
+            // Another name for a file, sharing its data.
+            .Tlink => |k| {
+                const dir = s.fids.get(k.dfid) orelse return s.lerr(tag, E.BADF);
+                const f = s.fids.get(k.fid) orelse return s.lerr(tag, E.BADF);
+                if (f.node.kind == .dir) return s.lerr(tag, E.PERM);
+                if (dir.node.child(k.name) != null) return s.lerr(tag, E.EXIST);
+                const n = try s.newNode(dir.node, k.name, f.node.kind);
+                n.same = f.node.inode();
+                n.same.?.nlink += 1;
+                try s.send(tag, l.Rlink{});
+            },
             .Tremove => |rm| {
                 const f = s.fids.get(rm.fid) orelse return s.lerr(tag, E.BADF);
                 _ = s.fids.remove(rm.fid);
                 const n = f.node;
                 const p = n.parent orelse return s.lerr(tag, E.BUSY);
                 if (n.children.items.len != 0) return s.lerr(tag, E.NOTEMPTY);
+                n.inode().nlink -= 1;
                 for (p.children.items, 0..) |c, i| if (c == n) {
                     _ = p.children.orderedRemove(i);
                     break;
@@ -487,7 +514,16 @@ pub const Server = struct {
                 const nd = s.fids.get(r.dfid) orelse return s.lerr(tag, E.BADF);
                 const n = f.node;
                 const p = n.parent orelse return s.lerr(tag, E.BUSY);
-                if (nd.node.child(r.name) != null) return s.lerr(tag, E.EXIST);
+                // rename(2) replaces what the new name was.
+                if (nd.node.child(r.name)) |old| {
+                    if (old == n) return s.send(tag, l.Rrename{});
+                    if (old.children.items.len != 0) return s.lerr(tag, E.NOTEMPTY);
+                    old.inode().nlink -= 1;
+                    for (nd.node.children.items, 0..) |c, i| if (c == old) {
+                        _ = nd.node.children.orderedRemove(i);
+                        break;
+                    };
+                }
                 for (p.children.items, 0..) |c, i| if (c == n) {
                     _ = p.children.orderedRemove(i);
                     break;
@@ -504,6 +540,7 @@ pub const Server = struct {
                 if (n.kind == .dir and u.flags & L.AT_REMOVEDIR == 0) return s.lerr(tag, E.ISDIR);
                 if (n.kind != .dir and u.flags & L.AT_REMOVEDIR != 0) return s.lerr(tag, E.NOTDIR);
                 if (n.children.items.len != 0) return s.lerr(tag, E.NOTEMPTY);
+                n.inode().nlink -= 1;
                 for (f.node.children.items, 0..) |c, i| if (c == n) {
                     _ = f.node.children.orderedRemove(i);
                     break;
@@ -530,13 +567,17 @@ pub const Server = struct {
                 if (sa.valid & L.SETATTR_MODE != 0) f.node.mode = sa.mode & 0o7777;
                 if (sa.valid & L.SETATTR_SIZE != 0) {
                     const len: usize = @intCast(sa.size);
-                    if (f.node.data.items.len < len) try f.node.data.appendNTimes(a, 0, len - f.node.data.items.len) else f.node.data.items.len = len;
+                    if (f.node.inode().data.items.len < len) try f.node.inode().data.appendNTimes(a, 0, len - f.node.inode().data.items.len) else f.node.inode().data.items.len = len;
                 }
-                if (sa.valid & L.SETATTR_MTIME_SET != 0) f.node.mtime = sa.mtime_sec;
+                if (sa.valid & L.SETATTR_MTIME_SET != 0) {
+                    f.node.mtime = sa.mtime_sec;
+                    f.node.mtime_ns = sa.mtime_nsec;
+                }
                 try s.send(tag, l.Rsetattr{});
             },
             .Tfsync => |fs| {
                 _ = s.fids.get(fs.fid) orelse return s.lerr(tag, E.BADF);
+                s.fsyncs[@intFromBool(fs.datasync != 0)] += 1;
                 try s.send(tag, l.Rfsync{});
             },
             .Tclunk => |cl| {

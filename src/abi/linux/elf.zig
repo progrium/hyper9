@@ -231,7 +231,7 @@ pub const Loaded = struct {
 pub fn load(m: *mm.Mm, img: *const Image, base: ?u64, name: []const u8, src: ?*mm.Src) Error!Loaded {
     const span = img.hi - img.lo;
     const bias: u64 = if (img.ehdr.type == ET_EXEC) 0 else blk: {
-        const at = base orelse (m.findFree(span) orelse return error.NoSpace);
+        const at = base orelse (mm.findFree(m, span) orelse return error.NoSpace);
         break :blk at - img.lo;
     };
     var phdr: u64 = 0;
@@ -369,9 +369,9 @@ pub fn buildStack(m: *mm.Mm, argv: []const []const u8, envp: []const []const u8,
     const nauxv = 20;
     const words = 1 + argv.len + 1 + envp.len + 1 + 2 * nauxv;
     const total = std.mem.alignForward(u64, size, 16) + words * ws + 16;
-    if (total > m.lay.stack_size / 4) return error.NoSpace;
+    if (total > mm.layout(m).stack_size / 4) return error.NoSpace;
 
-    const top = m.lay.stack_top;
+    const top = mm.layout(m).stack_top;
     var buf = try m.gpa.alloc(u8, @intCast(std.mem.alignForward(u64, total, page)));
     defer m.gpa.free(buf);
     @memset(buf, 0);

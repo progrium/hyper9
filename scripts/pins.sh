@@ -135,3 +135,7 @@ main/t/tcp-wrappers/libwrap0_7.6.q-33_amd64.deb 36118b862539868408ee056411d6e470
 ZEROFS_REPO=https://github.com/Barre/ZeroFS
 ZEROFS_VERSION=2.3.6
 ZEROFS_REV=9e5497ff22641531bafcb6b0d3072cf0df636f85
+
+# Binaryen for the web build's Asyncify pass (scripts/fetch.sh binaryen):
+# 133 can't read the DWARF in a Debug build's module.
+BINARYEN_VERSION=132.0.0

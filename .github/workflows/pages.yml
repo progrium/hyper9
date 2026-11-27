@@ -67,7 +67,7 @@ jobs:
           path: |
             .local/9front/*.386.iso
           key: pages-fetch-${{ hashFiles('scripts/pins.sh') }}
-      - run: scripts/fetch.sh iso386 alpinearm64web
+      - run: scripts/fetch.sh iso386 alpinearm64web binaryen
       - name: 386 root from the ISO
         run: |
           . scripts/pins.sh

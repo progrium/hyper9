@@ -34,9 +34,9 @@ Pointers, argv, the words of the note frame, and the Tos's pointers follow the a
 ## a.out loading (host side)
 
 1. Read the Exec header: eight big-endian 32-bit words. Both 64-bit magics set HDR\_MAGIC, so a big-endian 64-bit entry address follows, making the header 40 bytes; 386's has none, so its entry is the header's 32-bit `entry` word and the header is 32 bytes.
-2. Map file bytes \[0, header + text) read-only at UTZERO. The header is part of the text segment, and the entry point must fall inside it.
-3. Map the next `data` bytes of the file at the end of text, rounded up to the data alignment. bss starts at the end of data rounded up to 4 KiB, and is zero-filled.
-4. The stack may span \[USTKTOP − 16 MiB, USTKTOP), but as in 9front only its top pages are mapped at first; it grows down on faults below it, and at each syscall to cover the arguments. A zeroed Tos sits at the very top. Below it go the argument strings, then the argv array, then argc at SP.
+2. Map file bytes \[0, header + text) read-only at UTZERO, filled from the file on first touch. The header is part of the text segment, and the entry point must fall inside it.
+3. Map the next `data` bytes of the file at the end of text, rounded up to the data alignment, also filled on first touch and copy-on-write. bss starts at the end of data rounded up to 4 KiB, and is zero-filled.
+4. The stack is \[USTKTOP − 16 MiB, USTKTOP), mapped whole, with pages allocated on first touch ([memory-model](../design/memory-model.md)). A zeroed Tos sits at the very top. Below it go the argument strings, then the argv array, then argc at SP.
 5. Tos fields: the host fills `pid` and `cyclefreq` and keeps `kcycles`/`pcycles` current; the profiling pointers stay zero.
 
 ## Syscall table
@@ -45,7 +45,7 @@ Pointers, argv, the words of the note frame, and the Tos's pointers follow the a
 
 h9 implements only the current calls, plus `_NSEC` (53), which Go's `syscall.Gettimeofday` uses ([go-compat](../design/epoch-0/go-compat.md)): as 9front's `sys_nsec`, it returns the wall time in nanoseconds in the return register on 64-bit machines, and on 386 stores it through its argument and returns 0. The others post "sys: bad sys call", as the real kernel does for unknown calls.
 
-`mount`, `unmount`, and `fauth` are served by drawterm's `sysmount` and `sysunmount` and a `fauth` wrapper over devmnt's `mntauth` (`h9_fauth` in `src/kern/glue.c`), so a guest mounts any 9P server it has an fd for: a posted channel, a pipe it serves itself, or a network connection the policy allowed. `mount` blocks until the server answers `Tversion` and `Tattach`, and a note interrupts it as it does any devmnt RPC.
+`mount`, `unmount`, and `fauth` are served by drawterm's `sysmount` and `sysunmount` and a `fauth` wrapper over devmnt's `mntauth` (`h9_fauth` in `src/kern/glue.zig`), so a guest mounts any 9P server it has an fd for: a posted channel, a pipe it serves itself, or a network connection the policy allowed. `mount` blocks until the server answers `Tversion` and `Tattach`, and a note interrupts it as it does any devmnt RPC.
 
 Time otherwise comes from `/dev/bintime`, which h9's devcons hooks serve in nanoseconds with all four of 9front's words (see Kernel, "Added by us").
 
@@ -59,6 +59,6 @@ Go's `GOOS=plan9 GOARCH=amd64` binaries run unchanged ([go-compat](../design/epo
 - **Processes and notes:** `os/exec` forks with `RFPROC|RFFDG|RFREND`, lists fds in `#d`, writes `/env`, execs, and waits with `await`; `os.Getppid` reads `#c/ppid`; `Process.Kill` and `Signal` write `/proc/n/note`. Fault notes carry `addr=`, so a nil dereference becomes a panic, and `interrupt` reaches `os/signal`.
 - **Exit:** `os.Exit(n)` writes `n` as its `exits` string, which the CLI maps to exit code `n`.
 - **Executable and mounts:** `os.Executable` reads `/proc/n/text` ([self-host](../design/epoch-0/self-host.md)), and the `mount` syscall is served (see Syscall table). Execs of 9front commands need `/amd64/bin` in the root, which `zig build mkroot` builds on an x86\_64 host ([i386](../design/epoch-0/i386.md)).
-- **Not yet:** rfork copies the parent's memory eagerly, so a Go program that uses `os/exec` needs `--memory` of about 4 GB.
+- **Memory:** rfork shares the parent's pages copy-on-write ([memory-model](../design/memory-model.md)), so a program that runs `os/exec` many times fits in a `--memory` of 512 MB.
 
 The go-compat integration cases (tagged `[7]`) run the programs in `tests/fixtures/go` on the sud engine where the build has it (Linux x86\_64), and on the emulator elsewhere, and `zig build go-stdtest` runs Go's own `time`, `syscall`, `os`, and `runtime` tests to find gaps.

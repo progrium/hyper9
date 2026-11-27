@@ -10,7 +10,10 @@
 const std = @import("std");
 const aout = @import("abi/plan9/aout.zig");
 pub const mount = @import("mount.zig");
+const newns = @import("newns.zig");
 const web = @import("web.zig").enabled;
+const resolver = @import("resolver.zig");
+const handles = @import("host/host.zig");
 
 pub const Profile = enum { default, tight };
 
@@ -67,6 +70,10 @@ pub const Policy = struct {
     cwd_writable: ?bool = null,
     /// Expose all of the host filesystem at /mnt/term.
     host_fs: bool = false,
+    /// Let the guest start child machines through `#μ`
+    /// (design/child-machines.md), `--children`. The tight profile masks
+    /// it whatever this says.
+    children: bool = false,
 };
 
 /// How a bound tree can be changed: not at all, on the host, in an
@@ -74,8 +81,10 @@ pub const Policy = struct {
 /// root's server decides (`9p`, design/epoch-0/ninep-roots.md), or never, as
 /// constant data in the h9 binary (`builtin`, design/epoch-0/builtin-root.md),
 /// or as the writable layer over what's beneath it, which is only read
-/// (`up`, design/epoch-0/upper-layers.md).
-pub const Access = enum { ro, rw, eph, up, @"9p", builtin };
+/// (`up`, design/epoch-0/upper-layers.md), or, in a child machine, as the
+/// channel of the process that started it allows (`parent`,
+/// design/child-machines.md).
+pub const Access = enum { ro, rw, eph, up, @"9p", builtin, parent };
 
 /// The built-in root's device path.
 pub const builtin_dev = "#Hroot";
@@ -148,6 +157,14 @@ pub const Bind = struct {
     fd_write: ?std.posix.fd_t = null,
     /// The flag this line came from, for errors (`--dir ./x:/app`).
     what: ?[]const u8 = null,
+    /// In a child machine (design/child-machines.md): the path, in the
+    /// namespace of the process that started it, whose channel `from` (or
+    /// `lower`) names, as `#μsN`. The plan prints it in `from`'s place.
+    parent: ?[]const u8 = null,
+    /// With `parent`: a fresh `#O` overlay over the channel takes its
+    /// place, so the child's writes stay in its memory and never reach
+    /// the caller's files.
+    parent_cow: bool = false,
 
     pub const Flag = enum { repl, before, after };
 };
@@ -178,6 +195,10 @@ pub const NinePRoot = struct {
     cred: ?[]const u8 = null,
     /// Its metadata index (design/epoch-0/mount-index.md), as the plan shows it.
     index: Index = .auto,
+    /// `b3=`: the BLAKE3 hash its index must have (design/plan-format.md,
+    /// "Pinned roots"); h9 refuses the tree when it has another, or when
+    /// there's no index h9 can check.
+    b3: ?[32]u8 = null,
     /// An `http://` or `https://` URL, or one without a scheme, as that:
     /// `addr` is its WebSocket form, and when the handshake is answered
     /// with anything but a 101, h9 fetches `http/.fs/index` for a static
@@ -228,8 +249,16 @@ pub const dotl_dev = "ℓ";
 /// h9 opens, for the 9P connections it makes.
 pub const hidx_dev = "ι";
 
+/// The tree device, `#ū` (src/host/devtree.zig): an embedder's trees in
+/// memory, which namec reaches through `#U`, so it's masked with `#U`.
+pub const tree_dev = "ū";
+
 /// Where a 9P root's connection is posted, and the board name it's under.
 pub const root_srv = "#s/root";
+
+/// The machine device, `#μ` (design/child-machines.md), whose tree is
+/// the guest's /dev/machine.
+pub const machine_dev = "μ";
 
 /// Capabilities this build knows, in the order the plan prints them.
 pub const Capability = enum {
@@ -244,6 +273,7 @@ pub const Capability = enum {
     @"net.allow",
     @"net.disable",
     @"net.outbound",
+    @"proc.children",
     @"proc.timeout",
     @"res.cpu",
     @"res.memory",
@@ -264,6 +294,16 @@ pub const Plan = struct {
     net_allow: []const NetPattern = &.{},
     /// The machine's resolved-name table, when a pattern names hosts.
     names: ?*NameTable = null,
+    /// Whether the machine resolves for the guest (design/linux-dns.md):
+    /// a name pattern, and a network. Every connect to port 53 then goes
+    /// to the machine's resolver, `dns`, which the machine starts with a
+    /// run; without one it's refused.
+    resolves: bool = false,
+    dns: ?*resolver.Resolver = null,
+    /// The host the machine reaches outside through (design/host-handles.md),
+    /// built from this plan: what devfs and devip, which find the plan by
+    /// their thread, find their handles by. The machine sets it.
+    host: ?*const handles.Host = null,
     /// Device letters masked after the namespace is built.
     devmask: []const u8,
     binds: []const Bind,
@@ -307,6 +347,19 @@ pub const Plan = struct {
     fn isNameserver(p: *const Plan, addr: *const [16]u8) bool {
         for (p.nameservers) |*ns| if (std.mem.eql(u8, ns, addr)) return true;
         return false;
+    }
+
+    /// Whether a UDP connect that `netCheck` refuses is allowed as a
+    /// probe (design/linux-dns.md, Updates): one to an address the
+    /// resolved-name table recorded for a name a pattern covers, with any
+    /// protocol and port. getaddrinfo connects a UDP socket to each
+    /// address it got, which sends nothing, to rank them by whether the
+    /// host has a route; the conversation it makes may not send.
+    pub fn netProbe(p: *const Plan, proto: ?NetProto, addr: *const [16]u8) bool {
+        if (p.net == .disable or p.net_allow.len == 0) return false;
+        if (proto != .udp) return false;
+        const names = p.names orelse return false;
+        return names.recorded(p.net_allow, addr);
     }
 
     /// Whether devip's cs may resolve `name` for proto and port.
@@ -384,8 +437,8 @@ pub const Plan = struct {
             const q = if (b.to.len > 0 and b.to[0] == '#') "'" else "";
             // A URL's query can hold a token, so it's elided, as in the
             // note.
-            const from = if (b.url != null and b.url.?.kind == .ws) if (std.mem.indexOfScalar(u8, b.from, '?')) |i| b.from[0 .. i + 1] else b.from else b.from;
-            lw.print(" '{s}{s}{s}{s}' {s}{s}{s}", .{ from, if (from.len < b.from.len) "…" else "", if (b.console) "<id>" else "", if (b.cons_file) "/cons" else "", q, b.to, q }) catch return error.WriteFailed;
+            const from = if (b.parent) |pp| (if (b.lower != null) b.from else pp) else if (b.url != null and b.url.?.kind == .ws) if (std.mem.indexOfScalar(u8, b.from, '?')) |i| b.from[0 .. i + 1] else b.from else b.from;
+            lw.print(" '{s}{s}{s}{s}' {s}{s}{s}", .{ from, if (b.parent == null and from.len < b.from.len) "…" else "", if (b.console) "<id>" else "", if (b.cons_file) "/cons" else "", q, b.to, q }) catch return error.WriteFailed;
             // Always written for a mount, '' when empty, so newns can tell
             // the spec from the access column.
             if (b.mount) lw.print(" '{s}'", .{b.spec}) catch return error.WriteFailed;
@@ -405,11 +458,18 @@ pub const Plan = struct {
                 try w.splatByteAll(' ', pad + 1);
                 try w.print("{t}", .{a});
             }
-            if (b.lower orelse b.note) |l| try w.print("  # {s}", .{l});
+            if (b.parent) |pp| {
+                if (b.lower != null) try w.print("  # over the caller's {s}", .{pp}) else if (b.parent_cow) try w.writeAll("  # copy-on-write: the child's writes stay in its memory");
+            } else if (b.lower orelse b.note) |l| try w.print("  # {s}", .{l});
             try w.writeAll("\n");
         }
         if (p.rules.len > 0) {
-            try w.writeAll("access:\n");
+            const child = for (p.binds) |b| {
+                if (b.parent != null) break true;
+            } else false;
+            // A child's are its parent's: what the caller's paths reach
+            // on the host is checked against them.
+            try w.writeAll(if (child) "access:   # the parent's, for the host files the caller's paths reach\n" else "access:\n");
             for (p.rules) |r| try w.print("  {s} {s}\n", .{ switch (r.kind) {
                 .allow_ro => "ro  ",
                 .allow_rw => "rw  ",
@@ -435,10 +495,17 @@ pub const Plan = struct {
                 try w.writeAll("\n");
             }
         }
-        try w.writeAll("caveats:\n");
-        for (p.caveats) |c| try w.print("  - {s}\n", .{c});
+        try writeCaveats(w, p.caveats);
     }
 };
+
+/// Writes the plan's caveats, the one place they're written: after the
+/// compiled plan in `Plan.print`, and so, as comments, at the end of a
+/// plan file's text (`printPlan`).
+pub fn writeCaveats(w: *std.Io.Writer, caveats: []const []const u8) std.Io.Writer.Error!void {
+    try w.writeAll("caveats:\n");
+    for (caveats) |c| try w.print("  - {s}\n", .{c});
+}
 
 pub const CompileError = error{ OutOfMemory, Conflict };
 
@@ -482,6 +549,7 @@ pub fn rootNoteOf(arena: std.mem.Allocator, r: NinePRoot) error{OutOfMemory}![]c
             if (g.entries) |n| w.print(" {d} entries {d} dirs", .{ n, g.dirs orelse 0 }) catch break :blk error.WriteFailed;
         },
     }) catch return error.OutOfMemory;
+    if (r.b3) |h| w.print("  pinned b3={x}", .{&h}) catch return error.OutOfMemory;
     return out.written();
 }
 
@@ -544,6 +612,12 @@ pub const Inputs = struct {
     builtin_note: ?[]const u8 = null,
     /// `--serve` listeners (design/epoch-0/serve.md).
     serve: ?Serve = null,
+    /// A child machine's plan (design/child-machines.md): the mounts' and
+    /// paths' sources are paths in the namespace of the process that
+    /// starts it, not host paths, and `fromCaller` turns the `#U` binds
+    /// into its channels. A readable path is bound at its own path, not
+    /// under /mnt/term, and there's no cwd.
+    caller: bool = false,
 };
 
 /// Whether host path `path` is one `--writable` names, and writing is allowed.
@@ -561,6 +635,9 @@ pub const linux_view = "#L";
 /// Conflict.
 pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]const u8) CompileError!Plan {
     const tight = pol.profile == .tight;
+    // Child machines (design/child-machines.md) only with --children, and
+    // never under the tight profile.
+    const children = pol.children and !tight;
     const write_req = pol.write orelse .overlay;
     const net = pol.net orelse (if (tight) NetMode.disable else .outbound);
 
@@ -721,6 +798,9 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
 
     try binds.append(arena, .{ .from = "#c", .to = "/dev", .optional = true });
     try binds.append(arena, .{ .from = "#y", .to = "/dev", .flag = .before, .console = true });
+    // The machine's children (design/child-machines.md): #μ's `machine`
+    // directory, at /dev/machine.
+    if (children) try binds.append(arena, .{ .from = "#" ++ machine_dev, .to = "/dev", .flag = .after, .optional = true, .note = "child machines, under --children" });
     // The window's devices (design/epoch-0/gfx.md), after the console so
     // /dev/cons stays the terminal.
     if (in.gfx != null) for ([_][]const u8{ "#i", "#m", "#b" }) |d| {
@@ -764,7 +844,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     // paths and their ancestors.
     var need_mnt_term = pol.host_fs;
     for ([_][]const []const u8{ pol.readable, pol.writable }) |list| for (list) |p| {
-        if (guestPlace(in, p) == .mnt_term) need_mnt_term = true;
+        if (guestPlace(in, p) == .mnt_term and !in.caller) need_mnt_term = true;
     };
     // --host-fs shows the whole host read-only; --writable still applies.
     if (pol.host_fs) try rules.append(arena, .{ .path = "/", .kind = .allow_ro });
@@ -775,7 +855,17 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     var guest_cwd: ?[]const u8 = null;
     if (in.cwd) |cwd| {
         try rules.append(arena, .{ .path = cwd, .kind = acc.rule(cwd_rw) });
-        if (has_root) {
+        // A child's cwd is the caller's path, at the same path
+        // (design/child-machines.md): writable as a host machine's is,
+        // where the caller can write it. The caller's `/` is already the
+        // child's root.
+        if (in.caller) {
+            if (has_root and !std.mem.eql(u8, cwd, "/")) {
+                var b = try acc.bind(arena, cwd, cwd, cwd_rw);
+                b.make = true;
+                try binds.append(arena, b);
+            }
+        } else if (has_root) {
             var b = try acc.bind(arena, cwd, "/mnt/term/cwd", cwd_rw);
             b.fallback = "/mnt/term";
             b.make = true;
@@ -792,9 +882,12 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
             .root_top, .cwd_top => continue,
             .root => |rel| try std.fmt.allocPrint(arena, "/{s}", .{rel}),
             .cwd => |rel| try std.fmt.allocPrint(arena, "/mnt/term/cwd/{s}", .{rel}),
-            .mnt_term => try std.fmt.allocPrint(arena, "/mnt/term{s}", .{p}),
+            .mnt_term => if (in.caller) p else try std.fmt.allocPrint(arena, "/mnt/term{s}", .{p}),
         };
-        try binds.append(arena, try acc.bind(arena, p, to, rw));
+        var b = try acc.bind(arena, p, to, rw);
+        // A child's is made in its root's overlay, as a mount's is.
+        if (in.caller) b.make = true;
+        try binds.append(arena, b);
     };
 
     for (pol.read_deny) |p| try rules.append(arena, .{ .path = p, .kind = .deny });
@@ -857,13 +950,17 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     if (net == .disable or web) try devmask.append(arena, 'I');
     if (net == .disable) try devmask.appendSlice(arena, hstream_dev);
     if (!in.guest_tools) try devmask.append(arena, 'H');
-    if (!pol.host_fs) try devmask.append(arena, 'U');
+    if (!pol.host_fs) {
+        try devmask.append(arena, 'U');
+        try devmask.appendSlice(arena, tree_dev);
+    }
     // h9's own mounts are through #ι by now, and a guest conversation
     // could read the host's index cache.
     try devmask.appendSlice(arena, hidx_dev);
     // Without a window, a guest can neither open one nor reach the screen
     // another machine in the process has.
     if (in.gfx == null) try devmask.appendSlice(arena, "bim");
+    if (!children) try devmask.appendSlice(arena, machine_dev);
 
     var enforces: CapSet = .initMany(&.{ .@"env.scrub", .@"ipc.restrict", .@"kernel.isolation", .@"fs.write.scope" });
     if (write == .overlay or eph) enforces.insert(.@"fs.write.overlay");
@@ -878,6 +975,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     if (pol.cpus != null) enforces.insert(.@"res.cpu");
     const timeout = pol.timeout_ns orelse (if (tight) tight_timeout_ns else null);
     if (timeout != null) enforces.insert(.@"proc.timeout");
+    if (children) enforces.insert(.@"proc.children");
 
     // Overlaid paths never reach the host, so the hardlink and res.disk
     // caveats are only for paths writable on the host.
@@ -921,7 +1019,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     // servers (design/epoch-0/linux-net.md).
     var nameservers: std.ArrayList([16]u8) = .empty;
     if (has_linux and net != .disable) for (in.nameservers) |ns| {
-        if (parseIp(ns)) |a| try nameservers.append(arena, a);
+        if (resolver.parseServer(ns)) |s| try nameservers.append(arena, s.addr);
     };
     var ll_dns = false;
     for (nameservers.items) |*a| ll_dns = ll_dns or isLinkLocal(a);
@@ -936,6 +1034,8 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
             try caveats.append(arena, "the guest can make the host resolve any name");
         }
         if (name_patterns) try caveats.append(arena, "name patterns trust the host's resolver: a name is allowed to reach whatever address it resolves to");
+        // The machine resolves for the guest (design/linux-dns.md).
+        if (name_patterns) try caveats.append(arena, "DNS queries to port 53 go to h9's resolver, which forwards names the allowlist covers to the host's DNS servers");
         if (net == .enable) try caveats.append(arena, "servers in the guest are reachable by anything that can reach the host's ports");
     }
     if (in.gfx) |g| {
@@ -963,7 +1063,8 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
             try caveats.append(arena, try std.fmt.allocPrint(arena, "/net served on {s}: clients can dial out from the host's address, under --net={t}", .{ l.addr, net }));
         };
     }
-    try caveats.append(arena, "/proc/n/ns shows the host paths of bound host trees");
+    if (children) try caveats.append(arena, "child machines share this machine's kernel and host process: a kernel bug one can trigger affects them all");
+    if (in.caller) try caveats.append(arena, "a path from the caller is reached through its channel, with the caller's rights; one the child only reads is under an overlay, so the child's writes to it stay in memory");
     try caveats.append(arena, "the h9 process itself is not host-sandboxed");
 
     return .{
@@ -976,6 +1077,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         .cpus = pol.cpus,
         .net_allow = net_allow,
         .names = names,
+        .resolves = name_patterns and net != .disable and !web,
         .devmask = devmask.items,
         .binds = binds.items,
         .rules = rules.items,
@@ -1073,6 +1175,7 @@ fn memberBind(arena: std.mem.Allocator, in: Inputs, pol: Policy, m: mount.Mount,
             var r = if (m.kind == .url) try ninePConn(arena, m) else NinePRoot{ .kind = .unix, .addr = "fd", .spec = m.spec orelse "", .user = m.user };
             // The root's is set with the machine's options.
             if (m.index) |ix| r.index = .{ .given = .{ .from = ix } };
+            r.b3 = if (m.b3) |h| mount.pinHash(h) else null;
             return .{
                 // The URL h9 connects to, so a replay needs no scheme
                 // rule: an `http` one probes again.
@@ -1110,6 +1213,7 @@ fn upperBind(arena: std.mem.Allocator, m: mount.Mount, to: []const u8, linux: bo
         .url, .fd => {
             var r = if (m.kind == .url) try ninePConn(arena, m) else NinePRoot{ .kind = .unix, .addr = "fd", .spec = m.spec orelse "", .user = m.user };
             if (m.index) |ix| r.index = .{ .given = .{ .from = ix } };
+            r.b3 = if (m.b3) |h| mount.pinHash(h) else null;
             return .{
                 .from = if (r.kind == .ws) r.http orelse r.addr else if (r.kind == .port) r.addr else m.src,
                 .to = to,
@@ -1152,7 +1256,8 @@ fn guestPlace(in: Inputs, p: []const u8) Place {
             in_root = rel;
         }
     }
-    const in_cwd = if (in.cwd) |c| relUnder(c, p) else null;
+    // A child's cwd is bound at its own path, so a path in it is too.
+    const in_cwd = if (in.caller) null else if (in.cwd) |c| relUnder(c, p) else null;
     if (in_cwd != null and (in_root == null or in.cwd.?.len >= root.?.len)) {
         return if (in_cwd.?.len == 0) .cwd_top else .{ .cwd = in_cwd.? };
     }
@@ -1347,6 +1452,11 @@ pub const NetPattern = struct {
     /// Whether the pattern allows cs to resolve `name`.
     pub fn matchName(pat: NetPattern, proto: NetProto, name: []const u8, port: u16) bool {
         if (!pat.matchProtoPort(proto, port)) return false;
+        return pat.matchHostName(name);
+    }
+
+    /// Whether the pattern's host covers `name`, for any protocol and port.
+    pub fn matchHostName(pat: NetPattern, name: []const u8) bool {
         const n = std.mem.trimEnd(u8, name, ".");
         return switch (pat.host) {
             .any => true,
@@ -1540,8 +1650,11 @@ pub const NameTable = struct {
     pub const max_name = 255;
 
     pub const Entry = struct {
-        proto: NetProto,
-        port: u16,
+        /// Null in an entry the machine's resolver recorded from a DNS
+        /// answer, which has neither (design/linux-dns.md): it matches
+        /// any connect's, which the patterns then decide.
+        proto: ?NetProto,
+        port: ?u16,
         addr: [16]u8,
         name_len: u8,
         name_buf: [max_name]u8,
@@ -1555,7 +1668,7 @@ pub const NameTable = struct {
         while (!nt.lock.tryLock()) std.atomic.spinLoopHint();
     }
 
-    pub fn record(nt: *NameTable, proto: NetProto, addr: *const [16]u8, port: u16, name: []const u8) void {
+    pub fn record(nt: *NameTable, proto: ?NetProto, addr: *const [16]u8, port: ?u16, name: []const u8) void {
         if (name.len > max_name) return;
         nt.acquire();
         defer nt.lock.unlock();
@@ -1566,13 +1679,16 @@ pub const NameTable = struct {
     }
 
     /// Whether a name that resolved to addr for proto and port matches a
-    /// name pattern.
+    /// name pattern. An entry without a protocol or port takes the
+    /// connect's.
     pub fn allows(nt: *NameTable, pats: []const NetPattern, proto: NetProto, addr: *const [16]u8, port: u16) bool {
         nt.acquire();
         defer nt.lock.unlock();
         const n = @min(nt.count, capacity);
         for (nt.entries[0..n]) |*e| {
-            if (e.proto != proto or e.port != port or !std.mem.eql(u8, &e.addr, addr)) continue;
+            if (e.proto) |ep| if (ep != proto) continue;
+            if (e.port) |ept| if (ept != port) continue;
+            if (!std.mem.eql(u8, &e.addr, addr)) continue;
             for (pats) |pat| switch (pat.host) {
                 .name, .suffix => if (pat.matchName(proto, e.name(), port)) return true,
                 else => {},
@@ -1580,7 +1696,952 @@ pub const NameTable = struct {
         }
         return false;
     }
+
+    /// Whether addr is recorded for a name a name pattern covers, with
+    /// any protocol and port: what `Plan.netProbe` allows a UDP probe to.
+    pub fn recorded(nt: *NameTable, pats: []const NetPattern, addr: *const [16]u8) bool {
+        nt.acquire();
+        defer nt.lock.unlock();
+        const n = @min(nt.count, capacity);
+        for (nt.entries[0..n]) |*e| {
+            if (!std.mem.eql(u8, &e.addr, addr)) continue;
+            for (pats) |pat| switch (pat.host) {
+                .name, .suffix => if (pat.matchHostName(e.name())) return true,
+                else => {},
+            };
+        }
+        return false;
+    }
 };
+
+// The plan as text (design/plan-format.md): the lines a plan file takes,
+// their parser and printer, and the narrowing rule.
+
+/// An `engine` line's names: engine.Choice's (machine.zig checks they
+/// match), kept here so the policy needs no engine.
+pub const EngineChoice = enum { auto, hvf, kvm, whp, hcpu, sud };
+
+/// A `gfx` line: a window (`--gfx`, `--gfx=noclip`, and `--gfx-scale`),
+/// or the headless screen (`--gfx=headless` and `--gfx-size`).
+pub const GfxSpec = struct {
+    headless: bool = false,
+    /// /dev/snarf is the host's clipboard; false is `noclip`.
+    clipboard: bool = true,
+    scale: ?u8 = null,
+    size: ?[2]u16 = null,
+};
+
+/// Where each of a plan's settings came from: a line number, from 1, or
+/// 0 for none (a default, or a Spec made from flags or `Machine.Options`).
+/// Narrowing's errors name these lines.
+pub const Lines = struct {
+    profile: u32 = 0,
+    write: u32 = 0,
+    net: u32 = 0,
+    devices: u32 = 0,
+    memory: u32 = 0,
+    pids: u32 = 0,
+    cpus: u32 = 0,
+    timeout: u32 = 0,
+    engine: u32 = 0,
+    arch: u32 = 0,
+    cwd: u32 = 0,
+    gfx: u32 = 0,
+    serve_root: u32 = 0,
+    serve_net: u32 = 0,
+    /// One per item of the list of the same name.
+    mounts: []const u32 = &.{},
+    net_allow: []const u32 = &.{},
+    readable: []const u32 = &.{},
+    writable: []const u32 = &.{},
+    serve: []const u32 = &.{},
+    serve_origins: []const u32 = &.{},
+};
+
+/// A plan's contents (design/plan-format.md): what decides what a machine
+/// is, and nothing about the host that runs it (its stdio, caches,
+/// credential helpers, and proxies). Every way of starting a machine
+/// takes one: `h9 --plan`, the flags (which compile to one),
+/// `Machine.Options.plan`, and the page's `createMachine({ plan })`.
+/// Host paths are as written: the CLI resolves relative ones from its
+/// working directory, as it does a flag's.
+pub const Spec = struct {
+    /// `dir`, `url`, `archive`, `builtin`, and `tmp` lines: the mount
+    /// flags, each taking its flag's value.
+    mounts: []const mount.Mount = &.{},
+    /// `bind SRC:DST[:OPTS]` lines, with one value: `--bind`.
+    binds: []const mount.Bind = &.{},
+    /// Namespace lines (`bind` and `mount` with two values or more,
+    /// `unmount`, `cd`, and `clear`), as `--ns` text, replayed in order
+    /// after the binds.
+    ns: []const []const u8 = &.{},
+    /// `profile`, `write`, `net`, `netallow`, `allow read`, `allow write`,
+    /// `deny read`, and `devices host-fs`, and the limits.
+    policy: Policy = .{},
+    /// `devices guest-tools`: `#H/bin`, h9's own commands.
+    guest_tools: bool = true,
+    engine: ?EngineChoice = null,
+    arch: ?aout.Arch = null,
+    /// `env NAME=VALUE` lines.
+    env: []const []const u8 = &.{},
+    /// `cwd PATH [rw|ro]`: the host directory at /mnt/term/cwd; its mode
+    /// is `policy.cwd_writable`.
+    cwd: ?[]const u8 = null,
+    gfx: ?GfxSpec = null,
+    /// `serve ADDR` lines, as `--serve` takes them.
+    serve: []const []const u8 = &.{},
+    serve_root: ?[]const u8 = null,
+    /// `servetoken @FILE`: the host file holding the token, never the
+    /// token.
+    serve_token: ?[]const u8 = null,
+    serve_origins: []const []const u8 = &.{},
+    serve_net: bool = false,
+    /// `run PROG ARGS...`: optional, and a program on the command line
+    /// replaces it.
+    run: ?[]const []const u8 = null,
+    /// Comments the printer writes in the plan's namespace section, for
+    /// what a plan can't hold as text, such as an embedder's connection.
+    notes: []const []const u8 = &.{},
+    lines: Lines = .{},
+
+    /// The network mode the plan gets: its `net` line's, or its profile's.
+    pub fn netMode(s: Spec) NetMode {
+        return s.policy.net orelse if (s.policy.profile == .tight) .disable else .outbound;
+    }
+
+    pub fn writeMode(s: Spec) WriteMode {
+        return s.policy.write orelse .overlay;
+    }
+
+    /// The timeout the plan gets: its `timeout` line's, or its profile's.
+    pub fn timeout(s: Spec) ?u64 {
+        return s.policy.timeout_ns orelse if (s.policy.profile == .tight) tight_timeout_ns else null;
+    }
+
+    /// Whether the cwd is writable, as far as the plan says: `compile`
+    /// also needs the write mode to allow it.
+    pub fn cwdWritable(s: Spec) bool {
+        return s.policy.cwd_writable orelse (s.policy.profile != .tight or s.writeMode() == .ephemeral);
+    }
+
+    /// Writes the plan's lines, every default spelled out, so that
+    /// `parsePlan` reads back a plan that compiles to the same machine.
+    pub fn write(s: Spec, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        try w.writeAll("# h9 plan (design/plan-format.md): h9 --plan FILE runs it\n");
+        try s.writeNamespace(w);
+        try s.writePolicy(w);
+        try s.writeLimits(w);
+    }
+
+    fn writeNamespace(s: Spec, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        var scratch: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+        defer scratch.deinit();
+        try w.writeAll("\n# namespace\n");
+        for (s.mounts) |m0| {
+            if (m0.kind == .fd) continue;
+            var arg: std.Io.Writer.Allocating = .init(std.heap.page_allocator);
+            defer arg.deinit();
+            // A URL's query and a header's value can hold a token, so they
+            // are written as `…`, which `parsePlan` refuses, as the plan's
+            // comments always have: a plan that needs them names them in
+            // a file, `header=@FILE`, or has them written in by hand.
+            var m = m0;
+            var hs: [16][]const u8 = undefined;
+            if (m.kind == .url) {
+                if (std.mem.indexOfScalar(u8, m.src, '?')) |q| m.src = std.fmt.allocPrint(scratch.allocator(), "{s}?" ++ elided, .{m.src[0..q]}) catch return error.WriteFailed;
+                for (m.headers, 0..) |h, i| if (i < hs.len) {
+                    const colon = std.mem.indexOfScalar(u8, h, ':');
+                    hs[i] = if (h.len > 0 and h[0] == '@') h else std.fmt.allocPrint(scratch.allocator(), "{s}: " ++ elided, .{std.mem.trim(u8, h[0 .. colon orelse h.len], " \t")}) catch return error.WriteFailed;
+                };
+                m.headers = hs[0..@min(m.headers.len, hs.len)];
+            }
+            m.writeArg(&arg.writer) catch return error.WriteFailed;
+            try w.writeAll(@tagName(m.kind));
+            if (arg.written().len > 0) {
+                try w.writeAll(" ");
+                try writeWord(w, arg.written());
+            }
+            try w.writeAll("\n");
+        }
+        for (s.mounts) |m| if (m.kind == .fd) try w.print("# mount: an embedder's connection on {s}, passed beside the plan\n", .{m.dst});
+        for (s.notes) |n| try w.print("# {s}\n", .{n});
+        for (s.binds) |b| {
+            var arg: std.Io.Writer.Allocating = .init(std.heap.page_allocator);
+            defer arg.deinit();
+            b.writeArg(&arg.writer) catch return error.WriteFailed;
+            try w.writeAll("bind ");
+            try writeWord(w, arg.written());
+            try w.writeAll("\n");
+        }
+        for (s.ns) |t_| try writeNsText(w, t_);
+    }
+
+    fn writePolicy(s: Spec, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        const p = s.policy;
+        try w.writeAll("\n# policy\n");
+        try w.print("profile {t}\n", .{p.profile});
+        try w.print("write {t}\n", .{s.writeMode()});
+        try w.print("net {t}\n", .{s.netMode()});
+        for (p.net_allow) |pat| {
+            try w.writeAll("netallow ");
+            try writeWord(w, pat);
+            try w.writeAll("\n");
+        }
+        for ([_][]const []const u8{ p.readable, p.writable, p.read_deny }, [_][]const u8{ "allow read", "allow write", "deny read" }) |list, what| for (list) |path| {
+            try w.print("{s} ", .{what});
+            try writeWord(w, path);
+            try w.writeAll("\n");
+        };
+        try w.writeAll("devices");
+        if (p.host_fs) try w.writeAll(" host-fs");
+        if (s.guest_tools) try w.writeAll(" guest-tools");
+        if (p.children) try w.writeAll(" children");
+        try w.writeAll("\n");
+    }
+
+    fn writeLimits(s: Spec, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        const p = s.policy;
+        try w.writeAll("\n# limits and the run\n");
+        if (p.memory) |m| try w.print("memory {f}\n", .{fmtSize(m)}) else try w.writeAll("# memory: the engine's default\n");
+        if (p.pids) |n| try w.print("pids {d}\n", .{n}) else try w.writeAll("# pids: unlimited\n");
+        if (p.cpus) |n| try w.print("cpus {d}\n", .{n}) else try w.writeAll("# cpus: as many as the engine runs\n");
+        if (s.timeout()) |d| try w.print("timeout {f}\n", .{fmtDuration(d)}) else try w.writeAll("# timeout: none\n");
+        try w.print("engine {t}\n", .{s.engine orelse .auto});
+        if (s.arch) |a| try w.print("arch {s}\n", .{a.name()});
+        for (s.env) |e| {
+            try w.writeAll("env ");
+            try writeWord(w, e);
+            try w.writeAll("\n");
+        }
+        if (s.cwd) |c| {
+            try w.writeAll("cwd ");
+            try writeWord(w, c);
+            try w.print(" {s}\n", .{if (s.cwdWritable()) "rw" else "ro"});
+        }
+        if (s.gfx) |g| {
+            if (g.headless) {
+                try w.writeAll("gfx headless");
+                if (g.size) |sz| try w.print(" {d}x{d}", .{ sz[0], sz[1] });
+            } else {
+                try w.writeAll("gfx window");
+                if (!g.clipboard) try w.writeAll(" noclip");
+                if (g.scale) |n| try w.print(" scale={d}", .{n});
+            }
+            try w.writeAll("\n");
+        }
+        for (s.serve) |a| {
+            try w.writeAll("serve ");
+            try writeWord(w, a);
+            try w.writeAll("\n");
+        }
+        if (s.serve_root) |r| {
+            try w.writeAll("serveroot ");
+            try writeWord(w, r);
+            try w.writeAll("\n");
+        }
+        if (s.serve_token) |f| {
+            try w.writeAll("servetoken ");
+            try writeWord(w, f);
+            try w.writeAll("\n");
+        }
+        for (s.serve_origins) |o| {
+            try w.writeAll("serveorigin ");
+            try writeWord(w, o);
+            try w.writeAll("\n");
+        }
+        if (s.serve_net) try w.writeAll("servenet\n");
+        if (s.run) |argv| {
+            try w.writeAll("run");
+            for (argv) |a| {
+                try w.writeAll(" ");
+                try writeWord(w, a);
+            }
+            try w.writeAll("\n");
+        }
+    }
+
+    /// The plan's text, allocated in `arena`.
+    pub fn text(s: Spec, arena: std.mem.Allocator) error{OutOfMemory}![]const u8 {
+        var out: std.Io.Writer.Allocating = .init(arena);
+        s.write(&out.writer) catch return error.OutOfMemory;
+        return out.written();
+    }
+};
+
+/// What a plan's text has in place of a secret it leaves out.
+const elided = "…";
+
+/// Writes a word as namespace files read it: in single quotes, with `''`
+/// for a quote, when it's empty or has a blank, a quote, `;`, or `#`.
+pub fn writeWord(w: *std.Io.Writer, word: []const u8) std.Io.Writer.Error!void {
+    if (word.len > 0 and std.mem.indexOfAny(u8, word, " \t\r\n';#") == null) return w.writeAll(word);
+    try w.writeAll("'");
+    for (word) |c| {
+        if (c == '\'') try w.writeAll("'");
+        try w.writeByte(c);
+    }
+    try w.writeAll("'");
+}
+
+/// Writes `--ns` text as plan lines: a line per command, its words quoted
+/// as needed and its comments dropped.
+fn writeNsText(w: *std.Io.Writer, text: []const u8) std.Io.Writer.Error!void {
+    var scratch: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer scratch.deinit();
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw| {
+        var rest = raw;
+        while (rest.len > 0) {
+            var words: std.ArrayList([]const u8) = .empty;
+            rest = newns.split(scratch.allocator(), rest, &words) catch {
+                // Not namespace syntax: compile refuses it, so show it.
+                try w.print("# {s}\n", .{raw});
+                break;
+            };
+            if (words.items.len == 0) continue;
+            for (words.items, 0..) |word, i| {
+                if (i > 0) try w.writeAll(" ");
+                try writeWord(w, word);
+            }
+            try w.writeAll("\n");
+        }
+    }
+}
+
+/// Where a plan's text is wrong: the line, from 1, and what's wrong.
+pub const PlanError = struct {
+    line: u32 = 0,
+    msg: []const u8 = "",
+};
+
+pub const PlanParseError = error{ Syntax, OutOfMemory };
+
+/// Parses a plan's text (design/plan-format.md, "The format"). Strings
+/// are allocated in `arena`, or point into `text`. A line h9 doesn't
+/// know, or a value it can't take, is `error.Syntax`, with the line and
+/// why in `err`.
+pub fn parsePlan(arena: std.mem.Allocator, text: []const u8, err: *PlanError) PlanParseError!Spec {
+    var p: PlanParser = .{ .arena = arena, .err = err };
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    var n: u32 = 0;
+    while (lines.next()) |raw| {
+        n += 1;
+        p.line = n;
+        // A line that starts with `#` is a comment to its end, `;` and
+        // all, so the caveats `--print` writes as comments stay comments.
+        if (std.mem.trimStart(u8, raw, " \t\r").len > 0 and std.mem.trimStart(u8, raw, " \t\r")[0] == '#') continue;
+        var rest = raw;
+        while (rest.len > 0) {
+            var words: std.ArrayList([]const u8) = .empty;
+            rest = newns.split(arena, rest, &words) catch |e| switch (e) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Syntax => return p.fail("a quote isn't closed", .{}),
+            };
+            if (words.items.len == 0) continue;
+            try p.take(words.items);
+        }
+    }
+    return p.finish();
+}
+
+const PlanParser = struct {
+    arena: std.mem.Allocator,
+    err: *PlanError,
+    line: u32 = 0,
+    s: Spec = .{},
+    mounts: std.ArrayList(mount.Mount) = .empty,
+    mount_lines: std.ArrayList(u32) = .empty,
+    binds: std.ArrayList(mount.Bind) = .empty,
+    ns: std.ArrayList(u8) = .empty,
+    /// The first namespace line, and the first that isn't a mount.
+    first_ns: u32 = 0,
+    first_bind: u32 = 0,
+    net_allow: std.ArrayList([]const u8) = .empty,
+    net_allow_lines: std.ArrayList(u32) = .empty,
+    readable: std.ArrayList([]const u8) = .empty,
+    readable_lines: std.ArrayList(u32) = .empty,
+    writable: std.ArrayList([]const u8) = .empty,
+    writable_lines: std.ArrayList(u32) = .empty,
+    read_deny: std.ArrayList([]const u8) = .empty,
+    env: std.ArrayList([]const u8) = .empty,
+    serve: std.ArrayList([]const u8) = .empty,
+    serve_lines: std.ArrayList(u32) = .empty,
+    origins: std.ArrayList([]const u8) = .empty,
+    origin_lines: std.ArrayList(u32) = .empty,
+
+    fn fail(p: *PlanParser, comptime fmt: []const u8, args: anytype) PlanParseError {
+        p.err.* = .{ .line = p.line, .msg = try std.fmt.allocPrint(p.arena, fmt, args) };
+        return error.Syntax;
+    }
+
+    /// The one argument a line takes.
+    fn one(p: *PlanParser, w: []const []const u8) PlanParseError![]const u8 {
+        if (w.len != 2) return p.fail("{s} takes one value", .{w[0]});
+        return w[1];
+    }
+
+    fn enumOf(p: *PlanParser, comptime E: type, w: []const []const u8) PlanParseError!E {
+        const v = try p.one(w);
+        return std.meta.stringToEnum(E, v) orelse {
+            var names: std.Io.Writer.Allocating = .init(p.arena);
+            for (std.meta.fieldNames(E), 0..) |f, i| names.writer.print("{s}{s}", .{ if (i > 0) ", " else "", f }) catch return error.OutOfMemory;
+            return p.fail("{s} '{s}': not {s}", .{ w[0], v, names.written() });
+        };
+    }
+
+    fn count(p: *PlanParser, w: []const []const u8) PlanParseError!u32 {
+        const v = try p.one(w);
+        const n = std.fmt.parseInt(u32, v, 10) catch 0;
+        if (n == 0) return p.fail("{s} '{s}': not a count", .{ w[0], v });
+        return n;
+    }
+
+    fn take(p: *PlanParser, w: []const []const u8) PlanParseError!void {
+        const cmd = w[0];
+        const a = p.arena;
+        if (std.meta.stringToEnum(mount.Kind, cmd)) |kind| {
+            if (kind == .fd) return p.fail("unknown line '{s}'", .{cmd});
+            if (w.len > 2) return p.fail("{s} takes one value, as --{s} does", .{ cmd, cmd });
+            if (p.first_bind != 0) return p.fail("{s} comes after the namespace line on line {d}, but mounts run first: move it up", .{ cmd, p.first_bind });
+            if (kind != .builtin and w.len < 2) return p.fail("{s} needs a value, as --{s} does", .{ cmd, cmd });
+            if (w.len == 2 and std.mem.indexOf(u8, w[1], elided) != null)
+                return p.fail("{s}: a URL's query or a header's value was left out here (…): write it in, or use header=@FILE", .{cmd});
+            var why: []const u8 = "";
+            const m = mount.Mount.parse(a, kind, if (w.len == 2) w[1] else "", &why) catch |e| switch (e) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Usage => return p.fail("{s}: {s}", .{ cmd, why }),
+            };
+            try p.mounts.append(a, m);
+            try p.mount_lines.append(a, p.line);
+            return;
+        }
+        if (std.mem.eql(u8, cmd, "bind") and w.len == 2) return p.bindLine(w);
+        if (newns.isCommand(cmd)) return p.namespaceLine(w);
+        const pol = &p.s.policy;
+        if (std.mem.eql(u8, cmd, "profile")) {
+            pol.profile = try p.enumOf(Profile, w);
+            p.s.lines.profile = p.line;
+        } else if (std.mem.eql(u8, cmd, "write")) {
+            pol.write = try p.enumOf(WriteMode, w);
+            p.s.lines.write = p.line;
+        } else if (std.mem.eql(u8, cmd, "net")) {
+            pol.net = try p.enumOf(NetMode, w);
+            p.s.lines.net = p.line;
+        } else if (std.mem.eql(u8, cmd, "netallow")) {
+            const v = try p.one(w);
+            var why: []const u8 = "";
+            _ = parseNetPattern(v, &why) catch return p.fail("netallow '{s}': {s}", .{ v, why });
+            try p.net_allow.append(a, v);
+            try p.net_allow_lines.append(a, p.line);
+        } else if (std.mem.eql(u8, cmd, "allow") or std.mem.eql(u8, cmd, "deny")) {
+            const allow = cmd[0] == 'a';
+            if (w.len != 3) return p.fail("{s} takes {s} and a host path", .{ cmd, if (allow) "read or write" else "read" });
+            if (w[2].len == 0) return p.fail("{s}: an empty path", .{cmd});
+            if (std.mem.eql(u8, w[1], "read")) {
+                if (allow) {
+                    try p.readable.append(a, w[2]);
+                    try p.readable_lines.append(a, p.line);
+                } else try p.read_deny.append(a, w[2]);
+            } else if (allow and std.mem.eql(u8, w[1], "write")) {
+                try p.writable.append(a, w[2]);
+                try p.writable_lines.append(a, p.line);
+            } else return p.fail("{s} '{s}': not {s}", .{ cmd, w[1], if (allow) "read or write" else "read" });
+        } else if (std.mem.eql(u8, cmd, "devices")) {
+            pol.host_fs = false;
+            pol.children = false;
+            p.s.guest_tools = false;
+            for (w[1..]) |d| {
+                if (std.mem.eql(u8, d, "host-fs")) {
+                    pol.host_fs = true;
+                } else if (std.mem.eql(u8, d, "guest-tools")) {
+                    p.s.guest_tools = true;
+                } else if (std.mem.eql(u8, d, "children")) {
+                    pol.children = true;
+                } else return p.fail("devices '{s}': not host-fs, guest-tools, or children", .{d});
+            }
+            p.s.lines.devices = p.line;
+        } else if (std.mem.eql(u8, cmd, "memory")) {
+            const v = try p.one(w);
+            pol.memory = parseSize(v) orelse return p.fail("memory '{s}': not a size, such as 512M", .{v});
+            p.s.lines.memory = p.line;
+        } else if (std.mem.eql(u8, cmd, "pids")) {
+            pol.pids = try p.count(w);
+            p.s.lines.pids = p.line;
+        } else if (std.mem.eql(u8, cmd, "cpus")) {
+            pol.cpus = try p.count(w);
+            p.s.lines.cpus = p.line;
+        } else if (std.mem.eql(u8, cmd, "timeout")) {
+            const v = try p.one(w);
+            const d = parseDuration(v) orelse 0;
+            if (d == 0) return p.fail("timeout '{s}': not a duration, such as 30s or 5m", .{v});
+            pol.timeout_ns = d;
+            p.s.lines.timeout = p.line;
+        } else if (std.mem.eql(u8, cmd, "engine")) {
+            p.s.engine = try p.enumOf(EngineChoice, w);
+            p.s.lines.engine = p.line;
+        } else if (std.mem.eql(u8, cmd, "arch")) {
+            const v = try p.one(w);
+            p.s.arch = aout.Arch.fromName(v) orelse return p.fail("arch '{s}': not arm64, amd64, or 386", .{v});
+            p.s.lines.arch = p.line;
+        } else if (std.mem.eql(u8, cmd, "env")) {
+            const v = try p.one(w);
+            const eq = std.mem.indexOfScalar(u8, v, '=') orelse 0;
+            if (eq == 0 or std.mem.indexOfScalar(u8, v[0..eq], '/') != null) return p.fail("env '{s}': not NAME=VALUE", .{v});
+            try p.env.append(a, v);
+        } else if (std.mem.eql(u8, cmd, "cwd")) {
+            if (w.len < 2 or w.len > 3 or w[1].len == 0) return p.fail("cwd takes a host path, and rw or ro", .{});
+            p.s.cwd = w[1];
+            if (w.len == 3) pol.cwd_writable = if (std.mem.eql(u8, w[2], "rw")) true else if (std.mem.eql(u8, w[2], "ro")) false else return p.fail("cwd '{s}': not rw or ro", .{w[2]});
+            p.s.lines.cwd = p.line;
+        } else if (std.mem.eql(u8, cmd, "gfx")) {
+            p.s.gfx = try p.gfx(w);
+            p.s.lines.gfx = p.line;
+        } else if (std.mem.eql(u8, cmd, "serve")) {
+            const v = try p.one(w);
+            if (!std.mem.startsWith(u8, v, "unix!") and !std.mem.startsWith(u8, v, "tcp!") and !std.mem.startsWith(u8, v, "ws://"))
+                return p.fail("serve '{s}': not unix!PATH, tcp!HOST!PORT, or ws://HOST:PORT[/PATH]", .{v});
+            try p.serve.append(a, v);
+            try p.serve_lines.append(a, p.line);
+        } else if (std.mem.eql(u8, cmd, "serveroot")) {
+            const v = try p.one(w);
+            if (v.len == 0 or v[0] != '/') return p.fail("serveroot '{s}': not an absolute guest path", .{v});
+            p.s.serve_root = v;
+            p.s.lines.serve_root = p.line;
+        } else if (std.mem.eql(u8, cmd, "servetoken")) {
+            const v = try p.one(w);
+            // A file, so the token itself isn't in the plan.
+            if (v.len < 2 or v[0] != '@') return p.fail("servetoken takes @FILE, the token's host file", .{});
+            p.s.serve_token = v;
+        } else if (std.mem.eql(u8, cmd, "serveorigin")) {
+            const v = try p.one(w);
+            if (v.len == 0) return p.fail("serveorigin: an empty origin", .{});
+            try p.origins.append(a, v);
+            try p.origin_lines.append(a, p.line);
+        } else if (std.mem.eql(u8, cmd, "servenet")) {
+            if (w.len != 1) return p.fail("servenet takes no value", .{});
+            p.s.serve_net = true;
+            p.s.lines.serve_net = p.line;
+        } else if (std.mem.eql(u8, cmd, "run")) {
+            if (w.len < 2) return p.fail("run needs a program", .{});
+            p.s.run = try a.dupe([]const u8, w[1..]);
+        } else return p.fail("unknown line '{s}'", .{cmd});
+    }
+
+    fn gfx(p: *PlanParser, w: []const []const u8) PlanParseError!GfxSpec {
+        if (w.len < 2) return p.fail("gfx takes window or headless", .{});
+        var g: GfxSpec = .{};
+        if (std.mem.eql(u8, w[1], "headless")) {
+            g.headless = true;
+            if (w.len > 3) return p.fail("gfx headless takes a size, WxH", .{});
+            if (w.len == 3) {
+                const x = std.mem.indexOfScalar(u8, w[2], 'x') orelse return p.fail("gfx headless '{s}': not WxH", .{w[2]});
+                const dx = std.fmt.parseInt(u16, w[2][0..x], 10) catch 0;
+                const dy = std.fmt.parseInt(u16, w[2][x + 1 ..], 10) catch 0;
+                if (dx == 0 or dy == 0 or dx > 16384 or dy > 16384) return p.fail("gfx headless '{s}': each side is 1 to 16384", .{w[2]});
+                g.size = .{ dx, dy };
+            }
+            return g;
+        }
+        if (!std.mem.eql(u8, w[1], "window")) return p.fail("gfx '{s}': not window or headless", .{w[1]});
+        for (w[2..]) |o| {
+            if (std.mem.eql(u8, o, "noclip")) {
+                g.clipboard = false;
+            } else if (std.mem.startsWith(u8, o, "scale=")) {
+                g.scale = std.fmt.parseInt(u8, o["scale=".len..], 10) catch return p.fail("gfx '{s}': not scale=N", .{o});
+            } else return p.fail("gfx window '{s}': not noclip or scale=N", .{o});
+        }
+        return g;
+    }
+
+    /// A namespace line, checked as `--ns` checks it, and replayed as
+    /// `--ns` is, after the mounts and the `--bind`s.
+    fn namespaceLine(p: *PlanParser, w: []const []const u8) PlanParseError!void {
+        const a = p.arena;
+        var line: std.Io.Writer.Allocating = .init(a);
+        for (w, 0..) |word, i| {
+            if (i > 0) line.writer.writeAll(" ") catch return error.OutOfMemory;
+            writeWord(&line.writer, word) catch return error.OutOfMemory;
+        }
+        var ln: usize = 0;
+        _ = newns.parse(a, line.written(), &ln) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Syntax => return p.fail("{s}: not a namespace line h9 takes", .{w[0]}),
+        };
+        if (p.first_bind == 0) p.first_bind = p.line;
+        if (p.first_ns == 0) p.first_ns = p.line;
+        try p.ns.appendSlice(a, line.written());
+        try p.ns.append(a, '\n');
+    }
+
+    /// A `bind` line with one value, `--bind`'s: `bind SRC:DST[:OPTS]`.
+    fn bindLine(p: *PlanParser, w: []const []const u8) PlanParseError!void {
+        if (p.first_ns != 0) return p.fail("bind {s} comes after the namespace line on line {d}, but --bind lines run first: move it up", .{ w[1], p.first_ns });
+        var why: []const u8 = "";
+        const b = mount.Bind.parse(w[1], &why) catch return p.fail("bind {s}: {s}", .{ w[1], why });
+        if (p.first_bind == 0) p.first_bind = p.line;
+        try p.binds.append(p.arena, b);
+    }
+
+    fn finish(p: *PlanParser) PlanParseError!Spec {
+        var s = p.s;
+        s.mounts = p.mounts.items;
+        s.lines.mounts = p.mount_lines.items;
+        s.binds = p.binds.items;
+        if (p.ns.items.len > 0) s.ns = try p.arena.dupe([]const u8, &.{p.ns.items});
+        s.policy.net_allow = p.net_allow.items;
+        s.lines.net_allow = p.net_allow_lines.items;
+        s.policy.readable = p.readable.items;
+        s.lines.readable = p.readable_lines.items;
+        s.policy.writable = p.writable.items;
+        s.lines.writable = p.writable_lines.items;
+        s.policy.read_deny = p.read_deny.items;
+        s.env = p.env.items;
+        s.serve = p.serve.items;
+        s.lines.serve = p.serve_lines.items;
+        s.serve_origins = p.origins.items;
+        s.lines.serve_origins = p.origin_lines.items;
+        return s;
+    }
+};
+
+/// Writes a plan (design/plan-format.md) as `--print` does: its lines,
+/// and then what h9 compiles them to, which isn't read back, as
+/// comments, ending with the caveats.
+pub fn printPlan(w: *std.Io.Writer, spec: Spec, plan: *const Plan) std.Io.Writer.Error!void {
+    try spec.write(w);
+    try w.writeAll("\n# What h9 builds from these lines (comments, not read back):\n");
+    var out: std.Io.Writer.Allocating = .init(std.heap.page_allocator);
+    defer out.deinit();
+    plan.print(&out.writer) catch return error.WriteFailed;
+    var it = std.mem.splitScalar(u8, std.mem.trimEnd(u8, out.written(), "\n"), '\n');
+    while (it.next()) |l| try w.print("# {s}\n", .{l});
+}
+
+pub const NarrowError = error{ Widens, OutOfMemory };
+
+/// Narrows plan `base` by `by` (design/plan-format.md): the rule for
+/// flags given with `--plan`, and for a child machine's plan under its
+/// parent's. What `by` leaves unset, its defaults, keeps `base`'s
+/// setting; what it sets replaces `base`'s where it's no wider: a lower
+/// limit, a mount or a path made read-only, a network rule removed, a
+/// path denied, a device left out. `by.profile` tight narrows to the
+/// tight profile's settings. Anything wider is `error.Widens`, with
+/// `why` naming the line of `base` it conflicts with. `by.run` replaces
+/// the run, and `by.env` adds to or replaces `base`'s variables.
+/// Allocations go in `arena`; the result may share `base`'s and `by`'s.
+pub fn narrow(arena: std.mem.Allocator, base: Spec, by: Spec, why: *[]const u8) NarrowError!Spec {
+    var n: Narrowing = .{ .arena = arena, .base = base, .by = by, .why = why };
+    return n.run();
+}
+
+const Narrowing = struct {
+    arena: std.mem.Allocator,
+    base: Spec,
+    by: Spec,
+    why: *[]const u8,
+
+    /// `what` (in plan syntax) widens `base`'s line `line`, `had`.
+    fn widens(n: *Narrowing, what: []const u8, line: u32, had: []const u8) NarrowError {
+        n.why.* = if (line > 0)
+            try std.fmt.allocPrint(n.arena, "{s} widens the plan's line {d}: {s}", .{ what, line, had })
+        else
+            try std.fmt.allocPrint(n.arena, "{s} widens the plan, which has {s}", .{ what, had });
+        return error.Widens;
+    }
+
+    fn str(n: *Narrowing, comptime fmt: []const u8, args: anytype) NarrowError![]const u8 {
+        return std.fmt.allocPrint(n.arena, fmt, args);
+    }
+
+    fn run(n: *Narrowing) NarrowError!Spec {
+        const base = n.base;
+        const by = n.by;
+        var r = base;
+        const a = n.arena;
+        // A tight profile narrows to its own settings, which an explicit
+        // setting in `by` overrides.
+        const tight = by.policy.profile == .tight;
+        if (base.policy.profile == .tight and by.policy.profile == .default and by.lines.profile > 0)
+            return n.widens("profile default", base.lines.profile, "profile tight");
+        if (tight) r.policy.profile = .tight;
+
+        // Limits: lower only.
+        inline for (.{ .{ "memory", "memory" }, .{ "pids", "pids" }, .{ "cpus", "cpus" } }) |f| {
+            if (@field(by.policy, f[0])) |v| {
+                if (@field(base.policy, f[0])) |had| if (v > had) {
+                    return n.widens(try n.limitText(f[1], v), @field(base.lines, f[1]), try n.limitText(f[1], had));
+                };
+                @field(r.policy, f[0]) = v;
+            }
+        }
+        const had_timeout = base.timeout();
+        const want_timeout = by.policy.timeout_ns orelse if (tight) tight_timeout_ns else null;
+        if (want_timeout) |v| {
+            if (had_timeout) |h| if (v > h) {
+                if (by.policy.timeout_ns != null) return n.widens(try n.str("timeout {f}", .{fmtDuration(v)}), base.lines.timeout, try n.str("timeout {f}", .{fmtDuration(h)}));
+            };
+            r.policy.timeout_ns = if (had_timeout) |h| @min(h, v) else v;
+        } else r.policy.timeout_ns = had_timeout;
+
+        // The network: disable < outbound < enable, and an allowlist only
+        // ever loses patterns.
+        const had_net = base.netMode();
+        const want_net: ?NetMode = by.policy.net orelse if (tight) .disable else null;
+        if (want_net) |v| {
+            if (@intFromEnum(v) > @intFromEnum(had_net)) return n.widens(try n.str("net {t}", .{v}), base.lines.net, try n.str("net {t}", .{had_net}));
+            r.policy.net = v;
+        } else r.policy.net = had_net;
+        if (by.policy.net_allow.len > 0) {
+            if (r.policy.net == .disable) return n.widens(try n.str("netallow {s}", .{by.policy.net_allow[0]}), base.lines.net, "net disable");
+            if (base.policy.net_allow.len > 0) for (by.policy.net_allow) |pat| {
+                const known = for (base.policy.net_allow) |b| {
+                    if (std.mem.eql(u8, b, pat)) break true;
+                } else false;
+                if (!known) return n.widens(try n.str("netallow {s}", .{pat}), lineAt(base.lines.net_allow, 0), try n.str("netallow {s}", .{base.policy.net_allow[0]}));
+            };
+            r.policy.net_allow = by.policy.net_allow;
+        }
+        if (r.policy.net == .disable) r.policy.net_allow = &.{};
+
+        // Writes: none narrows everything, ephemeral keeps the host from
+        // being written, and scope and overlay differ in what they write
+        // (a 9P root, or memory), so neither narrows the other.
+        const had_write = base.writeMode();
+        if (by.policy.write) |v| {
+            if (!writeNarrows(v, had_write)) return n.widens(try n.str("write {t}", .{v}), base.lines.write, try n.str("write {t}", .{had_write}));
+            r.policy.write = v;
+        } else r.policy.write = had_write;
+
+        // Host paths: a readable path only where the plan already shares
+        // something, a writable one only where it already writes, and a
+        // denied one anywhere.
+        var readable: std.ArrayList([]const u8) = .empty;
+        var writable: std.ArrayList([]const u8) = .empty;
+        try readable.appendSlice(a, base.policy.readable);
+        for (by.policy.readable) |p| {
+            if (!n.shares(p)) return n.widens(try n.str("allow read {s}", .{p}), 0, try n.str("nothing that shares {s}", .{p}));
+            try readable.append(a, p);
+        }
+        for (base.policy.writable) |p| {
+            const ro = for (by.policy.readable) |q| {
+                if (std.mem.eql(u8, q, p)) break true;
+            } else false;
+            if (!ro) try writable.append(a, p);
+        }
+        for (by.policy.writable) |p| {
+            if (!n.writes(p)) {
+                const at = n.covering(p);
+                return n.widens(try n.str("allow write {s}", .{p}), at.line, at.text orelse try n.str("nothing that writes {s}", .{p}));
+            }
+            const dup = for (writable.items) |q| {
+                if (std.mem.eql(u8, q, p)) break true;
+            } else false;
+            if (!dup) try writable.append(a, p);
+        }
+        if (r.policy.write == .none) {
+            try readable.appendSlice(a, writable.items);
+            writable.clearRetainingCapacity();
+        }
+        r.policy.readable = readable.items;
+        r.policy.writable = writable.items;
+        r.policy.read_deny = try std.mem.concat(a, []const u8, &.{ base.policy.read_deny, by.policy.read_deny });
+
+        // The cwd: the plan's, made read-only if `by` says so.
+        if (by.cwd) |c| if (base.cwd == null or !std.mem.eql(u8, c, base.cwd.?)) {
+            return n.widens(try n.str("cwd {s}", .{c}), base.lines.cwd, if (base.cwd) |b| try n.str("cwd {s}", .{b}) else "no cwd");
+        };
+        const had_cwd_rw = base.cwdWritable();
+        const want_cwd_rw: ?bool = by.policy.cwd_writable orelse if (tight) false else null;
+        if (want_cwd_rw) |v| {
+            if (v and !had_cwd_rw) return n.widens(try n.str("cwd {s} rw", .{base.cwd orelse "."}), base.lines.cwd, try n.str("cwd {s} ro", .{base.cwd orelse "."}));
+            r.policy.cwd_writable = v;
+        } else r.policy.cwd_writable = had_cwd_rw;
+
+        // Devices: only left out.
+        if (by.policy.host_fs and !base.policy.host_fs) return n.widens("devices host-fs", base.lines.devices, "no host-fs");
+        if (by.policy.children and !base.policy.children) return n.widens("devices children", base.lines.devices, "no children");
+        if (by.lines.devices > 0 and !by.policy.children) r.policy.children = false;
+        if (!by.guest_tools) r.guest_tools = false;
+
+        // Mounts: only ones the plan has, with an access no wider.
+        var mounts = try a.dupe(mount.Mount, base.mounts);
+        for (by.mounts) |m| {
+            const at = for (mounts, 0..) |b, i| {
+                if (b.kind == m.kind and std.mem.eql(u8, b.src, m.src) and std.mem.eql(u8, b.dst, m.dst)) break i;
+            } else return n.widens(try n.str("{s} {f}", .{ @tagName(m.kind), argOf(m) }), 0, try n.str("no such mount", .{}));
+            const b = mounts[at];
+            if (accessRank(m) > accessRank(b)) return n.widens(try n.str("{s} {f}", .{ @tagName(m.kind), argOf(m) }), lineAt(base.lines.mounts, at), try n.str("{s} {f}", .{ @tagName(b.kind), argOf(b) }));
+            if (m.access != null) mounts[at].access = m.access;
+        }
+        if (r.policy.write == .none) for (mounts) |*m| {
+            if (m.access != null and m.access.? != .ro) m.access = .ro;
+        };
+        r.mounts = mounts;
+        if (by.binds.len > 0) return n.widens(try n.str("bind {s}:{s}", .{ by.binds[0].src, by.binds[0].dst }), 0, "no such bind");
+        if (by.ns.len > 0) return n.widens(try n.str("the namespace lines {s}", .{std.mem.trim(u8, by.ns[0], " \n")}), 0, "no such lines");
+
+        // The machine: a different engine or architecture is another
+        // machine, but a plan without one, or with `engine auto`, takes
+        // any but sud, which isn't a security boundary.
+        if (by.engine) |e| {
+            const had = base.engine;
+            const ok = if (had) |h| h == e or (h == .auto and e != .sud) else true;
+            if (!ok) return n.widens(try n.str("engine {t}", .{e}), base.lines.engine, try n.str("engine {t}", .{had.?}));
+            r.engine = e;
+        }
+        if (by.arch) |x| {
+            if (base.arch) |h| if (h != x) return n.widens(try n.str("arch {s}", .{x.name()}), base.lines.arch, try n.str("arch {s}", .{h.name()}));
+            r.arch = x;
+        }
+        if (by.env.len > 0) {
+            var env: std.ArrayList([]const u8) = .empty;
+            for (base.env) |e| {
+                const name = e[0 .. std.mem.indexOfScalar(u8, e, '=') orelse e.len];
+                const replaced = for (by.env) |f| {
+                    if (std.mem.startsWith(u8, f, name) and f.len > name.len and f[name.len] == '=') break true;
+                } else false;
+                if (!replaced) try env.append(a, e);
+            }
+            try env.appendSlice(a, by.env);
+            r.env = env.items;
+        }
+
+        // A window, and serving, only as the plan has them.
+        if (by.gfx) |g| {
+            const had = base.gfx orelse return n.widens(try n.str("gfx {s}", .{if (g.headless) "headless" else "window"}), 0, "no gfx");
+            if (had.headless != g.headless or (g.clipboard and !had.clipboard))
+                return n.widens(try n.str("gfx {s}{s}", .{ if (g.headless) "headless" else "window", if (g.clipboard or g.headless) "" else " noclip" }), base.lines.gfx, try n.str("gfx {s}{s}", .{ if (had.headless) "headless" else "window", if (had.clipboard or had.headless) "" else " noclip" }));
+            r.gfx = g;
+        }
+        for (by.serve) |s| {
+            const known = for (base.serve) |b| {
+                if (std.mem.eql(u8, b, s)) break true;
+            } else false;
+            if (!known) return n.widens(try n.str("serve {s}", .{s}), lineAt(base.lines.serve, 0), if (base.serve.len > 0) try n.str("serve {s}", .{base.serve[0]}) else "no serve");
+        }
+        if (by.serve.len > 0) r.serve = by.serve;
+        if (by.serve_net and !base.serve_net) return n.widens("servenet", 0, "no servenet");
+        if (by.serve_root) |root| {
+            const had = base.serve_root orelse "/";
+            if (relUnder(had, root) == null) return n.widens(try n.str("serveroot {s}", .{root}), base.lines.serve_root, try n.str("serveroot {s}", .{had}));
+            r.serve_root = root;
+        }
+        if (by.serve_token) |tk| r.serve_token = tk;
+        if (by.serve_origins.len > 0) {
+            for (by.serve_origins) |o| {
+                const known = for (base.serve_origins) |b| {
+                    if (std.mem.eql(u8, b, o)) break true;
+                } else false;
+                if (!known) return n.widens(try n.str("serveorigin {s}", .{o}), lineAt(base.lines.serve_origins, 0), if (base.serve_origins.len > 0) try n.str("serveorigin {s}", .{base.serve_origins[0]}) else "no serveorigin");
+            }
+            r.serve_origins = by.serve_origins;
+        }
+        if (by.run) |argv| r.run = argv;
+        // A result has no lines of its own.
+        r.lines = .{};
+        return r;
+    }
+
+    fn limitText(n: *Narrowing, comptime what: []const u8, v: anytype) NarrowError![]const u8 {
+        if (comptime std.mem.eql(u8, what, "memory")) return n.str("memory {f}", .{fmtSize(v)});
+        return n.str(what ++ " {d}", .{v});
+    }
+
+    /// Whether the plan shares host path `p` with the guest at all.
+    fn shares(n: *Narrowing, p: []const u8) bool {
+        const b = n.base;
+        if (b.policy.host_fs) return true;
+        if (b.cwd) |c| if (relUnder(c, p) != null) return true;
+        for ([_][]const []const u8{ b.policy.readable, b.policy.writable }) |list| for (list) |q| {
+            if (relUnder(q, p) != null) return true;
+        };
+        for (b.mounts) |m| if (m.kind == .dir and relUnder(m.src, p) != null) return true;
+        return false;
+    }
+
+    /// Whether the plan already lets the guest write host path `p`.
+    fn writes(n: *Narrowing, p: []const u8) bool {
+        const b = n.base;
+        if (b.writeMode() == .none) return false;
+        if (b.cwd) |c| if (b.cwdWritable() and relUnder(c, p) != null) return true;
+        for (b.policy.writable) |q| if (relUnder(q, p) != null) return true;
+        for (b.mounts) |m| if (m.kind == .dir and (m.access == .rw or m.access == .up) and relUnder(m.src, p) != null) return true;
+        return false;
+    }
+
+    /// The plan's line that shares `p` read-only, for an error.
+    fn covering(n: *Narrowing, p: []const u8) struct { line: u32, text: ?[]const u8 } {
+        const b = n.base;
+        for (b.policy.readable, 0..) |q, i| if (relUnder(q, p) != null) return .{ .line = lineAt(b.lines.readable, i), .text = n.str("allow read {s}", .{q}) catch null };
+        if (b.cwd) |c| if (relUnder(c, p) != null) return .{ .line = b.lines.cwd, .text = n.str("cwd {s} ro", .{c}) catch null };
+        for (b.mounts, 0..) |m, i| if (m.kind == .dir and relUnder(m.src, p) != null) return .{ .line = lineAt(b.lines.mounts, i), .text = n.str("dir {f}", .{argOf(m)}) catch null };
+        return .{ .line = 0, .text = null };
+    }
+};
+
+/// A child machine's plan's sources (design/child-machines.md): each bind
+/// of a `#U` path, which `compile` makes from a mount or a path when
+/// `Inputs.caller` is set, becomes a bind of `#μsN`, the channel the
+/// caller's path `paths[N]` names, which the machine device walks in the
+/// caller's namespace when the child starts. A source only read is a
+/// copy-on-write overlay over it in the child (`parent_cow`). The binds
+/// are copied into `arena`.
+pub fn fromCaller(arena: std.mem.Allocator, plan: *Plan, paths: *std.ArrayList([]const u8)) error{OutOfMemory}!void {
+    const bs = try arena.dupe(Bind, plan.binds);
+    for (bs) |*b| {
+        const host: ?[]const u8 = if (b.lower) |l| l else if (std.mem.startsWith(u8, b.from, "#U")) b.from[2..] else null;
+        var p = host orelse continue;
+        if (std.mem.startsWith(u8, p, "!c")) p = p[2..];
+        if (p.len == 0) p = "/";
+        const at = for (paths.items, 0..) |q, i| {
+            if (std.mem.eql(u8, q, p)) break i;
+        } else blk: {
+            try paths.append(arena, p);
+            break :blk paths.items.len - 1;
+        };
+        const dev = try std.fmt.allocPrint(arena, "#" ++ machine_dev ++ "s{d}", .{at});
+        if (b.lower != null) {
+            b.lower = dev;
+            b.contained = false;
+        } else {
+            b.from = dev;
+            b.parent_cow = b.access != .rw and b.access != .up;
+        }
+        b.parent = p;
+        b.access = .parent;
+    }
+    plan.binds = bs;
+}
+
+fn lineAt(lines: []const u32, i: usize) u32 {
+    return if (i < lines.len) lines[i] else 0;
+}
+
+/// Whether write mode `v` is no wider than `had`.
+fn writeNarrows(v: WriteMode, had: WriteMode) bool {
+    if (v == had or v == .none) return true;
+    return v == .ephemeral and had != .none;
+}
+
+/// How much a mount lets the guest change: ro, then eph (in memory),
+/// then rw and up (the source). No access is its destination's default:
+/// on a stack, the overlay's eph, and elsewhere ro.
+fn accessRank(m: mount.Mount) u8 {
+    const a = m.access orelse return if (m.stack() != null) 1 else 0;
+    return switch (a) {
+        .ro => 0,
+        .eph => 1,
+        .rw, .up => 2,
+    };
+}
+
+fn argOf(m: mount.Mount) std.fmt.Alt(mount.Mount, writeMountArg) {
+    return .{ .data = m };
+}
+
+fn writeMountArg(m: mount.Mount, w: *std.Io.Writer) std.Io.Writer.Error!void {
+    return m.writeArg(w);
+}
 
 const t = std.testing;
 
@@ -1622,13 +2683,13 @@ test "compile: default and tight profiles" {
     const d = try compile(arena.allocator(), in, .{}, &msg);
     try t.expectEqual(Verdict.allow, d.check("/w/f", .create));
     try t.expectEqual(Verdict.read_only, d.check("/r/f", .create));
-    try t.expectEqualStrings("CU" ++ hidx_dev ++ "bim", d.devmask);
+    try t.expectEqualStrings("CU" ++ tree_dev ++ hidx_dev ++ "bim" ++ machine_dev, d.devmask);
     try t.expect(!d.enforces.contains(.@"net.disable"));
     try t.expectEqual(@as(?u64, null), d.timeout_ns);
 
     const tt = try compile(arena.allocator(), in, .{ .profile = .tight }, &msg);
     try t.expectEqual(Verdict.read_only, tt.check("/w/f", .create));
-    try t.expectEqualStrings("CI" ++ hstream_dev ++ "U" ++ hidx_dev ++ "bim", tt.devmask);
+    try t.expectEqualStrings("CI" ++ hstream_dev ++ "U" ++ tree_dev ++ hidx_dev ++ "bim" ++ machine_dev, tt.devmask);
     try t.expect(tt.enforces.contains(.@"net.disable"));
     try t.expect(tt.enforces.contains(.@"proc.timeout"));
 
@@ -1857,6 +2918,44 @@ test "net: the resolved-name table keeps the most recent entries" {
     try t.expect(!nt.allows(&pats, .tcp, &tip("10.2.0.1"), 443));
 }
 
+test "an entry without a protocol or port takes the connect's, which the patterns decide [linux-dns]" {
+    const nt = try t.allocator.create(NameTable);
+    defer t.allocator.destroy(nt);
+    nt.* = .{};
+    const pats = [_]NetPattern{try tpat("tcp!api.example.com!443")};
+    nt.record(null, &tip("10.0.0.7"), null, "api.example.com");
+    try t.expect(nt.allows(&pats, .tcp, &tip("10.0.0.7"), 443));
+    try t.expect(!nt.allows(&pats, .tcp, &tip("10.0.0.7"), 80));
+    try t.expect(!nt.allows(&pats, .udp, &tip("10.0.0.7"), 443));
+    try t.expect(!nt.allows(&pats, .tcp, &tip("10.0.0.8"), 443));
+    // An entry cs recorded still needs its own protocol and port.
+    nt.record(.tcp, &tip("10.0.0.9"), 80, "api.example.com");
+    try t.expect(!nt.allows(&pats, .tcp, &tip("10.0.0.9"), 443));
+}
+
+test "a UDP connect to a recorded address is allowed as a probe, and nothing else is [linux-dns]" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    var msg: []const u8 = "";
+    const p = try compile(arena.allocator(), .{ .mounts = &r_mounts, .cwd = "/w", .arch = .arm64 }, .{ .net_allow = &.{"tcp!registry.example.com!443"} }, &msg);
+    const v6 = tip("2001:db8::1");
+    p.names.?.record(null, &tip("10.0.0.7"), null, "registry.example.com");
+    p.names.?.record(null, &v6, null, "registry.example.com");
+    p.names.?.record(.tcp, &tip("10.0.0.6"), 443, "registry.example.com");
+    p.names.?.record(null, &tip("10.0.0.8"), null, "other.example.com");
+    // The probe's port matches no pattern, so netCheck refuses it.
+    try t.expect(!p.netCheck(.connect, .udp, &tip("10.0.0.7"), 9));
+    try t.expect(p.netProbe(.udp, &tip("10.0.0.7")));
+    try t.expect(p.netProbe(.udp, &v6));
+    try t.expect(p.netProbe(.udp, &tip("10.0.0.6")));
+    // TCP, an address recorded for a name no pattern covers, and one
+    // never recorded aren't probes.
+    try t.expect(!p.netProbe(.tcp, &tip("10.0.0.7")));
+    try t.expect(!p.netProbe(null, &tip("10.0.0.7")));
+    try t.expect(!p.netProbe(.udp, &tip("10.0.0.8")));
+    try t.expect(!p.netProbe(.udp, &tip("10.0.0.9")));
+}
+
 test "net: --print shows patterns and caveats" {
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
@@ -2049,4 +3148,165 @@ test "compile: the web host's canvas shows clipboard=page and its own caveats" {
     try private.print(&out.writer);
     try t.expect(std.mem.indexOf(u8, out.written(), "gfx:      web scale=2 clipboard=private\n") != null);
     try t.expect(std.mem.indexOf(u8, out.written(), "page's clipboard") == null);
+}
+
+/// The compile inputs a plan gives, for the plan tests.
+fn testInputs(s: Spec) Inputs {
+    return .{
+        .mounts = s.mounts,
+        .binds = s.binds,
+        .cwd = s.cwd,
+        .arch = s.arch orelse .amd64,
+        .guest_tools = s.guest_tools,
+        .gfx = if (s.gfx) |g| .{ .backend = "headless", .clipboard = g.clipboard, .scale = g.scale orelse 1, .headless = if (g.headless) .{ .dx = 1024, .dy = 768 } else null } else null,
+    };
+}
+
+fn testCompiled(arena: std.mem.Allocator, s: Spec) ![]const u8 {
+    var why: []const u8 = "";
+    const p = try compile(arena, testInputs(s), s.policy, &why);
+    var out: std.Io.Writer.Allocating = .init(arena);
+    try p.print(&out.writer);
+    return out.written();
+}
+
+test "a plan's text round-trips through its parser for every policy case [plan-format]" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = [_]mount.Mount{.{ .kind = .dir, .src = "/r" }};
+    var why: []const u8 = "";
+    const url = try mount.Mount.parse(a, .url, "src=wss://fs.example/9p,dst=/n/fs,ro,header=@/h,index=https://cdn.example/i,b3=abababababababababababababababababababababababababababababababab", &why);
+    const cases = [_]Spec{
+        .{ .mounts = &root, .cwd = "/home/me/proj" },
+        .{ .mounts = &root, .cwd = "/home/me/proj", .policy = .{ .profile = .tight } },
+        .{ .mounts = &root, .cwd = "/c", .policy = .{ .write = .none } },
+        .{ .mounts = &root, .cwd = "/c", .policy = .{ .write = .scope, .writable = &.{"/out"} } },
+        .{ .mounts = &root, .cwd = "/c", .policy = .{ .write = .ephemeral, .writable = &.{"/out"} } },
+        .{ .mounts = &root, .cwd = "/c", .policy = .{ .net = .disable } },
+        .{ .mounts = &root, .cwd = "/c", .policy = .{ .net = .enable, .net_allow = &.{ "tcp!*.example.com!443", "udp!10.0.0.53!53" } } },
+        .{ .mounts = &root, .cwd = "/c", .policy = .{ .readable = &.{"/data set"}, .read_deny = &.{"/data set/.env"} } },
+        .{ .mounts = &root, .cwd = "/c", .policy = .{ .memory = 512 << 20, .pids = 32, .cpus = 2, .timeout_ns = 90 * std.time.ns_per_s } },
+        .{ .mounts = &root, .cwd = "/c", .policy = .{ .host_fs = true }, .guest_tools = false },
+        .{ .mounts = &root, .cwd = "/sb", .policy = .{ .profile = .tight, .cwd_writable = true } },
+        .{ .mounts = &root, .cwd = "/c", .gfx = .{ .headless = true, .size = .{ 640, 480 } } },
+        .{ .mounts = &root, .cwd = "/c", .gfx = .{ .clipboard = false, .scale = 2 } },
+        .{
+            .mounts = &.{ root[0], .{ .kind = .builtin, .order = .after }, .{ .kind = .tmp, .dst = "/n/t", .access = .up }, .{ .kind = .archive, .src = "/a b.tgz", .dst = "/n/a" }, .{ .kind = .dir, .src = "/x:/y", .dst = "/n/x", .access = .rw, .contained = true }, url },
+            .binds = &.{.{ .src = "/n/x/bin", .dst = "/bin", .order = .before }},
+            .ns = &.{"bind -b '#Hroot/bin' /bin\nmount -c tcp!fs!564 /n/fs ''\nbind /a '/b c'\n"},
+            .cwd = "/c",
+            .engine = .sud,
+            .arch = .i386,
+            .env = &.{ "A=1", "B=two words" },
+            .serve = &.{ "tcp!127.0.0.1!0", "ws://127.0.0.1:0/9p" },
+            .serve_root = "/usr",
+            .serve_token = "@tok",
+            .serve_origins = &.{"http://a.example"},
+            .serve_net = true,
+            .run = &.{ "/bin/rc", "-c", "ls /bin | wc -l; echo 'q'" },
+        },
+    };
+    for (cases) |c| {
+        const text1 = try c.text(a);
+        errdefer std.debug.print("{s}\n", .{text1});
+        var err: PlanError = .{};
+        const back = parsePlan(a, text1, &err) catch |e| {
+            std.debug.print("line {d}: {s}\n", .{ err.line, err.msg });
+            return e;
+        };
+        try t.expectEqualStrings(text1, try back.text(a));
+        try t.expectEqualStrings(try testCompiled(a, c), try testCompiled(a, back));
+    }
+}
+
+test "a plan leaves out a URL's query and a header's value, and refuses to run without them [plan-format]" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var why: []const u8 = "";
+    const m = try mount.Mount.parse(a, .url, "ws://127.0.0.1:1/9p?token=s3cret:/:header=Authorization: Bearer s3cret", &why);
+    const text = try (Spec{ .mounts = &.{m} }).text(a);
+    try t.expect(std.mem.indexOf(u8, text, "s3cret") == null);
+    try t.expect(std.mem.indexOf(u8, text, "url 'src=ws://127.0.0.1:1/9p?…,dst=/,header=Authorization: …'\n") != null);
+    var err: PlanError = .{};
+    try t.expectError(error.Syntax, parsePlan(a, text, &err));
+    try t.expectEqual(@as(u32, 4), err.line);
+}
+
+test "an unknown plan line is an error with its line number [plan-format]" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var err: PlanError = .{};
+    try t.expectError(error.Syntax, parsePlan(a, "# a plan\nmemory 512M\n\nfrobnicate 3\nnet outbound\n", &err));
+    try t.expectEqual(@as(u32, 4), err.line);
+    try t.expectEqualStrings("unknown line 'frobnicate'", err.msg);
+    // A line after a `;` is the same line, and a bad value names it too.
+    try t.expectError(error.Syntax, parsePlan(a, "net outbound; memory lots\n", &err));
+    try t.expectEqual(@as(u32, 1), err.line);
+    try t.expectError(error.Syntax, parsePlan(a, "bind /a:/b\ndir /r\n", &err));
+    try t.expectEqual(@as(u32, 2), err.line);
+    try t.expectError(error.Syntax, parsePlan(a, "\n\ndir /r:/:bogus\n", &err));
+    try t.expectEqual(@as(u32, 3), err.line);
+    try t.expectError(error.Syntax, parsePlan(a, "bind -b /a /b\nbind /x:/y\n", &err));
+    try t.expectEqual(@as(u32, 2), err.line);
+    const ok = try parsePlan(a, "dir /r\nbind /x:/bin:b\nbind -b /x /bin\nmount -c tcp!fs!564 /n/fs\nrun ls -l\n", &err);
+    try t.expectEqual(@as(usize, 1), ok.binds.len);
+    try t.expectEqualStrings("bind -b /x /bin\nmount -c tcp!fs!564 /n/fs\n", ok.ns[0]);
+    try t.expectEqualStrings("-l", ok.run.?[1]);
+}
+
+test "narrowing takes lower limits, read-only paths, and fewer rules, and refuses wider ones [plan-format]" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var err: PlanError = .{};
+    const base = try parsePlan(a,
+        \\dir /r
+        \\dir /src:/src:rw
+        \\allow write /out
+        \\netallow tcp!*.example.com!443
+        \\netallow tcp!10.0.0.1!80
+        \\memory 512M
+        \\cwd /c rw
+        \\engine auto
+    , &err);
+    var why: []const u8 = "";
+    const ok = try narrow(a, base, .{
+        .policy = .{ .memory = 64 << 20, .readable = &.{"/out"}, .read_deny = &.{"/c/.env"}, .net_allow = &.{"tcp!10.0.0.1!80"}, .timeout_ns = std.time.ns_per_s },
+        .mounts = &.{.{ .kind = .dir, .src = "/src", .dst = "/src", .access = .ro }},
+        .engine = .hcpu,
+    }, &why);
+    try t.expectEqual(@as(?u64, 64 << 20), ok.policy.memory);
+    try t.expectEqual(@as(usize, 0), ok.policy.writable.len);
+    try t.expectEqual(@as(usize, 1), ok.policy.net_allow.len);
+    try t.expectEqual(mount.Access.ro, ok.mounts[1].access.?);
+    try t.expectEqual(EngineChoice.hcpu, ok.engine.?);
+    // The tight profile narrows to its settings.
+    const tight = try narrow(a, base, .{ .policy = .{ .profile = .tight } }, &why);
+    try t.expectEqual(NetMode.disable, tight.netMode());
+    try t.expectEqual(@as(usize, 0), tight.policy.net_allow.len);
+    try t.expect(!tight.cwdWritable());
+    try t.expectEqual(@as(?u64, tight_timeout_ns), tight.timeout());
+
+    const wide = [_]struct { Spec, []const u8 }{
+        .{ .{ .policy = .{ .memory = 1 << 30 } }, "memory 1G widens the plan's line 6: memory 512M" },
+        .{ .{ .policy = .{ .writable = &.{"/etc"} } }, "allow write /etc widens the plan, which has nothing that writes /etc" },
+        .{ .{ .policy = .{ .net = .enable } }, "net enable widens the plan, which has net outbound" },
+        .{ .{ .policy = .{ .net_allow = &.{"tcp!*!*"} } }, "netallow tcp!*!* widens the plan's line 4: netallow tcp!*.example.com!443" },
+        .{ .{ .mounts = &.{.{ .kind = .dir, .src = "/etc", .dst = "/n/etc" }} }, "dir /etc:/n/etc widens the plan, which has no such mount" },
+        .{ .{ .engine = .sud }, "engine sud widens the plan's line 8: engine auto" },
+        .{ .{ .policy = .{ .host_fs = true } }, "devices host-fs widens the plan, which has no host-fs" },
+    };
+    for (wide) |c| {
+        try t.expectError(error.Widens, narrow(a, base, c[0], &why));
+        try t.expectEqualStrings(c[1], why);
+    }
+    // A read-only cwd stays read-only.
+    const ro = try parsePlan(a, "cwd /c ro\nnet disable\n", &err);
+    try t.expectError(error.Widens, narrow(a, ro, .{ .policy = .{ .cwd_writable = true } }, &why));
+    try t.expectEqualStrings("cwd /c rw widens the plan's line 1: cwd /c ro", why);
+    try t.expectError(error.Widens, narrow(a, ro, .{ .policy = .{ .net = .outbound } }, &why));
+    try t.expectEqualStrings("net outbound widens the plan's line 2: net disable", why);
 }

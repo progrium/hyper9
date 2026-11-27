@@ -1,17 +1,26 @@
-//! Zig side of the drawterm kern seam (SPEC.md, "Kernel: drawterm kern/
-//! and the Zig seam"). Each call goes through one of kern's `sys*` wrappers,
-//! which catch kernel errors with waserror and return -1; `errstr` then
-//! holds the message. No Zig frame sits between a waserror and an error.
+//! The kernel as the rest of h9 calls it (spec/kernel.md). Each call is
+//! one of the kernel's functions under its C name (src/kern/sysfile.zig's
+//! `sysopen`, `h9_pread`, and the rest), which returns -1 on an error;
+//! `errstr` then holds the message. Guest buffers are host slices by now,
+//! checked against the address space by src/guestmem.zig, and counts
+//! are usize down to the kernel.
 //!
 //! The kernel boots once per host process, on a private thread. Each guest
-//! process runs on a thread made by `spawn`, and only that thread may make
-//! kernel calls for it.
+//! process runs on a thread made by `Kernel.spawn` (or `fork`) in its
+//! machine's `Kernel`, and only that thread may make kernel calls for it.
 
 const std = @import("std");
 const build_options = @import("build_options");
 const policy = @import("policy.zig");
+const resolver = @import("resolver.zig");
 const consin = @import("consin.zig");
 const web = @import("web.zig");
+const host_api = @import("host/host.zig");
+const Host = host_api.Host;
+const host_dirs = @import("host/dirs.zig");
+const dotl_kern = @import("dotl/kern.zig");
+const hidx_kern = @import("rootindex/kern.zig");
+const hstream = @import("hstream.zig");
 
 /// False where kern isn't built (a checkout without drawterm).
 pub const available = build_options.kern;
@@ -39,9 +48,17 @@ const c_stub = struct {
     fn h9_kern_park() noreturn {
         unreachable;
     }
-    fn h9_kern_spawn(_: [*:0]const u8, _: *const fn (?*anyopaque) callconv(.c) void, _: ?*anyopaque) c_int {
+    fn h9_kern_spawn(_: ?*anyopaque, _: [*:0]const u8, _: *const fn (?*anyopaque) callconv(.c) void, _: ?*anyopaque) c_int {
         return -1;
     }
+    fn h9_kern_newmach(_: ?*anyopaque) ?*anyopaque {
+        return null;
+    }
+    fn h9_kern_setsched(_: ?*anyopaque, _: ?*anyopaque, _: *const fn (?*anyopaque, ?*anyopaque) callconv(.c) c_int) void {}
+    fn h9_kern_machkernel(_: ?*anyopaque) ?*anyopaque {
+        return null;
+    }
+    fn h9_kern_machdetach(_: ?*anyopaque) void {}
     fn h9_kern_kprocdetached(_: [*:0]const u8, _: *const fn (?*anyopaque) callconv(.c) void, _: ?*anyopaque) c_int {
         return -1;
     }
@@ -171,10 +188,10 @@ const c_stub = struct {
     fn sysclose(_: c_int) c_int {
         return -1;
     }
-    fn syspread(_: c_int, _: [*]u8, _: c_int, _: i64) c_int {
+    fn h9_pread(_: c_int, _: [*]u8, _: usize, _: i64) isize {
         return -1;
     }
-    fn syspwrite(_: c_int, _: [*]const u8, _: c_int, _: i64) c_int {
+    fn h9_pwrite(_: c_int, _: [*]const u8, _: usize, _: i64) isize {
         return -1;
     }
     fn sysseek(_: c_int, _: i64, _: c_int) i64 {
@@ -202,36 +219,55 @@ const c_stub = struct {
     fn h9_dupfrom(_: c_int, _: c_int, _: c_int) c_int {
         return -1;
     }
-    fn sysstat(_: [*:0]const u8, _: [*]u8, _: c_int) c_int {
+    fn h9_stat(_: [*:0]const u8, _: [*]u8, _: usize) isize {
         return -1;
     }
-    fn sysfstat(_: c_int, _: [*]u8, _: c_int) c_int {
+    fn h9_fstat(_: c_int, _: [*]u8, _: usize) isize {
         return -1;
     }
     fn sysremove(_: [*:0]const u8) c_int {
         return -1;
     }
-    fn syswstat(_: [*:0]const u8, _: [*]u8, _: c_int) c_int {
+    fn h9_wstat(_: [*:0]const u8, _: [*]u8, _: usize) isize {
         return -1;
     }
-    fn sysfwstat(_: c_int, _: [*]u8, _: c_int) c_int {
+    fn h9_fwstat(_: c_int, _: [*]u8, _: usize) isize {
         return -1;
     }
     fn h9_overlay_newpath(_: ?[*:0]const u8) c_int {
         return -1;
     }
-    fn h9_fs_readlinkpath(_: [*:0]const u8, _: [*]u8, _: c_int) c_int {
+    fn h9_readlink(_: [*:0]const u8, _: [*]u8, _: c_int) c_int {
         return -1;
     }
-    fn h9_fs_symlinkpath(_: [*:0]const u8, _: [*:0]const u8) c_int {
+    fn h9_symlink(_: [*:0]const u8, _: [*:0]const u8) c_int {
+        return -1;
+    }
+    fn h9_link(_: [*:0]const u8, _: [*:0]const u8, _: c_int) c_int {
+        return -1;
+    }
+    fn h9_rename(_: [*:0]const u8, _: [*:0]const u8) c_int {
+        return -1;
+    }
+    fn h9_getattr(_: [*:0]const u8, _: c_int, _: u64, _: *Attr, _: [*]u8, _: c_int) c_int {
+        return -1;
+    }
+    fn h9_fgetattr(_: c_int, _: u64, _: *Attr, _: [*]u8, _: c_int) c_int {
+        return -1;
+    }
+    fn h9_fsync(_: c_int, _: c_int) c_int {
+        return -1;
+    }
+    fn h9_setattr(_: [*:0]const u8, _: c_int, _: u64, _: *const Attr) c_int {
+        return -1;
+    }
+    fn h9_fsetattr(_: c_int, _: u64, _: *const Attr) c_int {
         return -1;
     }
     fn h9_fs_mkfifopath(_: [*:0]const u8, _: c_uint) c_int {
         return -1;
     }
-    fn h9_fs_renamepath(_: [*:0]const u8, _: [*:0]const u8) c_int {
-        return 1;
-    }
+
     fn h9_overlay_drop(_: c_int) void {}
     fn h9_overlay_union(_: [*:0]const u8, _: [*:0]const u8, _: [*:0]const u8, _: c_int) c_int {
         return -1;
@@ -262,6 +298,12 @@ const c_stub = struct {
     }
     fn h9_kern_setuser(_: [*:0]const u8) void {}
     fn h9_hstream_wake(_: c_ulong) void {}
+    fn h9_child_wake(_: c_ulong) void {}
+    fn h9_child_dropsrc(_: ?*anyopaque) void {}
+    fn h9_child_nserved(_: c_ulong) c_int {
+        return 0;
+    }
+    fn h9_child_unserve(_: c_ulong) void {}
     fn h9_hstream_fd(_: c_ulong) c_int {
         return -1;
     }
@@ -286,7 +328,11 @@ const c_stub = struct {
 const c_real = struct {
     extern fn h9_kern_boot() c_int;
     extern fn h9_kern_park() noreturn;
-    extern fn h9_kern_spawn(name: [*:0]const u8, func: *const fn (?*anyopaque) callconv(.c) void, arg: ?*anyopaque) c_int;
+    extern fn h9_kern_spawn(mach: ?*anyopaque, name: [*:0]const u8, func: *const fn (?*anyopaque) callconv(.c) void, arg: ?*anyopaque) c_int;
+    extern fn h9_kern_newmach(kernel: ?*anyopaque) ?*anyopaque;
+    extern fn h9_kern_setsched(mach: ?*anyopaque, sched: ?*anyopaque, start: *const fn (?*anyopaque, ?*anyopaque) callconv(.c) c_int) void;
+    extern fn h9_kern_machkernel(mach: ?*anyopaque) ?*anyopaque;
+    extern fn h9_kern_machdetach(mach: ?*anyopaque) void;
     extern fn h9_kern_kprocdetached(name: [*:0]const u8, func: *const fn (?*anyopaque) callconv(.c) void, arg: ?*anyopaque) c_int;
     extern fn h9_kern_pid() c_ulong;
     extern fn h9_kern_fork(flag: c_int, pid: c_ulong, func: *const fn (?*anyopaque) callconv(.c) void, arg: ?*anyopaque) c_int;
@@ -344,8 +390,9 @@ const c_real = struct {
     extern fn sysopen(name: [*:0]const u8, mode: c_int) c_int;
     extern fn syscreate(name: [*:0]const u8, mode: c_int, perm: c_uint) c_int;
     extern fn sysclose(fd: c_int) c_int;
-    extern fn syspread(fd: c_int, buf: [*]u8, n: c_int, off: i64) c_int;
-    extern fn syspwrite(fd: c_int, buf: [*]const u8, n: c_int, off: i64) c_int;
+    // src/kern/sysfile.zig's, with 64-bit counts.
+    extern fn h9_pread(fd: c_int, buf: [*]u8, n: usize, off: i64) isize;
+    extern fn h9_pwrite(fd: c_int, buf: [*]const u8, n: usize, off: i64) isize;
     extern fn sysseek(fd: c_int, off: i64, whence: c_int) i64;
     extern fn sysbind(old: [*:0]const u8, new: [*:0]const u8, flag: c_int) c_int;
     extern fn sysmount(fd: c_int, afd: c_int, new: [*:0]const u8, flag: c_int, spec: [*:0]const u8) c_int;
@@ -362,16 +409,23 @@ const c_real = struct {
     extern var h9_procsegment: ?*const fn (?*anyopaque, [*]u8, c_int) callconv(.c) c_int;
     extern fn sysdup(fd0: c_int, fd1: c_int) c_int;
     extern fn h9_dupfrom(fd0: c_int, min: c_int, cexec: c_int) c_int;
-    extern fn sysstat(name: [*:0]const u8, buf: [*]u8, n: c_int) c_int;
-    extern fn sysfstat(fd: c_int, buf: [*]u8, n: c_int) c_int;
+    extern fn h9_stat(name: [*:0]const u8, buf: [*]u8, n: usize) isize;
+    extern fn h9_fstat(fd: c_int, buf: [*]u8, n: usize) isize;
     extern fn sysremove(name: [*:0]const u8) c_int;
-    extern fn syswstat(name: [*:0]const u8, buf: [*]u8, n: c_int) c_int;
-    extern fn sysfwstat(fd: c_int, buf: [*]u8, n: c_int) c_int;
+    extern fn h9_wstat(name: [*:0]const u8, buf: [*]u8, n: usize) isize;
+    extern fn h9_fwstat(fd: c_int, buf: [*]u8, n: usize) isize;
     extern fn h9_overlay_newpath(path: ?[*:0]const u8) c_int;
-    extern fn h9_fs_readlinkpath(path: [*:0]const u8, buf: [*]u8, nbuf: c_int) c_int;
-    extern fn h9_fs_symlinkpath(path: [*:0]const u8, target: [*:0]const u8) c_int;
+    extern fn h9_readlink(path: [*:0]const u8, buf: [*]u8, nbuf: c_int) c_int;
+    extern fn h9_symlink(path: [*:0]const u8, target: [*:0]const u8) c_int;
+    extern fn h9_link(old: [*:0]const u8, new: [*:0]const u8, follow: c_int) c_int;
+    extern fn h9_rename(old: [*:0]const u8, new: [*:0]const u8) c_int;
+    extern fn h9_getattr(path: [*:0]const u8, nofollow: c_int, mask: u64, a: *Attr, dir: [*]u8, ndir: c_int) c_int;
+    extern fn h9_fgetattr(fd: c_int, mask: u64, a: *Attr, dir: [*]u8, ndir: c_int) c_int;
+    extern fn h9_fsync(fd: c_int, datasync: c_int) c_int;
+    extern fn h9_setattr(path: [*:0]const u8, nofollow: c_int, mask: u64, a: *const Attr) c_int;
+    extern fn h9_fsetattr(fd: c_int, mask: u64, a: *const Attr) c_int;
     extern fn h9_fs_mkfifopath(path: [*:0]const u8, perm: c_uint) c_int;
-    extern fn h9_fs_renamepath(old: [*:0]const u8, new: [*:0]const u8) c_int;
+
     extern fn h9_overlay_drop(id: c_int) void;
     extern fn h9_overlay_union(name: [*:0]const u8, path: [*:0]const u8, at: [*:0]const u8, flags: c_int) c_int;
     extern fn h9_overlay_cowname(name: [*:0]const u8) c_int;
@@ -386,6 +440,10 @@ const c_real = struct {
     extern fn h9_kern_upuser() [*:0]const u8;
     extern fn h9_kern_setuser(name: [*:0]const u8) void;
     extern fn h9_hstream_wake(id: c_ulong) void;
+    extern fn h9_child_wake(id: c_ulong) void;
+    extern fn h9_child_dropsrc(ch: ?*anyopaque) void;
+    extern fn h9_child_nserved(id: c_ulong) c_int;
+    extern fn h9_child_unserve(id: c_ulong) void;
     extern fn h9_hstream_fd(id: c_ulong) c_int;
     extern fn h9_hstream_wait(id: c_ulong) c_int;
     extern fn h9_kserve_new(readonly: c_int, root: [*:0]const u8, ended: ?*const fn (?*anyopaque) callconv(.c) void, arg: ?*anyopaque) ?*anyopaque;
@@ -406,11 +464,11 @@ pub fn boot() Error!void {
     while (true) switch (boot_state.load(.acquire)) {
         .up => return,
         .failed => return error.Kern,
-        // On the web host the boot runs on a coroutine, which needs a turn.
+        // On the web host the boot runs on a task, which needs a turn.
         .booting => if (web.enabled) web.yield() else std.atomic.spinLoopHint(),
         .idle => if (boot_state.cmpxchgStrong(.idle, .booting, .acq_rel, .acquire) == null) {
             // The monotonic clock starts at the wall time of the boot.
-            _ = monoNs();
+            _ = osMonoNs();
             const t = web.Thread.spawn(.{}, bootThread, .{}) catch {
                 boot_state.store(.idle, .release);
                 return error.OutOfMemory;
@@ -427,18 +485,94 @@ fn bootThread() void {
     if (ok) c.h9_kern_park();
 }
 
-/// Runs `func(arg)` on a new kernel process with its own host thread, a
-/// fresh namespace containing only #/, no fds, an empty environment and no
-/// parent. The process ends when `func` returns.
-pub fn spawn(name: [*:0]const u8, comptime T: type, comptime func: fn (*T) void, arg: *T) Error!void {
-    try boot();
-    const Tramp = struct {
-        fn run(p: ?*anyopaque) callconv(.c) void {
-            func(@ptrCast(@alignCast(p.?)));
-        }
-    };
-    if (c.h9_kern_spawn(name, Tramp.run, arg) < 0) return error.OutOfMemory;
+/// A kernel (design/kernel-port.md, "A kernel is a value"): one
+/// machine's processes and what they share, which no other kernel in the
+/// host process sees. The processes `spawn` starts and their descendants
+/// are its; its process list, note groups, `#s` board and `/proc` are
+/// theirs alone, and so are the settings #ℓ, #ι and host streams look up
+/// for it, which were tables keyed by machine. `Machine` makes one for
+/// each run.
+///
+/// Its C half (the kernel's Hmach) is counted, so processes and host
+/// streams can outlive the Kernel; once `deinit` has run, lookups from
+/// them find no Kernel.
+pub const Kernel = struct {
+    gpa: std.mem.Allocator,
+    /// The host it may reach (design/host-handles.md). The devices find it
+    /// through their thread's plan (`policy.Plan.host`) for now.
+    host: *const Host,
+    mach: *Mach,
+    /// Guards the settings below, which a process reads from its own
+    /// thread while the machine's first process sets them.
+    lock: std.atomic.Mutex = .unlocked,
+    /// What #ℓ's translators are made with (src/dotl/kern.zig).
+    dotl: ?dotl_kern.Config = null,
+    /// Where #ι caches compiled indexes (src/rootindex/kern.zig).
+    hidx: ?hidx_kern.Config = null,
+    /// What #ℓ redials a host stream with (src/hstream.zig).
+    streams: ?hstream.HostSet = null,
+
+    /// A kernel that reaches `host`, which must outlive it. Boots the
+    /// host process's kernel threads the first time.
+    pub fn init(gpa: std.mem.Allocator, host: *const Host) Error!*Kernel {
+        try boot();
+        const k = try gpa.create(Kernel);
+        errdefer gpa.destroy(k);
+        const m = c.h9_kern_newmach(k) orelse return error.OutOfMemory;
+        k.* = .{ .gpa = gpa, .host = host, .mach = @ptrCast(m) };
+        return k;
+    }
+
+    /// Lets go of the kernel. Its processes must have ended, or at least
+    /// stopped looking at its settings.
+    pub fn deinit(k: *Kernel) void {
+        c.h9_kern_machdetach(k.mach);
+        k.gpa.destroy(k);
+    }
+
+    /// The kernel whose machine is `mach` (a `Mach`, or the pointer C
+    /// passes as a machine's key), or null once it has been deinited.
+    pub fn ofMach(m: ?*anyopaque) ?*Kernel {
+        return @ptrCast(@alignCast(c.h9_kern_machkernel(m)));
+    }
+
+    /// Has the processes this kernel starts from now on run on a
+    /// scheduler's executors (design/scheduler.md): `start(ctx, proc)`
+    /// takes each, or returns -1 to have it get a host thread of its own.
+    pub fn setScheduler(k: *Kernel, ctx: *anyopaque, start: *const fn (?*anyopaque, ?*anyopaque) callconv(.c) c_int) void {
+        if (!available) return;
+        c.h9_kern_setsched(k.mach, ctx, start);
+    }
+
+    pub fn lockSettings(k: *Kernel) void {
+        while (!k.lock.tryLock()) std.atomic.spinLoopHint();
+    }
+
+    /// Runs `func(arg)` on a new process in this kernel, with its own
+    /// host thread, a fresh namespace containing only #/, no fds, an
+    /// empty environment and no parent. The process ends when `func`
+    /// returns.
+    pub fn spawn(k: *Kernel, name: [*:0]const u8, comptime T: type, comptime func: fn (*T) void, arg: *T) Error!void {
+        const Tramp = struct {
+            fn run(p: ?*anyopaque) callconv(.c) void {
+                func(@ptrCast(@alignCast(p.?)));
+            }
+        };
+        if (c.h9_kern_spawn(k.mach, name, Tramp.run, arg) < 0) return error.OutOfMemory;
+    }
+};
+
+/// Spawns `func(arg)` as the first process of a kernel of its own, which
+/// reaches no host and which only the process holds: a machine of one
+/// process tree, for a kernel thread such as the interval timers' and
+/// for tests.
+pub fn spawnAlone(name: [*:0]const u8, comptime T: type, comptime func: fn (*T) void, arg: *T) Error!void {
+    const k = try Kernel.init(std.heap.page_allocator, &no_host);
+    defer k.deinit();
+    try k.spawn(name, T, func, arg);
 }
+
+const no_host: Host = .{};
 
 /// Runs `func(arg)` on a kproc started from the calling process, once it
 /// has dropped the fds, namespace, dot and slash it shares with the
@@ -464,6 +598,9 @@ pub const RF = struct {
     pub const NOWAIT = 1 << 6;
     /// Not 9front's: a Linux thread, whose children are its group leader's (hproc.h).
     pub const LXTHREAD = 1 << 30;
+    /// Not 9front's: the child keeps a host thread of its own where the
+    /// machine has a scheduler (hproc.h).
+    pub const HOSTTHREAD = 1 << 29;
     pub const CNAMEG = 1 << 10;
     pub const CENVG = 1 << 11;
     pub const CFDG = 1 << 12;
@@ -692,7 +829,7 @@ pub const NoteFlag = enum(c_int) { user = 0, exit = 1, debug = 2 };
 /// machine. Returns false if its queue was full. Fails, with "process
 /// exited" as the error string, if there's no such process.
 pub fn postNote(to: u32, msg: [*:0]const u8, flag: NoteFlag) Error!bool {
-    return try check(c.h9_kern_postnote(to, msg, @intFromEnum(flag))) != 0;
+    return try check(c.h9_kern_postnote(to, msg, @backingInt(flag))) != 0;
 }
 
 /// A reference to the calling process, for notes posted later from any
@@ -704,7 +841,7 @@ pub fn selfRef() ?*anyopaque {
 /// Posts a note to a `selfRef` process; false if it wasn't queued (a full
 /// queue, or the process ended).
 pub fn postNoteRef(ref: *anyopaque, msg: [*:0]const u8, flag: NoteFlag) bool {
-    return c.h9_kern_postnoteref(ref, msg, @intFromEnum(flag)) != 0;
+    return c.h9_kern_postnoteref(ref, msg, @backingInt(flag)) != 0;
 }
 
 pub fn unref(ref: *anyopaque) void {
@@ -714,7 +851,7 @@ pub fn unref(ref: *anyopaque) void {
 /// Posts a note to every process but the caller in note group `noteid` of
 /// the caller's machine.
 pub fn postNoteGroup(noteid: u32, msg: [*:0]const u8, flag: NoteFlag) void {
-    c.h9_kern_postnotepg(noteid, msg, @intFromEnum(flag));
+    c.h9_kern_postnotepg(noteid, msg, @backingInt(flag));
 }
 
 /// The calling process's note group: machine-local, inherited by children
@@ -751,7 +888,7 @@ pub const NoteAction = enum(c_int) {
 /// Also clears the "interrupt this call" flag.
 pub fn popNote(msg: *[ERRMAX]u8, pc: u64) NoteAction {
     msg[0] = 0;
-    return @enumFromInt(c.h9_kern_popnote(msg, pc));
+    return @fromBackingInt(@intCast(c.h9_kern_popnote(msg, pc)));
 }
 
 /// noted's arguments (9front's libc.h).
@@ -763,9 +900,9 @@ pub const Noted = enum(c_int) { cont = 0, dflt = 1, save = 2, rstr = 3, _ };
 /// error string set, for noted outside a handler with anything but `rstr`.
 pub fn noted(arg: Noted, msg: *[ERRMAX]u8) Error!NoteAction {
     msg[0] = 0;
-    const r = c.h9_kern_noted(@intFromEnum(arg), msg);
+    const r = c.h9_kern_noted(@backingInt(arg), msg);
     if (r < 0) return error.Kern;
-    return @enumFromInt(r);
+    return @fromBackingInt(@intCast(r));
 }
 
 /// A machine as the kernel sees it: the process tree from one `spawn`.
@@ -788,7 +925,7 @@ pub const Mach = opaque {
     /// from any thread, including ones that aren't kernel processes.
     /// Returns how many processes it reached.
     pub fn post(m: *Mach, to: To, msg: [*:0]const u8) u32 {
-        return @intCast(c.h9_kern_postmach(m, @intFromEnum(to), msg, @intFromEnum(NoteFlag.user)));
+        return @intCast(c.h9_kern_postmach(m, @backingInt(to), msg, @backingInt(NoteFlag.user)));
     }
 };
 
@@ -872,7 +1009,7 @@ pub fn semrelease(addr: *i32, count: i32) Error!i32 {
 }
 
 /// The sandbox plan devfs and devip check for the calling thread's
-/// process (see src/kern/fscheck.c and src/kern/netcheck.h). Each guest
+/// process (see src/host/fscheck.c and src/kern/netcheck.h). Each guest
 /// process runs on its own thread, so the
 /// plan is per thread; kernel threads without one aren't restricted.
 threadlocal var fs_plan: ?*const policy.Plan = null;
@@ -911,23 +1048,103 @@ pub fn overlayNew(lower: ?[*:0]const u8) Error!u32 {
     return try check(c.h9_overlay_newpath(lower));
 }
 
-/// The target of the host link that `path`'s last name is, through `#U`
-/// and an overlay over it, as the link has it written
-/// (design/epoch-0/symlinks-in-root.md). Fails with "not a symbolic link"
-/// for anything else. For the Linux ABI's readlinkat; Plan 9
-/// programs never see links.
+/// The target of the link that `path`'s last name is, as the link has it
+/// written, by its device's readlink (design/file-interface.md): an
+/// overlay's, a host tree's, or a 9P2000.L server's. Fails with "not a
+/// symbolic link" for anything else. For the Linux ABI's readlinkat;
+/// Plan 9 programs never see links.
 pub fn readlink(path: [*:0]const u8, buf: []u8) Error![]u8 {
-    const n = try check(c.h9_fs_readlinkpath(path, buf.ptr, @intCast(@min(buf.len, std.math.maxInt(c_int)))));
+    const n = try check(c.h9_readlink(path, buf.ptr, clampLen(buf.len)));
     return buf[0..@intCast(n)];
 }
 
-/// Makes `path` a symbolic link to `target`: in memory in an overlay, or
-/// on the host in a devfs tree, where the new name is checked like a
-/// create. For the Linux ABI's symlinkat; Plan 9 programs never
-/// see links.
+/// Makes `path` a symbolic link to `target`, by its directory's device
+/// (design/file-interface.md): in memory in an overlay, on the host in a
+/// host tree, where the new name is checked like a create, or by
+/// Tsymlink on a 9P2000.L server; "permission denied" elsewhere. For the
+/// Linux ABI's symlinkat; Plan 9 programs never see links.
 pub fn symlink(path: [*:0]const u8, target: [*:0]const u8) Error!void {
-    _ = try check(c.h9_fs_symlinkpath(path, target));
+    _ = try check(c.h9_symlink(path, target));
 }
+
+/// Makes `new` another name for `old`'s file, following a link `old` is
+/// if `follow`: a link where the device has them (a host tree, or a
+/// 9P2000.L server), and a copy elsewhere (design/file-interface.md).
+pub fn link(old: [*:0]const u8, new: [*:0]const u8, follow: bool) Error!void {
+    _ = try check(c.h9_link(old, new, @intFromBool(follow)));
+}
+
+/// Moves `old` (the link, if it's one) to `new`, replacing what's there:
+/// at once where the device can, and by wstat within a directory
+/// elsewhere; "cross-device link" across directories where it can't
+/// (design/file-interface.md).
+pub fn rename(old: [*:0]const u8, new: [*:0]const u8) Error!void {
+    _ = try check(c.h9_rename(old, new));
+}
+
+/// A file's attributes as Linux has them (src/kern/devx.h's Attr), which
+/// a device that keeps more than a Dir says gives: links, ids, device
+/// numbers, and nanosecond times (design/file-interface.md).
+pub const Attr = extern struct {
+    valid: u64 = 0,
+    qid_path: u64 = 0,
+    qid_vers: u32 = 0,
+    qid_type: u8 = 0,
+    mode: u32 = 0,
+    uid: u32 = 0,
+    gid: u32 = 0,
+    nlink: u64 = 0,
+    rdev: u64 = 0,
+    size: u64 = 0,
+    blocks: u64 = 0,
+    atime: i64 = 0,
+    atimens: i64 = 0,
+    mtime: i64 = 0,
+    mtimens: i64 = 0,
+    ctime: i64 = 0,
+    ctimens: i64 = 0,
+
+    pub const mode_bit = 0x1;
+    pub const nlink_bit = 0x2;
+    pub const uid_bit = 0x4;
+    pub const gid_bit = 0x8;
+    pub const rdev_bit = 0x10;
+    pub const atime_bit = 0x20;
+    pub const mtime_bit = 0x40;
+    pub const ctime_bit = 0x80;
+    pub const ino_bit = 0x100;
+    pub const size_bit = 0x200;
+    pub const blocks_bit = 0x400;
+    pub const basic = 0x7ff;
+};
+
+/// `path`'s attributes, acting on a link in its last name if `nofollow`,
+/// and its Dir, as stat gives it, into `dir`, whose length is returned.
+pub fn getattr(path: [*:0]const u8, nofollow: bool, a: *Attr, dir: []u8) Error!usize {
+    return try check(c.h9_getattr(path, @intFromBool(nofollow), Attr.basic, a, dir.ptr, clampLen(dir.len)));
+}
+
+/// fd's, as getattr.
+pub fn fgetattr(fd: u31, a: *Attr, dir: []u8) Error!usize {
+    return try check(c.h9_fgetattr(fd, Attr.basic, a, dir.ptr, clampLen(dir.len)));
+}
+
+/// Sets what `mask` names from `a` on `path` (following a link in its
+/// last name): the device's setattr, a Tsetattr on a .L mount, and by
+/// default a wstat, in whole seconds. `a.mode` is Plan 9's, with DMDIR
+/// and the rest as a stat gave them; a time's nanoseconds `now_ns` mean
+/// the time now.
+pub fn setattr(path: [*:0]const u8, mask: u64, a: *const Attr) Error!void {
+    _ = try check(c.h9_setattr(path, 0, mask, a));
+}
+
+/// fd's, as setattr.
+pub fn fsetattr(fd: u31, mask: u64, a: *const Attr) Error!void {
+    _ = try check(c.h9_fsetattr(fd, mask, a));
+}
+
+/// In a setattr's atimens or mtimens: the time now (devx.h's Anow).
+pub const now_ns: i64 = (1 << 30) - 1;
 
 /// Makes `path` a FIFO with permissions `perm`: a node in memory in an
 /// overlay, or a host FIFO in a devfs tree, where the new name is checked
@@ -937,12 +1154,6 @@ pub fn mkfifo(path: [*:0]const u8, perm: u32) Error!void {
     _ = try check(c.h9_fs_mkfifopath(path, perm));
 }
 
-/// Moves `old` to `new` in another directory with the host's rename,
-/// when both are in host (devfs) trees; false if either isn't. For the
-/// Linux ABI's renameat.
-pub fn renameAcross(old: [*:0]const u8, new: [*:0]const u8) Error!bool {
-    return try check(c.h9_fs_renamepath(old, new)) == 0;
-}
 
 /// Where a union member goes (design/epoch-0/mounts.md, "Union instances").
 pub const UnionFlags = packed struct(c_int) {
@@ -1048,6 +1259,12 @@ fn check(r: c_int) Error!u31 {
     return @intCast(r);
 }
 
+/// A count from one of the kernel's 64-bit calls.
+fn checkn(r: isize) Error!usize {
+    if (r < 0) return error.Kern;
+    return @intCast(r);
+}
+
 fn clampLen(n: usize) c_int {
     return @intCast(@min(n, std.math.maxInt(c_int)));
 }
@@ -1064,14 +1281,16 @@ pub fn close(fd: u31) Error!void {
     _ = try check(c.sysclose(fd));
 }
 
-/// One read of at most 2 GiB - 1; `off` -1 uses and advances the fd offset.
+/// One read, of at most 2 GiB - 1 (the device's count is C's int, so a
+/// longer one is short); `off` -1 uses and advances the fd offset.
 pub fn pread(fd: u31, buf: []u8, off: i64) Error!usize {
-    return try check(c.syspread(fd, buf.ptr, clampLen(buf.len), off));
+    return checkn(c.h9_pread(fd, buf.ptr, buf.len, off));
 }
 
-/// One write of at most 2 GiB - 1; `off` -1 uses and advances the fd offset.
+/// One write, of at most 2 GiB - 1, as pread; `off` -1 uses and advances
+/// the fd offset.
 pub fn pwrite(fd: u31, buf: []const u8, off: i64) Error!usize {
-    return try check(c.syspwrite(fd, buf.ptr, clampLen(buf.len), off));
+    return checkn(c.h9_pwrite(fd, buf.ptr, buf.len, off));
 }
 
 pub fn seek(fd: u31, off: i64, whence: c_int) Error!i64 {
@@ -1101,7 +1320,7 @@ pub fn fauth(fd: u31, aname: [*:0]const u8) Error!u31 {
 /// Connects to the unix-domain socket at host path `path` and returns an
 /// fd on a channel for it (design/epoch-0/ninep-roots.md). Fails on Windows.
 /// The status of the caller's machine's `#ι` conversation `n`
-/// (src/kern/devhidx.c), read without a chan, since `#ι` is masked once
+/// (src/kern/dev/hidx.zig), read without a chan, since `#ι` is masked once
 /// the namespace is built; or null.
 pub fn hidxStatus(n: u32, buf: []u8) ?[]u8 {
     const k = c.h9_hidx_convstatus(@intCast(n), buf.ptr, @intCast(@min(buf.len, std.math.maxInt(c_int))));
@@ -1133,10 +1352,35 @@ fn fdPtr(fd: std.posix.fd_t) ?*anyopaque {
 }
 
 /// Wakes guest reads and connects waiting on host stream `id`
-/// (src/kern/devhstream.c). Called from the stream's thread, which isn't
+/// (src/kern/dev/hstream.zig). Called from the stream's thread, which isn't
 /// a kernel process, as `wakeConsole` is.
 pub fn hstreamWake(id: u32) void {
     c.h9_hstream_wake(id);
+}
+
+/// Wakes guest reads waiting on child machine conversation `id`
+/// (src/kern/dev/machine.zig, design/child-machines.md). Called from
+/// any thread.
+pub fn childWake(id: u32) void {
+    c.h9_child_wake(id);
+}
+
+/// Closes a channel the machine device walked for a child machine's
+/// namespace. On a kernel process.
+pub fn childDropSource(ch: *anyopaque) void {
+    c.h9_child_dropsrc(ch);
+}
+
+/// The servers of its caller's paths that child machine conversation
+/// `id` still has (src/kern/dev/machine.zig's source).
+pub fn childServed(id: u32) u32 {
+    return @intCast(c.h9_child_nserved(id));
+}
+
+/// Ends the connections of child machine conversation `id`'s servers
+/// of its caller's paths; they then end as childServed counts.
+pub fn childUnserve(id: u32) void {
+    c.h9_child_unserve(id);
 }
 
 /// Sleeps in the kernel until host stream `id` has connected or failed;
@@ -1145,7 +1389,7 @@ pub fn hstreamWait(id: u32) Error!void {
     _ = try check(c.h9_hstream_wait(id));
 }
 
-/// The kernel's 9P2000 server (src/kern/kserve.c, design/epoch-0/kernel-serve.md),
+/// The kernel's 9P2000 server (src/kern/kserve.zig, design/epoch-0/kernel-serve.md),
 /// serving the calling process's namespace.
 pub const Kserve = opaque {
     /// Serves from `root`, a path in the caller's namespace, with ..
@@ -1230,19 +1474,25 @@ pub fn dupFrom(fd0: u31, min: u31, cexec: bool) Error!u31 {
 /// Returns the length of the stat message written to `buf`, or, if `buf`
 /// is too small, the BIT16SZ size prefix that tells the caller how big.
 pub fn stat(name: [*:0]const u8, buf: []u8) Error!usize {
-    return try check(c.sysstat(name, buf.ptr, clampLen(buf.len)));
+    return checkn(c.h9_stat(name, buf.ptr, buf.len));
 }
 
 pub fn fstat(fd: u31, buf: []u8) Error!usize {
-    return try check(c.sysfstat(fd, buf.ptr, clampLen(buf.len)));
+    return checkn(c.h9_fstat(fd, buf.ptr, buf.len));
 }
 
 pub fn wstat(name: [*:0]const u8, buf: []u8) Error!usize {
-    return try check(c.syswstat(name, buf.ptr, clampLen(buf.len)));
+    return checkn(c.h9_wstat(name, buf.ptr, buf.len));
+}
+
+/// Makes what was written to fd's file durable, only its data if
+/// datasync: the device's fsync, by default the null wstat.
+pub fn fsync(fd: u31, datasync: bool) Error!void {
+    _ = try check(c.h9_fsync(fd, @intFromBool(datasync)));
 }
 
 pub fn fwstat(fd: u31, buf: []u8) Error!usize {
-    return try check(c.sysfwstat(fd, buf.ptr, clampLen(buf.len)));
+    return checkn(c.h9_fwstat(fd, buf.ptr, buf.len));
 }
 
 pub fn remove(name: [*:0]const u8) Error!void {
@@ -1253,7 +1503,7 @@ pub fn fd2path(fd: u31, buf: []u8) Error!void {
     _ = try check(c.h9_fd2path(fd, buf.ptr, @intCast(@min(buf.len, std.math.maxInt(c_uint)))));
 }
 
-/// One machine's console, behind `#y<id>` (src/kern/devhcons.c).
+/// One machine's console, behind `#y<id>` (src/kern/dev/hcons.zig).
 pub const Console = struct {
     /// Input from the run's reader thread; none means EOF.
     in: ?*consin.ConsoleInput,
@@ -1352,7 +1602,8 @@ fn console(id: c_ulong) ?*Console {
     return consoles[id].load(.acquire);
 }
 
-// Leaves called from devhcons.c. They never raise kernel errors.
+// Leaves called from src/kern/dev/hcons.zig and the C devices. They never
+// raise kernel errors.
 
 /// Whether this is the namespace kernel's build (design/epoch-0/namespace-kernel.md),
 /// which has no console, policy, guest tools, or built-in root: it
@@ -1360,9 +1611,22 @@ fn console(id: c_ulong) ?*Console {
 pub const nskernel = @hasDecl(build_options, "nskernel") and build_options.nskernel;
 
 comptime {
-    // devhstream.c's leaves.
+    // src/kern/dev/hstream.zig's leaves.
     _ = @import("hstream.zig");
+    if (available) {
+        // Handle names in the namespace (src/kern/chan.zig).
+        @export(&h9_host_nsname, .{ .name = "h9_host_nsname" });
+        @export(&h9_host_nspath, .{ .name = "h9_host_nspath" });
+        // An embedder's trees in memory (src/host/devtree.zig).
+        @export(&h9_tree_path, .{ .name = "h9_tree_path" });
+        @export(&h9_tree_get, .{ .name = "h9_tree_get" });
+        @export(&h9_tree_entry, .{ .name = "h9_tree_entry" });
+        @export(&h9_tree_child, .{ .name = "h9_tree_child" });
+        @export(&h9_tree_parent, .{ .name = "h9_tree_parent" });
+        @export(&h9_tree_read, .{ .name = "h9_tree_read" });
+    }
     if (available and nskernel) {
+        if (host_dirs.supported) @export(&h9_host_dir, .{ .name = "h9_host_dir" });
         @export(&h9_plan_get, .{ .name = "h9_plan_get" });
         @export(&h9_plan_set, .{ .name = "h9_plan_set" });
         @export(&h9_overlay_pool, .{ .name = "h9_overlay_pool" });
@@ -1379,6 +1643,7 @@ comptime {
         @export(&h9_cons_raw, .{ .name = "h9_cons_raw" });
         @export(&h9_cons_echo, .{ .name = "h9_cons_echo" });
         @export(&h9_cons_poll, .{ .name = "h9_cons_poll" });
+        if (host_dirs.supported) @export(&h9_host_dir, .{ .name = "h9_host_dir" });
         @export(&h9_policy_active, .{ .name = "h9_policy_active" });
         @export(&h9_policy_check, .{ .name = "h9_policy_check" });
         @export(&h9_plan_get, .{ .name = "h9_plan_get" });
@@ -1386,6 +1651,10 @@ comptime {
         @export(&h9_net_check, .{ .name = "h9_net_check" });
         @export(&h9_net_lookup, .{ .name = "h9_net_lookup" });
         @export(&h9_net_resolved, .{ .name = "h9_net_resolved" });
+        @export(&h9_dns_target, .{ .name = "h9_dns_target" });
+        @export(&h9_dns_register, .{ .name = "h9_dns_register" });
+        @export(&h9_dns_peer, .{ .name = "h9_dns_peer" });
+        @export(&h9_dns_self, .{ .name = "h9_dns_self" });
         @export(&h9_overlay_pool, .{ .name = "h9_overlay_pool" });
         @export(&h9_overlay_alloc, .{ .name = "h9_overlay_alloc" });
         @export(&h9_overlay_free, .{ .name = "h9_overlay_free" });
@@ -1420,13 +1689,43 @@ fn clockNow(clock: std.Io.Clock) i64 {
 var mono_offset: web.Atomic(i64) = .init(0);
 var mono_set: std.atomic.Value(bool) = .init(false);
 
-/// Wall time in nanoseconds since the epoch.
+/// The calling thread's machine's clock (design/host-handles.md): its
+/// host's, if its plan has a host with one. Kernel threads without a
+/// machine read the OS's.
+fn threadClock() ?@import("host/host.zig").Clock {
+    const p = fs_plan orelse return null;
+    const h = p.host orelse return null;
+    return h.clock;
+}
+
+/// Wall time in nanoseconds since the epoch, by the calling thread's
+/// machine's clock.
 pub fn wallNs() i64 {
+    if (threadClock()) |cl| return cl.wall();
+    return osWallNs();
+}
+
+/// Monotonic time in nanoseconds, starting near the wall time, by the
+/// calling thread's machine's clock.
+pub fn monoNs() i64 {
+    if (threadClock()) |cl| return cl.mono();
+    return osMonoNs();
+}
+
+/// Fills `buf` with entropy from the calling thread's machine's host
+/// (design/host-handles.md), or from `io` for a thread without one.
+pub fn random(io: std.Io, buf: []u8) void {
+    if (fs_plan) |p| if (p.host) |h| if (h.random) |r| return r.fill(buf);
+    io.random(buf);
+}
+
+/// The OS's wall time: the clock a plan's host gives (src/host/planned.zig).
+pub fn osWallNs() i64 {
     return clockNow(.real);
 }
 
-/// Monotonic time in nanoseconds, starting near the wall time.
-pub fn monoNs() i64 {
+/// The OS's monotonic time, starting near the wall time.
+pub fn osMonoNs() i64 {
     if (!mono_set.load(.acquire)) {
         const off = clockNow(.real) - clockNow(.awake);
         // The first reader to set it wins; the others use its offset.
@@ -1448,14 +1747,14 @@ fn h9_clock_mono() callconv(.c) i64 {
 /// with the plan. Kernel threads without a machine see one.
 threadlocal var cons_ncpu: u32 = 1;
 
-// On the web host, where threadlocals are plain globals, a coroutine's
-// park saves and restores them (src/web/coro.c).
+// On the web host, where threadlocals are plain globals, a task's
+// switch saves and restores them (src/kern/sched/web.zig).
 comptime {
     if (web.enabled) @export(&h9_web_locals, .{ .name = "h9_web_locals" });
 }
 
 /// Also h9_kern_locals, everywhere: a kernel thread that acts for a
-/// machine (kserve.c's workers) takes its starter's plan, pages and CPUs.
+/// machine (kserve.zig's workers) takes its starter's plan, pages and CPUs.
 fn h9_web_locals(save: c_int, slots: *[4]usize) callconv(.c) void {
     if (save != 0) {
         slots[0] = @intFromPtr(fs_plan);
@@ -1529,7 +1828,7 @@ fn h9_root_table(n: *c_int) callconv(.c) [*]const Htool {
     return &root_table;
 }
 
-// Leaves called from devoverlay.c. They never raise kernel errors.
+// Leaves called from src/kern/dev/overlay.zig. They never raise kernel errors.
 
 fn h9_overlay_pool() callconv(.c) ?*anyopaque {
     return @ptrCast(@constCast(fs_pages));
@@ -1567,10 +1866,117 @@ fn h9_policy_active() callconv(.c) c_int {
     return @intFromBool(fs_plan != null);
 }
 
+/// src/kern/chan.zig's, for handle names in the namespace
+/// (design/host-handles.md): host path `path` as the name of the calling
+/// thread's machine's directory handle that holds it, the deepest, and
+/// the path relative to it, `name` or `name/rel`, into `out`. Its length,
+/// or -1 if no handle holds it or `out` is too short.
+fn h9_host_nsname(path: [*]const u8, len: c_int, out: [*]u8, n: c_int) callconv(.c) c_int {
+    const p = fs_plan orelse return -1;
+    const h = p.host orelse return -1;
+    const d = h.dirs orelse return -1;
+    const held = d.holding(path[0..@intCast(@max(len, 0))]) orelse return -1;
+    var w: std.Io.Writer = .fixed(out[0..@intCast(@max(n, 0))]);
+    w.writeAll(held.dir.name) catch return -1;
+    if (held.rel.len > 0) w.print("/{s}", .{held.rel}) catch return -1;
+    return @intCast(w.end);
+}
+
+/// The other way: the host path of the calling thread's machine's
+/// directory handle named `name`, into `out`. Its length, or -1 if there's
+/// no such handle or `out` is too short.
+fn h9_host_nspath(name: [*]const u8, len: c_int, out: [*]u8, n: c_int) callconv(.c) c_int {
+    const p = fs_plan orelse return -1;
+    const h = p.host orelse return -1;
+    const d = h.dirs orelse return -1;
+    const dir = d.get(name[0..@intCast(@max(len, 0))]) orelse return -1;
+    if (dir.path.len > @as(usize, @intCast(@max(n, 0)))) return -1;
+    @memcpy(out[0..dir.path.len], dir.path);
+    return @intCast(dir.path.len);
+}
+
+/// For host path `path` held by one of the calling thread's machine's
+/// trees in memory (a `Dir` with a `tree`), the tree's name and the path
+/// relative to it, `name` or `name/rel`, into `out`: its length, or -1 if
+/// no such tree holds it (a host directory does, or nothing) or `out` is
+/// too short. namec walks such a path on `#ū` rather than `#U`.
+fn h9_tree_path(path: [*]const u8, len: c_int, out: [*]u8, n: c_int) callconv(.c) c_int {
+    const p = fs_plan orelse return -1;
+    const h = p.host orelse return -1;
+    const d = h.dirs orelse return -1;
+    const held = d.holding(path[0..@intCast(@max(len, 0))]) orelse return -1;
+    if (held.dir.tree == null) return -1;
+    var w: std.Io.Writer = .fixed(out[0..@intCast(@max(n, 0))]);
+    w.writeAll(held.dir.name) catch return -1;
+    if (held.rel.len > 0) w.print("/{s}", .{held.rel}) catch return -1;
+    return @intCast(w.end);
+}
+
+/// The tree in memory of the calling thread's machine's handle named
+/// `name`, if it has one and the plan doesn't hide its path.
+fn h9_tree_get(name: [*]const u8, len: c_int) callconv(.c) ?*const anyopaque {
+    const p = fs_plan orelse return null;
+    const h = p.host orelse return null;
+    const d = h.dirs orelse return null;
+    const dir = d.get(name[0..@intCast(@max(len, 0))]) orelse return null;
+    if (p.check(dir.path, .read) == .hidden) return null;
+    if (dir.tree) |*t| return t;
+    return null;
+}
+
+/// A `host.Tree.Entry`, for src/host/devtree.zig.
+const TreeEntry = extern struct {
+    id: u64,
+    len: u64,
+    name: [*:0]const u8,
+    dir: u8,
+    exec: u8,
+};
+
+fn treeEntry(e: ?host_api.Tree.Entry, out: *TreeEntry) c_int {
+    const x = e orelse return -1;
+    out.* = .{ .id = x.id, .len = x.len, .name = x.name.ptr, .dir = @intFromBool(x.dir), .exec = @intFromBool(x.exec) };
+    return 0;
+}
+
+fn treeOf(t: *const anyopaque) *const host_api.Tree {
+    return @ptrCast(@alignCast(t));
+}
+
+fn h9_tree_entry(t: *const anyopaque, id: u64, out: *TreeEntry) callconv(.c) c_int {
+    return treeEntry(treeOf(t).entry(id), out);
+}
+
+fn h9_tree_child(t: *const anyopaque, id: u64, i: c_int, out: *TreeEntry) callconv(.c) c_int {
+    if (i < 0) return -1;
+    return treeEntry(treeOf(t).child(id, @intCast(i)), out);
+}
+
+fn h9_tree_parent(t: *const anyopaque, id: u64) callconv(.c) u64 {
+    return treeOf(t).parent(id);
+}
+
+fn h9_tree_read(t: *const anyopaque, id: u64, off: u64, buf: [*]u8, n: c_int) callconv(.c) c_int {
+    return @intCast(treeOf(t).read(id, off, buf[0..@intCast(@max(n, 0))]));
+}
+
+/// src/host/dirs.c's: the calling thread's machine's directory handle that
+/// holds host path `path`, with the path relative to it in `rel`
+/// (design/host-handles.md). -2 with no host, which devfs opens by path
+/// as before; -3 if no handle holds it; -4 if `rel` is too short.
+fn h9_host_dir(path: [*:0]const u8, rel: [*]u8, nrel: c_int, flags: *c_int) callconv(.c) i64 {
+    const p = fs_plan orelse return host_dirs.none;
+    const h = p.host orelse return host_dirs.none;
+    var contained = false;
+    const r = host_dirs.hostDir(h, std.mem.span(path), rel[0..@intCast(@max(nrel, 0))], &contained);
+    flags.* = @intFromBool(contained);
+    return r;
+}
+
 fn h9_policy_check(path: [*]const u8, len: c_long, op: c_int) callconv(.c) c_int {
     const p = fs_plan orelse return 0;
-    const o = std.enums.fromInt(policy.Op, op) orelse return @intFromEnum(policy.Verdict.hidden);
-    return @intFromEnum(p.check(path[0..@intCast(len)], o));
+    const o = std.enums.fromInt(policy.Op, op) orelse return @backingInt(policy.Verdict.hidden);
+    return @backingInt(p.check(path[0..@intCast(len)], o));
 }
 
 // devip's sandbox hooks (src/kern/netcheck.h): leaves that return a
@@ -1586,7 +1992,7 @@ fn netPort(port: c_int) ?u16 {
 }
 
 /// The calling thread's plan, for a kernel thread that acts for a
-/// process, such as #ℓ's reader when it redials (src/kern/devdotl.c).
+/// process, such as #ℓ's reader when it redials (src/kern/dev/dotl.zig).
 fn h9_plan_get() callconv(.c) ?*const anyopaque {
     return fs_plan;
 }
@@ -1604,19 +2010,115 @@ fn h9_net_check(op: c_int, proto: c_int, addr: [*]const u8, port: c_int) callcon
         if (p.net_allow.len > 0) return -1;
         break :blk 0;
     };
-    return if (p.netCheck(o, netProto(proto), addr[0..16], pt)) 0 else -1;
+    // A connect to port 53 goes to the machine's resolver instead, which
+    // checks each query (design/linux-dns.md): devip and the Linux
+    // layer's sendto redirect it right after this, through
+    // h9_dns_target, which refuses it if there's no resolver.
+    if (p.resolves and o == .connect and pt == 53 and netProto(proto) != null and p.net != .disable) return 0;
+    // The machine's dialer and listener decide (design/host-handles.md);
+    // one that's absent refuses everything. A plan without a host is
+    // asked itself.
+    const a = addr[0..16];
+    if (p.host) |h| {
+        switch (o) {
+            .connect => {
+                const d = h.dial orelse return -1;
+                if (d.allows(netProto(proto), a, pt)) return 0;
+                // A UDP connect to an address recorded for an allowed name is
+                // getaddrinfo's route probe (design/linux-dns.md, Updates): allowed,
+                // but h9_net_redirect marks the conversation probe-only and
+                // h9_net_send refuses its sends.
+                if (d.probe(netProto(proto), a)) return 1;
+            },
+            .announce => {
+                const l = h.listen orelse return -1;
+                if (l.allows(netProto(proto), a, pt)) return 0;
+            },
+        }
+        return -1;
+    }
+    if (p.netCheck(o, netProto(proto), a, pt)) return 0;
+    if (o == .connect and p.netProbe(netProto(proto), a)) return 1;
+    return -1;
+}
+
+fn dnsKind(proto: c_int) ?resolver.Transport {
+    return switch (netProto(proto) orelse return null) {
+        .udp => .udp,
+        .tcp => .tcp,
+    };
+}
+
+/// Where a connect or sendto to port 53 goes when the machine resolves
+/// for the guest (design/linux-dns.md): 1 with addr and port rewritten
+/// to the machine's resolver, 0 if it isn't redirected, -1 if it would
+/// be and the machine has no resolver, which refuses it.
+fn h9_dns_target(proto: c_int, addr: *[16]u8, port: *c_int) callconv(.c) c_int {
+    const p = fs_plan orelse return 0;
+    if (!p.resolves or port.* != 53) return 0;
+    const kind = dnsKind(proto) orelse return -1;
+    const r = p.dns orelse return -1;
+    addr.* = resolver.loopback;
+    port.* = r.port(kind);
+    return 1;
+}
+
+/// Tells the resolver that host port lport was redirected from
+/// orig!oport, the address the guest dialled.
+fn h9_dns_register(proto: c_int, lport: c_int, orig: *const [16]u8, oport: c_int) callconv(.c) void {
+    const p = fs_plan orelse return;
+    const r = p.dns orelse return;
+    const kind = dnsKind(proto) orelse return;
+    r.register(kind, std.math.cast(u16, lport) orelse return, orig, std.math.cast(u16, oport) orelse return);
+}
+
+/// If addr!port is the resolver's, as a reply's source or a redirected
+/// conversation's peer is, rewrites it to the address the guest dialled
+/// from host port lport, and returns 1.
+fn h9_dns_peer(proto: c_int, lport: c_int, addr: *[16]u8, port: *u16) callconv(.c) c_int {
+    var a: [16]u8 = addr.*;
+    if (!dnsPeer(dnsKind(proto) orelse return 0, std.math.cast(u16, lport) orelse return 0, &a, port)) return 0;
+    addr.* = a;
+    return 1;
+}
+
+/// Whether addr!port is one of the machine's resolver's sockets.
+fn h9_dns_self(proto: c_int, addr: *const [16]u8, port: c_int) callconv(.c) c_int {
+    const p = fs_plan orelse return 0;
+    const r = p.dns orelse return 0;
+    return @intFromBool(r.isSelf(dnsKind(proto) orelse return 0, addr, std.math.cast(u16, port) orelse return 0));
+}
+
+/// h9_dns_peer, for the Linux layer's getpeername.
+pub fn dnsPeer(kind: resolver.Transport, lport: u16, addr: *[16]u8, port: *u16) bool {
+    const p = fs_plan orelse return false;
+    const r = p.dns orelse return false;
+    if (!r.isSelf(kind, addr, port.*)) return false;
+    const o = r.original(kind, lport) orelse return false;
+    addr.* = o.addr;
+    port.* = o.port;
+    return true;
 }
 
 fn h9_net_lookup(proto: c_int, name: [*:0]const u8, port: c_int) callconv(.c) c_int {
     const p = fs_plan orelse return 0;
     const pt = netPort(port) orelse return -1;
+    if (p.host) |h| {
+        const d = h.dial orelse return -1;
+        return if (d.lookup(netProto(proto), std.mem.span(name), pt)) 0 else -1;
+    }
     return if (p.netLookup(netProto(proto), std.mem.span(name), pt)) 0 else -1;
 }
 
 fn h9_net_resolved(proto: c_int, name: [*:0]const u8, port: c_int, addrs: [*]const [16]u8, n: c_int) callconv(.c) void {
     const p = fs_plan orelse return;
     const pt = netPort(port) orelse return;
-    p.netResolved(netProto(proto), std.mem.span(name), pt, addrs[0..@intCast(@max(n, 0))]);
+    const got = addrs[0..@intCast(@max(n, 0))];
+    if (p.host) |h| {
+        if (h.dial) |d| d.resolved(netProto(proto), std.mem.span(name), pt, got);
+        return;
+    }
+    p.netResolved(netProto(proto), std.mem.span(name), pt, got);
 }
 
 /// Returns the bytes read, 0 at EOF, -1 on error, or -2 when the caller
@@ -1742,7 +2244,7 @@ test "spawn a process and read a host file through kern" {
         }
     };
     var t: T = .{ .root = root };
-    try spawn("test", T, T.run, &t);
+    try spawnAlone("test", T, T.run, &t);
     while (!t.done.load(.acquire)) std.Thread.yield() catch {};
     if (t.err) |e| return e;
     try std.testing.expectEqualStrings("mount -a #s/boot /\n", t.data[0..t.len]);
@@ -1869,7 +2371,7 @@ test "fork shares or copies groups, and await returns wait records" {
         }
     };
     var t: T = .{ .root = root };
-    try spawn("test", T, T.run, &t);
+    try spawnAlone("test", T, T.run, &t);
     while (!t.done.load(.acquire)) std.Thread.yield() catch {};
     if (t.err) |e| {
         std.debug.print("failed in {s}\n", .{t.where});
@@ -1986,8 +2488,8 @@ test "notes queue per process, reach note groups and stay in their machine" {
         }
     };
     var t: T = .{};
-    try spawn("test", T, T.run, &t);
-    try spawn("other", T, T.other, &t);
+    try spawnAlone("test", T, T.run, &t);
+    try spawnAlone("other", T, T.other, &t);
     while (!t.done.load(.acquire)) std.Thread.yield() catch {};
     while (!t.other_done.load(.acquire)) std.Thread.yield() catch {};
     if (t.err) |e| {
@@ -1998,6 +2500,72 @@ test "notes queue per process, reach note groups and stay in their machine" {
     try std.testing.expectEqual(NoteAction.kill, t.acts[0]);
     try std.testing.expectEqualStrings("die", std.mem.sliceTo(&t.got[1], 0));
     try std.testing.expectEqual(NoteAction.kill, t.acts[1]);
+}
+
+test "two machines don't share /srv [kernel-port]" {
+    if (!available) return error.SkipZigTest;
+    const T = struct {
+        const Self = @This();
+        errs: [2]?anyerror = .{ null, null },
+        /// How many machines have posted their service.
+        posted: std.atomic.Value(u32) = .init(0),
+        looked: std.atomic.Value(u32) = .init(0),
+        done: std.atomic.Value(u32) = .init(0),
+
+        const names = [2][*:0]const u8{ "#s/kernel-port-a", "#s/kernel-port-b" };
+
+        fn machine(t: *Self, i: usize) void {
+            defer _ = t.done.fetchAdd(1, .release);
+            t.body(i) catch |e| {
+                t.errs[i] = e;
+                // The other machine mustn't wait for this one.
+                _ = t.posted.fetchAdd(2, .release);
+                _ = t.looked.fetchAdd(2, .release);
+            };
+        }
+        fn body(t: *Self, i: usize) !void {
+            const fd = try create(names[i], OWRITE, 0o600);
+            defer close(fd) catch {};
+            _ = t.posted.fetchAdd(1, .release);
+            while (t.posted.load(.acquire) < 2) std.Thread.yield() catch {};
+            var buf: [256]u8 = undefined;
+            // Its own service is there, and the other machine's isn't,
+            // though both are posted under the same #s.
+            _ = try stat(names[i], &buf);
+            if (stat(names[1 - i], &buf)) |_| return error.SharedSrv else |_| {}
+            // Nor does a listing of its board show the other's.
+            const dfd = try open("#s", OREAD);
+            defer close(dfd) catch {};
+            var dirs: [4096]u8 = undefined;
+            var n: usize = 0;
+            while (n < dirs.len) {
+                const k = try pread(dfd, dirs[n..], @intCast(n));
+                if (k == 0) break;
+                n += k;
+            }
+            const other = std.mem.span(names[1 - i])[3..];
+            if (std.mem.indexOf(u8, dirs[0..n], other) != null) return error.SharedSrvListing;
+            // Stay posted until both have looked.
+            _ = t.looked.fetchAdd(1, .release);
+            while (t.looked.load(.acquire) < 2) std.Thread.yield() catch {};
+        }
+        fn m0(t: *Self) void {
+            t.machine(0);
+        }
+        fn m1(t: *Self) void {
+            t.machine(1);
+        }
+    };
+    var t: T = .{};
+    const host: Host = .{};
+    const k0 = try Kernel.init(std.testing.allocator, &host);
+    defer k0.deinit();
+    const k1 = try Kernel.init(std.testing.allocator, &host);
+    defer k1.deinit();
+    try k0.spawn("m0", T, T.m0, &t);
+    try k1.spawn("m1", T, T.m1, &t);
+    while (t.done.load(.acquire) < 2) std.Thread.yield() catch {};
+    for (t.errs) |e| if (e) |x| return x;
 }
 
 test "#p lists and serves only the caller's machine, by machine-local pid" {
@@ -2116,8 +2684,8 @@ test "#p lists and serves only the caller's machine, by machine-local pid" {
             a.t.machine(1);
         }
     };
-    try spawn("m0", @TypeOf(m0), M0.run, &m0);
-    try spawn("m1", @TypeOf(m1), M1.run, &m1);
+    try spawnAlone("m0", @TypeOf(m0), M0.run, &m0);
+    try spawnAlone("m1", @TypeOf(m1), M1.run, &m1);
     while (t.ready.load(.acquire) < 2) std.Thread.yield() catch {};
     t.go.store(true, .release);
     while (t.done.load(.acquire) < 2) std.Thread.yield() catch {};
@@ -2193,7 +2761,7 @@ test "tsleep returns at its deadline, returns early on wakeup, and fails with in
         }
     };
     var t: T = .{};
-    try spawn("tsleep", T, T.run, &t);
+    try spawnAlone("tsleep", T, T.run, &t);
     while (!t.done.load(.acquire)) std.Thread.yield() catch {};
     if (t.err) |e| return e;
     errdefer std.debug.print("results {any}, ms {any}, timers {any}\n", .{ t.rs, t.ms, t.timers });
@@ -2376,7 +2944,7 @@ test "#O overlays a host tree in memory and never writes it" {
         }
     };
     var t: T = .{ .root = root };
-    try spawn("test", T, T.run, &t);
+    try spawnAlone("test", T, T.run, &t);
     while (!t.done.load(.acquire)) std.Thread.yield() catch {};
     if (t.err) |e| {
         std.debug.print("failed in {s}\n", .{t.where});
@@ -2453,7 +3021,7 @@ test "a kproc started from a process in an overlay doesn't keep the overlay" {
     var k: K = .{};
     defer k.release.store(true, .release);
     var t: T = .{ .root = root, .k = &k };
-    try spawn("test", T, T.run, &t);
+    try spawnAlone("test", T, T.run, &t);
     while (!t.done.load(.acquire)) std.Thread.yield() catch {};
     if (t.err) |e| return e;
 }
@@ -2510,7 +3078,7 @@ test "#O finds, removes and lists the children of a large directory" {
         }
     };
     var t: T = .{ .root = root };
-    try spawn("test", T, T.run, &t);
+    try spawnAlone("test", T, T.run, &t);
     while (!t.done.load(.acquire)) std.Thread.yield() catch {};
     if (t.err) |e| return e;
     try std.testing.expectEqual(@as(usize, count / 2), t.listed);
@@ -2632,7 +3200,7 @@ test "#U!c resolves symlinks inside the tree it's bound from [34]" {
         }
     };
     var t: T = .{ .root = buf[0..n :0] };
-    try spawn("test", T, T.run, &t);
+    try spawnAlone("test", T, T.run, &t);
     while (!t.done.load(.acquire)) std.Thread.yield() catch {};
     if (t.err) |e| {
         std.debug.print("failed in {s}\n", .{t.where});

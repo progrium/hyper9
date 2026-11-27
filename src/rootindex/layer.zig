@@ -4,7 +4,7 @@
 //! and sends opens, reads, and writes on to the server.
 //!
 //! Like the 9P2000.L translator (src/dotl/client.zig) it has no I/O of
-//! its own: `#ι` (src/kern/devhidx.c) feeds it what devmnt writes
+//! its own: `#ι` (src/kern/dev/hidx.zig) feeds it what devmnt writes
 //! (`fromMount`) and what the server sends (`fromServer`), and sends on
 //! what it queues (`toServer`, `toMount`). The host cache is reached
 //! through `Hooks`, so the tests run it against a server in memory.
@@ -102,6 +102,9 @@ const Kind = enum {
     wstat,
     write,
     flush,
+    /// One of devmnt's 9P2000.L requests for links and attributes
+    /// (design/file-interface.md), with its fids made real.
+    wide,
 };
 
 /// A devmnt request the layer is answering, by its tag.
@@ -123,6 +126,11 @@ const Pending = struct {
     frame: ?[]u8 = null,
     flushed: bool = false,
     aname: ?[]u8 = null,
+    /// A wide request's second fid, made real after `fid`, and its node.
+    fid2: ?u32 = null,
+    node2: ?u32 = null,
+    /// A wide request changes the tree: its nodes are demoted.
+    mutates: bool = false,
 };
 
 /// The layer's own requests, by tag.
@@ -517,6 +525,7 @@ pub const Layer = struct {
         // attach so does all but Tversion's msize and the attach.
         if (l.phase == .passthrough) return l.forward(frame);
         if (l.phase == .attach and frame[4] != p9.Tattach.id and frame[4] != p9.Tversion.id) return l.forward(frame);
+        if (isWide(frame[4])) return l.wide(frame);
         const d = wire.decode(p9.T, frame, l.msize, false) catch return l.fail("bad 9P message from the mount");
         const tag = d.tag;
         if (tag >= last_private_tag and tag != wire.notag) return l.fail("devmnt tag in the layer's range");
@@ -589,6 +598,49 @@ pub const Layer = struct {
         }
     }
 
+    fn isWide(t: u8) bool {
+        return switch (t) {
+            wire.l.Tsymlink.id, wire.l.Trename.id, wire.l.Treadlink.id, wire.l.Tgetattr.id, wire.l.Tsetattr.id, wire.l.Tlink.id, wire.l.Tfsync.id => true,
+            else => false,
+        };
+    }
+
+    /// devmnt's 9P2000.L requests for links and attributes, which only a
+    /// translating #ℓ under the layer gets (src/kern/devmnt.zig): the
+    /// server answers them, on real fids, and what they change is demoted.
+    fn wide(l: *Layer, frame: []const u8) Error!void {
+        const d = wire.decode(wire.wide.T, frame, l.msize, false) catch return l.fail("bad 9P message from the mount");
+        const tag = d.tag;
+        if (tag >= last_private_tag and tag != wire.notag) return l.fail("devmnt tag in the layer's range");
+        if (l.pending.contains(tag)) return l.fail("tag in use");
+        const fid: u32, const fid2: ?u32 = switch (d.msg) {
+            .Tsymlink => |m| .{ m.dfid, null },
+            .Trename => |m| .{ m.fid, m.dfid },
+            .Treadlink => |m| .{ m.fid, null },
+            .Tgetattr => |m| .{ m.fid, null },
+            .Tsetattr => |m| .{ m.fid, null },
+            .Tlink => |m| .{ m.fid, m.dfid },
+            .Tfsync => |m| .{ m.fid, null },
+            else => unreachable,
+        };
+        const f = l.fids.get(fid) orelse return l.plain(tag, frame);
+        const f2 = if (fid2) |x| l.fids.get(x) orelse return l.plain(tag, frame) else null;
+        var p: Pending = .{ .kind = .wide, .fid = fid, .node = f.node, .mutates = d.msg != .Treadlink and d.msg != .Tgetattr and d.msg != .Tfsync };
+        if (f2) |g| {
+            p.fid2 = fid2;
+            p.node2 = g.node;
+        }
+        if (!f.real) return l.viaReal(tag, frame, fid, p);
+        if (f2) |g| if (!g.real) {
+            p.making_real = true;
+            p.frame = try l.gpa.dupe(u8, frame);
+            try l.pending.put(l.gpa, tag, p);
+            return l.makeReal(tag, fid2.?, 0);
+        };
+        try l.pending.put(l.gpa, tag, p);
+        return l.forward(frame);
+    }
+
     fn plain(l: *Layer, tag: u16, frame: []const u8) Error!void {
         if (tag != wire.notag) try l.pending.put(l.gpa, tag, .{ .kind = .plain });
         return l.forward(frame);
@@ -635,6 +687,8 @@ pub const Layer = struct {
     fn madeReal(l: *Layer, tag: u16, fid: u32) Error!void {
         if (l.fids.getPtr(fid)) |f| f.real = true;
         const p = l.pending.getPtr(tag).?;
+        // A wide request's second fid, made real in turn.
+        if (p.fid2) |x| if (x != fid and !p.flushed) if (l.fids.get(x)) |g| if (!g.real) return l.makeReal(tag, x, 0);
         const frame = p.frame.?;
         p.frame = null;
         p.making_real = false;
@@ -819,10 +873,22 @@ pub const Layer = struct {
         }).value;
         defer freePending(l.gpa, &p);
         if (p.kind == .plain) return l.out_mount.appendSlice(l.gpa, frame);
+        if (p.kind == .wide) {
+            // The tree changed under these: the server says from now on.
+            if (p.mutates and frame[4] != p9.Rerror.id) for ([_]?u32{ p.node, p.node2 }) |node| if (node) |n| {
+                l.demote(n);
+                l.demote(l.ix().parent(n));
+            };
+            // A renamed fid's entry is another name's now.
+            if (frame[4] == wire.l.Rrename.id) if (l.fids.getPtr(p.fid)) |f| {
+                f.node = null;
+            };
+            return l.out_mount.appendSlice(l.gpa, frame);
+        }
         const d = wire.decode(p9.R, frame, l.msize, false) catch return l.fail("bad 9P message from the server");
         const ok = d.msg != .Rerror;
         switch (p.kind) {
-            .plain => unreachable,
+            .plain, .wide => unreachable,
             .version => if (d.msg == .Rversion) {
                 l.msize = @max(d.msg.Rversion.msize, 256);
             },

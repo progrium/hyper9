@@ -842,13 +842,13 @@ pub fn dispatch(p: *Process, u: *const engine.Ureg) Outcome {
 
 fn memCall(p: *Process, s: Sys, c: Call) Err!Outcome {
     switch (s) {
-        .brk => return ret(@intCast(p.mm.setBrk(c.a[0]))),
+        .brk => return ret(@intCast(mm.setBrk(p.mm, c.a[0]))),
         .mmap => return ret(try mmap(p, c.a[0], c.a[1], c.uint(2), c.uint(3), c.int(4), c.a[5])),
         .munmap => {
             const a = c.a[0];
             if (a % page != 0 or c.a[1] == 0) return ret(-E.INVAL);
             const len = std.mem.alignForward(u64, c.a[1], page);
-            if (a >= p.mm.lay.user_top or len > p.mm.lay.user_top - a) return ret(-E.INVAL);
+            if (a >= mm.layout(p.mm).user_top or len > mm.layout(p.mm).user_top - a) return ret(-E.INVAL);
             p.mm.unmap(a, a + len) catch return ret(-E.NOMEM);
             return ret(0);
         },
@@ -857,7 +857,7 @@ fn memCall(p: *Process, s: Sys, c: Call) Err!Outcome {
             if (a % page != 0) return ret(-E.INVAL);
             const len = std.mem.alignForward(u64, c.a[1], page);
             if (len == 0) return ret(0);
-            p.mm.protect(a, a + len, .fromLinux(c.a[2])) catch |e| return ret(if (e == error.BadAddress) -E.NOMEM else -E.NOMEM);
+            p.mm.protect(a, a + len, mm.protFromLinux(c.a[2])) catch |e| return ret(if (e == error.BadAddress) -E.NOMEM else -E.NOMEM);
             return ret(0);
         },
         .madvise => {
@@ -934,11 +934,11 @@ fn oNofollow(a: engine.Arch) u32 {
 const OTRUNC = 16;
 const OCEXEC = 32;
 const DMDIR: u32 = 0x80000000;
-/// The mode bit that marks a FIFO's Dir (src/kern/fscheck.h's H9_DMFIFO,
+/// The mode bit that marks a FIFO's Dir (src/host/fscheck.h's H9_DMFIFO,
 /// 9P2000.u's DMNAMEDPIPE), since Plan 9 has no file types.
 const DMFIFO: u32 = 0x00200000;
 /// 9P2000.u's DMSYMLINK: a link a Linux process's walk stopped at
-/// (design/epoch-0/linux-symlinks.md, src/kern/fscheck.h).
+/// (design/epoch-0/linux-symlinks.md, src/host/fscheck.h).
 const DMSYMLINK: u32 = 0x02000000;
 
 fn serve(p: *Process, s: Sys, c: Call, u: *const engine.Ureg) Err!Outcome {
@@ -1039,7 +1039,8 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const engine.Ureg) Err!Outcome {
         .ftruncate => return ret(try truncateFd(p, c.int(0), c.a[1])),
         .fallocate => return ret(try fallocate(p, c.int(0), c.uint(1), c.a[2], c.a[3])),
         .truncate => return ret(try truncatePath(p, c.a[0], c.a[1])),
-        .fsync, .fdatasync => return ret(fsync(c.int(0))),
+        .fsync => return ret(fsync(c.int(0), false)),
+        .fdatasync => return ret(fsync(c.int(0), true)),
         // A hint to start writing back: fsync does the writing here.
         .sync_file_range => return ret(if (kc.fdInfo(c.int(0))) |_| 0 else |_| -E.BADF),
         .syncfs => return ret(syncfs(c.int(0))),
@@ -1267,7 +1268,7 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const engine.Ureg) Err!Outcome {
             var off: u64 = 0;
             while (off < n) {
                 const k = @min(tmp.len, n - off);
-                p.io.random(tmp[0..k]);
+                kern.random(p.io, tmp[0..k]);
                 try p.writeMem(c.a[0] + off, tmp[0..k]);
                 off += k;
             }
@@ -1334,8 +1335,8 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const engine.Ureg) Err!Outcome {
         },
         .sched_setaffinity, .setpriority, .sched_setscheduler, .sched_setparam => return ret(0),
         // The kernel's sleep(0), as 9front's: the host's sched_yield, or
-        // on the web host, where every vCPU is a coroutine on one thread,
-        // a coroutine switch. Without one, a thread spinning on
+        // on the web host, where every vCPU is a task on one thread,
+        // a task switch. Without one, a thread spinning on
         // sched_yield there never lets another run.
         .sched_yield => {
             kern.sleep(0) catch {};
@@ -1895,8 +1896,7 @@ fn openAt(p: *Process, dirfd: i32, path_va: u64, flags: u32, mode: u32) Err!i64 
                 return -E.TXTBSY;
             }
             if (trunc) {
-                var w: [64]u8 = undefined;
-                if (fileKey(fd)) |k| if (kern.fwstat(fd, (Wstat{ .length = 0 }).encode(&w))) |_| {
+                if (fileKey(fd)) |k| if (kern.fsetattr(fd, kern.Attr.size_bit, &.{ .size = 0 })) |_| {
                     _ = file_writes.fetchAdd(1, .monotonic);
                     shmfile.truncated(k, 0);
                     pagecache.changed(k);
@@ -2020,8 +2020,8 @@ fn rwOne(p: *Process, fd: i32, buf: u64, len_in: u64, off: i64, comptime dir: Di
     var pipe_nb = false;
     var is_pty = false;
     if (off == -1) if (kc.fdInfo(fd) catch null) |info| {
-        // A socket from a mounted /net is read through the kernel's
-        // read-ahead, as recv reads it, and written as send writes.
+        // A socket from a mounted /net is read as recv reads it, once its
+        // server says it won't wait, and written as send writes.
         if (info.dc == 'M' and !info.dir) if (sockOf(p, fd)) |so| if (so.conv & conv_remote != 0) return remoteRw(p, fd, so.s, buf, len, dir);
         if (dir == .read and info.dc == ev_dc) {
             if (sigfdOf(p, info.qpath) != null) return sigfdRead(p, fd, info.qpath, buf, len);
@@ -2617,16 +2617,19 @@ fn recordLock(p: *Process, fd: i32, arg: u64, ofd: bool, get: bool, wait: bool, 
     if (t == .read and info.mode == kern.OWRITE) return -E.BADF;
     if (t == .write and info.mode != kern.OWRITE and info.mode != kern.ORDWR) return -E.BADF;
     while (true) {
+        // Read before trying, so a change after the try ends the wait.
+        const g = kc.lockGen();
         locks.set(key, owner, t, start, end) catch |e| switch (e) {
             error.OutOfMemory => return -E.NOLCK,
             error.WouldBlock => {
                 if (!wait) return -E.AGAIN;
-                // No wait queue: poll, and let a signal end the wait.
+                // Wait for the table to change, or a signal.
                 if (p.sig.deliverable()) return -E.INTR;
-                kern.sleep(2) catch return -E.INTR;
+                kc.lockWait(g) catch return -E.INTR;
                 continue;
             },
         };
+        kc.lockWake();
         return 0;
     }
 }
@@ -2642,15 +2645,17 @@ fn flockCall(p: *Process, fd: i32, op: u32) Err!i64 {
         else => return -E.INVAL,
     };
     while (true) {
+        const g = kc.lockGen();
         locks.flock(lockKey(info), ch.id, t) catch |e| switch (e) {
             error.OutOfMemory => return -E.NOLCK,
             error.WouldBlock => {
                 if (op & 4 != 0) return -E.AGAIN;
                 if (p.sig.deliverable()) return -E.INTR;
-                kern.sleep(2) catch return -E.INTR;
+                kc.lockWait(g) catch return -E.INTR;
                 continue;
             },
         };
+        kc.lockWake();
         return 0;
     }
 }
@@ -2665,6 +2670,7 @@ fn releaseLocks(p: *Process, fd: i32) void {
     const key = lockKey(info);
     locks.closedPosix(key, posixOwner(p).id);
     if (kc.fdChan(fd)) |ch| if (ch.refs <= 1) locks.closedOfd(key, ch.id);
+    kc.lockWake();
 }
 
 /// At the group's end, before the kernel closes its fds: what closing
@@ -2673,6 +2679,7 @@ pub fn releaseAllLocks(p: *Process) void {
     var buf: [1024]c_int = undefined;
     for (buf[0..@min(buf.len, kc.fds(&buf))]) |fd| releaseLocks(p, fd);
     locks.endedPosix(posixOwner(p).id);
+    kc.lockWake();
     itimer.cancel(@intFromPtr(p.g));
     for (buf[0..@min(buf.len, kc.fds(&buf))]) |fd| {
         unixClosed(p, fd);
@@ -2779,7 +2786,7 @@ fn isListeningUnix(d: *const attr.Dir) bool {
 }
 
 /// devlinux's device character and the qid bit it sets on its devices
-/// (src/kern/devlinux.c).
+/// (src/kern/dev/linux.zig).
 pub const devlinux_dc: u16 = 'L';
 pub const devlinux_chr_bit: u64 = 1 << 40;
 
@@ -2804,12 +2811,43 @@ fn putStat(p: *Process, buf: u64, st_in: *const attr.Stat, fmt: StatFmt) Err!voi
     }
 }
 
+/// What a device's getattr adds to a Stat built from a Dir: the link
+/// count, the change time, and nanoseconds (design/file-interface.md).
+fn withAttr(st: *attr.Stat, a: *const kern.Attr) void {
+    const A = kern.Attr;
+    if (a.valid & A.nlink_bit != 0) st.nlink = @truncate(a.nlink);
+    if (a.valid & A.atime_bit != 0 and a.atime == st.atime) st.atime_ns = nanos(a.atimens);
+    if (a.valid & A.mtime_bit != 0 and a.mtime == st.mtime) st.mtime_ns = nanos(a.mtimens);
+    if (a.valid & A.ctime_bit != 0) {
+        st.ctime = @intCast(std.math.clamp(a.ctime, 0, std.math.maxInt(u32)));
+        st.ctime_ns = nanos(a.ctimens);
+    }
+}
+
+fn nanos(ns: i64) u32 {
+    return @intCast(std.math.clamp(ns, 0, std.time.ns_per_s - 1));
+}
+
+/// path's Dir into b, and its attributes into a, acting on a link in its
+/// last name if nofollow, as lstat does.
+fn getattrAt(dirfd: i32, path: [:0]const u8, nofollow: bool, a: *kern.Attr, b: []u8) kern.Error!usize {
+    return at(dirfd, path, usize, kern.getattr, .{ path, nofollow, a, b });
+}
+
+/// path's Dir, acting on a link in its last name.
+fn lstatAt(dirfd: i32, path: [:0]const u8, b: []u8) kern.Error!usize {
+    var a: kern.Attr = .{};
+    return getattrAt(dirfd, path, true, &a, b);
+}
+
 fn statFd(p: *Process, fd: i32, buf: u64, fmt: StatFmt) Err!i64 {
     if (fd < 0) return -E.BADF;
     var b: [1024]u8 = undefined;
-    const n = kern.fstat(@intCast(fd), &b) catch return kerr();
+    var a: kern.Attr = .{};
+    const n = kern.fgetattr(@intCast(fd), &a, &b) catch return kerr();
     const d, _ = attr.Dir.parse(b[0..n]) orelse return -E.IO;
     var st = attr.Stat.fromDir(&d, kindOfDir(&d), 0, 0);
+    withAttr(&st, &a);
     if (d.type == pty_dc and d.qid_type & 0x80 == 0) st.rdev = ptyRdev(d.qid_path);
     // A pipe end's Dir is its directory's in some kernels; trust the fd.
     if (kc.fdInfo(fd)) |info| {
@@ -2829,6 +2867,7 @@ fn statAt(p: *Process, dirfd: i32, path_va: u64, buf: u64, flags: u32, fmt: Stat
     // design/epoch-0/linux-symlinks.md), which kindOfDir makes S_IFLNK. /proc's
     // links are the Linux layer's (procLink), so they're made here.
     var b: [1024]u8 = undefined;
+    var a: kern.Attr = .{};
     if (flags & AT_SYMLINK_NOFOLLOW != 0 and path[0] == '/') if (procLink(p, path)) |target| {
         const n = at(dirfd, path, usize, kern.stat, .{ path, &b }) catch return kerr();
         const d, _ = attr.Dir.parse(b[0..n]) orelse return -E.IO;
@@ -2840,11 +2879,12 @@ fn statAt(p: *Process, dirfd: i32, path_va: u64, buf: u64, flags: u32, fmt: Stat
     var exe_buf: [256 + 1]u8 = undefined;
     const fpath = if (flags & AT_SYMLINK_NOFOLLOW == 0 and path[0] == '/') procExe(p, path, &exe_buf) orelse path else path;
     const n = (if (flags & AT_SYMLINK_NOFOLLOW != 0)
-        atNoFollow(dirfd, path, usize, kern.stat, .{ path, &b })
+        getattrAt(dirfd, path, true, &a, &b)
     else
-        at(dirfd, fpath, usize, kern.stat, .{ fpath, &b })) catch return kerr();
+        getattrAt(dirfd, fpath, false, &a, &b)) catch return kerr();
     const d, _ = attr.Dir.parse(b[0..n]) orelse return -E.IO;
     var st = attr.Stat.fromDir(&d, kindOfDir(&d), 0, 0);
+    withAttr(&st, &a);
     if (d.type == pty_dc and d.qid_type & 0x80 == 0) st.rdev = ptyRdev(d.qid_path);
     try putStat(p, buf, &st, fmt);
     return 0;
@@ -2893,7 +2933,7 @@ fn unlink(p: *Process, dirfd: i32, path_va: u64, flags: u32) Err!i64 {
     // A link is removed itself, whatever it points at: one walk that
     // stops at a link says what's there, or that nothing is.
     var b: [512]u8 = undefined;
-    const n = atNoFollow(dirfd, path, usize, kern.stat, .{ path, &b }) catch
+    const n = lstatAt(dirfd, path, &b) catch
         return if (flags & AT_REMOVEDIR != 0) -E.NOENT else kerr();
     const d, _ = attr.Dir.parse(b[0..n]) orelse return -E.IO;
     const is_link = d.mode & DMSYMLINK != 0 and d.mode & DMDIR == 0;
@@ -2913,28 +2953,29 @@ fn statExists(dirfd: i32, path: [:0]const u8) bool {
 /// Whether anything is at path, a link (even a dangling one) included.
 fn lexists(dirfd: i32, path: [:0]const u8) bool {
     var b: [512]u8 = undefined;
-    _ = atNoFollow(dirfd, path, usize, kern.stat, .{ path, &b }) catch return false;
+    _ = lstatAt(dirfd, path, &b) catch return false;
     return true;
 }
 
 /// Whether path is a directory itself, not a link to one.
 fn isLdir(dirfd: i32, path: [:0]const u8) bool {
     var b: [512]u8 = undefined;
-    const n = atNoFollow(dirfd, path, usize, kern.stat, .{ path, &b }) catch return false;
+    const n = lstatAt(dirfd, path, &b) catch return false;
     const d, _ = attr.Dir.parse(b[0..n]) orelse return false;
     return d.mode & DMDIR != 0;
 }
 
-/// fsync and fdatasync: a wstat that changes nothing, which a host file
-/// system serves with the host's fsync of the file or directory
-/// (third_party/drawterm/kern/devfs-*.c). Databases fsync a directory
-/// to make a rename or a create in it durable. Devices that don't keep
-/// data, and 9P servers that refuse it, have nothing to sync.
-fn fsync(fd: i32) i64 {
+/// fsync and fdatasync: the device's fsync (design/file-interface.md,
+/// Part 3), a Tfsync on a .L mount, and elsewhere a wstat that changes
+/// nothing, which a host file system serves with the host's fsync of
+/// the file or directory (third_party/drawterm/kern/devfs-*.c).
+/// Databases fsync a directory to make a rename or a create in it
+/// durable. Devices that don't keep data, and 9P servers that refuse
+/// it, have nothing to sync.
+fn fsync(fd: i32, datasync: bool) i64 {
     if (fd < 0) return -E.BADF;
     const info = kc.fdInfo(fd) catch return -E.BADF;
-    var b: [64]u8 = undefined;
-    _ = kern.fwstat(@intCast(fd), (Wstat{}).encode(&b)) catch {
+    kern.fsync(@intCast(fd), datasync) catch {
         // devfs raises the host's error; anything else means no sync.
         return if (info.dc == 'U') -E.IO else 0;
     };
@@ -2953,11 +2994,11 @@ var sync_opened: std.atomic.Value(bool) = .init(false);
 fn synced(p: *Process, fd: i32, n: i64) i64 {
     if (n <= 0 or !sync_opened.load(.monotonic)) return n;
     if (!flagsOf(p, fd).dsync) return n;
-    const r = fsync(fd);
+    const r = fsync(fd, !flagsOf(p, fd).sync);
     return if (r < 0) r else n;
 }
 
-/// syncfs: the host file system behind fd's channel (src/kern/linux.c).
+/// syncfs: the host file system behind fd's channel (src/kern/linux.zig).
 fn syncfs(fd: i32) i64 {
     if (fd < 0) return -E.BADF;
     const info = kc.fdInfo(fd) catch return -E.BADF;
@@ -2996,105 +3037,74 @@ fn rename(p: *Process, olddir: i32, old_va: u64, newdir: i32, new_va: u64, flags
     const old = try pathArg(p, old_va, &p.name_buf);
     const new = try pathArg(p, new_va, &p.name2_buf);
     if (old.len == 0 or new.len == 0) return -E.NOENT;
-    // Plan 9 renames within a directory only (wstat of the name). A move
-    // between directories is the host's rename when both are in host
-    // trees, which replaces the target atomically, as Redis's AOF and
-    // other databases need, and a move in memory when both are in one
-    // overlay, as Zig's cache needs (its entries are made in tmp/ and
-    // renamed into place). Anywhere else, and for a directory still in an
-    // overlay's lower tree, it's EXDEV, and mv copies instead.
-    const od = dirname(old);
-    const nd = dirname(new);
-    if (!std.mem.eql(u8, od, nd) or olddir != newdir) {
-        const old_abs = old[0] == '/';
-        var new_abs = new[0] == '/';
-        // Both names must resolve from one place: a relative new name in
-        // another directory (Zig's cache renames from its tmp/ fd into
-        // o/'s) is joined to that directory's path.
-        var newbuf: [4096]u8 = undefined;
-        var new_full = new;
-        if (!new_abs and newdir != olddir) {
-            var db: [4096]u8 = undefined;
-            const d = if (newdir == AT_FDCWD) kc.getcwd(&db) catch return kerr() else blk: {
-                kern.fd2path(@intCast(@max(newdir, 0)), &db) catch return -E.BADF;
-                break :blk std.mem.sliceTo(&db, 0);
-            };
-            new_full = std.fmt.bufPrintSentinel(&newbuf, "{s}/{s}", .{ d, new }, 0) catch return -E.NAMETOOLONG;
-            new_abs = true;
-        }
-        const base: i32 = if (old_abs and new_abs) AT_FDCWD else if (!old_abs and new_abs) olddir else if (olddir == newdir) olddir else return -E.XDEV;
-        if (!lexists(olddir, old)) return -E.NOENT;
-        if (flags & RENAME_NOREPLACE != 0 and lexists(newdir, new_full)) return -E.EXIST;
-        if (lexists(newdir, new_full)) {
-            const new_dir = isLdir(newdir, new_full);
-            const old_dir = isLdir(olddir, old);
-            if (new_dir and !old_dir) return -E.ISDIR;
-            if (!new_dir and old_dir) return -E.NOTDIR;
-        }
-        const moved = at(base, old, bool, kern.renameAcross, .{ old, new_full }) catch return kerr();
-        return if (moved) 0 else -E.XDEV;
+    // The kernel's rename (design/file-interface.md): the device's own,
+    // which replaces the target at once, as Linux's does (a host tree's
+    // rename(2), a .L server's Trenameat, or an overlay's move in
+    // memory), and otherwise a wstat of the name within one directory,
+    // or EXDEV across directories, where mv copies instead. Redis's AOF
+    // and other databases need the replace to be atomic, and Zig's cache
+    // makes its entries in tmp/ and renames them into place.
+    const old_abs = old[0] == '/';
+    var new_abs = new[0] == '/';
+    // Both names must resolve from one place: a relative new name in
+    // another directory (Zig's cache renames from its tmp/ fd into o/'s)
+    // is joined to that directory's path.
+    var newbuf: [4096]u8 = undefined;
+    var new_full = new;
+    if (!new_abs and newdir != olddir) {
+        var db: [4096]u8 = undefined;
+        const d = if (newdir == AT_FDCWD) kc.getcwd(&db) catch return kerr() else blk: {
+            kern.fd2path(@intCast(@max(newdir, 0)), &db) catch return -E.BADF;
+            break :blk std.mem.sliceTo(&db, 0);
+        };
+        new_full = std.fmt.bufPrintSentinel(&newbuf, "{s}/{s}", .{ d, new }, 0) catch return -E.NAMETOOLONG;
+        new_abs = true;
     }
+    const base: i32 = if (old_abs and new_abs) AT_FDCWD else if (!old_abs and new_abs) olddir else if (olddir == newdir) olddir else return -E.XDEV;
     if (!lexists(olddir, old)) return -E.NOENT;
-    if (std.mem.eql(u8, old, new)) return 0;
-    if (lexists(newdir, new)) {
+    if (olddir == newdir and std.mem.eql(u8, old, new)) return 0;
+    if (lexists(newdir, new_full)) {
         if (flags & RENAME_NOREPLACE != 0) return -E.EXIST;
-        const new_dir = isLdir(newdir, new);
+        const new_dir = isLdir(newdir, new_full);
         const old_dir = isLdir(olddir, old);
         if (new_dir and !old_dir) return -E.ISDIR;
         if (!new_dir and old_dir) return -E.NOTDIR;
-        // In a host tree or an overlay, the host's or the overlay's own
-        // rename replaces the target at once, as Linux's does. Removing it
-        // and renaming over the gap raced: two renames onto one name (two
-        // Zig compiles writing one cache file) failed with EEXIST or
-        // ENOENT, or ENOTEMPTY on macOS.
-        if (at(olddir, old, bool, kern.renameAcross, .{ old, new }) catch false) return 0;
-        at(newdir, new, void, kern.remove, .{new}) catch return kerr();
     }
-    var b: [600]u8 = undefined;
-    const base = basename(new);
-    if (base.len > 512) return -E.NAMETOOLONG;
-    const msg = (Wstat{ .name = base }).encode(&b);
-    _ = atNoFollow(olddir, old, usize, kern.wstat, .{ old, msg }) catch return kerr();
+    if (basename(new_full).len > 512) return -E.NAMETOOLONG;
+    at(base, old, void, kern.rename, .{ old, new_full }) catch return kerr();
     return 0;
 }
 
-/// 9P has no hard links, so a link to a regular file is a copy, made
-/// with an exclusive create: the "create if absent" that programs use
-/// `link` for (object_store's put-if-not-exists, lock files) holds, but
-/// the two names don't share later writes.
+/// The kernel's link (design/file-interface.md): a second name for the
+/// file where its device has links (a host tree, or a .L server), and
+/// otherwise a copy made with an exclusive create, so the "create if
+/// absent" that programs use `link` for (object_store's
+/// put-if-not-exists, lock files) holds, though the two names don't
+/// share later writes.
 fn link(p: *Process, olddir: i32, old_va: u64, newdir: i32, new_va: u64, flags: u32) Err!i64 {
     const AT_SYMLINK_FOLLOW = 0x400;
     if (flags & ~@as(u32, AT_SYMLINK_FOLLOW) != 0) return -E.INVAL;
     const old = try pathArg(p, old_va, &p.name_buf);
     const new = try pathArg(p, new_va, &p.name2_buf);
     if (old.len == 0 or new.len == 0) return -E.NOENT;
-    var sb: [512]u8 = undefined;
-    const sn = at(olddir, old, usize, kern.stat, .{ old, &sb }) catch return kerr();
-    const d, _ = attr.Dir.parse(sb[0..sn]) orelse return -E.IO;
-    if (d.mode & DMDIR != 0) return -E.PERM;
-    if (statExists(newdir, new)) return -E.EXIST;
-    const in = at(olddir, old, u31, kern.open, .{ old, kern.OREAD }) catch return kerr();
-    defer kern.close(in) catch {};
-    const OEXCL = 0x1000;
-    const out = at(newdir, new, u31, kern.create, .{ new, kern.OWRITE | OEXCL, d.mode & 0o777 }) catch {
-        return if (statExists(newdir, new)) -E.EXIST else kerr();
-    };
-    var buf: [16 << 10]u8 = undefined;
-    var off: i64 = 0;
-    const ok = while (true) {
-        const n = kern.pread(in, &buf, off) catch break false;
-        if (n == 0) break true;
-        var w: usize = 0;
-        while (w < n) w += kern.pwrite(out, buf[w..n], off + @as(i64, @intCast(w))) catch break;
-        if (w < n) break false;
-        off += @intCast(n);
-    };
-    kern.close(out) catch {};
-    if (!ok) {
-        const e = kerr();
-        at(newdir, new, void, kern.remove, .{new}) catch {};
-        return e;
+    if (!lexists(olddir, old)) return -E.NOENT;
+    if (isLdir(olddir, old)) return -E.PERM;
+    if (lexists(newdir, new)) return -E.EXIST;
+    // Both names from one place, as rename's.
+    var newbuf: [4096]u8 = undefined;
+    var new_full = new;
+    if (new[0] != '/' and newdir != olddir) {
+        var db: [4096]u8 = undefined;
+        const d = if (newdir == AT_FDCWD) kc.getcwd(&db) catch return kerr() else blk: {
+            kern.fd2path(@intCast(@max(newdir, 0)), &db) catch return -E.BADF;
+            break :blk std.mem.sliceTo(&db, 0);
+        };
+        new_full = std.fmt.bufPrintSentinel(&newbuf, "{s}/{s}", .{ d, new }, 0) catch return -E.NAMETOOLONG;
     }
+    const base: i32 = if (old[0] == '/' and new_full[0] == '/') AT_FDCWD else if (new_full[0] == '/' or olddir == newdir) olddir else return -E.XDEV;
+    at(base, old, void, kern.link, .{ old, new_full, flags & AT_SYMLINK_FOLLOW != 0 }) catch {
+        return if (lexists(newdir, new)) -E.EXIST else kerr();
+    };
     return 0;
 }
 
@@ -3124,8 +3134,10 @@ fn mknod(p: *Process, dirfd: i32, path_va: u64, mode: u32) Err!i64 {
     return 0;
 }
 
-/// A link in an overlay is kept in memory; in a host tree it's a host
-/// symlink, the new name checked like a create (design/epoch-0/linux-personality.md).
+/// The kernel's symlink, by the new name's directory's device
+/// (design/file-interface.md): in memory in an overlay, a host symlink
+/// in a host tree, the new name checked like a create, and a Tsymlink on
+/// a 9P2000.L server.
 fn symlink(p: *Process, target_va: u64, newdir: i32, new_va: u64) Err!i64 {
     const target = try pathArg(p, target_va, &p.name2_buf);
     if (target.len == 0) return -E.NOENT;
@@ -3137,12 +3149,6 @@ fn symlink(p: *Process, target_va: u64, newdir: i32, new_va: u64) Err!i64 {
     if (at(newdir, new, []u8, kern.readlink, .{ new, &lb })) |_| return -E.EXIST else |_| {}
     at(newdir, new, void, kern.symlink, .{ new, target }) catch return kerr();
     return 0;
-}
-
-fn dirname(path: []const u8) []const u8 {
-    const t = std.mem.trimEnd(u8, path, "/");
-    const i = std.mem.lastIndexOfScalar(u8, t, '/') orelse return ".";
-    return if (i == 0) "/" else t[0..i];
 }
 
 fn basename(path: []const u8) []const u8 {
@@ -3157,8 +3163,7 @@ fn chmodFd(p: *Process, fd: i32, mode: u32) Err!i64 {
     var b: [1024]u8 = undefined;
     const n = kern.fstat(@intCast(fd), &b) catch return kerr();
     const d, _ = attr.Dir.parse(b[0..n]) orelse return -E.IO;
-    var w: [64]u8 = undefined;
-    _ = kern.fwstat(@intCast(fd), (Wstat{ .mode = (d.mode & ~@as(u32, 0o777)) | (mode & 0o777) }).encode(&w)) catch return kerr();
+    kern.fsetattr(@intCast(fd), kern.Attr.mode_bit, &.{ .mode = (d.mode & ~@as(u32, 0o777)) | (mode & 0o777) }) catch return kerr();
     return 0;
 }
 
@@ -3168,50 +3173,55 @@ fn chmodAt(p: *Process, dirfd: i32, path_va: u64, mode: u32) Err!i64 {
     var b: [1024]u8 = undefined;
     const n = at(dirfd, path, usize, kern.stat, .{ path, &b }) catch return kerr();
     const d, _ = attr.Dir.parse(b[0..n]) orelse return -E.IO;
-    var w: [64]u8 = undefined;
-    _ = at(dirfd, path, usize, kern.wstat, .{ path, (Wstat{ .mode = (d.mode & ~@as(u32, 0o777)) | (mode & 0o777) }).encode(&w) }) catch return kerr();
+    const a: kern.Attr = .{ .mode = (d.mode & ~@as(u32, 0o777)) | (mode & 0o777) };
+    at(dirfd, path, void, kern.setattr, .{ path, kern.Attr.mode_bit, &a }) catch return kerr();
     return 0;
 }
 
 fn utimens(p: *Process, dirfd: i32, path_va: u64, times: u64) Err!i64 {
     const UTIME_NOW = (1 << 30) - 1;
     const UTIME_OMIT = (1 << 30) - 2;
-    const now: u32 = @intCast(@divTrunc(kern.wallNs(), std.time.ns_per_s));
-    var ws: Wstat = .{ .atime = now, .mtime = now };
+    // The device's setattr: a .L mount takes the nanoseconds, and the
+    // default wstat whole seconds.
+    var a: kern.Attr = .{ .atimens = kern.now_ns, .mtimens = kern.now_ns };
+    var mask: u64 = kern.Attr.atime_bit | kern.Attr.mtime_bit;
     if (times != 0) {
         var b: [32]u8 = undefined;
         // Two timespecs, 32-bit for i386's utimensat (not _time64).
         const t32 = p.is32() and p.time32;
         try p.readMem(times, if (t32) b[0..16] else &b);
-        const fields = [2]*?u32{ &ws.atime, &ws.mtime };
+        const fields = [2]struct { *i64, *i64, u64 }{ .{ &a.atime, &a.atimens, kern.Attr.atime_bit }, .{ &a.mtime, &a.mtimens, kern.Attr.mtime_bit } };
         for (fields, 0..) |f, i| {
             const sec: i64 = if (t32) std.mem.readInt(i32, b[i * 8 ..][0..4], .little) else std.mem.readInt(i64, b[i * 16 ..][0..8], .little);
             const nsec: i64 = if (t32) std.mem.readInt(i32, b[i * 8 + 4 ..][0..4], .little) else std.mem.readInt(i64, b[i * 16 + 8 ..][0..8], .little);
-            f.* = if (nsec == UTIME_OMIT) null else if (nsec == UTIME_NOW) now else @intCast(std.math.clamp(sec, 0, std.math.maxInt(u32) - 1));
+            if (nsec == UTIME_OMIT) {
+                mask &= ~f[2];
+            } else if (nsec != UTIME_NOW) {
+                f[0].* = std.math.clamp(sec, 0, std.math.maxInt(u32) - 1);
+                f[1].* = std.math.clamp(nsec, 0, std.time.ns_per_s - 1);
+            }
         }
     }
-    var w: [64]u8 = undefined;
-    const msg = ws.encode(&w);
+    if (mask == 0) return 0;
     if (path_va == 0) {
         if (dirfd < 0) return -E.BADF;
-        _ = kern.fwstat(@intCast(dirfd), msg) catch return kerr();
+        kern.fsetattr(@intCast(dirfd), mask, &a) catch return kerr();
         return 0;
     }
     const path = try pathArg(p, path_va, &p.name_buf);
     if (path.len == 0) {
         if (dirfd < 0) return -E.NOENT;
-        _ = kern.fwstat(@intCast(dirfd), msg) catch return kerr();
+        kern.fsetattr(@intCast(dirfd), mask, &a) catch return kerr();
         return 0;
     }
-    _ = at(dirfd, path, usize, kern.wstat, .{ path, msg }) catch return kerr();
+    at(dirfd, path, void, kern.setattr, .{ path, mask, &a }) catch return kerr();
     return 0;
 }
 
 fn truncateFd(p: *Process, fd: i32, len: u64) Err!i64 {
     _ = p;
     if (fd < 0) return -E.BADF;
-    var w: [64]u8 = undefined;
-    _ = kern.fwstat(@intCast(fd), (Wstat{ .length = len }).encode(&w)) catch return kerr();
+    kern.fsetattr(@intCast(fd), kern.Attr.size_bit, &.{ .size = len }) catch return kerr();
     _ = file_writes.fetchAdd(1, .monotonic);
     if (fileKey(fd)) |k| {
         shmfile.truncated(k, len);
@@ -3247,8 +3257,7 @@ fn truncatePath(p: *Process, path_va: u64, len: u64) Err!i64 {
         defer kern.close(fd) catch {};
         if (busy.has(fd)) return -E.TXTBSY;
     } else |_| {};
-    var w: [64]u8 = undefined;
-    _ = kern.wstat(path, (Wstat{ .length = len }).encode(&w)) catch return kerr();
+    kern.setattr(path, kern.Attr.size_bit, &.{ .size = len }) catch return kerr();
     _ = file_writes.fetchAdd(1, .monotonic);
     return 0;
 }
@@ -3474,7 +3483,7 @@ fn defaultTermios() [60]u8 {
     return b;
 }
 
-// Pseudoterminals (design/epoch-0/linux-pty.md): #τ, src/kern/devpty.c, keeps
+// Pseudoterminals (design/epoch-0/linux-pty.md): #τ, src/kern/dev/pty.zig, keeps
 // each pair's queues and state, and applies its termios as a line
 // discipline; the ioctls are served here from it, and VMIN 0 reads.
 
@@ -4176,13 +4185,13 @@ pub const LazyFile = struct {
 fn mmap(p: *Process, addr: u64, len_in: u64, prot_bits: u32, flags: u32, fd: i32, off: u64) Err!i64 {
     if (len_in == 0) return -E.INVAL;
     const len = std.mem.alignForward(u64, len_in, page);
-    const top = p.mm.lay.user_top;
+    const top = mm.layout(p.mm).user_top;
     if (len > top or len < len_in) return -E.NOMEM;
     if (off % page != 0) return -E.INVAL;
     const shared = flags & 3 == MAP_SHARED or flags & 3 == 3;
     if (flags & 3 == 0) return -E.INVAL;
     const anon = flags & MAP_ANONYMOUS != 0;
-    const prot: mm.Prot = .fromLinux(prot_bits);
+    const prot = mm.protFromLinux(prot_bits);
     var info: ?kc.FdInfo = null;
     if (!anon) {
         if (fd < 0) return -E.BADF;
@@ -4216,7 +4225,7 @@ fn mmap(p: *Process, addr: u64, len_in: u64, prot_bits: u32, flags: u32, fd: i32
         if (hint >= mm.min_addr and hint < top and len <= top - hint and !shared and p.mm.isFree(hint, hint + len)) {
             start = hint;
         } else {
-            const at_ = p.mm.findFree(span + if (placed) mm.chunk_size else 0) orelse return -E.NOMEM;
+            const at_ = mm.findFree(p.mm, span + if (placed) mm.chunk_size else 0) orelse return -E.NOMEM;
             start = if (placed) std.mem.alignForward(u64, at_, mm.chunk_size) + delta else at_;
         }
     }
@@ -4339,7 +4348,7 @@ fn shmat(p: *Process, id: i32, addr: u64, flags: u32) i64 {
         start = if (flags & SHM_RND != 0) std.mem.alignBackward(u64, addr, mm.chunk_size) else addr;
         if (start % mm.chunk_size != 0) return -E.INVAL;
     } else {
-        const at_ = p.mm.findFree(len + 2 * mm.chunk_size) orelse return -E.NOMEM;
+        const at_ = mm.findFree(p.mm, len + 2 * mm.chunk_size) orelse return -E.NOMEM;
         start = std.mem.alignForward(u64, at_, mm.chunk_size);
     }
     var v: mm.Vma = .{ .start = start, .end = start + len, .prot = if (flags & SHM_RDONLY != 0) .{ .read = true } else .rw, .shared = true, .kind = .shm, .offset = @intCast(id) };
@@ -4450,7 +4459,7 @@ fn mremap(p: *Process, old: u64, old_len_in: u64, new_len_in: u64, flags: u32, n
         return @intCast(old);
     }
     // Grow in place when the space after it is free.
-    if (old + old_len == vma.end and p.mm.isFree(old + old_len, old + new_len) and old + new_len <= p.mm.lay.user_top) {
+    if (old + old_len == vma.end and p.mm.isFree(old + old_len, old + new_len) and old + new_len <= mm.layout(p.mm).user_top) {
         var ext = vma;
         ext.start = old + old_len;
         ext.end = old + new_len;
@@ -4460,7 +4469,7 @@ fn mremap(p: *Process, old: u64, old_len_in: u64, new_len_in: u64, flags: u32, n
     }
     if (flags & MREMAP_MAYMOVE == 0) return -E.NOMEM;
     _ = new_addr;
-    const dst = p.mm.findFree(new_len) orelse return -E.NOMEM;
+    const dst = mm.findFree(p.mm, new_len) orelse return -E.NOMEM;
     var nv = vma;
     nv.start = dst;
     nv.end = dst + new_len;
@@ -4845,7 +4854,7 @@ fn rlimit(p: *Process, res: u32) ?[2]u64 {
     const RLIMIT_NOFILE = 7;
     const RLIMIT_AS = 9;
     return switch (res) {
-        RLIMIT_STACK => .{ p.mm.lay.stack_size, inf },
+        RLIMIT_STACK => .{ mm.layout(p.mm).stack_size, inf },
         RLIMIT_NOFILE => .{ 1024, 1024 },
         RLIMIT_AS => .{ if (p.mem_limit > 0) p.mem_limit else inf, if (p.mem_limit > 0) p.mem_limit else inf },
         else => if (res < 16) .{ inf, inf } else null,
@@ -4893,7 +4902,7 @@ fn frameCheck(p: *Process, u: *engine.Ureg, x: *engine.Extra, f: sig.Frame) !voi
 // they do for 9front programs. What Linux needs beyond the files goes
 // through control messages (connect, nbconnect, announce, shutdown,
 // sockopt) or straight to the host socket (recvfrom and sendto with
-// flags and addresses, SO_ERROR), in src/kern/linuxnet.c.
+// flags and addresses, SO_ERROR), in src/kern/linuxnet.zig.
 
 const AF_UNSPEC = 0;
 const AF_UNIX = 1;
@@ -4928,7 +4937,7 @@ const TCP_KEEPINTVL = 5;
 const TCP_KEEPCNT = 6;
 const IPV6_V6ONLY = 26;
 
-/// devip's data file type, and its protocols' indexes (kern/devip.c).
+/// devip's data file type, and its protocols' indexes (src/host/devip.zig).
 const ip_qdata = 7;
 const ip_udp = 0;
 const ip_tcp = 1;
@@ -4979,7 +4988,8 @@ fn convOf(fd: i32) ?u32 {
 }
 
 /// The bit that marks a conversation from a /net mounted from another
-/// machine (devmnt's, not devip's), which src/kern/linuxnet.c reads ahead.
+/// machine (devmnt's, not devip's), whose readiness its server says
+/// (design/file-interface.md).
 const conv_remote: u32 = 1 << 30;
 
 fn protoOf(conv: u32) u32 {
@@ -5036,18 +5046,17 @@ fn netErr() i64 {
 
 /// Opens a new conversation's data file for socket(2) and accept(2):
 /// `clone` is a clone or listen file, opened for its new ctl, in the
-/// 9front view's /net or devip's. A conversation from a mounted /net is
-/// attached to the kernel's read-ahead; `accepted` says it's connected.
+/// 9front view's /net or devip's.
 const ConvOpened = union(enum) { fd: u31, err: i64 };
 
-fn openConv(p: *Process, clone: [:0]const u8, proto: u32, cloexec: bool, accepted: bool) Err!ConvOpened {
+fn openConv(p: *Process, clone: [:0]const u8, proto: u32, cloexec: bool) Err!ConvOpened {
     _ = p;
     const ctl = (if (clone[0] == '/') open9(clone, kern.ORDWR) else kern.open(clone, kern.ORDWR)) catch return .{ .err = netErr() };
-    return convFromCtl(ctl, proto, cloexec, accepted);
+    return convFromCtl(ctl, proto, cloexec);
 }
 
 /// openConv's rest, from the new conversation's ctl, which it closes.
-fn convFromCtl(ctl: u31, proto: u32, cloexec: bool, accepted: bool) ConvOpened {
+fn convFromCtl(ctl: u31, proto: u32, cloexec: bool) ConvOpened {
     defer kern.close(ctl) catch {};
     var b: [16]u8 = undefined;
     const n = kern.pread(ctl, &b, 0) catch return .{ .err = kerr() };
@@ -5055,10 +5064,6 @@ fn convFromCtl(ctl: u31, proto: u32, cloexec: bool, accepted: bool) ConvOpened {
     const remote = if (kc.fdInfo(ctl)) |info| info.dc == 'M' else |_| false;
     const conv = proto << 12 | num | if (remote) conv_remote else 0;
     const fd = convOpen(conv, "data", kern.ORDWR | if (cloexec) @as(c_int, OCEXEC) else 0) catch return .{ .err = kerr() };
-    if (remote) kc.rattach(fd, ctl, conv, proto == ip_udp, accepted) catch {
-        kern.close(fd) catch {};
-        return .{ .err = kerr() };
-    };
     return .{ .fd = fd };
 }
 
@@ -5079,7 +5084,7 @@ fn socketCall(p: *Process, domain: u32, type_in: u32, protocol: u32) Err!i64 {
     // Through the namespace, as dial(2) goes: /net is devip's unless
     // something else is mounted there, such as another machine's /net.
     const clone: [:0]const u8 = if (proto == ip_tcp) "/net/tcp/clone" else "/net/udp/clone";
-    const fd = switch (try openConv(p, clone, proto, type_in & SOCK_CLOEXEC != 0, false)) {
+    const fd = switch (try openConv(p, clone, proto, type_in & SOCK_CLOEXEC != 0)) {
         .fd => |f| f,
         .err => |e| return e,
     };
@@ -5308,19 +5313,13 @@ fn acceptCall(p: *Process, fd: i32, addr: u64, lenp: u64, flags: u32) Err!i64 {
         if (w < 0) return w;
     }
     var b: [64]u8 = undefined;
-    const listen = std.fmt.bufPrintSentinel(&b, "#I/{s}/{d}/listen", .{ protoName(conv), conv & 0xfff }, 0) catch unreachable;
-    // A mounted conversation's call was taken by the kernel's listener,
-    // which made it ready; devip's is opened here.
-    const opened = if (conv & conv_remote != 0) blk: {
-        const r = while (true) {
-            const r = kc.raccept(fd, false);
-            if (r != -E.AGAIN or flagsOf(p, fd).nonblock) break r;
-            const w = waitReady(fd, kc.POLLIN);
-            if (w < 0) return w;
-        };
-        if (r < 0) return r;
-        break :blk convFromCtl(@intCast(r), protoOf(conv), flags & SOCK_CLOEXEC != 0, true);
-    } else try openConv(p, listen, protoOf(conv), flags & SOCK_CLOEXEC != 0, true);
+    // A mounted conversation's listen is its server's, in the 9front
+    // view's /net, which says it's readable once a call waits.
+    const listen = if (conv & conv_remote != 0)
+        std.fmt.bufPrintSentinel(&b, "/net/{s}/{d}/listen", .{ protoName(conv), conv & 0xfff }, 0) catch unreachable
+    else
+        std.fmt.bufPrintSentinel(&b, "#I/{s}/{d}/listen", .{ protoName(conv), conv & 0xfff }, 0) catch unreachable;
+    const opened = try openConv(p, listen, protoOf(conv), flags & SOCK_CLOEXEC != 0);
     const nfd = switch (opened) {
         .fd => |f| f,
         .err => |e| return e,
@@ -5356,6 +5355,12 @@ fn sockName(p: *Process, fd: i32, va: u64, lenp: u64, peer: bool) Err!i64 {
     var rb: [128]u8 = undefined;
     const t = convRead(so.conv, if (peer) "remote" else "local", &rb) orelse return -E.IO;
     var a = parseAddrText(t);
+    // A conversation redirected to the machine's resolver gives the
+    // address it was dialled with (design/linux-dns.md).
+    if (peer and so.conv & conv_remote == 0 and isV4(&a.ip) and a.ip[12] == 127) {
+        var lb: [128]u8 = undefined;
+        if (convRead(so.conv, "local", &lb)) |lt| _ = kern.dnsPeer(if (protoOf(so.conv) == ip_udp) .udp else .tcp, parseAddrText(lt).port, &a.ip, &a.port);
+    }
     // A stream socket bound but not yet listening or connected hasn't
     // announced, so its conversation has no local address: answer with
     // the one bind kept, as Kestrel reads it back between bind and listen.
@@ -5548,6 +5553,7 @@ fn sendCall(p: *Process, fd: i32, buf_va: u64, len_in: u64, flags: u32, to_va: u
 
 fn sendBuf(p: *Process, fd: i32, s: *Sock, data: []const u8, flags: u32, to_va: u64, to_len: u64) Err!i64 {
     var to: ?kc.NetAddr = null;
+    var implicit = false;
     if (to_va != 0 and s.stype == SOCK_DGRAM) {
         to = switch (try readSockaddr(p, to_va, to_len)) {
             .addr => |a| a,
@@ -5564,6 +5570,7 @@ fn sendBuf(p: *Process, fd: i32, s: *Sock, data: []const u8, flags: u32, to_va: 
             s.connected = true;
             s.peer = to;
             to = null;
+            implicit = true;
         } else if (to != null and s.connected) {
             if (s.peer) |pa| if (std.meta.eql(pa, to.?)) {
                 to = null;
@@ -5578,6 +5585,13 @@ fn sendBuf(p: *Process, fd: i32, s: *Sock, data: []const u8, flags: u32, to_va: 
         }
         const r = kc.sockSend(fd, data, true, if (to) |*t| t else null);
         if (r == -E.AGAIN and !dontwait) continue;
+        // The connect above may have been allowed only as a route probe
+        // (design/linux-dns.md), which can't send: the socket isn't the
+        // program's connected one, so its next sendto connects again.
+        if (r == -E.ACCES and implicit) {
+            s.connected = false;
+            s.peer = null;
+        }
         if (r == -E.PIPE and flags & MSG_NOSIGNAL == 0) _ = p.host.kill(p.host.ctx, p, p.pid, sig.SIGPIPE, .{});
         return r;
     }
@@ -6715,7 +6729,7 @@ fn selectCall(p: *Process, s: Sys, c: Call) Err!i64 {
     return ready;
 }
 
-// eventfd and epoll, on #ε instances (src/kern/linuxnet.c).
+// eventfd and epoll, on #ε instances (src/kern/dev/eventfd.zig).
 
 const EFD_SEMAPHORE = 1;
 const ev_dc: u21 = 0x3b5; // 'ε'
@@ -6848,8 +6862,11 @@ pub const EpEntry = struct {
     fd: i32,
     events: u32,
     data: u64,
-    /// The wake generation of the last report, for EPOLLET.
+    /// The generation of the fd's object at the last report
+    /// (kc.fdGen), for EPOLLET.
     last_gen: u64 = std.math.maxInt(u64),
+    /// The events that held when it was last looked at, for EPOLLET.
+    last_rev: u32 = 0,
     /// Reported once under EPOLLONESHOT; rearmed by EPOLL_CTL_MOD.
     disarmed: bool = false,
 };
@@ -6970,15 +6987,26 @@ fn epollWait(p: *Process, epfd: i32, events_va: u64, maxevents: i32, timeout_ms:
             defer p.g.lock.unlock();
             for (snap.items, 0..) |s, k| {
                 const rev: u32 = @as(u16, @bitCast(pf.items[k].revents));
-                if (rev == 0 or s.disarmed) continue;
+                if (s.disarmed or (rev == 0 and s.events & EPOLLET == 0)) continue;
                 // The live entry, unless another thread removed or changed it.
                 const e = for (ep.entries.items) |*e| {
                     if (e.fd == s.fd and e.events == s.events and e.data == s.data) break e;
                 } else continue;
                 if (e.disarmed) continue;
                 if (e.events & EPOLLET != 0) {
-                    if (e.last_gen == gen) continue;
-                    e.last_gen = gen;
+                    // An edge: a change to the fd's own object since the
+                    // last report (not to anything else, which would
+                    // report a socket still writable again), or an event
+                    // that didn't hold when this last looked (a remote
+                    // conversation's server changes it with no wake here
+                    // while nothing watches it).
+                    if (rev != 0 and out >= @as(usize, @intCast(maxevents))) break;
+                    const fresh = rev & ~e.last_rev;
+                    e.last_rev = rev;
+                    if (rev == 0) continue;
+                    const fg: u64 = kc.fdGen(e.fd);
+                    if (e.last_gen == fg and fresh == 0) continue;
+                    e.last_gen = fg;
                 }
                 if (out >= @as(usize, @intCast(maxevents))) break;
                 var b: [16]u8 = @splat(0);
@@ -7000,16 +7028,20 @@ fn epollWait(p: *Process, epfd: i32, events_va: u64, maxevents: i32, timeout_ms:
             ms = @divTrunc(left + std.time.ns_per_ms - 1, std.time.ns_per_ms);
         }
         // Sleep until something changes. An fd that's ready now but was
-        // reported edge-triggered is left out, so it doesn't end the wait
-        // at once; any wake ends it, and the loop asks again.
-        // An edge-triggered fd waits only for the events that aren't
-        // ready yet (a socket that can be written waits to be readable).
+        // reported edge-triggered is only watched (kc.POLLEDGE), so it
+        // doesn't end the wait at once; its next change ends it, and the
+        // loop asks again. An edge-triggered fd waits only for the
+        // events that aren't ready yet (a socket that can be written
+        // waits to be readable).
         var waiting: usize = 0;
         for (snap.items, 0..) |e, k| {
             if (e.disarmed) continue;
-            var want: u16 = @bitCast(pf.items[k].events);
-            if (e.events & EPOLLET != 0 and e.last_gen == gen) want &= ~@as(u16, @bitCast(pf.items[k].revents));
-            if (want == 0) continue;
+            const all: u16 = @bitCast(pf.items[k].events);
+            var want = all;
+            // An edge-triggered entry ready now wasn't reported (it would
+            // have returned), so it waits for what doesn't hold yet.
+            if (e.events & EPOLLET != 0) want &= ~@as(u16, @bitCast(pf.items[k].revents));
+            if (want == 0) want = all | kc.POLLEDGE;
             pf.items[waiting] = .{ .fd = e.fd, .events = @bitCast(want), .revents = 0 };
             waiting += 1;
         }

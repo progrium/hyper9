@@ -64,9 +64,12 @@ const syscall_arm64 = words(&.{
     0xd4000001, // svc  #0
 }) ++ "x".*;
 
+// The amd64 programs keep what they count in R14 and R15: a system call returns
+// with BX, DX, SI, DI, BP, and R8 to R13 zeroed, as 9front's does, so a
+// counter there starts again on every call and the loop never ends.
 const syscall_amd64 = [_]u8{
     0x48, 0x83, 0xec, 0x30, // subq  $0x30, %rsp
-    0x41, 0xbc, 0x40, 0x42, 0x0f, 0x00, // movl  $1000000, %r12d
+    0x41, 0xbf, 0x40, 0x42, 0x0f, 0x00, // movl  $1000000, %r15d
     // loop:
     0x48, 0xc7, 0x44, 0x24, 0x08, 0x01, 0x00, 0x00, 0x00, // movq  $1, 8(%rsp)       fd
     0x48, 0x8d, 0x05, 0x33, 0x00, 0x00, 0x00, // leaq  msg(%rip), %rax
@@ -75,7 +78,7 @@ const syscall_amd64 = [_]u8{
     0x48, 0xc7, 0x44, 0x24, 0x20, 0xff, 0xff, 0xff, 0xff, // movq  $-1, 32(%rsp)     offset
     0xbd, 0x33, 0x00, 0x00, 0x00, // movl  $51, %ebp          PWRITE
     0x0f, 0x05, // syscall
-    0x49, 0xff, 0xcc, // decq  %r12
+    0x49, 0xff, 0xcf, // decq  %r15
     0x75, 0xcd, // jne   loop
     0x48, 0xc7, 0x44, 0x24, 0x08, 0x00, 0x00, 0x00, 0x00, // movq  $0, 8(%rsp)       nil
     0xbd, 0x08, 0x00, 0x00, 0x00, // movl  $8, %ebp           EXITS
@@ -102,11 +105,11 @@ const nsec_arm64 = words(&.{
 
 const nsec_amd64 = [_]u8{
     0x48, 0x83, 0xec, 0x30, // subq  $0x30, %rsp
-    0x41, 0xbc, 0x40, 0x42, 0x0f, 0x00, // movl  $1000000, %r12d
+    0x41, 0xbf, 0x40, 0x42, 0x0f, 0x00, // movl  $1000000, %r15d
     // loop:
     0xbd, 0x35, 0x00, 0x00, 0x00, // movl  $53, %ebp          _NSEC
     0x0f, 0x05, // syscall
-    0x49, 0xff, 0xcc, // decq  %r12
+    0x49, 0xff, 0xcf, // decq  %r15
     0x75, 0xf4, // jne   loop
     0x48, 0xc7, 0x44, 0x24, 0x08, 0x00, 0x00, 0x00, 0x00, // movq  $0, 8(%rsp)       nil
     0xbd, 0x08, 0x00, 0x00, 0x00, // movl  $8, %ebp           EXITS
@@ -119,17 +122,17 @@ const nsec_amd64 = [_]u8{
 fn procsAmd64(comptime n: u8) [0x7e]u8 {
     var t = [_]u8{
         0x48, 0x81, 0xec, 0x30, 0x01, 0x00, 0x00, // subq  $0x130, %rsp
-        0x41, 0xbd, n - 1, 0x00, 0x00, 0x00, // movl  $n-1, %r13d       to fork
+        0x41, 0xbf, n - 1, 0x00, 0x00, 0x00, // movl  $n-1, %r15d       to fork
         0x41, 0xbe, 0x01, 0x00, 0x00, 0x00, // movl  $1, %r14d         the parent
         // fork:
-        0x45, 0x85, 0xed, // testl %r13d, %r13d
+        0x45, 0x85, 0xff, // testl %r15d, %r15d
         0x74, 0x1d, // je    work
         0x48, 0xc7, 0x44, 0x24, 0x08, 0x30, 0x00, 0x00, 0x00, // movq  $48, 8(%rsp)      RFPROC|RFMEM
         0xbd, 0x13, 0x00, 0x00, 0x00, // movl  $19, %ebp          RFORK
         0x0f, 0x05, // syscall
         0x48, 0x85, 0xc0, // testq %rax, %rax
         0x74, 0x05, // je    child
-        0x41, 0xff, 0xcd, // decl  %r13d
+        0x41, 0xff, 0xcf, // decl  %r15d
         0xeb, 0xe1, // jmp   fork
         // child:
         0x45, 0x31, 0xf6, // xorl  %r14d, %r14d
@@ -139,16 +142,16 @@ fn procsAmd64(comptime n: u8) [0x7e]u8 {
         0x75, 0xfb, // jne   .-3
         0x45, 0x85, 0xf6, // testl %r14d, %r14d
         0x74, 0x2a, // je    done
-        0x41, 0xbd, n - 1, 0x00, 0x00, 0x00, // movl  $n-1, %r13d       to await
+        0x41, 0xbf, n - 1, 0x00, 0x00, 0x00, // movl  $n-1, %r15d       to await
         // wait:
-        0x45, 0x85, 0xed, // testl %r13d, %r13d
+        0x45, 0x85, 0xff, // testl %r15d, %r15d
         0x74, 0x1f, // je    done
         0x48, 0x8d, 0x44, 0x24, 0x40, // leaq  0x40(%rsp), %rax
         0x48, 0x89, 0x44, 0x24, 0x08, // movq  %rax, 8(%rsp)     buf
         0x48, 0xc7, 0x44, 0x24, 0x10, 0x80, 0x00, 0x00, 0x00, // movq  $0x80, 16(%rsp)   n
         0xbd, 0x2f, 0x00, 0x00, 0x00, // movl  $47, %ebp          AWAIT
         0x0f, 0x05, // syscall
-        0x41, 0xff, 0xcd, // decl  %r13d
+        0x41, 0xff, 0xcf, // decl  %r15d
         0xeb, 0xdc, // jmp   wait
         // done:
         0x48, 0xc7, 0x44, 0x24, 0x08, 0x00, 0x00, 0x00, 0x00, // movq  $0, 8(%rsp)       nil
@@ -181,8 +184,20 @@ extern "c" fn bench_sieve() u32;
 extern "c" fn bench_md5() u32;
 extern "c" fn bench_qsort() u32;
 extern "c" fn bench_fp() u32;
-extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+/// Sets H9_HCPU_TIER for the next machine (hcpu reads it with getenv),
+/// or unsets it. Windows' C runtime has _putenv_s, where an empty value
+/// unsets, and no setenv.
+fn setTier(tier: ?[:0]const u8) void {
+    const name = "H9_HCPU_TIER";
+    if (comptime @import("builtin").os.tag == .windows) {
+        _ = crt._putenv_s(name, if (tier) |t| t.ptr else "");
+    } else if (tier) |t| _ = crt.setenv(name, t.ptr, 1) else _ = crt.unsetenv(name);
+}
+const crt = struct {
+    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+    extern "c" fn _putenv_s(name: [*:0]const u8, value: [*:0]const u8) c_int;
+};
 
 const Compute = struct {
     name: []const u8,
@@ -236,12 +251,17 @@ pub fn main(init: std.process.Init) !void {
     const w = &stdout.interface;
 
     var bad = false;
-    // zig build bench -- [compute | loop] [--repeat N]: the compute
-    // benchmarks only, or the loop rows only without T0; each timing the
-    // fastest of N runs (default 3).
+    // zig build bench -- [compute | loop | syscall] [--engine E] [--arch A]
+    // [--repeat N]: the compute benchmarks only, the loop rows only without
+    // T0, or the system call rows only (pwrite and nsec); --engine and
+    // --arch run one engine's or one architecture's rows only;
+    // each timing the fastest of N runs (default 3).
     const argv = try init.minimal.args.toSlice(init.arena.allocator());
     var compute_only = false;
     var loop_only = false;
+    var syscall_only = false;
+    var only_engine: ?engine.Choice = null;
+    var only_arch: ?aout.Arch = null;
     var repeat: usize = 3;
     var ai: usize = 1;
     while (ai < argv.len) : (ai += 1) {
@@ -249,19 +269,36 @@ pub fn main(init: std.process.Init) !void {
             compute_only = true;
         } else if (std.mem.eql(u8, argv[ai], "loop")) {
             loop_only = true;
+        } else if (std.mem.eql(u8, argv[ai], "syscall")) {
+            syscall_only = true;
+        } else if (std.mem.eql(u8, argv[ai], "--engine") and ai + 1 < argv.len) {
+            ai += 1;
+            only_engine = std.meta.stringToEnum(engine.Choice, argv[ai]) orelse {
+                std.debug.print("bench: no engine {s}\n", .{argv[ai]});
+                std.process.exit(2);
+            };
+        } else if (std.mem.eql(u8, argv[ai], "--arch") and ai + 1 < argv.len) {
+            ai += 1;
+            only_arch = std.meta.stringToEnum(aout.Arch, argv[ai]) orelse {
+                std.debug.print("bench: no arch {s}\n", .{argv[ai]});
+                std.process.exit(2);
+            };
         } else if (std.mem.eql(u8, argv[ai], "--repeat") and ai + 1 < argv.len) {
             ai += 1;
             repeat = @max(1, try std.fmt.parseUnsigned(usize, argv[ai], 10));
         } else {
-            std.debug.print("usage: bench [compute | loop] [--repeat N]\n", .{});
+            std.debug.print("usage: bench [compute | loop | syscall] [--engine E] [--arch A] [--repeat N]\n", .{});
             std.process.exit(2);
         }
     }
     if (!compute_only) try w.print("{s: <7} {s: <6} {s: <7} {s: >8}  {s}\n", .{ "case", "arch", "engine", "time", "rate" });
-    if (!compute_only) for (cases) |c| for ([_]engine.Choice{ .hvf, .kvm, .sud, .hcpu }) |kind| for (tiersOf(kind)) |tier| {
+    if (!compute_only) for (cases) |c| for ([_]engine.Choice{ .hvf, .kvm, .whp, .sud, .hcpu }) |kind| for (tiersOf(kind)) |tier| {
         if (loop_only and (!std.mem.eql(u8, c.name, "loop") or (tier != null and std.mem.eql(u8, tier.?, "t0")))) continue;
-        if (tier) |t| _ = setenv("H9_HCPU_TIER", t, 1) else _ = unsetenv("H9_HCPU_TIER");
-        defer _ = unsetenv("H9_HCPU_TIER");
+        if (syscall_only and !std.mem.eql(u8, c.name, "pwrite") and !std.mem.eql(u8, c.name, "nsec")) continue;
+        if (only_engine) |e| if (e != kind) continue;
+        if (only_arch) |a| if (a != c.arch) continue;
+        setTier(tier);
+        defer setTier(null);
         var ns: i96 = try runOne(gpa, io, kind, c) orelse continue;
         for (1..repeat) |_| ns = @min(ns, (try runOne(gpa, io, kind, c)).?);
         const s = @as(f64, @floatFromInt(ns)) / 1e9;
@@ -274,9 +311,9 @@ pub fn main(init: std.process.Init) !void {
             const n: f64 = if (std.mem.eql(u8, c.name, "procs4")) 4 else 1;
             try w.print("{d:.2} G instructions/s in all\n", .{n * 2 * procs_iters / s / 1e9});
         } else if (std.mem.eql(u8, c.name, "nsec")) {
-            try w.print("{d:.0} ns per system call\n", .{s * 1e9 / syscall_iters});
+            try w.print("{d:.1} ns per system call\n", .{s * 1e9 / syscall_iters});
         } else {
-            try w.print("{d:.2} µs per round trip\n", .{s * 1e6 / syscall_iters});
+            try w.print("{d:.3} µs per round trip\n", .{s * 1e6 / syscall_iters});
         }
         try w.flush();
     };
@@ -284,10 +321,10 @@ pub fn main(init: std.process.Init) !void {
 
     // The bare vCPU round trip: run returning .syscall and run again,
     // with no system call served (SVC or SYSCALL, and a branch back).
-    if (loop_only) return w.flush();
+    if (loop_only or syscall_only) return w.flush();
     if (!compute_only) for ([_]aout.Arch{ .arm64, .amd64 }) |arch| for ([_]engine.Choice{ .hvf, .kvm, .whp, .sud, .hcpu }) |kind| for (tiersOf(kind)) |tier| {
-        if (tier) |t| _ = setenv("H9_HCPU_TIER", t, 1) else _ = unsetenv("H9_HCPU_TIER");
-        defer _ = unsetenv("H9_HCPU_TIER");
+        setTier(tier);
+        defer setTier(null);
         var ns: i96 = try bareRoundTrip(gpa, io, kind, arch) orelse continue;
         for (1..repeat) |_| ns = @min(ns, (try bareRoundTrip(gpa, io, kind, arch)).?);
         var lb: [16]u8 = undefined;
@@ -311,8 +348,8 @@ pub fn main(init: std.process.Init) !void {
             const text = if (arch == .arm64) c.arm64 else c.i386;
             for ([_]engine.Choice{ .hvf, .kvm, .sud, .hcpu }) |kind| {
                 for (tiersOf(kind)) |tier| {
-                    if (tier) |t| _ = setenv("H9_HCPU_TIER", t, 1) else _ = unsetenv("H9_HCPU_TIER");
-                    defer _ = unsetenv("H9_HCPU_TIER");
+                    setTier(tier);
+                    defer setTier(null);
                     const before = engine.hcpuRetired();
                     const st0 = engine.hcpuT1Stats();
                     var r = try runText(gpa, io, kind, arch, text) orelse continue;

@@ -421,8 +421,9 @@ fn expectBreakpoint(arch: aout.Arch, text: []const u8, pc_off: u64) !void {
         defer b.destroy();
         const as = try b.newAddressSpace();
         defer as.destroy();
-        var img = try h9.loader.load(gpa, b, as, bytes, &.{"brk"}, 1);
-        defer img.segs.release(as);
+        var img = try h9.loader.load(gpa, b, as, bytes, &.{"brk"}, 1, null);
+        defer img.space.release(as);
+        try prefault(&img);
         var v = try b.createVcpu();
         defer v.destroy();
         try v.setAddressSpace(as);
@@ -475,8 +476,9 @@ fn expectKick(arch: aout.Arch, text: []const u8) !void {
         defer b.destroy();
         const as = try b.newAddressSpace();
         defer as.destroy();
-        var img = try h9.loader.load(gpa, b, as, bytes, &.{"spin"}, 1);
-        defer img.segs.release(as);
+        var img = try h9.loader.load(gpa, b, as, bytes, &.{"spin"}, 1, null);
+        defer img.space.release(as);
+        try prefault(&img);
         var v = try b.createVcpu();
         defer v.destroy();
         try v.setAddressSpace(as);
@@ -527,8 +529,9 @@ fn expectKickRace(arch: aout.Arch, text: []const u8) !void {
         defer b.destroy();
         const as = try b.newAddressSpace();
         defer as.destroy();
-        var img = try h9.loader.load(gpa, b, as, bytes, &.{"spin"}, 1);
-        defer img.segs.release(as);
+        var img = try h9.loader.load(gpa, b, as, bytes, &.{"spin"}, 1, null);
+        defer img.space.release(as);
+        try prefault(&img);
         var v = try b.createVcpu();
         defer v.destroy();
         try v.setAddressSpace(as);
@@ -627,12 +630,12 @@ test "a timeout interrupts sleep arm64" {
     try runPolicy(.arm64, img, .{ .timeout_ns = 100 * std.time.ns_per_ms }, "h9: timeout");
 }
 
-/// Runs `bytes` on every engine that can, with an owned and a pooled
-/// vCPU, and checks the status (prefix) and output.
+/// Runs `bytes` on every engine that can, with the default executors and
+/// with one, and checks the status (prefix) and output.
 fn expectNotes(arch: aout.Arch, bytes: []const u8, want_status: []const u8, want_out: []const u8) !void {
     const gpa = std.testing.allocator;
     var ran: usize = 0;
-    for ([_]engine.Choice{ .hvf, .kvm, .whp, .sud, .hcpu }) |kind| for ([_]?u32{ null, 0 }) |own| {
+    for ([_]engine.Choice{ .hvf, .kvm, .whp, .sud, .hcpu }) |kind| for ([_]?u32{ null, 1 }) |cpus| {
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
         var err: std.Io.Writer.Allocating = .init(gpa);
@@ -640,8 +643,7 @@ fn expectNotes(arch: aout.Arch, bytes: []const u8, want_status: []const u8, want
         var m = h9.Machine.init(gpa, std.testing.io, .{
             .engine = kind,
             .arch = arch,
-            .policy = .{ .timeout_ns = 10 * std.time.ns_per_s },
-            .owned_vcpus = own,
+            .policy = .{ .timeout_ns = 10 * std.time.ns_per_s, .cpus = cpus },
             .stdio = .{ .out = &out.writer, .err = &err.writer },
         }) catch |e| switch (e) {
             error.HypervisorUnavailable, error.EngineNotBuilt, error.WrongArch => continue,
@@ -649,7 +651,7 @@ fn expectNotes(arch: aout.Arch, bytes: []const u8, want_status: []const u8, want
         };
         defer m.deinit();
         const status = try m.run(.{ .bytes = bytes }, &.{"t"});
-        errdefer std.debug.print("engine {t}, {t} binary, owned_vcpus {?d}\n", .{ kind, arch, own });
+        errdefer std.debug.print("engine {t}, {t} binary, cpus {?d}\n", .{ kind, arch, cpus });
         var sb: [300]u8 = undefined;
         const got = switch (status) {
             .exited => |t| try std.fmt.bufPrint(&sb, "exited {s}", .{t}),
@@ -972,6 +974,15 @@ test "the memory cap is exact" {
     if (ran == 0) return error.SkipZigTest;
 }
 
+/// Fills an image's text and the top of its stack, which a process's
+/// faults would (src/segment.zig), for the cases that run a vCPU on its
+/// address space with no process around it.
+fn prefault(img: *const h9.loader.Image) !void {
+    const l = aout.layout(img.arch);
+    try img.space.touch(l.utzero, engine.page_size, false);
+    try img.space.touch(img.sp & ~@as(u64, engine.page_size - 1), l.ustktop - (img.sp & ~@as(u64, engine.page_size - 1)), true);
+}
+
 /// Runs `f(engine)` on each engine that can run arm64 here.
 fn eachEngine(comptime f: fn (engine.Engine) anyerror!void) !void {
     var ran: usize = 0;
@@ -988,58 +999,68 @@ fn eachEngine(comptime f: fn (engine.Engine) anyerror!void) !void {
     if (ran == 0) return error.SkipZigTest;
 }
 
-fn byteAt(as: engine.AddressSpace, va: u64) ?u8 {
-    const s = as.translate(va, 1) orelse return null;
-    return s[0];
+/// The byte at `va` as the process's syscalls see it, filling the page
+/// if it's mapped but not yet touched; null if nothing maps it.
+fn byteAt(sp: *const segment.Space, va: u64) ?u8 {
+    var b: [1]u8 = undefined;
+    sp.read(va, &b) catch return null;
+    return b[0];
 }
 
-fn setByte(as: engine.AddressSpace, va: u64, v: u8) void {
-    as.translate(va, 1).?[0] = v;
+fn setByte(sp: *const segment.Space, va: u64, v: u8) void {
+    sp.write(va, &.{v}) catch unreachable;
 }
+
+/// Loads hello into `as`, for the segment tests below.
+fn loadHello(b: engine.Engine, as: engine.AddressSpace) !h9.loader.Image {
+    const gpa = std.testing.allocator;
+    const bytes = try image(gpa, .arm64, &hello.arm64_text);
+    defer gpa.free(bytes);
+    return h9.loader.load(gpa, b, as, bytes, &.{"hello"}, 1, null);
+}
+
+const segment = h9.segment;
 
 test "segments: fork shares text, copies the stack, and shares data only with RFMEM" {
     try eachEngine(struct {
         fn f(b: engine.Engine) !void {
-            const gpa = std.testing.allocator;
-            const bytes = try image(gpa, .arm64, &hello.arm64_text);
-            defer gpa.free(bytes);
+            const io = std.testing.io;
             const as = try b.newAddressSpace();
             defer as.destroy();
-            var img = try h9.loader.load(gpa, b, as, bytes, &.{"hello"}, 1);
-            defer img.segs.release(as);
+            var img = try loadHello(b, as);
+            defer img.space.release(as);
+            const s = &img.space;
             // hello has no data or bss, so give it some.
-            const data = img.segs.data.?.base;
-            try img.segs.brk(data + engine.page_size);
+            const data = s.brkTop();
+            try s.brk(io, data + engine.page_size);
             const sp = img.sp;
-            setByte(as, data, 1);
-            setByte(as, sp, 1);
+            setByte(s, data, 1);
+            setByte(s, sp, 1);
 
             for ([_]bool{ false, true }) |share| {
                 const cas = try b.newAddressSpace();
                 defer cas.destroy();
-                var c = try img.segs.fork(cas, share);
+                var c = try s.fork(cas, share);
                 defer c.release(cas);
-                try std.testing.expectEqual(img.segs.text.?, c.text.?);
-                try std.testing.expectEqual(share, img.segs.data.? == c.data.?);
-                try std.testing.expect(img.segs.stack.? != c.stack.?);
+                try std.testing.expectEqual(share, s.mm == c.mm);
+                try std.testing.expect(s.stack != c.stack);
                 // The child sees the parent's memory at fork time...
-                try std.testing.expectEqual(@as(?u8, 1), byteAt(cas, data));
-                try std.testing.expectEqual(@as(?u8, 1), byteAt(cas, sp));
-                // ...and then only shared segments follow each other.
-                setByte(cas, data, 2);
-                setByte(cas, sp, 2);
-                try std.testing.expectEqual(@as(?u8, if (share) 2 else 1), byteAt(as, data));
-                try std.testing.expectEqual(@as(?u8, 1), byteAt(as, sp));
-                setByte(as, data, 1);
-                // Growing a shared break maps the pages into both spaces
-                // (past the headroom the parent's mapping already has).
-                const top = img.segs.brkTop();
+                try std.testing.expectEqual(@as(?u8, 1), byteAt(&c, data));
+                try std.testing.expectEqual(@as(?u8, 1), byteAt(&c, sp));
+                // ...and then only what's shared follows the other.
+                setByte(&c, data, 2);
+                setByte(&c, sp, 2);
+                try std.testing.expectEqual(@as(?u8, if (share) 2 else 1), byteAt(s, data));
+                try std.testing.expectEqual(@as(?u8, 1), byteAt(s, sp));
+                setByte(s, data, 1);
+                // A shared break is the same in both.
+                const top = s.brkTop();
                 const far = top + (1 << 20);
-                try c.brk(far + 1);
-                try std.testing.expectEqual(share, byteAt(as, far) != null);
-                try std.testing.expectEqual(@as(?u8, 0), byteAt(cas, far));
+                try c.brk(io, far + 1);
+                try std.testing.expectEqual(share, byteAt(s, far) != null);
+                try std.testing.expectEqual(@as(?u8, 0), byteAt(&c, far));
                 // 9front won't shrink a segment others share.
-                if (share) try std.testing.expectError(error.InUse, c.brk(top)) else try c.brk(top);
+                if (share) try std.testing.expectError(error.InUse, c.brk(io, top)) else try c.brk(io, top);
             }
         }
     }.f);
@@ -1048,64 +1069,55 @@ test "segments: fork shares text, copies the stack, and shares data only with RF
 test "segments: brk grows and shrinks, and memory above the break is zeroed" {
     try eachEngine(struct {
         fn f(b: engine.Engine) !void {
-            const gpa = std.testing.allocator;
-            const bytes = try image(gpa, .arm64, &hello.arm64_text);
-            defer gpa.free(bytes);
+            const io = std.testing.io;
             const as = try b.newAddressSpace();
             defer as.destroy();
-            var img = try h9.loader.load(gpa, b, as, bytes, &.{"hello"}, 1);
-            defer img.segs.release(as);
-            const s = &img.segs;
+            var img = try loadHello(b, as);
+            defer img.space.release(as);
+            const s = &img.space;
             const base = s.brkTop();
-            try std.testing.expectEqual(@as(?u8, null), byteAt(as, base));
+            try std.testing.expectEqual(@as(?u8, null), byteAt(s, base));
 
-            // Small steps don't each add a mapping (hello's data starts empty).
-            for (1..9) |i| try s.brk(base + i * 100);
+            for (1..9) |i| try s.brk(io, base + i * 100);
             try std.testing.expectEqual(base + engine.page_size, s.brkTop());
-            for (1..9) |i| try s.brk(base + i * engine.page_size);
-            try std.testing.expectEqual(@as(usize, 1), s.data.?.chunks.items.len);
-
-            try s.brk(base + (1 << 20) + 1);
+            try s.brk(io, base + (1 << 20) + 1);
             try std.testing.expectEqual(base + (1 << 20) + engine.page_size, s.brkTop());
-            setByte(as, base + 10, 7);
-            setByte(as, base + (1 << 20), 7);
+            // Nothing's allocated until it's touched.
+            try std.testing.expect(s.bytes() < 1 << 20);
+            setByte(s, base + 10, 7);
+            setByte(s, base + (1 << 20), 7);
 
-            try s.brk(base);
+            try s.brk(io, base);
             try std.testing.expectEqual(base, s.brkTop());
-            try s.brk(base + (1 << 20) + 1);
-            try std.testing.expectEqual(@as(?u8, 0), byteAt(as, base + 10));
-            try std.testing.expectEqual(@as(?u8, 0), byteAt(as, base + (1 << 20)));
+            try std.testing.expectEqual(@as(?u8, null), byteAt(s, base));
+            try s.brk(io, base + (1 << 20) + 1);
+            try std.testing.expectEqual(@as(?u8, 0), byteAt(s, base + 10));
+            try std.testing.expectEqual(@as(?u8, 0), byteAt(s, base + (1 << 20)));
 
-            try std.testing.expectError(error.NoVmem, s.brk(s.data.?.base - 1));
-            try std.testing.expectError(error.NoVmem, s.brk(s.stack_floor + 1));
-            try std.testing.expectError(error.NoVmem, s.brk(std.math.maxInt(u64)));
-            // More than --memory.
-            try std.testing.expectError(error.NoVmem, s.brk(base + (128 << 20)));
+            try std.testing.expectError(error.NoVmem, s.brk(io, base - 1));
+            try std.testing.expectError(error.NoVmem, s.brk(io, s.floor() + 1));
+            try std.testing.expectError(error.NoVmem, s.brk(io, std.math.maxInt(u64)));
         }
     }.f);
 }
 
-test "segments: the stack grows down to its 16 MiB limit" {
+test "segments: the stack is its whole 16 MiB, with pages on first touch" {
     try eachEngine(struct {
         fn f(b: engine.Engine) !void {
-            const gpa = std.testing.allocator;
-            const bytes = try image(gpa, .arm64, &hello.arm64_text);
-            defer gpa.free(bytes);
             const as = try b.newAddressSpace();
             defer as.destroy();
-            var img = try h9.loader.load(gpa, b, as, bytes, &.{"hello"}, 1);
-            defer img.segs.release(as);
-            const s = &img.segs;
+            var img = try loadHello(b, as);
+            defer img.space.release(as);
+            const s = &img.space;
             const l = aout.layout(.arm64);
-            try std.testing.expect(s.stack.?.base > s.stack_floor);
+            const before = s.bytes();
             const deep = l.ustktop - (8 << 20);
-            try std.testing.expectEqual(@as(?u8, null), byteAt(as, deep));
-            try std.testing.expect(s.growStack(deep));
-            try std.testing.expectEqual(@as(?u8, 0), byteAt(as, deep));
-            try std.testing.expect(s.growStack(s.stack_floor));
-            try std.testing.expectEqual(s.stack_floor, s.stack.?.base);
-            try std.testing.expect(!s.growStack(s.stack_floor - 1));
-            try std.testing.expect(!s.growStack(l.ustktop));
+            try std.testing.expectEqual(@as(?u8, 0), byteAt(s, deep));
+            try std.testing.expectEqual(@as(?u8, 0), byteAt(s, s.floor()));
+            try std.testing.expect(s.bytes() > before);
+            try std.testing.expect(s.writable(s.floor(), 8));
+            try std.testing.expectEqual(@as(?u8, null), byteAt(s, s.floor() - 1));
+            try std.testing.expectEqual(@as(?u8, null), byteAt(s, l.ustktop));
         }
     }.f);
 }
@@ -1113,26 +1125,29 @@ test "segments: the stack grows down to its 16 MiB limit" {
 test "segments: releasing a process's segments frees its memory" {
     try eachEngine(struct {
         fn f(b: engine.Engine) !void {
-            const gpa = std.testing.allocator;
-            const bytes = try image(gpa, .arm64, &hello.arm64_text);
-            defer gpa.free(bytes);
+            const io = std.testing.io;
             // 64 MiB of guest memory, so 200 processes' worth only fits if
             // each one's pages come back.
             for (0..200) |_| {
                 const as = try b.newAddressSpace();
                 defer as.destroy();
-                var img = try h9.loader.load(gpa, b, as, bytes, &.{"hello"}, 1);
-                defer img.segs.release(as);
-                try img.segs.brk(img.segs.brkTop() + (1 << 20));
-                _ = img.segs.growStack(img.sp - (1 << 20));
+                var img = try loadHello(b, as);
+                defer img.space.release(as);
+                const s = &img.space;
+                try s.brk(io, s.brkTop() + (1 << 20));
+                try s.touch(s.brkTop() - (1 << 20), 1 << 20, true);
+                try s.touch(img.sp - (1 << 20), 1 << 20, true);
                 const cas = try b.newAddressSpace();
                 defer cas.destroy();
-                var c = try img.segs.fork(cas, false);
+                var c = try s.fork(cas, false);
+                // The child's writes copy what they touch.
+                try c.touch(img.sp - (1 << 20), 1 << 20, true);
                 c.release(cas);
             }
         }
     }.f);
 }
+
 
 // A syscall returns with the registers 9front's doesn't preserve zeroed,
 // as its forkret leaves them, so a program that wrongly keeps a value in
@@ -1246,9 +1261,8 @@ test "a syscall zeroes X1 to X17 and keeps X18 to X25 arm64" {
 
 test "pooled vCPUs carry FP state, the thread pointer and fork across processes arm64" {
     // Forks four times (16 processes), then each sets d8 and TPIDR_EL0 from
-    // its Tos pid and makes 2000 syscalls, each one a fresh trip through
-    // the shared pool when no vCPUs can be owned, so processes keep landing
-    // on vCPUs others last used. Each checks both registers at the end, and
+    // its Tos pid and makes 2000 syscalls, on one or two executors, so
+    // processes keep landing on vCPUs others last used. Each checks both registers at the end, and
     // faults if either is wrong.
     const code = words(&.{
         0xaa0003f7, // mov  x23, x0            Tos
@@ -1399,20 +1413,21 @@ test "pooled vCPUs carry FP state and fork across processes 386 [i386]" {
     try expectPooled(.i386, &code);
 }
 
-/// Runs `code` with the pool forced on (no owned vCPUs) and off, on every
-/// engine that can, and expects a clean exit.
+/// Runs `code` on one executor and on two, so processes keep landing on
+/// vCPUs others last used, on every engine that can, and expects a clean
+/// exit.
 fn expectPooled(arch: aout.Arch, code: []const u8) !void {
     const gpa = std.testing.allocator;
     const bytes = try image(gpa, arch, code);
     defer gpa.free(bytes);
     var ran: usize = 0;
-    for ([_]engine.Choice{ .hvf, .kvm, .whp, .sud, .hcpu }) |kind| for ([_]u32{ 0, 1 }) |own| {
+    for ([_]engine.Choice{ .hvf, .kvm, .whp, .sud, .hcpu }) |kind| for ([_]u32{ 1, 2 }) |cpus| {
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
         var m = h9.Machine.init(gpa, std.testing.io, .{
             .engine = kind,
             .arch = arch,
-            .owned_vcpus = own,
+            .policy = .{ .cpus = cpus },
             .stdio = .{ .out = &out.writer, .err = &out.writer },
         }) catch |e| switch (e) {
             error.HypervisorUnavailable, error.EngineNotBuilt, error.WrongArch => continue,
@@ -1420,7 +1435,7 @@ fn expectPooled(arch: aout.Arch, code: []const u8) !void {
         };
         defer m.deinit();
         const status = try m.run(.{ .bytes = bytes }, &.{"t"});
-        errdefer std.debug.print("engine {t}, {t}, owned_vcpus {d}\n", .{ kind, arch, own });
+        errdefer std.debug.print("engine {t}, {t}, cpus {d}\n", .{ kind, arch, cpus });
         var sb: [300]u8 = undefined;
         try std.testing.expectEqualStrings("exited ", switch (status) {
             .exited => |t| try std.fmt.bufPrint(&sb, "exited {s}", .{t}),
@@ -1573,49 +1588,26 @@ test "/proc/n/segment lists every segment [segattach]" {
     );
 }
 
-/// Loads hello into `as`, for the segment tests below.
-fn loadHello(b: engine.Engine, as: engine.AddressSpace) !h9.loader.Image {
-    const gpa = std.testing.allocator;
-    const bytes = try image(gpa, .arm64, &hello.arm64_text);
-    defer gpa.free(bytes);
-    return h9.loader.load(gpa, b, as, bytes, &.{"hello"}, 1);
-}
-
-const segment = h9.segment;
-
-test "segments: segattach trims the data headroom, splitting a chunk, and won't for a shared data segment" {
+test "segments: segattach just above the break, which then can't grow into it" {
     try eachEngine(struct {
         fn f(b: engine.Engine) !void {
-            const gpa = std.testing.allocator;
+            const io = std.testing.io;
             const as = try b.newAddressSpace();
             defer as.destroy();
             var img = try loadHello(b, as);
-            defer img.segs.release(as);
-            const s = &img.segs;
-            const d = s.data.?;
-            // One chunk mapped well past a break that ends mid-chunk.
-            try s.brk(d.base + 3 * engine.page_size);
-            try std.testing.expect(d.top > d.base + 4 * engine.page_size);
-            try std.testing.expectEqual(@as(usize, 1), d.chunks.items.len);
-            setByte(as, d.base + 2 * engine.page_size, 9);
-            const above = d.base + 3 * engine.page_size;
-
-            // An RFMEM sibling shares the data, so its headroom can't be cut.
-            const cas = try b.newAddressSpace();
-            defer cas.destroy();
-            var c = try s.fork(cas, true);
-            try std.testing.expectError(error.Overlap, s.segattach(gpa, b, as, .memory, 0, above, engine.page_size));
-            c.release(cas);
-
-            const va = try s.segattach(gpa, b, as, .memory, 0, above, engine.page_size);
+            defer img.space.release(as);
+            const s = &img.space;
+            const base = s.brkTop();
+            try s.brk(io, base + 3 * engine.page_size);
+            setByte(s, base + 2 * engine.page_size, 9);
+            const above = base + 3 * engine.page_size;
+            const va = try s.segattach(io, .memory, 0, above, engine.page_size);
             try std.testing.expectEqual(above, va);
-            try std.testing.expectEqual(above, d.top);
-            try std.testing.expectEqual(@as(?u8, 9), byteAt(as, d.base + 2 * engine.page_size));
-            try std.testing.expectEqual(@as(?u8, 0), byteAt(as, above));
-            // The break can't grow into it now.
-            try std.testing.expectError(error.Overlap, s.brk(above + 1));
-            try s.segdetach(as, va);
-            try s.brk(above + 1);
+            try std.testing.expectEqual(@as(?u8, 9), byteAt(s, base + 2 * engine.page_size));
+            try std.testing.expectEqual(@as(?u8, 0), byteAt(s, above));
+            try std.testing.expectError(error.Overlap, s.brk(io, above + 1));
+            try s.segdetach(io, va);
+            try s.brk(io, above + 1);
         }
     }.f);
 }
@@ -1623,30 +1615,28 @@ test "segments: segattach trims the data headroom, splitting a chunk, and won't 
 test "segments: segbrk stops at the next segment and the stack, and frees what it shrinks" {
     try eachEngine(struct {
         fn f(b: engine.Engine) !void {
-            const gpa = std.testing.allocator;
+            const io = std.testing.io;
             const as = try b.newAddressSpace();
             defer as.destroy();
             var img = try loadHello(b, as);
-            defer img.segs.release(as);
-            const s = &img.segs;
-            const lo = try s.segattach(gpa, b, as, .memory, 0, 1 << 32, engine.page_size);
-            const hi = try s.segattach(gpa, b, as, .shared, 0, (1 << 32) + 4 * engine.page_size, engine.page_size);
-            try std.testing.expectEqual(lo, try s.segbrk(lo, 0));
-            try std.testing.expectEqual(@as(u64, 0), try s.segbrk(lo, hi));
-            try std.testing.expectError(error.Overlap, s.segbrk(lo, hi + 1));
-            try std.testing.expectError(error.Overlap, s.segbrk(hi, s.ustktop + 1));
-            try std.testing.expectError(error.Overlap, s.segbrk(hi, s.stack_floor + 1));
-            try std.testing.expectError(error.NoVmem, s.segbrk(lo, lo - 1));
-            try std.testing.expectError(error.BadArg, s.segbrk(s.text.?.base, s.text.?.top));
-            try std.testing.expectError(error.BadArg, s.segbrk(s.brkTop() - 1, s.brkTop()));
-            try std.testing.expectEqual(@as(u64, 0), try s.segbrk(lo, lo + 1));
-            try std.testing.expectEqual(@as(?u8, null), byteAt(as, lo + engine.page_size));
-            // More than --memory, with nothing in the way.
-            try s.segdetach(as, hi);
-            try std.testing.expectError(error.NoVmem, s.segbrk(lo, lo + (128 << 20)));
-            try std.testing.expectError(error.NoVmem, s.segattach(gpa, b, as, .memory, 0, 0, 128 << 20));
+            defer img.space.release(as);
+            const s = &img.space;
+            const lo = try s.segattach(io, .memory, 0, 1 << 32, engine.page_size);
+            const hi = try s.segattach(io, .shared, 0, (1 << 32) + 4 * engine.page_size, engine.page_size);
+            try std.testing.expectEqual(lo, try s.segbrk(io, lo, 0));
+            try std.testing.expectEqual(@as(u64, 0), try s.segbrk(io, lo, hi));
+            try std.testing.expectError(error.Overlap, s.segbrk(io, lo, hi + 1));
+            try std.testing.expectError(error.Overlap, s.segbrk(io, hi, s.lay.ustktop + 1));
+            try std.testing.expectError(error.Overlap, s.segbrk(io, hi, s.floor() + 1));
+            try std.testing.expectError(error.NoVmem, s.segbrk(io, lo, lo - 1));
+            try std.testing.expectError(error.BadArg, s.segbrk(io, aout.layout(.arm64).utzero, aout.layout(.arm64).utzero + engine.page_size));
+            setByte(s, lo + engine.page_size, 3);
+            try std.testing.expectEqual(@as(u64, 0), try s.segbrk(io, lo, lo + 1));
+            try std.testing.expectEqual(@as(?u8, null), byteAt(s, lo + engine.page_size));
+            try std.testing.expectEqual(@as(u64, 0), try s.segbrk(io, lo, lo + 2 * engine.page_size));
+            try std.testing.expectEqual(@as(?u8, 0), byteAt(s, lo + engine.page_size));
             // Bigger than SEGMAXSIZE, wherever it'd go.
-            try std.testing.expectError(error.NoVmem, s.segattach(gpa, b, as, .memory, 0, 0, 9 << 30));
+            try std.testing.expectError(error.NoVmem, s.segattach(io, .memory, 0, 0, 9 << 30));
         }
     }.f);
 }
@@ -1654,18 +1644,18 @@ test "segments: segbrk stops at the next segment and the stack, and frees what i
 test "segments: fork shares shared segments and copies memory ones, and exec keeps those without SG_CEXEC" {
     try eachEngine(struct {
         fn f(b: engine.Engine) !void {
-            const gpa = std.testing.allocator;
+            const io = std.testing.io;
             const as = try b.newAddressSpace();
             defer as.destroy();
             var img = try loadHello(b, as);
-            defer img.segs.release(as);
-            const s = &img.segs;
-            const sh = try s.segattach(gpa, b, as, .shared, 0, 0, engine.page_size);
-            const mem = try s.segattach(gpa, b, as, .memory, 0, 0, engine.page_size);
-            const cx = try s.segattach(gpa, b, as, .memory, segment.SG_CEXEC, 0, engine.page_size);
-            // A gap in the slots is kept by fork.
-            try s.segdetach(as, mem);
-            const mem2 = try s.segattach(gpa, b, as, .memory, 0, 0, engine.page_size);
+            defer img.space.release(as);
+            const s = &img.space;
+            const sh = try s.segattach(io, .shared, 0, 0, engine.page_size);
+            const mem = try s.segattach(io, .memory, 0, 0, engine.page_size);
+            const cx = try s.segattach(io, .memory, segment.SG_CEXEC, 0, engine.page_size);
+            // A gap in the slots is filled by the next.
+            try s.segdetach(io, mem);
+            const mem2 = try s.segattach(io, .memory, 0, 0, engine.page_size);
             try std.testing.expectEqual(mem, mem2);
 
             for ([_]bool{ false, true }) |share| {
@@ -1673,24 +1663,27 @@ test "segments: fork shares shared segments and copies memory ones, and exec kee
                 defer cas.destroy();
                 var c = try s.fork(cas, share);
                 defer c.release(cas);
-                for (s.extra, c.extra) |p, q| try std.testing.expectEqual(p == null, q == null);
-                setByte(cas, sh, 1);
-                setByte(cas, mem, 1);
-                try std.testing.expectEqual(@as(?u8, 1), byteAt(as, sh));
-                try std.testing.expectEqual(@as(?u8, if (share) 1 else 0), byteAt(as, mem));
-                setByte(as, sh, 0);
-                setByte(as, mem, 0);
+                setByte(&c, sh, 1);
+                setByte(&c, mem, 1);
+                try std.testing.expectEqual(@as(?u8, 1), byteAt(s, sh));
+                try std.testing.expectEqual(@as(?u8, if (share) 1 else 0), byteAt(s, mem));
+                setByte(s, sh, 0);
+                setByte(s, mem, 0);
             }
 
-            // exec: a new image, and the old segments carried into it.
+            // exec: a new image, with the old segments carried into it.
+            const gpa = std.testing.allocator;
+            const bytes = try image(gpa, .arm64, &hello.arm64_text);
+            defer gpa.free(bytes);
             const nas = try b.newAddressSpace();
             defer nas.destroy();
-            var n = try loadHello(b, nas);
-            defer n.segs.release(nas);
-            try n.segs.inherit(s, nas);
-            try std.testing.expect(byteAt(nas, sh) != null);
-            try std.testing.expect(byteAt(nas, mem) != null);
-            try std.testing.expectEqual(@as(?u8, null), byteAt(nas, cx));
+            const kept = try h9.loader.inherited(s, nas, try h9.loader.imageSpans(bytes));
+            var n = try h9.loader.load(gpa, b, nas, bytes, &.{"hello"}, 1, kept);
+            defer n.space.release(nas);
+            setByte(s, sh, 5);
+            try std.testing.expectEqual(@as(?u8, 5), byteAt(&n.space, sh));
+            try std.testing.expect(byteAt(&n.space, mem) != null);
+            try std.testing.expectEqual(@as(?u8, null), byteAt(&n.space, cx));
         }
     }.f);
 }
@@ -1698,13 +1691,13 @@ test "segments: fork shares shared segments and copies memory ones, and exec kee
 test "segments: /proc/n/segment's text" {
     try eachEngine(struct {
         fn f(b: engine.Engine) !void {
-            const gpa = std.testing.allocator;
+            const io = std.testing.io;
             const as = try b.newAddressSpace();
             defer as.destroy();
             var img = try loadHello(b, as);
-            defer img.segs.release(as);
-            const s = &img.segs;
-            _ = try s.segattach(gpa, b, as, .memory, segment.SG_RONLY, 0, engine.page_size);
+            defer img.space.release(as);
+            const s = &img.space;
+            _ = try s.segattach(io, .memory, segment.SG_RONLY, 0, engine.page_size);
             var buf: [512]u8 = undefined;
             try std.testing.expectEqualStrings(
                 \\Stack     7feff0000 7ffff0000    1
@@ -1716,6 +1709,7 @@ test "segments: /proc/n/segment's text" {
         }
     }.f);
 }
+
 
 // rendezvous and semaphores (design/epoch-0/semaphores.md), from the programs
 // in tests/fixtures/sema.
@@ -1742,6 +1736,15 @@ test "an odd semaphore address posts sys: odd address [semaphores]" {
 
 test "an unmapped semaphore address is a bad address [semaphores]" {
     try expectRun(@embedFile("sema_unmapped"), null, 10 * std.time.ns_per_s, "killed sys: bad address in syscall pc=", "");
+}
+
+// A guest buffer is checked against the process's address space before
+// the kernel reads or writes through it (design/kernel-port.md), from
+// the programs in tests/fixtures/badptr.
+
+test "a bad guest pointer is a fault, not a host crash [kernel-port]" {
+    for ([_][]const u8{ @embedFile("badptr_read"), @embedFile("badptr_write"), @embedFile("badptr_stat") }) |text|
+        try expectRun(text, null, 10 * std.time.ns_per_s, "killed sys: bad address in syscall pc=", "");
 }
 
 test "a note interrupts rendezvous and semacquire, and the handler runs [semaphores]" {
@@ -1827,6 +1830,65 @@ test "a name pattern allows a connect through cs, and only through cs [net-polic
     try expectNet(net_cs, &.{ "t", "tcp!localhost!1" }, pol, refused);
     try expectNet(net_ctl, &.{ "t", "#I/tcp/clone", "connect 127.0.0.1!1" }, pol, denied);
     try expectNet(net_cs, &.{ "t", "tcp!localhost!2" }, pol, "exited no translation for host found");
+}
+
+// The machine's resolver (design/linux-dns.md), with a stub server as the
+// machine's nameserver.
+
+const net_dns = @embedFile("net_dns");
+const dnsstub = @import("dnsstub.zig");
+
+/// expectNet, with `nameservers`.
+fn expectNetNs(text: []const u8, argv: []const []const u8, pol: h9.Policy, nameservers: []const []const u8, want_status: []const u8) !void {
+    const gpa = std.testing.allocator;
+    const bytes = try image(gpa, .arm64, text);
+    defer gpa.free(bytes);
+    var p = pol;
+    p.timeout_ns = 20 * std.time.ns_per_s;
+    var ran: usize = 0;
+    for ([_]engine.Choice{ .hvf, .kvm, .whp, .sud, .hcpu }) |kind| {
+        var out: std.Io.Writer.Allocating = .init(gpa);
+        defer out.deinit();
+        var m = h9.Machine.init(gpa, std.testing.io, .{
+            .engine = kind,
+            .arch = .arm64,
+            .policy = p,
+            .nameservers = nameservers,
+            .stdio = .{ .out = &out.writer, .err = &out.writer },
+        }) catch |e| switch (e) {
+            error.HypervisorUnavailable, error.EngineNotBuilt, error.WrongArch => continue,
+            else => return e,
+        };
+        defer m.deinit();
+        const status = try m.run(.{ .bytes = bytes }, argv);
+        errdefer std.debug.print("engine {t}\n", .{kind});
+        var sb: [300]u8 = undefined;
+        try std.testing.expectEqualStrings(want_status, switch (status) {
+            .exited => |t| try std.fmt.bufPrint(&sb, "exited {s}", .{t}),
+            .killed => |t| try std.fmt.bufPrint(&sb, "killed {s}", .{t}),
+        });
+        ran += 1;
+    }
+    if (ran == 0) return error.SkipZigTest;
+}
+
+test "the backends' lookups go through the resolver to a stub given as 127.0.0.1!PORT [linux-dns]" {
+    if (!h9.resolver.supported or !dnsstub.supported) return error.SkipZigTest;
+    var stub: dnsstub.Stub = .{ .records = &.{.{ .name = "svc.test", .a = .{ 127, 0, 0, 1 } }} };
+    try stub.start();
+    defer stub.stop();
+    const ns: []const []const u8 = &.{stub.nameserver()};
+    const pol: h9.Policy = .{ .net_allow = &.{"tcp!svc.test!1"} };
+    // An address no server is at: the query goes to the resolver, which
+    // forwards it, and the answer allows the connect.
+    try expectNetNs(net_dns, &.{ "t", "connect 192.0.2.53!53", "svc.test", "connect 127.0.0.1!1" }, pol, ns, refused);
+    const seen = stub.queries();
+    try std.testing.expect(seen > 0);
+    // A name no pattern covers is refused, and never reaches the stub.
+    try expectNetNs(net_dns, &.{ "t", "connect 192.0.2.53!53", "other.test", "connect 127.0.0.1!1" }, pol, ns, "exited rcode 5");
+    try std.testing.expectEqual(seen, stub.queries());
+    // Without a lookup, the address is refused.
+    try expectNetNs(net_ctl, &.{ "t", "#I/tcp/clone", "connect 127.0.0.1!1" }, pol, ns, denied);
 }
 
 // Overlays (design/epoch-0/ephemeral-writes.md).
@@ -2253,6 +2315,117 @@ fn nineRoot(buf: []u8) ?[]const u8 {
     const rc = std.fmt.bufPrint(&lb, "{s}/{s}/bin/rc", .{ p, arch }) catch return null;
     std.Io.Dir.cwd().access(std.testing.io, rc, .{}) catch return null;
     return p;
+}
+
+/// rc -c `script` from the 9front root at `root`, on engine `kind`, with
+/// the machine's host `hst` (null for the one the policy describes): its
+/// output and status, or null if the engine can't run here.
+fn rcWithHost(kind: engine.Choice, root: []const u8, hst: ?h9.Host, script: []const u8, buf: []u8) !?[]const u8 {
+    const arch: engine.Arch = switch (builtin.cpu.arch) {
+        .aarch64 => .arm64,
+        .x86_64 => .amd64,
+        else => return null,
+    };
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    var err: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer err.deinit();
+    const mounts = [_]h9.Machine.Mount{.{ .kind = .dir, .src = root }};
+    var m = h9.Machine.init(std.testing.allocator, std.testing.io, .{
+        .engine = kind,
+        .arch = arch,
+        .mounts = &mounts,
+        .host = hst,
+        .policy = .{ .timeout_ns = 20 * std.time.ns_per_s },
+        .stdio = .{ .out = &out.writer, .err = &err.writer },
+    }) catch |e| switch (e) {
+        error.HypervisorUnavailable, error.EngineNotBuilt, error.WrongArch => return null,
+        else => return e,
+    };
+    defer m.deinit();
+    const status = m.run(.{ .guest = "/bin/rc" }, &.{ "rc", "-c", script }) catch |e|
+        return try std.fmt.bufPrint(buf, "{s}error {t}", .{ out.written(), e });
+    return switch (status) {
+        .exited => |t| try std.fmt.bufPrint(buf, "{s}exited {s}", .{ out.written(), t }),
+        .killed => |t| try std.fmt.bufPrint(buf, "{s}killed {s}", .{ out.written(), t }),
+    };
+}
+
+test "a kernel with an empty Host can reach nothing outside [host-handles]" {
+    var rb: [std.fs.max_path_bytes]u8 = undefined;
+    const host_root = nineRoot(&rb) orelse return error.SkipZigTest;
+    // In the form a mount takes (/C:/... on Windows).
+    var kb: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const root = kernPath(&kb, host_root);
+    var ran: usize = 0;
+    for ([_]engine.Choice{ .hvf, .kvm, .whp, .sud, .hcpu }) |kind| {
+        var sb: [512]u8 = undefined;
+        // The host the policy describes holds the root tree...
+        const got = try rcWithHost(kind, root, null, "echo hi", &sb) orelse continue;
+        errdefer std.debug.print("engine {t}\n", .{kind});
+        try std.testing.expectEqualStrings("hi\nexited ", got);
+        // ...and with no handles, the same mount reaches nothing: there's
+        // no rc to run.
+        const none = (try rcWithHost(kind, root, .{}, "echo hi", &sb)).?;
+        try std.testing.expect(std.mem.indexOf(u8, none, "hi\n") == null);
+        try std.testing.expect(!std.mem.eql(u8, none, "exited "));
+        ran += 1;
+    }
+    if (ran == 0) return error.SkipZigTest;
+}
+
+test "an embedder's in-memory dirs handle serves a root [host-handles]" {
+    var rb: [std.fs.max_path_bytes]u8 = undefined;
+    const root = nineRoot(&rb) orelse return error.SkipZigTest;
+    const arch = switch (builtin.cpu.arch) {
+        .aarch64 => "arm64",
+        .x86_64 => "amd64",
+        else => return error.SkipZigTest,
+    };
+    // rc and what it runs, read into memory, and a file only the tree has.
+    const gpa = std.testing.allocator;
+    var files: [6]h9.host.memtree.File = undefined;
+    const names = [_][]const u8{ "bin/rc", "bin/echo", "bin/cat", "bin/ls" };
+    var bufs: [5][]u8 = undefined;
+    var nb: usize = 0;
+    defer for (bufs[0..nb]) |b| gpa.free(b);
+    var pb: [4][32]u8 = undefined;
+    for (names, 0..) |n, i| {
+        var hb: [std.fs.max_path_bytes + 32]u8 = undefined;
+        bufs[nb] = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, try std.fmt.bufPrint(&hb, "{s}/{s}/{s}", .{ root, arch, n }), gpa, .limited(1 << 26));
+        nb += 1;
+        files[i] = .{ .path = try std.fmt.bufPrint(&pb[i], "{s}/{s}", .{ arch, n }), .data = bufs[nb - 1], .exec = true };
+    }
+    var hb: [std.fs.max_path_bytes + 32]u8 = undefined;
+    bufs[nb] = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, try std.fmt.bufPrint(&hb, "{s}/rc/lib/rcmain", .{root}), gpa, .limited(1 << 20));
+    nb += 1;
+    files[4] = .{ .path = "rc/lib/rcmain", .data = bufs[nb - 1] };
+    files[5] = .{ .path = "lib/mem.txt", .data = "from memory\n" };
+    var mt: h9.host.MemTree = undefined;
+    try mt.init(gpa, &files);
+    defer mt.deinit();
+    // The tree's path names it in the plan and the mount; nothing is there
+    // on the host.
+    var mb: [std.fs.max_path_bytes + 8]u8 = undefined;
+    var kb: [std.fs.max_path_bytes + 9]u8 = undefined;
+    const mem = kernPath(&kb, try std.fmt.bufPrint(&mb, "{s}-mem", .{root}));
+    const Allow = struct {
+        fn check(_: *anyopaque, _: []const u8, _: h9.policy.Op) h9.policy.Verdict {
+            return .allow;
+        }
+        const vt: h9.host.Dirs.VTable = .{ .check = check };
+    };
+    const list = [_]h9.host.Dir{.{ .name = "root", .path = mem, .writable = false, .tree = mt.tree() }};
+    const hst: h9.Host = .{ .dirs = .{ .list = &list, .ctx = &mt, .vtable = &Allow.vt } };
+    var ran: usize = 0;
+    for ([_]engine.Choice{ .hvf, .kvm, .whp, .sud, .hcpu }) |kind| {
+        var sb: [512]u8 = undefined;
+        const got = try rcWithHost(kind, mem, hst, "echo hi; cat /lib/mem.txt; ls /lib", &sb) orelse continue;
+        errdefer std.debug.print("engine {t}\n", .{kind});
+        try std.testing.expectEqualStrings("hi\nfrom memory\n/lib/mem.txt\nexited ", got);
+        ran += 1;
+    }
+    if (ran == 0) return error.SkipZigTest;
 }
 
 test "posting, opening and removing in /srv, and clone boards [devsrv]" {
@@ -3126,4 +3299,79 @@ test "--print writes an .fd mount as a comment, and the rest replays [fd-mounts]
     const r = try runFd(a, &base, &.{ns}, @embedFile("fdmount_create"), &.{ "create", "/tmp/f" }) orelse return error.SkipZigTest;
     errdefer std.debug.print("err: {s}\n", .{r.err});
     try std.testing.expectEqualStrings("exited ", r.status);
+}
+
+test "Machine.init from a plan equals Machine.init from Options [plan-format]" {
+    // design/plan-format.md: Options.toPlan's text, given as `plan`, is
+    // the same machine. The compiled plans print the same, and a program
+    // runs the same in both.
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "out");
+    try tmp.dir.createDirPath(io, "data/secret");
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var kb: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const dir = try a.dupe(u8, kernPath(&kb, buf[0..try tmp.dir.realPath(io, &buf)]));
+    const out = try std.fmt.allocPrint(a, "{s}/out", .{dir});
+    const data = try std.fmt.allocPrint(a, "{s}/data", .{dir});
+    const secret = try std.fmt.allocPrint(a, "{s}/data/secret", .{dir});
+    const bytes = try image(gpa, .amd64, &hello.amd64_text);
+    defer gpa.free(bytes);
+    const Case = struct {
+        mounts: []const h9.Machine.Mount = &.{},
+        policy: h9.Policy = .{},
+        env: []const h9.EnvVar = &.{},
+        cwd: ?[]const u8 = null,
+    };
+    const cases = [_]Case{
+        .{},
+        .{ .mounts = &.{ .{ .kind = .tmp, .dst = "/" }, .{ .kind = .dir, .src = dir, .dst = "/n/d", .access = .ro } }, .cwd = dir },
+        .{ .policy = .{ .write = .scope, .writable = &.{out}, .readable = &.{data}, .read_deny = &.{secret} }, .cwd = dir },
+        .{ .policy = .{ .net = .enable, .net_allow = &.{"tcp!*.example.com!443"}, .memory = 256 << 20, .pids = 32, .timeout_ns = 90 * std.time.ns_per_s } },
+        .{ .policy = .{ .net = .disable, .write = .none }, .env = &.{.{ .name = "A", .value = "two words" }} },
+    };
+    var ran = false;
+    for ([_]engine.Choice{ .hcpu, .sud, .kvm, .hvf, .whp }) |kind| for (cases) |c| {
+        var got: [2]struct { plan: []const u8, out: []const u8 } = undefined;
+        var text: []const u8 = "";
+        for (&got, 0..) |*g, i| {
+            var o: std.Io.Writer.Allocating = .init(a);
+            var e: std.Io.Writer.Allocating = .init(a);
+            const opts: h9.Machine.Options = .{
+                .engine = kind,
+                .arch = .amd64,
+                .mounts = c.mounts,
+                .policy = c.policy,
+                .env = c.env,
+                .cwd = c.cwd,
+                .stdio = .{ .out = &o.writer, .err = &e.writer },
+            };
+            if (i == 0) text = try opts.toPlan(a);
+            var why: []const u8 = "";
+            var m = h9.Machine.initExplained(gpa, io, if (i == 0) opts else .{ .plan = text, .stdio = opts.stdio }, &why) catch |err| switch (err) {
+                error.HypervisorUnavailable, error.EngineNotBuilt, error.WrongArch => break,
+                else => {
+                    std.debug.print("{s}\n{s}\n", .{ text, why });
+                    return err;
+                },
+            };
+            defer m.deinit();
+            var pw: std.Io.Writer.Allocating = .init(a);
+            try m.plan.print(&pw.writer);
+            _ = try m.run(.{ .bytes = bytes }, &.{"hello"});
+            g.* = .{ .plan = pw.written(), .out = o.written() };
+        } else {
+            errdefer std.debug.print("engine {t}, plan:\n{s}\n", .{ kind, text });
+            try std.testing.expectEqualStrings(got[0].plan, got[1].plan);
+            try std.testing.expectEqualStrings(got[0].out, got[1].out);
+            try std.testing.expectEqualStrings(hello.msg, got[1].out);
+            ran = true;
+        }
+    };
+    if (!ran) return error.SkipZigTest;
 }

@@ -1,20 +1,20 @@
 //! The web host's `std.Io` (design/epoch-0/browser-host.md): std's
 //! single-threaded implementation over WASI, with blocking that parks the
-//! calling coroutine (src/web/coro.c) instead of a thread. A futex wait
+//! calling task (src/kern/sched/web.zig) instead of a thread. A futex wait
 //! parks until a wake for the same address; a sleep parks on a timer.
 //! Everything else, files and clocks included, is std's WASI code, which
 //! the JS host serves.
 
 const std = @import("std");
-const coro = @import("coro.zig");
+const task = @import("task.zig");
 
 const Threaded = std.Io.Threaded;
 
-/// A coroutine waiting on a futex address. Waiters live on their own
+/// A task waiting on a futex address. Waiters live on their own
 /// stacks while they wait.
 const Waiter = struct {
     addr: usize,
-    coro: *coro.Coro,
+    task: *task.Task,
     next: ?*Waiter = null,
     woken: bool = false,
 };
@@ -33,10 +33,10 @@ fn unlink(w: *Waiter) void {
 /// when negative). Returns early on a wake, or spuriously.
 fn wait(ptr: *const u32, expected: u32, ms: i64) void {
     if (@atomicLoad(u32, ptr, .acquire) != expected) return;
-    var w: Waiter = .{ .addr = @intFromPtr(ptr), .coro = coro.self(), .next = waiters };
+    var w: Waiter = .{ .addr = @intFromPtr(ptr), .task = task.self(), .next = waiters };
     waiters = &w;
     while (!w.woken) {
-        if (!coro.park(ms)) break; // timed out
+        if (!task.park(ms)) break; // timed out
         // An unrelated unpark (procwakeup, say) is a spurious wakeup.
         break;
     }
@@ -74,7 +74,7 @@ fn futexWake(_: ?*anyopaque, ptr: *const u32, max_waiters: u32) void {
         }
         l.* = w.next;
         w.woken = true;
-        coro.unpark(w.coro);
+        task.unpark(w.task);
         n += 1;
     }
 }
@@ -83,9 +83,9 @@ fn sleep(_: ?*anyopaque, timeout: std.Io.Timeout) std.Io.Cancelable!void {
     const ms = timeoutMs(timeout);
     if (ms < 0) {
         // Forever: nothing will wake it.
-        while (true) coro.sleep(1 << 30);
+        while (true) task.sleep(1 << 30);
     }
-    coro.sleep(ms);
+    task.sleep(ms);
 }
 
 const vtable: std.Io.VTable = blk: {

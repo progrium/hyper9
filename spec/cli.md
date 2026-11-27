@@ -8,6 +8,7 @@ This describes, as built, the `h9` command: how it parses its arguments and find
   - [Parsing rules](#parsing-rules)
   - [Program resolution](#program-resolution)
   - [Flags](#flags)
+  - [Flags as plan lines](#flags-as-plan-lines)
   - [Default guest environment](#default-guest-environment)
   - [Exit codes](#exit-codes)
   - [Signals and TTY](#signals-and-tty)
@@ -24,6 +25,7 @@ h9 [h9-flags] --rc                  # login rc: the root's default command
 h9 [h9-flags] rc                    # interactive shell
 h9 [h9-flags]                       # no program: prints the usage to stderr, exit 2
 h9 [h9-flags] --serve ADDR...       # no program: serves the namespace until a note
+h9 --plan FILE|- [narrowing flags] [program [args...]]  # a plan file; - is stdin
 h9 --version | --check | --help      # tool functions; -h alone is --help
 ```
 
@@ -82,10 +84,12 @@ A host program that starts with `#!` runs as a guest program by its guest path (
 | `--serve-token @FILE` | A token, the file's one word, that WebSocket listeners require as `Authorization: Bearer TOKEN` or `?token=TOKEN`. A missing file is exit 125 |
 | `--serve-origin ORIGIN` (repeatable) | An `Origin` WebSocket listeners accept; `*` for any, which needs `--serve-token`. A request with no `Origin` is accepted |
 | `--serve-net` | Exports `/net` too. Without it, the server Proc unmounts `/net` |
+| `--children` | Binds `#μ` at `/dev/machine`, so the guest's `h9` can start child machines (spec/kernel.md, Child machines); ignored under `--profile=tight`, which masks `#μ` |
 | `--memory SIZE` | Caps guest memory (`512m`, `2g`) |
 | `--pids N`, `--cpus N` | Caps processes and concurrently running vCPUs |
 | `--timeout DURATION` | Posts `hangup` at a deadline, waits up to 2 s, then tears down the machine |
-| `--print` | Prints the compiled policy and namespace, then exits |
+| `--plan FILE\|-` | Runs a plan ([plan-format](../design/plan-format.md); the format is [Plans](sandbox.md#plans)), read on the host before the machine starts, from standard input with `-`, and as a stream, so `<(...)` works. Flags given with it are applied after it and can only narrow it (see [Flags as plan lines](#flags-as-plan-lines)); one that would widen it is exit 2, naming the plan's line (`h9: --plan p: memory 1G widens the plan's line 4: memory 256M`). A program on the command line replaces the plan's `run` line, and without either it's exit 2. A line the plan can't take is exit 2 with its number (`h9: --plan p: line 3: unknown line 'frobnicate'`), and a file that can't be read is exit 125. `--trace`, `-v`, `--index`, `--index-cache`, `--cred`, and `--print` aren't plan lines and apply as usual |
+| `--print` | Writes the plan the flags compile to, every default spelled out, then what h9 builds from it as comments (the compiled policy, namespace, access, and caveats), and exits. `h9 --plan <(h9 FLAGS --print)` runs the same machine (see [Plans](sandbox.md#plans)) |
 | `--host-fs` | Exposes all of `#U`, not just the root and cwd |
 | `--no-guest-tools` | Leaves out the `#H/bin` bind of h9's own commands and masks `#H` |
 | `--sandbox DIR` | The tight profile with only DIR bound, read-write, as the cwd. Can't be combined with `--host-fs` |
@@ -97,6 +101,34 @@ A host program that starts with `#!` runs as a guest program by its guest path (
 | `--check` | Runs a test program on each engine built in, or just `--engine`'s (on HVF this also checks the entitlement), reports the vCPU limit, and runs `/bin/echo` from the root tree, or from the built-in root when there's none (`root: built-in (9front 11952 slim, arm64; no tree found)`), then a 9P root's index notes. Exits 0, or 125 if h9 can't run programs from the root |
 | `--version` | Prints the h9 version (`git describe`, or `-Dversion` in releases), the pinned 9front release and drawterm revision, the engines built in, the GUI backend (`gfx:`, with `headless` after a window backend, such as `gfx: cocoa, headless`), and the built-in root's contents (`built-in root: 9front 11952 slim, arm64 amd64 386 (44 commands)`, or `skeleton only`) |
 | `--help`, `-h` | Prints the usage to stdout and exits 0 (`-h` only as the only argument) |
+
+### Flags as plan lines
+
+Each flag that decides what the machine is compiles to a plan line ([plan-format](../design/plan-format.md)), and `--print` writes them. Given with `--plan`, a flag narrows the plan's line of the same kind (`src/policy.zig`'s `narrow`, the one rule child machines use too: a child's `ctl` lines narrow its caller's plan, with what's left of its limits): what's lower, read-only, or removed is taken, and anything wider is exit 2.
+
+| Flag | Plan line | With `--plan` |
+| --- | --- | --- |
+| `--dir`, `--url`, `--archive`, `--builtin`, `--tmp` | `dir VALUE`, `url VALUE`, `archive VALUE`, `builtin [VALUE]`, `tmp VALUE`, each the flag's value; bare `builtin` is the bottom of `/` | Only a plan's own mount, made no more writable (`rw` to `eph` or `ro`); a new one widens |
+| `--bind SRC:DST[:OPTS]` | `bind SRC:DST[:OPTS]`, one value | A new one widens |
+| `--ns 'LINES'\|@FILE` | The lines themselves: `bind` and `mount` with two values or more, `unmount`, `cd`, `clear` | New lines widen |
+| `--profile P` | `profile P`, which also sets what the profile defaults | `tight` narrows the network to `disable`, the timeout to 10 minutes, and the cwd to read-only |
+| `--write M` | `write M` | `none` narrows anything; `ephemeral` narrows `scope` and `overlay`. A `none` makes writable paths readable and mounts `ro` |
+| `--net M` | `net M` | `disable` < `outbound` < `enable` |
+| `--net-allow PATTERN` | `netallow PATTERN` | Only the plan's patterns, or any when the plan has none |
+| `--readable PATH` | `allow read PATH` | A path the plan shares, or a writable one made read-only |
+| `--writable PATH` | `allow write PATH` | Only under a writable path of the plan's |
+| `--read-deny PATH` | `deny read PATH` | Always narrows |
+| `--host-fs`, `--no-guest-tools`, `--children` | `devices [host-fs] [guest-tools] [children]` | Can be left out, not added |
+| `--memory SIZE`, `--pids N`, `--cpus N`, `--timeout D` | `memory SIZE`, `pids N`, `cpus N`, `timeout D`; one that's unset is a comment, such as `# memory: the engine's default` | Lower only |
+| `--engine E` | `engine E` | The plan's engine, any under no `engine` line, and any but `sud` under `auto` |
+| `--arch A` | `arch A` | The plan's, or any under no `arch` line |
+| `--env NAME=VALUE` | `env NAME=VALUE` | Adds or replaces a variable |
+| `--cwd PATH`, `--sandbox DIR` | `cwd PATH rw\|ro`; `--sandbox DIR` is `profile tight` and `cwd DIR rw` with only DIR bound | The plan's cwd; `rw` only if the plan's is |
+| `--gfx[=noclip]`, `--gfx-scale N`, `--gfx=headless`, `--gfx-size WxH` | `gfx window [noclip] [scale=N]`, `gfx headless [WxH]` | Only with the plan's `gfx` line, the clipboard taken away but not given |
+| `--serve ADDR`, `--serve-root P`, `--serve-token @FILE`, `--serve-origin O`, `--serve-net` | `serve ADDR`, `serveroot P`, `servetoken @FILE`, `serveorigin O`, `servenet` | Only the plan's addresses, a root under its root, and fewer origins |
+| A program, `--rc 'cmd'`, `--rc` | `run PROG ARGS...`, `run /bin/rc -c cmd`, `run /bin/rc -l` | Replaces the run |
+
+A URL's query and a header's inline value can hold a secret, so `--print` writes them as `…`, as it always elided them, and `--plan` refuses a line with `…` (exit 2) rather than run a different machine: a plan names them in a file (`header=@FILE`, `servetoken @FILE`) or has them written in by hand. A mount's `b3=HASH` pins its tree by its index's BLAKE3 hash ([Pinned roots](sandbox.md#pinned-roots)).
 
 ### Default guest environment
 
@@ -192,13 +224,19 @@ pub const Options = struct {
     serve_token: ?[]const u8 = null,    // required on WebSocket listeners when set
     serve_origins: []const []const u8 = &.{}, // Origins WebSocket listeners accept; "*" for any
     serve_net: bool = false,            // export /net too
-    owned_vcpus: ?u32 = null,           // for tests of the vCPU pool
     signals: ?*Signals = null,          // Ctrl-C and hangup from the embedder
     gfx: ?Gfx = null,                   // a host window or the headless screen (.screen, .size); one machine in the process at a time
+    plan: ?[]const u8 = null,           // a plan's text, in place of the fields a plan covers (design/plan-format.md); host paths absolute
     stdio: Stdio,                       // host fds behind the console
+
+    pub fn toPlan(o: Options, arena: Allocator) ![]const u8; // these options as a plan's text, which .plan takes back
+    pub fn toSpec(o: Options, arena: Allocator) !policy.Spec; // the same, parsed
 };
 pub fn run(m: *Machine, prog: Program, argv: []const []const u8) !ExitStatus;
 pub fn serving(m: *const Machine) []const []const u8; // each listener's bound address, once run has opened them
+pub fn planRun(m: *const Machine) ?[]const []const u8; // a plan's run line, for the embedder to run
 ```
+
+`Machine.init(gpa, io, .{ .plan = text, .stdio = ... })` takes a plan as `h9 --plan` does: its lines replace the mounts, binds, `ns`, `policy`, `guest_tools`, `engine`, `arch`, `env`, `cwd`, `gfx`, and the serve fields, and the rest (stdio, trace, signals, caches, credential helpers, and `.fd` mounts, which a plan can't hold as text) come from the other fields. A plan that doesn't parse is `error.BadPlan`, with the line and why in `initExplained`'s message. `Options.toPlan` is its inverse, so `.{ .plan = try opts.toPlan(arena) }` is the same machine as `opts`.
 
 `cli.zig` is the only code that knows flag strings; tests and other embedders build `Options` directly. `stdio` and `trace` are passed in rather than taken from the process. That keeps the machine API free of CLI-global state and lets integration tests capture a machine's output and syscall trace.

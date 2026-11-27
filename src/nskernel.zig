@@ -1,13 +1,13 @@
 //! The namespace kernel (design/epoch-0/namespace-kernel.md): h9's kernel with
 //! nothing for running programs, holding namespaces that `#N`
-//! (src/kern/devns.c) makes and composes, served over 9P2000 by kserve
+//! (src/kern/dev/ns.zig) makes and composes, served over 9P2000 by kserve
 //! with each attach name a namespace's id.
 //!
 //! On the web host it's `h9ns.wasm`, whose `main` boots the kernel and
 //! serves each port the page hands it (h9ns.js's `connect`). Natively it's
 //! `libh9ns.a`, with the C API in `h9ns.h`.
 //!
-//! This file has the Zig leaves devns.c calls: `h9_ns_ctl`, which runs a
+//! This file has the Zig leaves #N (src/kern/dev/ns.zig) calls: `h9_ns_ctl`, which runs a
 //! ctl line's bind, mount, unmount or cd in the calling process's
 //! namespace, and the dials its mounts make.
 
@@ -17,12 +17,19 @@ const kern = @import("kern.zig");
 const hstream = @import("hstream.zig");
 const newns = @import("newns.zig");
 const web = @import("web.zig");
+/// Host descriptors (fd! dials, h9ns_serve, h9ns_addfd) are POSIX's: not
+/// on the web, or on Windows, where the namespace kernel builds only for
+/// the kernel's own cases (zig build kern-test).
+const nofds = web.enabled or builtin.os.tag == .windows;
 const dotl = @import("dotl/kern.zig");
 
 comptime {
     // #ℓ's and #ℏ's leaves.
     _ = dotl;
     _ = hstream;
+    // The kernel's Zig (design/kernel-port.md), with the C functions of
+    // the drawterm files it replaces.
+    _ = @import("kern_port");
 }
 
 const gpa = web.gpa;
@@ -56,8 +63,26 @@ fn putErr(err: [*]u8, msg: []const u8) void {
 /// The kernel's messages (panic, pprint), on the host's standard error.
 export fn h9_ns_log(buf: [*]const u8, n: c_int) c_int {
     if (n <= 0) return 0;
-    _ = std.c.write(2, buf, @intCast(n));
+    if (comptime builtin.os.tag == .windows)
+        _ = _write(2, buf, @intCast(n))
+    else
+        _ = std.c.write(2, buf, @intCast(n));
     return n;
+}
+
+/// The C runtime's write on Windows, where std.c.write takes a HANDLE.
+extern "c" fn _write(fd: c_int, buf: [*]const u8, n: c_uint) c_int;
+
+/// drawterm's win32.c asks src/host/hostsock-win32.c for a Winsock
+/// error's text, and the namespace kernel has no host sockets: Windows's
+/// own text it is.
+fn h9so_errstr(e: c_int) callconv(.c) ?[*:0]const u8 {
+    _ = e;
+    return null;
+}
+
+comptime {
+    if (builtin.os.tag == .windows) @export(&h9so_errstr, .{ .name = "h9so_errstr" });
 }
 
 // Mounts' dials.
@@ -144,8 +169,8 @@ fn rawDial(d: []const u8, why: *[]const u8) DialError!u31 {
         return try kern.hstreamFd(id);
     }
     if (std.mem.startsWith(u8, d, "fd!")) {
-        if (comptime web.enabled) {
-            why.* = "host descriptors need a native host";
+        if (comptime nofds) {
+            why.* = if (web.enabled) "host descriptors need a native host" else "host descriptors need a POSIX host";
             return error.Dial;
         }
         const fd = Fds.dup(d["fd!".len..]) orelse {
@@ -286,7 +311,7 @@ fn runOp(ns: ?*anyopaque, arena: std.mem.Allocator, op: newns.Op, why: *[]const 
         },
         .unmount => |u| try kern.unmount(if (u.from) |f| try arena.dupeSentinel(u8, f, 0) else null, try arena.dupeSentinel(u8, u.to, 0)),
         .cd => |d| try kern.chdir(try arena.dupeSentinel(u8, d, 0)),
-        // devns.c runs clear itself.
+        // #N runs clear itself.
         .clear => {
             why.* = "clear: not in a line with others";
             return error.Dial;
@@ -295,7 +320,7 @@ fn runOp(ns: ?*anyopaque, arena: std.mem.Allocator, op: newns.Op, why: *[]const 
 }
 
 /// Runs one ctl line (design/epoch-0/namespace-kernel.md, Composing) in the
-/// calling process's namespace, which devns.c has set to namespace `ns`'s.
+/// calling process's namespace, which #N has set to namespace `ns`'s.
 /// Returns 0, or -1 with the error in `err` (ERRMAX bytes); the line's
 /// operations before a failed one stand.
 export fn h9_ns_ctl(ns: ?*anyopaque, line: [*]const u8, n: c_long, err: [*]u8) c_int {
@@ -365,6 +390,8 @@ fn theIo() std.Io {
 
 const Boot = struct {};
 var boot_arg: Boot = .{};
+var ns_kernel: ?*kern.Kernel = null;
+const no_host: @import("host/host.zig").Host = .{};
 
 /// The namespace kernel's first process: makes namespace 0 and the
 /// server, then serves each connection posted to it until the host
@@ -372,7 +399,7 @@ var boot_arg: Boot = .{};
 fn serverMain(_: *Boot) void {
     kern.setText("h9ns");
     if (h9_ns_init() < 0) return failBoot(kern.errstr());
-    dotl.register(owner(), .{ .user = kern.user(), .io = theIo() });
+    if (kern.Kernel.ofMach(@ptrFromInt(owner()))) |k| dotl.register(k, .{ .user = kern.user(), .io = theIo() });
     server = kern.Kserve.newNamed(&h9_ns_lookup, null, null) catch return failBoot(kern.errstr());
     booted.store(1, .release);
     if (comptime web.enabled) {
@@ -405,7 +432,7 @@ fn serveOne(kind: c_int, arg: c_long, aname: []const u8) void {
             defer hstream.release(id);
             break :blk kern.hstreamFd(id) catch return;
         },
-        .fd => if (comptime web.enabled) return else blk: {
+        .fd => if (comptime nofds) return else blk: {
             const fds = kern.hostFdDial(@intCast(arg), @intCast(arg)) catch return;
             break :blk fds[0];
         },
@@ -427,7 +454,7 @@ const Accepted = struct {
 
     fn ready(ctx: *anyopaque, id: u32) void {
         const a: *Accepted = @ptrCast(@alignCast(ctx));
-        if (h9_ns_post(@intFromEnum(Post.stream), @intCast(id), @ptrCast(&a.aname)) < 0) hstream.release(id);
+        if (h9_ns_post(@backingInt(Post.stream), @intCast(id), @ptrCast(&a.aname)) < 0) hstream.release(id);
     }
 
     fn done(ctx: *anyopaque, handed: bool) void {
@@ -474,10 +501,17 @@ fn bootOnce() c_int {
         threaded = .init(std.heap.page_allocator, .{});
     }
     hstream.setIo(theIo());
-    kern.spawn("h9ns", Boot, serverMain, &boot_arg) catch {
+    // The namespace kernel's one Kernel, for the host process's life.
+    const k = kern.Kernel.init(std.heap.page_allocator, &no_host) catch {
         failBoot("can't start the kernel");
         return -1;
     };
+    k.spawn("h9ns", Boot, serverMain, &boot_arg) catch {
+        k.deinit();
+        failBoot("can't start the kernel");
+        return -1;
+    };
+    ns_kernel = k;
     while (booted.load(.acquire) == 0) web.yield();
     return if (booted.load(.acquire) == 1) 0 else -1;
 }
@@ -498,10 +532,10 @@ export fn h9ns_error() [*:0]const u8 {
 /// namespace `aname` (its id; "" or null is 0), until the far end hangs
 /// up. The kernel takes `fd`. Returns 0 once serving has started, or -1.
 export fn h9ns_serve(fd: c_int, aname: ?[*:0]const u8) c_int {
-    if (comptime web.enabled) return -1;
+    if (comptime nofds) return -1;
     if (bootOnce() < 0) return -1;
     if (fd < 0) return -1;
-    if (h9_ns_post(@intFromEnum(Post.fd), fd, aname orelse "") < 0) return -1;
+    if (h9_ns_post(@backingInt(Post.fd), fd, aname orelse "") < 0) return -1;
     return 0;
 }
 
@@ -509,7 +543,7 @@ export fn h9ns_serve(fd: c_int, aname: ?[*:0]const u8) c_int {
 /// `fd!NAME`. Each mount dials a duplicate; the kernel keeps `fd` and
 /// closes it if the name is given again. Returns 0, or -1.
 export fn h9ns_addfd(name: ?[*:0]const u8, fd: c_int) c_int {
-    if (comptime web.enabled) return -1;
+    if (comptime nofds) return -1;
     const n = std.mem.span(name orelse return -1);
     for (n) |ch| if (!(std.ascii.isAlphanumeric(ch) or ch == '-' or ch == '_' or ch == '.')) return -1;
     return if (Fds.add(n, fd)) 0 else -1;
@@ -518,9 +552,14 @@ export fn h9ns_addfd(name: ?[*:0]const u8, fd: c_int) c_int {
 /// The web host's: boots and serves the ports the page hands it.
 pub fn main() void {
     if (comptime !web.enabled) return;
+    web.task.runMain(serve);
+}
+
+/// The first task on the web host's executor.
+fn serve() void {
     if (bootOnce() < 0) {
         std.debug.print("h9ns: {s}\n", .{std.mem.sliceTo(&boot_err, 0)});
         return;
     }
-    while (true) web.coro.sleep(1 << 30);
+    while (true) web.task.sleep(1 << 30);
 }

@@ -1,6 +1,6 @@
 //! Host streams (design/epoch-0/websocket-9p.md): WebSocket connections h9
 //! makes on the host and hands to the kernel through devhstream
-//! (src/kern/devhstream.c), which devmnt can mount. A stream is made by h9
+//! (src/kern/dev/hstream.zig), which devmnt can mount. A stream is made by h9
 //! for a `ws://` root or a namespace-file mount (host-made), or by the
 //! guest through `/net/ws/clone` (a conversation).
 //!
@@ -19,7 +19,7 @@
 //!
 //! On the web host (design/epoch-0/websocket-9p.md, "On the web host")
 //! the JS host's WebSocket connects, does TLS and frames, through the
-//! `h9_ws_*` imports below; each stream's reader is a coroutine parked
+//! `h9_ws_*` imports below; each stream's reader is a task parked
 //! in `ws_recv`. ws.zig, TLS, proxies and the keepalive aren't used there.
 //!
 //! Ports (design/epoch-0/port-streams.md) are the web host's third kind: a
@@ -38,7 +38,7 @@
 //! client's first 9P message, checks it in the dialect slot, and only then
 //! tells the listener's `Served` that the stream is ready to serve.
 //!
-//! The leaves called from devhstream.c never raise kernel errors: they
+//! The leaves called from dev/hstream.zig never raise kernel errors: they
 //! return -1 with the error in the caller's ERRMAX buffer, and the C side
 //! raises it.
 
@@ -83,8 +83,8 @@ fn theIo() Io {
 pub const Kind = enum(c_int) { data = 0, text = 1 };
 
 /// The JS host's WebSockets (src/web/h9-web.js), on the web host only.
-/// `ws_opened` and `ws_recv` are Suspending, so they're called through
-/// `web.coro.blocking`.
+/// `ws_opened` and `ws_recv` are ops, which return an id the task waits
+/// on, so they're called through `web.task.blocking`.
 const js = struct {
     /// Starts a WebSocket to `url` offering the comma-separated
     /// `protocols`, with `headers` (`Name: value` lines) in its handshake;
@@ -100,7 +100,7 @@ const js = struct {
     /// `--cred` helper's command, one word per line, or empty. Writes
     /// `Name: value` lines to `out`, the first of which may instead be
     /// `url URL`, a URL to connect to, and returns their length; -1 for no
-    /// credential; -2 with the error in `out`. Suspending.
+    /// credential; -2 with the error in `out`. An op.
     extern "h9" fn ws_cred(url: [*]const u8, url_n: u32, failed: [*]const u8, failed_n: u32, argv: [*]const u8, argv_n: u32, out: [*]u8, out_n: u32) i32;
     /// Waits for the open: the selected subprotocol's length (in `sel`),
     /// or -1 if it failed or closed first.
@@ -122,7 +122,7 @@ const js = struct {
     /// opened and closed.
     extern "h9" fn port_open(name: [*]const u8, n: u32) i32;
     /// Waits for the next port the page serves the machine on, opened:
-    /// its id, or -1 once `port_stop` was called. Suspending.
+    /// its id, or -1 once `port_stop` was called. An op.
     extern "h9" fn port_accept() i32;
     extern "h9" fn port_stop() void;
     /// What the embedder serves on ports: bit 0 set to serve the machine
@@ -659,7 +659,7 @@ fn newStreamPages(owner: usize, conv: ?u8, pages: ?*const kern.Pages) ?*Stream {
     return null;
 }
 
-// The C side (src/kern/devhstream.c).
+// The C side (src/kern/dev/hstream.zig).
 
 fn wake(id: u32) void {
     kern.hstreamWake(id);
@@ -765,32 +765,21 @@ pub fn identity(id: u32, buf: *[ws.max_user]u8) ?Identity {
 // (design/epoch-0/credential-helpers.md): the root's options for its URL, and
 // the mounts' for the rest.
 
-const HostEntry = struct { owner: usize, root_url: ?[]const u8, root: HostOptions, mounts: HostOptions };
+/// A kernel's options for host-made streams, kept on the kernel.
+pub const HostSet = struct { root_url: ?[]const u8, root: HostOptions, mounts: HostOptions };
 
-var hosts_lock: std.atomic.Mutex = .unlocked;
-var hosts: [64]?HostEntry = @splat(null);
-
-fn lockHosts() void {
-    while (!hosts_lock.tryLock()) std.atomic.spinLoopHint();
+/// Sets kernel `k`'s options. What they point to must outlive it.
+pub fn registerHost(k: *kern.Kernel, root_url: ?[]const u8, root: HostOptions, mounts: HostOptions) void {
+    k.lockSettings();
+    defer k.lock.unlock();
+    k.streams = .{ .root_url = root_url, .root = root, .mounts = mounts };
 }
 
-/// Registers machine `owner`'s options until `unregisterHost`. What they
-/// point to must outlive the registration.
-pub fn registerHost(owner: usize, root_url: ?[]const u8, root: HostOptions, mounts: HostOptions) void {
-    lockHosts();
-    defer hosts_lock.unlock();
-    for (&hosts) |*e| if (e.* == null or e.*.?.owner == owner) {
-        e.* = .{ .owner = owner, .root_url = root_url, .root = root, .mounts = mounts };
-        return;
-    };
-}
-
-pub fn unregisterHost(owner: usize) void {
-    lockHosts();
-    defer hosts_lock.unlock();
-    for (&hosts) |*e| if (e.* != null and e.*.?.owner == owner) {
-        e.* = null;
-    };
+/// Drops kernel `k`'s options, so its machine no longer redials.
+pub fn unregisterHost(k: *kern.Kernel) void {
+    k.lockSettings();
+    defer k.lock.unlock();
+    k.streams = null;
 }
 
 /// Waits up to `ms` for machine `owner`'s host-made streams to finish
@@ -815,19 +804,19 @@ fn connecting(owner: usize) bool {
     return false;
 }
 
-/// For devhstream.c's h9_hstream_dial: starts a host-made stream to
+/// For dev/hstream.zig's h9_hstream_dial: starts a host-made stream to
 /// `url` with the options machine `mach` registered, and returns its id,
 /// or -1 with the error in `err`.
 fn h9_hstream_redial(mach: ?*anyopaque, url: [*]const u8, n: c_long, err: [*]u8) callconv(.c) c_long {
     const u = url[0..@intCast(n)];
     const owner = @intFromPtr(mach);
     const o: HostOptions = blk: {
-        lockHosts();
-        defer hosts_lock.unlock();
-        for (hosts) |e| if (e != null and e.?.owner == owner) {
-            const h = e.?;
-            break :blk if (h.root_url != null and std.mem.eql(u8, h.root_url.?, u)) h.root else h.mounts;
-        };
+        if (kern.Kernel.ofMach(mach)) |k| {
+            k.lockSettings();
+            defer k.lock.unlock();
+            if (k.streams) |h|
+                break :blk if (h.root_url != null and std.mem.eql(u8, h.root_url.?, u)) h.root else h.mounts;
+        }
         putErr(err, "redial: no options for this machine");
         return -1;
     };
@@ -977,7 +966,7 @@ fn acceptUpgrade(s: *Stream, pol: ws.ServerPolicy) error{Refused}!void {
 /// once `stopPorts` was called. Web host only.
 pub fn acceptPort() ?i32 {
     if (!web.enabled) return null;
-    const id = web.coro.blocking(js.port_accept, .{});
+    const id = web.task.blocking(js.port_accept, .{});
     return if (id < 0) null else id;
 }
 
@@ -1430,7 +1419,7 @@ fn webCred(s: *Stream, failed: []const u8, out: *[8192]u8) ConnectError!i32 {
         }
         cred.warnPlain(h, s.url);
     }
-    const n = web.coro.blocking(js.ws_cred, .{ s.url.ptr, @as(u32, @intCast(s.url.len)), failed.ptr, @as(u32, @intCast(failed.len)), argv.items.ptr, @as(u32, @intCast(argv.items.len)), out, @as(u32, out.len) });
+    const n = web.task.blocking(js.ws_cred, .{ s.url.ptr, @as(u32, @intCast(s.url.len)), failed.ptr, @as(u32, @intCast(failed.len)), argv.items.ptr, @as(u32, @intCast(argv.items.len)), out, @as(u32, out.len) });
     if (n == -2) {
         const msg = std.mem.sliceTo(out, 0);
         return webFail(s, "{s}", .{msg[0..@min(msg.len, 120)]});
@@ -1458,7 +1447,7 @@ fn webOpen(s: *Stream, url: []const u8, protos: []const u8, headers: []const u8,
     }
     // From here `finish` frees the socket.
     var sel: [32]u8 = undefined;
-    const n = web.coro.blocking(js.ws_opened, .{ id, &sel, @as(u32, sel.len) });
+    const n = web.task.blocking(js.ws_opened, .{ id, &sel, @as(u32, sel.len) });
     if (n < 0) {
         var len: u32 = 0;
         _ = js.ws_status(id, why, why.len, &len);
@@ -1506,7 +1495,7 @@ fn webReadLoop(s: *Stream) void {
     var buf: [4096]u8 = undefined;
     while (true) {
         var info: u32 = 0;
-        const n = web.coro.blocking(js.ws_recv, .{ s.sock, &buf, @as(u32, buf.len), &info });
+        const n = web.task.blocking(js.ws_recv, .{ s.sock, &buf, @as(u32, buf.len), &info });
         if (n < 0) {
             var reason: [123]u8 = undefined;
             var len: u32 = 0;
@@ -1806,7 +1795,7 @@ fn keepaliveLoop() void {
     }
 }
 
-// Leaves called from devhstream.c.
+// Leaves called from dev/hstream.zig.
 
 fn putErr(err: [*]u8, msg: []const u8) void {
     const n = @min(msg.len, kern.ERRMAX - 1);
@@ -2124,7 +2113,7 @@ fn h9_hstream_read(id: c_ulong, kind: c_int, buf: [*]u8, n: c_long, err: [*]u8) 
         return -1;
     }
     const dest = buf[0..@intCast(n)];
-    if (kind == @intFromEnum(Kind.text)) {
+    if (kind == @backingInt(Kind.text)) {
         if (s.text.len > 0) {
             const len = s.text.peekLen();
             if (len > dest.len) {
@@ -2154,7 +2143,7 @@ fn h9_hstream_ready(id: c_ulong, kind: c_int) callconv(.c) c_int {
     const st = s.state.load(.acquire);
     if (st == .idle) return 1;
     if (st == .connecting) return 0;
-    return @intFromBool(if (kind == @intFromEnum(Kind.text)) s.text.len > 0 else s.data.len > 0);
+    return @intFromBool(if (kind == @backingInt(Kind.text)) s.text.len > 0 else s.data.len > 0);
 }
 
 /// Sends one binary (`data`) or text message. Returns `n` or -1.
@@ -2165,7 +2154,7 @@ fn h9_hstream_write(id: c_ulong, kind: c_int, buf: [*]const u8, n: c_long, err: 
     };
     defer unref(s);
     const bytes = buf[0..@intCast(n)];
-    const text = kind == @intFromEnum(Kind.text);
+    const text = kind == @backingInt(Kind.text);
     if (text and !ws.validUtf8(bytes)) {
         putErr(err, "invalid utf-8");
         return -1;
@@ -2455,7 +2444,7 @@ test "the guest's /net/ws: connect, data, text, status, and the last close hangs
         }
     };
     var t: T = .{ .port = echo.port };
-    try kern.spawn("test", T, T.run, &t);
+    try kern.spawnAlone("test", T, T.run, &t);
     while (!t.done.load(.acquire)) std.Thread.yield() catch {};
     if (t.err) |e| {
         std.debug.print("at {s}: {s}\n", .{ t.what, t.why[0..t.why_len] });
@@ -2522,7 +2511,7 @@ test "a host-made stream: connect, wait, an fd, and a server close ends it" {
         }
     };
     var t: T = .{ .port = echo.port, .bye_port = bye.port };
-    try kern.spawn("test", T, T.run, &t);
+    try kern.spawnAlone("test", T, T.run, &t);
     while (!t.done.load(.acquire)) std.Thread.yield() catch {};
     if (t.err) |e| {
         std.debug.print("{s}\n", .{t.msg[0..t.msg_len]});
@@ -2559,7 +2548,7 @@ test "the keepalive pings an idle stream" {
         }
     };
     var t: T = .{ .port = echo.port };
-    try kern.spawn("test", T, T.run, &t);
+    try kern.spawnAlone("test", T, T.run, &t);
     while (!t.done.load(.acquire)) std.Thread.yield() catch {};
     if (t.err) |e| return e;
     try testing.expect(echo.pings.load(.acquire) >= 2);

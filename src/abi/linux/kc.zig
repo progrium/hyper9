@@ -1,5 +1,5 @@
 //! The kernel leaves the Linux ABI uses beyond src/kern.zig's:
-//! src/kern/linux.c. Stubs stand in where kern isn't built.
+//! src/kern/linux.zig. Stubs stand in where kern isn't built.
 
 const std = @import("std");
 const kern = @import("../../kern.zig");
@@ -13,16 +13,16 @@ const real = struct {
     extern fn h9_linux_dotrestore(old: ?*anyopaque) void;
     extern fn h9_fs_nofollow(on: c_int) c_int;
     extern fn h9_linux_fdinfo(fd: c_int, dc: *c_int, dev: *c_uint, qpath: *u64, qtype: *c_int, mode: *c_int, cexec: *c_int) c_int;
-    extern fn h9_linux_setcputime(user: c_ulong, sys: c_ulong) void;
+    extern fn h9_linux_setcputime(user: c_uint, sys: c_uint) void;
     extern fn h9_linux_fdchan(fd: c_int, refs: *c_int) usize;
     extern fn h9_linux_changet(fd: c_int) ?*anyopaque;
-    extern fn h9_linux_chanpread(ch: *anyopaque, buf: [*]u8, n: c_long, off: i64) c_long;
+    extern fn h9_linux_chanpread(ch: *anyopaque, buf: [*]u8, n: c_int, off: i64) c_int;
     extern fn h9_linux_chanput(ch: *anyopaque) void;
     extern fn h9_linux_setcexec(fd: c_int, on: c_int) c_int;
     extern fn h9_linux_maxfd() c_int;
     extern fn h9_linux_fds(fds: [*]c_int, n: c_int) c_int;
-    extern fn h9_linux_await(buf: [*]u8, n: c_int, block: c_int, want: c_long, peek: c_int) c_int;
-    extern fn h9_linux_ppid() c_ulong;
+    extern fn h9_linux_await(buf: [*]u8, n: c_int, block: c_int, want: c_int, peek: c_int) c_int;
+    extern fn h9_linux_ppid() c_uint;
     extern fn h9_linux_getcwd(buf: [*]u8, n: c_int) c_int;
     extern fn h9_linux_fchdir(fd: c_int) c_int;
     extern fn h9_linux_chroot(path: [*:0]const u8) c_int;
@@ -30,7 +30,11 @@ const real = struct {
     extern fn h9_poll(fds: [*]PollFd, n: c_int, ms: c_int, gen: ?*c_uint, once: c_int) c_int;
     extern fn h9_fdready(fd: c_int, events: c_int) c_int;
     extern fn h9_pollgen() c_uint;
-    extern fn h9_pollwake() void;
+    extern fn h9_fdgen(fd: c_int) c_uint;
+    extern fn h9_pollkick() void;
+    extern fn h9_lockgen() c_uint;
+    extern fn h9_lockwake() void;
+    extern fn h9_lockwait(seen: c_uint) c_int;
     extern fn h9_futex_wait(key: *const anyopaque, addr: u64, word: *u32, val: u32, bitset: u32, ms: c_int) c_int;
     extern fn h9_futex_wake(key: *const anyopaque, addr: u64, n: c_int, bitset: u32, addr2: u64, nreq: c_int, word: ?*u32, val: u32) c_int;
     extern fn h9_linux_sockrecv(fd: c_int, buf: [*]u8, n: c_int, peek: c_int, dontwait: c_int, raddr: ?*[16]u8, rport: ?*u16) c_int;
@@ -44,10 +48,8 @@ const real = struct {
     extern fn h9so_hasv6() c_int;
     extern fn h9so_ifaddrs(a: [*]IfAddr, max: c_int) c_int;
     extern fn h9_linux_sockctl(fd: c_int, msg: [*:0]const u8) c_int;
-    extern fn h9_linux_rattach(datafd: c_int, ctlfd: c_int, id: c_int, udp: c_int, open: c_int) c_int;
     extern fn h9_linux_rconvid(fd: c_int) c_int;
     extern fn h9_linux_rclose(fd: c_int) void;
-    extern fn h9_linux_raccept(fd: c_int, cloexec: c_int) c_int;
     extern fn h9_linux_syncfs(fd: c_int) c_int;
     extern fn h9_linux_sync() c_int;
     extern fn h9_linux_isfifo(fd: c_int) c_int;
@@ -55,11 +57,11 @@ const real = struct {
     extern fn h9_pty_get(fd: c_int, s: *PtyState) c_int;
     extern fn h9_pty_set(fd: c_int, s: *const PtyState, what: c_int, excl: c_int) c_int;
     extern fn h9_pty_bysid(sid: c_ulong) c_int;
-    extern fn h9_pty_queued(fd: c_int, wr: c_int, flush: c_int) c_long;
+    extern fn h9_pty_queued(fd: c_int, wr: c_int, flush: c_int) c_int;
     extern fn h9_pty_setsig(f: PtySig) void;
 };
 
-/// devlinux's hook for its text files (src/kern/devlinux.c): the file's
+/// devlinux's hook for its text files (src/kern/dev/linux.zig): the file's
 /// name, the process's `aux` for /proc/n files (null for the machine's
 /// own), into buf; returns the length or -1.
 pub const Gen = *const fn (aux: ?*anyopaque, name: [*:0]const u8, pid: c_ulong, buf: [*]u8, n: c_int) callconv(.c) c_int;
@@ -84,14 +86,14 @@ const stub = struct {
     fn h9_fs_nofollow(_: c_int) c_int {
         return 0;
     }
-    fn h9_linux_setcputime(_: c_ulong, _: c_ulong) void {}
+    fn h9_linux_setcputime(_: c_uint, _: c_uint) void {}
     fn h9_linux_fdchan(_: c_int, _: *c_int) usize {
         return 0;
     }
     fn h9_linux_changet(_: c_int) ?*anyopaque {
         return null;
     }
-    fn h9_linux_chanpread(_: *anyopaque, _: [*]u8, _: c_long, _: i64) c_long {
+    fn h9_linux_chanpread(_: *anyopaque, _: [*]u8, _: c_int, _: i64) c_int {
         return -1;
     }
     fn h9_linux_chanput(_: *anyopaque) void {}
@@ -107,10 +109,10 @@ const stub = struct {
     fn h9_linux_fds(_: [*]c_int, _: c_int) c_int {
         return 0;
     }
-    fn h9_linux_await(_: [*]u8, _: c_int, _: c_int, _: c_long, _: c_int) c_int {
+    fn h9_linux_await(_: [*]u8, _: c_int, _: c_int, _: c_int, _: c_int) c_int {
         return -1;
     }
-    fn h9_linux_ppid() c_ulong {
+    fn h9_linux_ppid() c_uint {
         return 1;
     }
     fn h9_linux_getcwd(_: [*]u8, _: c_int) c_int {
@@ -138,7 +140,17 @@ const stub = struct {
     fn h9_pollgen() c_uint {
         return 0;
     }
-    fn h9_pollwake() void {}
+    fn h9_fdgen(_: c_int) c_uint {
+        return 0;
+    }
+    fn h9_pollkick() void {}
+    fn h9_lockgen() c_uint {
+        return 0;
+    }
+    fn h9_lockwake() void {}
+    fn h9_lockwait(_: c_uint) c_int {
+        return 0;
+    }
     fn h9_futex_wait(_: *const anyopaque, _: u64, _: *u32, _: u32, _: u32, _: c_int) c_int {
         return 1;
     }
@@ -166,16 +178,10 @@ const stub = struct {
     fn h9_linux_sockctl(_: c_int, _: [*:0]const u8) c_int {
         return -1;
     }
-    fn h9_linux_rattach(_: c_int, _: c_int, _: c_int, _: c_int, _: c_int) c_int {
-        return -1;
-    }
     fn h9_linux_rconvid(_: c_int) c_int {
         return -1;
     }
     fn h9_linux_rclose(_: c_int) void {}
-    fn h9_linux_raccept(_: c_int, _: c_int) c_int {
-        return -9;
-    }
     fn h9_linux_syncfs(_: c_int) c_int {
         return -1;
     }
@@ -191,13 +197,13 @@ const stub = struct {
     fn h9_pty_bysid(_: c_ulong) c_int {
         return -1;
     }
-    fn h9_pty_queued(_: c_int, _: c_int, _: c_int) c_long {
+    fn h9_pty_queued(_: c_int, _: c_int, _: c_int) c_int {
         return -1;
     }
     fn h9_pty_setsig(_: PtySig) void {}
 };
 
-/// A pty pair's state (src/kern/devpty.c's Ptystate): the termios as
+/// A pty pair's state (src/kern/dev/pty.zig's Ptystate): the termios as
 /// the ABI keeps it, the window size (rows, cols, xpixel,
 /// ypixel), the foreground group and session (0 for none), the lock,
 /// and, read only, the pair's number, whether the fd is its master, and
@@ -264,7 +270,7 @@ pub fn setPtySig(f: PtySig) void {
     c.h9_pty_setsig(f);
 }
 
-/// Linux's struct pollfd, which h9_poll fills in (src/kern/linuxnet.c).
+/// Linux's struct pollfd, which h9_poll fills in (src/kern/linuxnet.zig).
 pub const PollFd = extern struct { fd: i32, events: i16, revents: i16 };
 
 pub const POLLIN = 1;
@@ -274,6 +280,9 @@ pub const POLLERR = 8;
 pub const POLLHUP = 0x10;
 pub const POLLNVAL = 0x20;
 pub const POLLRDHUP = 0x2000;
+/// h9_poll's own: an entry to watch for its next change, not to ask
+/// (an edge-triggered epoll entry already reported; src/kern/linuxnet.zig).
+pub const POLLEDGE = 0x8000;
 
 /// Fills in each revents and returns how many fds are ready, sleeping up
 /// to `ms` (-1 forever, 0 not at all) until one is. `gen` gets the wake
@@ -324,7 +333,29 @@ pub fn futexWake(key: *const anyopaque, addr: u64, n: u32, bitset: u32, addr2: u
 
 /// Wakes every poll, select and epoll_wait, to look again.
 pub fn pollWake() void {
-    c.h9_pollwake();
+    c.h9_pollkick();
+}
+
+/// The file lock table's changes (locks.zig), for lockWait.
+pub fn lockGen() u32 {
+    return c.h9_lockgen();
+}
+
+/// The file lock table changed: wakes the locks waiting in lockWait.
+pub fn lockWake() void {
+    c.h9_lockwake();
+}
+
+/// Waits until the lock table has changed since lockGen said seen, or a
+/// signal interrupts it.
+pub fn lockWait(seen: u32) Error!void {
+    _ = try check(c.h9_lockwait(seen));
+}
+
+/// The generation of what fd's readiness comes from, which each change
+/// to it moves: for edge-triggered epoll.
+pub fn fdGen(fd: i32) u32 {
+    return c.h9_fdgen(fd);
 }
 
 pub fn pollGen() u64 {
@@ -386,27 +417,15 @@ pub fn soError(fd: i32) u32 {
     return @intCast(c.h9_linux_soerror(fd));
 }
 
-/// Attaches a conversation from a mounted /net (not devip's), open on
-/// `data` and `ctl`, to the kernel's read-ahead (src/kern/linuxnet.c),
-/// under the Linux layer's `id`. `open`: it's connected already.
-pub fn rattach(data: i32, ctl: i32, id: u32, udp: bool, open: bool) Error!void {
-    _ = try check(c.h9_linux_rattach(data, ctl, @intCast(id), @intFromBool(udp), @intFromBool(open)));
-}
-
-/// The id fd's mounted conversation was attached under, or null.
+/// The Linux layer's id for fd if it's a conversation of a mounted /net
+/// (its data file, by name), or null.
 pub fn rconvId(fd: i32) ?u32 {
     const r = c.h9_linux_rconvid(fd);
     return if (r < 0) null else @intCast(r);
 }
 
-/// accept on a listening mounted conversation: a new fd for the waiting
-/// call's ctl, or -errno (-EAGAIN when none waits yet).
-pub fn raccept(fd: i32, cloexec: bool) i64 {
-    return c.h9_linux_raccept(fd, @intFromBool(cloexec));
-}
-
-/// fd is closing: a mounted conversation goes with its description's
-/// last fd.
+/// fd is closing: what the kernel kept for a mounted conversation's
+/// peeks goes with its description's last fd.
 pub fn rclose(fd: i32) void {
     c.h9_linux_rclose(fd);
 }
@@ -485,7 +504,7 @@ pub fn isFifo(fd: i32) bool {
 
 /// Replaces fd, open on a FIFO's file, with an open of the FIFO's pipe
 /// in `mode` (Plan 9's OREAD, OWRITE, or ORDWR), from the machine-wide
-/// table (src/kern/fifo.c). A read or write open waits for the other
+/// table (src/kern/fifo.zig). A read or write open waits for the other
 /// end unless `nonblock`; a nonblocking write open with no reader fails
 /// with "no reader", and a note interrupts the wait.
 pub fn fifoJoin(fd: i32, mode: c_int, nonblock: bool) Error!void {
@@ -493,7 +512,7 @@ pub fn fifoJoin(fd: i32, mode: c_int, nonblock: bool) Error!void {
 }
 
 /// syncfs(2): syncs the host file system behind fd's channel, if it's on
-/// one (src/kern/linux.c).
+/// one (src/kern/linux.zig).
 pub fn syncfs(fd: i32) Error!void {
     _ = try check(c.h9_linux_syncfs(fd));
 }
@@ -531,7 +550,7 @@ pub fn chanPut(ch: *anyopaque) void {
     c.h9_linux_chanput(ch);
 }
 
-/// One of the host's interface addresses (src/kern/hostsock.h's
+/// One of the host's interface addresses (src/host/hostsock.h's
 /// H9ifaddr): `addr` is devip's 16 bytes, IPv4 mapped.
 pub const IfAddr = extern struct {
     name: [16]u8,
@@ -550,7 +569,7 @@ pub fn hostIfAddrs(buf: []IfAddr) []IfAddr {
     return buf[0..@intCast(@max(n, 0))];
 }
 
-/// Whether the host can make IPv6 sockets (src/kern/hostsock.h).
+/// Whether the host can make IPv6 sockets (src/host/hostsock.h).
 pub fn hostHasV6() bool {
     return c.h9so_hasv6() != 0;
 }

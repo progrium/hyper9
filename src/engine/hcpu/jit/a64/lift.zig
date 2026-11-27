@@ -865,7 +865,8 @@ pub const L = struct {
     /// STXR, and STXP of two W registers, as T0 runs them: if the monitor
     /// holds this address and size, a compare-and-swap against the value
     /// LDXR saw (status 0 if it swapped); otherwise status 1, with no
-    /// access, after the alignment check. Either way the monitor clears.
+    /// access, after the alignment check. Either way the monitor clears,
+    /// unless the swap faults.
     /// It ends the current block: the rest of the instruction's block
     /// continues in a new one.
     fn storeExclusive(l: *L, in: Insn) !void {
@@ -900,9 +901,14 @@ pub const L = struct {
         const a2 = try b.getreg(.i64, regOff(o.n));
         const lo = try b.getreg(.i64, monOff("lo"));
         const exp = if (ty == .i64) lo else try b.un(.trunc, ty, lo);
-        try clearMonitor(b);
         const v = try l.newValue(in, size, is_pair);
         const old = try b.cas(ty, a2, exp, v, .{ .size = size, .aligned = true, .order = .seq_cst }, in.pc);
+        // Cleared after the swap, not before: if the swap faults (a page
+        // kept read-only until its first write, for copy-on-write), T0
+        // runs the instruction again and must find the monitor, or it
+        // fails the STXR without touching the page, the kernel never sees
+        // the write fault, and the guest's LDXR/STXR loop never ends.
+        try clearMonitor(b);
         const status = try b.un(.zext, .i64, try b.icmp(.ne, old, exp));
         if (o.d != SINK and o.d != ZR) try b.setreg(regOff(o.d), status);
         try b.br(join);

@@ -28,8 +28,23 @@ pub const Times = struct {
     }
 };
 
-/// The calling thread's CPU time so far; zero where the host can't say.
+/// A process on a machine's executors (src/executor.zig) shares its host
+/// thread with others, and moves between them: the executors count each
+/// process's time apart, and this hook reads it for the calling process,
+/// or null if it isn't on an executor.
+pub var task_hook: ?*const fn () ?Times = null;
+
+/// The calling guest thread's CPU time so far, on the host thread it's
+/// on or across the executors it has run on; zero where the host can't
+/// say.
 pub fn thread() Times {
+    if (task_hook) |h| if (h()) |t| return t;
+    return hostThread();
+}
+
+/// The calling host thread's CPU time so far; zero where the host can't
+/// say.
+pub fn hostThread() Times {
     switch (builtin.os.tag) {
         .linux => {
             // RUSAGE_THREAD splits it, as clock_gettime can't.

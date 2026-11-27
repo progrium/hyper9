@@ -405,9 +405,6 @@ chanfree(Chan *c)
 	pathclose(c->path);
 	c->path = nil;
 
-	free(c->srvname);	/* h9, as 9front */
-	c->srvname = nil;
-
 	lock(&chanalloc.lk);
 	c->next = chanalloc.free;
 	chanalloc.free = c;
@@ -756,22 +753,6 @@ cclone(Chan *c)
 	return nc;
 }
 
-/* h9: src/kern/devoverlay.c */
-extern int h9_overlay_lowerdev(int, int, Qid, int*, int*);
-/* h9: devfs-posix.c and devfs-win32.c (src/kern/fscheck.h) */
-extern void h9_fs_anchor(Chan*);
-/* h9: Linux symlinks (design/linux-symlinks.md, src/kern/fscheck.h) */
-extern int h9_fs_linkwalk(void);
-extern int h9_fs_nofollowing(void);
-extern int h9_fs_chanreadlink(Chan*, char*, int);
-extern int h9_fs_atroot(Chan*);	/* h9: src/kern/linux.c */
-enum {
-	Qtsymlink	= 0x02,	/* H9_QTSYMLINK */
-	Maxlinks	= 40,	/* H9_MAXLINKS */
-	Linkbuf		= 4096,
-};
-static int walkl(Chan**, char**, int, int, int*, int, int*);
-
 /* also used by sysfile.c:/^mountfix */
 int
 findmount(Chan **cp, Mhead **mp, int type, int dev, Qid qid)
@@ -779,14 +760,10 @@ findmount(Chan **cp, Mhead **mp, int type, int dev, Qid qid)
 	Chan *to;
 	Pgrp *pg;
 	Mhead *m;
-	int samepath;
 
 	pg = up->pgrp;
-	samepath = 0;
 	rlock(&pg->ns);
 	for(m = MOUNTH(pg, qid); m != nil; m = m->hash){
-		if(m->from->qid.path == qid.path)
-			samepath = 1;
 		if(eqchantdqid(m->from, type, dev, qid, 1)){
 			if(mp != nil)
 				incref(&m->ref);
@@ -806,13 +783,6 @@ findmount(Chan **cp, Mhead **mp, int type, int dev, Qid qid)
 		}
 	}
 	runlock(&pg->ns);
-	/*
-	 * h9: a lower directory seen through a #O overlay keeps the mounts
-	 * made on it before the overlay (src/kern/devoverlay.c), as when a
-	 * namespace file's overlay goes over / after other binds.
-	 */
-	if(samepath && h9_overlay_lowerdev(type, dev, qid, &type, &dev))
-		return findmount(cp, mp, type, dev, qid);
 	return 0;
 }
 
@@ -890,101 +860,8 @@ ewalk(Chan *c, Chan *nc, char **name, int nname)
 int
 walk(Chan **cp, char **names, int nnames, int nomount, int *nerror)
 {
-	int nlinks;
-
-	nlinks = 0;
-	return walkl(cp, names, nnames, nomount, nerror, 1, &nlinks);
-}
-
-/*
- * h9: the link a Linux process's walk stopped at (design/linux-symlinks.md).
- * c is the directory the walk had reached, path its name; the device's
- * walk of the k names from names (k > 0) ended on a link, the last of
- * them, and rest more names follow it. Walks the link's target and then
- * the rest: an absolute target from the process's root, a relative one
- * from the link's directory, so the result's name is the target's.
- * Returns the walk's result, or nil with the error in errstr.
- */
-static Chan*
-followlink(Chan *c, Path *path, char **names, int k, char **rest, int nrest, int nomount, int follow, int *nlinks)
-{
-	Walkqid *wq;
-	Chan *lc, *s;
-	char *t, *buf, **nn;
-	int n, nnn, i, r, abs;
-
-	if(++*nlinks > Maxlinks){
-		kstrcpy(up->errstr, "too many symbolic links", ERRMAX);
-		return nil;
-	}
-	/* The link itself, to read its target. */
-	if((wq = ewalk(c, nil, names, k)) == nil)
-		return nil;
-	lc = wq->clone;
-	if(lc == nil || wq->nqid != k){
-		if(lc != nil)
-			cclose(lc);
-		free(wq);
-		kstrcpy(up->errstr, Enonexist, ERRMAX);
-		return nil;
-	}
-	free(wq);
-	buf = smalloc(Linkbuf);
-	if(waserror()){
-		cclose(lc);
-		free(buf);
-		return nil;
-	}
-	n = h9_fs_chanreadlink(lc, buf, Linkbuf);
-	poperror();
-	cclose(lc);
-	if(n <= 0){
-		free(buf);
-		kstrcpy(up->errstr, Enonexist, ERRMAX);
-		return nil;
-	}
-	/* The names to walk: the link's directory's (if relative), the target's, and the rest. */
-	abs = buf[0] == '/';
-	nn = smalloc((k + n + nrest) * sizeof(char*));
-	nnn = 0;
-	if(!abs)
-		for(i = 0; i < k-1; i++)
-			nn[nnn++] = names[i];
-	for(t = buf; *t != '\0'; ){
-		while(*t == '/')
-			*t++ = '\0';
-		if(*t == '\0')
-			break;
-		nn[nnn++] = t;
-		while(*t != '\0' && *t != '/')
-			t++;
-	}
-	for(i = 0; i < nrest; i++)
-		nn[nnn++] = rest[i];
-	if(abs){
-		s = cclone(up->slash);
-		nomount = 0;
-	}else{
-		s = cclone(c);
-		pathclose(s->path);
-		s->path = path;
-		incref(&path->ref);
-	}
-	r = walkl(&s, nn, nnn, nomount, nil, follow, nlinks);
-	free(nn);
-	free(buf);
-	if(r < 0){
-		cclose(s);
-		return nil;
-	}
-	return s;
-}
-
-static int
-walkl(Chan **cp, char **names, int nnames, int nomount, int *nerror, int follow, int *nlinks)
-{
 	int dev, didmount, dotdot, i, n, nhave, ntry, type;
-	Chan *c, *nc, *mtpt, *wc;
+	Chan *c, *nc, *mtpt;
 	Path *path;
 	Mhead *mh, *nmh;
 	Mount *f;
@@ -1035,18 +912,11 @@ walkl(Chan **cp, char **names, int nnames, int nomount, int *nerror, int follow,
 			}
 		}
 
-		/* h9: .. at a Linux process's chroot stays there, as on Linux (design/linux-chroot.md). */
-		if(dotdot && h9_fs_atroot(c)){
-			n = 1;
-			continue;
-		}
-
 		if(!dotdot && !nomount && !didmount)
 			domount(&c, &mh, &path);
 		
 		type = c->type;
 		dev = c->dev;
-		wc = c;	/* h9: the chan the names were walked from, for followlink */
 
 		if((wq = ewalk(c, nil, names+nhave, ntry)) == nil){
 			/* try a union mount, if any */
@@ -1061,8 +931,6 @@ walkl(Chan **cp, char **names, int nnames, int nomount, int *nerror, int follow,
 					if((wq = ewalk(f->to, nil, names+nhave, ntry)) != nil){
 						type = f->to->type;
 						dev = f->to->dev;
-						wc = f->to;
-						incref(&wc->ref);
 						break;
 					}
 				runlock(&mh->lock);
@@ -1076,52 +944,6 @@ walkl(Chan **cp, char **names, int nnames, int nomount, int *nerror, int follow,
 				return -1;
 			}
 		}
-
-		/*
-		 * h9: a Linux process's walk that stopped at a link, with names
-		 * left or at a last name it follows, starts again at the link's
-		 * target (design/linux-symlinks.md), unless a mount point comes
-		 * before the link: the walk crosses that first.
-		 */
-		if(!dotdot && wq->nqid > 0 && (wq->qid[wq->nqid-1].type & Qtsymlink) != 0
-		&& (nhave+wq->nqid < nnames || follow) && h9_fs_linkwalk()){
-			int k;
-
-			k = wq->nqid;
-			nc = nil;
-			nmh = nil;
-			if(!nomount)
-				for(i=0; i<k-1; i++)
-					if(findmount(&nc, &nmh, type, dev, wq->qid[i]))
-						break;
-			if(nc != nil){
-				cclose(nc);
-				putmhead(nmh);
-				nc = nil;
-			}else{
-				if(wq->clone != nil)
-					cclose(wq->clone);
-				free(wq);
-				nc = followlink(wc, path, names+nhave, k, names+nhave+k, nnames-nhave-k, nomount, follow, nlinks);
-				if(wc != c)
-					cclose(wc);
-				cclose(c);
-				pathclose(path);
-				putmhead(mh);
-				if(nc == nil){
-					if(nerror)
-						*nerror = nhave+k;
-					return -1;
-				}
-				cclose(*cp);
-				*cp = nc;
-				if(nerror)
-					*nerror = nnames;
-				return 0;
-			}
-		}
-		if(wc != c)
-			cclose(wc);
 
 		didmount = 0;
 		if(dotdot){
@@ -1354,7 +1176,7 @@ namelenerror(char *aname, int len, char *err)
 Chan*
 namec(char *aname, int amode, int omode, ulong perm)
 {
-	int len, n, t, nomount, nofollow, nlinks;
+	int len, n, t, nomount;
 	Chan *volatile c;
 	Chan *volatile cnew;
 	Path *volatile path;
@@ -1409,13 +1231,6 @@ namec(char *aname, int amode, int omode, ulong perm)
 			error(Enoattach);
 
 		c = devtab[t]->attach(up->genbuf+n);
-		/*
-		 * h9: #L, the Linux view's root (src/kern/devlinux.c), is a
-		 * union with the Linux root tree bound after it, so a walk from
-		 * it crosses mounts, as one from / does.
-		 */
-		if(r == 'L')
-			nomount = 0;
 		break;
 
 	default:
@@ -1431,7 +1246,6 @@ namec(char *aname, int amode, int omode, ulong perm)
 	e.off = nil;
 	e.nelems = 0;
 	e.nerror = 0;
-	nlinks = 0;
 	if(waserror()){
 		cclose(c);
 		free(e.name);
@@ -1471,23 +1285,13 @@ namec(char *aname, int amode, int omode, ulong perm)
 		e.nelems--;
 	}
 
-	/*
-	 * h9: a Linux process's lookup follows a link in its last name
-	 * unless it's a remove, or the call says not to (h9_fs_nofollow).
-	 * A create's walk here stops before its last name.
-	 */
-	nofollow = amode == Aremove || (amode != Acreate && h9_fs_linkwalk() && h9_fs_nofollowing());
-	if(walkl(&c, e.elems, e.nelems, nomount, &e.nerror, !nofollow, &nlinks) < 0){
+	if(walk(&c, e.elems, e.nelems, nomount, &e.nerror) < 0){
 		if(e.nerror < 0 || e.nerror > e.nelems){
 			print("namec %s walk error nerror=%d\n", aname, e.nerror);
 			e.nerror = 0;
 		}
 		nexterror();
 	}
-
-	/* h9: a contained #U attach's tree is where its walk ends (devfs). */
-	if(nomount && devtab[c->type]->dc == 'U')
-		h9_fs_anchor(c);
 
 	if(e.mustbedir && (c->qid.type&QTDIR) == 0)
 		error("not a directory");
@@ -1572,9 +1376,6 @@ namec(char *aname, int amode, int omode, ulong perm)
 			/* save registers else error() in open has wrong value of c saved */
 			saveregisters();
 
-			/* h9: a link a Linux open didn't follow (design/linux-symlinks.md) */
-			if((c->qid.type & Qtsymlink) != 0 && h9_fs_linkwalk())
-				error("too many symbolic links");
 			c = devtab[c->type]->open(c, omode&~OCEXEC);
 			if(omode & ORCLOSE)
 				c->flag |= CRCLOSE;
