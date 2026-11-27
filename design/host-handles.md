@@ -1,12 +1,12 @@
 ---
 slug: host-handles
 title: Host access through handles
-status: draft
+status: implemented
 created: 2026-11-21
 authors: [progrium]
 depends: [kernel-port]
 areas: [kern, sandbox, web, tests]
-branch: [dev, host-handles, host-handles-2]
+branch: [main]
 ---
 
 # Proposal: Host access through handles
@@ -96,12 +96,12 @@ This is a security change. The guest can reach nothing new. What changes is how 
 
 ## Done criteria
 
-- [ ] Every sandbox case in `tests/` passes unchanged on macOS, Linux, Windows, and the web host.
-- [ ] `test "a symlink swapped in mid-walk can't escape a handle [host-handles]"` passes on macOS, Linux, and Windows.
+- [~] Every sandbox case in `tests/` passes unchanged on macOS, Linux, Windows, and the web host. Waived in part: they pass on macOS, Linux, and Windows, and on the web host but for the cases that fail the same way on main: the 23 `zig build integration -Dweb` failures on the Mac ([linux-net], [linux-fifo], termios, fsync, wait4, and [upper-layers]'s links and FIFOs) are the same 23 with a build of main.
+- [x] `test "a symlink swapped in mid-walk can't escape a handle [host-handles]"` passes on macOS, Linux, and Windows.
 - [x] `test "a kernel with an empty Host can reach nothing outside [host-handles]"` passes.
 - [x] `test "an embedder's in-memory dirs handle serves a root [host-handles]"` passes.
 - [x] `git grep -lE '#include <(unistd|fcntl|sys/|windows)' src/kern/` finds nothing.
-- [ ] `h9 --print` output is the same as before for the policy cases, apart from handle names and the caveat that goes.
+- [~] `h9 --print` output is the same as before for the policy cases, apart from handle names and the caveat that goes. Waived: [plan-format](plan-format.md), in the same PR, replaced `--print`'s output, and its cases pin the new output for the policy cases.
 - [x] `test "/proc/n/ns shows handle names and no host path, in every profile [host-handles]"` passes.
 - [x] `test "--ns replays /proc/n/ns output in a machine with the same handles [host-handles]"` passes.
 - [x] [spec/sandbox.md](../spec/sandbox.md) describes handles, and its path resolution section describes what each host does beneath one.
@@ -159,3 +159,5 @@ This is a security change. The guest can reach nothing new. What changes is how 
 - **Remove and rename open the file's own entry beneath the handle**, a link itself rather than its target (`FILE_FLAG_OPEN_REPARSE_POINT`, through `src/host/dirs.c`'s walk), and act on that handle: the delete disposition, with POSIX semantics where the file system has them, and `NtSetInformationFile`'s `FileRenameInformation` with a bare name, which renames within the file's own directory. Not `SetFileInformationByHandle`, which reads a bare name as relative to the process's current directory and moves the file there.
 - **A link is an empty entry made beneath the handle, then a reparse point set on that handle** (`FSCTL_SET_REPARSE_POINT`), so nothing is made by a path the host resolves again. Its target is kept as written, with `\` for each `/`, and marked relative, since an absolute Linux target is a guest path; `readlink` gives it back with `/`. It's a directory link when a relative target names a directory when it's made. A symbolic link needs `SeCreateSymbolicLinkPrivilege`, and without it the link fails with "permission denied", as before.
 - **A FIFO is WSL's: an empty file with an `IO_REPARSE_TAG_LX_FIFO` reparse point**, made the same way, which needs no privilege. devfs gives it `DMFIFO`, opens it only to check it, and never reads or writes it, as on POSIX hosts, so a Linux program's open joins h9's own pipe for it.
+
+**2026-11-27, the run on every host.** dev at 232b49e, on the Mac (HVF and hcpu), Graviton (KVM and hcpu), an amd64 Linux host (KVM, sud, and hcpu), and Windows (WHP and hcpu): `zig build test` passes on all four, and `zig build integration -Dpending` passes on every engine but for cases that fail the same way on main. The sandbox criterion is waived for the web host's, and the `--print` one for plan-format's new output.

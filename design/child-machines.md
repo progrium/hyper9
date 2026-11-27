@@ -2,11 +2,12 @@
 issue: 109
 slug: child-machines
 title: Child machines
-status: proposed
+status: implemented
 created: 2026-11-08
 authors: [progrium]
 depends: [mounts]
 areas: [kern, vmm, sandbox, cli, guest]
+branch: [main]
 ---
 
 # Proposal: Child machines
@@ -211,3 +212,4 @@ The cases run on every backend, including HVF, where a second VM in the process 
   - A refusal at `exec` names the line, as `--plan` does: `memory 1G widens the plan, which has memory 523616K`. The script exits with status `exec`.
   - rc reads an unquoted `=` in an argument as a syntax error, so the Done criteria's `--net=enable` inside an `--rc` string has to be written `--net enable`.
   - The HVF, KVM, and WHP engines compile with the shared engine and quota, but the sharing hasn't run on them here; the cases run on sud and hcpu.
+- 2026-11-27: The run on every host. The `[child-machines]` cases pass, 11 of 11, on HVF and hcpu on the Mac, KVM and hcpu on Graviton, KVM, sud, and hcpu on an amd64 Linux host, and WHP and hcpu on Windows.

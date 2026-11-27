@@ -1,12 +1,12 @@
 ---
 slug: plan-format
 title: The plan as a file, and the one way in
-status: draft
+status: implemented
 created: 2026-11-21
 authors: [progrium]
 depends: [baseline-1, mounts, child-machines]
 areas: [cli, sandbox, kern, web, tests]
-branch: [dev, plan-format]
+branch: [main]
 ---
 
 # Proposal: The plan as a file, and the one way in
@@ -138,3 +138,4 @@ A plan file is as trusted as a command line: whoever writes it decides what the 
   - Pinned roots: h9 checks the index it reads on the host before the tree is used, an `index=` file or URL or a static tree's `/.fs/index`. A 9P server's own `.fs/index` is read inside `#ι` once the connection is in use, so a pinned mount with only that, or under `--index none`, is refused rather than taken unchecked.
   - `createMachine({ plan })` fetches the plan's `archive` URLs and rewrites each to a `dir` line in place, so line numbers stay the plan's; a plan with no mount lines gets `root.h9a` as a first line, so h9's line numbers are one more. `mounts` and `binds` beside a plan are an error, as they'd widen it.
 - 2026-11-26: A child's `ctl` is on the `child-machines` branch ([child-machines](child-machines.md)): it takes plan lines, each parsed as it's written, and `exec` narrows them against the caller's plan, with what's left of its limits, through `policy.narrow`; `devices` gained a `children` word.
+- 2026-11-27: The run on every host. The `[plan-format]` cases pass, 6 of 6, on the Mac, Linux, and Windows hosts; its browser step runs with `zig build web-test`, which passes on the Mac.

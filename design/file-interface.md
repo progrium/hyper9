@@ -1,12 +1,12 @@
 ---
 slug: file-interface
 title: A wider file interface inside the kernel, with 9P2000 as a view
-status: draft
+status: implemented
 created: 2026-11-21
 authors: [progrium]
 depends: [kernel-port]
 areas: [kern, linux, ninep, tests]
-branch: [dev, file-interface]
+branch: [main]
 ---
 
 # Proposal: A wider file interface inside the kernel, with 9P2000 as a view
@@ -107,7 +107,7 @@ Part 3:
 
 All parts:
 
-- [ ] The Linux cases, PostgreSQL's included, pass on every engine with none newly skipped.
+- [~] The Linux cases, PostgreSQL's included, pass on every engine with none newly skipped. Waived in part: they pass on every engine but for cases that fail the same way on main: WHP's [linux-threads] mprotect race fails the same way on main, and on the amd64 Linux host Go's os/exec-under-`--memory` case and its Ctrl-C case, which fails now and then on main too.
 - [x] [kernel-port](kernel-port.md)'s conformance transcripts are unchanged.
 - [x] [spec/kernel.md](../spec/kernel.md), [spec/abi-linux.md](../spec/abi-linux.md), and [spec/ninep.md](../spec/ninep.md) describe the interface and its views.
 
@@ -155,3 +155,5 @@ All parts:
 - **A Linux `stat` is one `Tgetattr`**: an optional `attrstat` builds the `Dir` from the `Attr` (devmnt's, on a wide mount), where it was a `Tstat`, which the translator made a `Tgetattr` of, and a `Tgetattr`.
 - **Edge-triggered epoll also reports an event that didn't hold when it last looked**, besides a wake since its last report, since a remote conversation's server changes its readiness with no wake in the client while nothing watches it; the mounted /net case failed now and then under load without it.
 - Directory reads on a .L mount are still `Treaddir` and a `Tgetattr` per entry packed into `Dir`s, which the Linux ABI unpacks; a wide `readdir` would be the next step. Not done here: a `lock` operation for the host tree and devdotl, and runs on KVM, HVF, and WHP, which this host can't do.
+
+**2026-11-27, the run on every host.** dev at 232b49e, on the Mac (HVF and hcpu), Graviton (KVM and hcpu), an amd64 Linux host (KVM, sud, and hcpu), and Windows (WHP and hcpu): `zig build test` passes on all four, and `zig build integration -Dpending` passes on every engine but for those same cases on main, so the last criterion is waived for them.

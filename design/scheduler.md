@@ -1,12 +1,12 @@
 ---
 slug: scheduler
 title: A scheduler, with processes on per-core executors
-status: draft
+status: implemented
 created: 2026-11-21
 authors: [progrium]
 depends: [kernel-port]
 areas: [kern, engine, web, tests]
-branch: [dev, scheduler]
+branch: [main]
 ---
 
 # Proposal: A scheduler, with processes on per-core executors
@@ -81,11 +81,11 @@ None for the guest's reach. The scheduler is new code in the trusted base, and a
 
 ## Done criteria
 
-- [ ] `h9 --rc 'for(i in `{seq 1 500}) sleep 5 & wait'` runs 500 processes at once on HVF and KVM, with no pool and no slowdown past the 56th.
+- [x] `h9 --rc 'for(i in `{seq 1 500}) sleep 5 & wait'` runs 500 processes at once on HVF and KVM, with no pool and no slowdown past the 56th.
 - [x] `test "1000 blocked processes use 8 host threads [scheduler]"` passes.
-- [ ] `test "processes keep their own registers across executor switches [scheduler]"` passes on every engine.
-- [ ] `zig build integration`, `zig build integration -Dweb`, and `zig build web-test` pass, with the web host on one executor and no coroutine layer.
-- [ ] `zig build bench` shows a system call round trip no slower than before, and a `fork` and `exit` loop faster.
+- [x] `test "processes keep their own registers across executor switches [scheduler]"` passes on every engine.
+- [~] `zig build integration`, `zig build integration -Dweb`, and `zig build web-test` pass, with the web host on one executor and no coroutine layer. Waived in part: all of it passes but cases that fail the same way on main: the 23 `zig build integration -Dweb` failures on the Mac ([linux-net], [linux-fifo], termios, fsync, wait4, and [upper-layers]'s links and FIFOs) are the same 23 with a build of main, and WHP's [linux-threads] mprotect race fails the same way on main.
+- [~] `zig build bench` shows a system call round trip no slower than before, and a `fork` and `exit` loop faster. Waived in part: the round trip is faster everywhere, and 300 forks and execs are faster on KVM and hcpu, but on HVF they take 65 ms against main's 53 ms (Updates, 2026-11-27).
 - [x] `src/cpupool.zig`, `src/web/coro.zig`, `src/web/coro.c`, and `src/kern/os-wasm.c`'s thread emulation are deleted.
 - [x] [spec/kernel.md](../spec/kernel.md)'s process model describes executors, parking, and slices.
 
@@ -143,3 +143,9 @@ Steps 6 and 7 are left. The web build needs Binaryen's `wasm-opt` for Asyncify, 
 - **KVM's vCPU recycling.** An executor that's taken for blocked in the host is replaced, and KVM can't destroy a vCPU, so the engine's free list of parked vCPUs is what keeps the count bounded.
 - **A child machine's CPUs.** A child machine (design/child-machines.md) has executors of its own, `--cpus` of them, so its runs aren't under its parent's `--cpus` as that proposal says; running a child's processes on its parent's executors is left.
 
+**2026-11-27, the run on every host, and a child on its parent's executor.** Some things the run found:
+
+- **500 processes at once.** rc's `&` applies to the whole `for` in the criterion's command, so its sleeps ran one after another; `for(i in `{seq 1 500}) { sleep 5 & }; wait` runs them at once, and finished in 6 to 9 s on HVF, KVM (amd64 and arm64), sud, and hcpu, with no slowdown past the 56th.
+- **A forked or woken process runs next on its parent's executor.** A new task went on the machine's queue, and the futex wake let an idle executor take it, so each child of a fork and exec loop, and its parent after it, ran on another executor with a cold vCPU: on a host with many CPUs the loop was 1.4 to 3.3 times slower than main. A task started, or woken by a task on the executor it last ran on, is now that executor's `next`, which no other steals, and the monitor moves it to the queue once it has waited a tick (`spillNext`), so a parent spinning on shared memory doesn't starve it.
+- **The numbers.** 300 forks and execs of `/bin/echo` in ReleaseFast builds, dev against main: 0.111 s and 0.153 s on Graviton's KVM, 0.236 and 0.290 on its hcpu, 0.101 and 0.105 on the Mac's hcpu, and 0.065 and 0.053 on HVF. One-byte `pwrite` round trips are faster than main on every engine (HVF 1.00 µs against 1.27, hcpu on the Mac 0.24 against 0.51).
+- **The bench's amd64 rows.** Its amd64 programs counted in R12 and R13, which a system call returns zeroed, so they never finished on any engine; they count in R14 and R15 now.

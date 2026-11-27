@@ -1,12 +1,12 @@
 ---
 slug: kernel-port
 title: Port the kernel core to Zig, as an instance
-status: draft
+status: implemented
 created: 2026-11-21
 authors: [progrium]
 depends: [baseline-1, namespace-kernel, kernel-serve]
 areas: [kern, build, tests]
-branch: [dev]
+branch: [main]
 ---
 
 # Proposal: Port the kernel core to Zig, as an instance
@@ -94,11 +94,11 @@ No new reach for a guest. Real address checks close a class of bug where a guest
 
 ## Done criteria
 
-- [ ] `zig build test`, `zig build integration` on every engine, `zig build integration -Dweb`, and `zig build web-test` pass with no case removed or newly skipped.
-- [ ] [namespace-kernel](epoch-0/namespace-kernel.md)'s cases pass against the ported core.
+- [~] `zig build test`, `zig build integration` on every engine, `zig build integration -Dweb`, and `zig build web-test` pass with no case removed or newly skipped. Waived in part: all of it passes but cases that fail the same way on main: the 23 `zig build integration -Dweb` failures on the Mac ([linux-net], [linux-fifo], termios, fsync, wait4, and [upper-layers]'s links and FIFOs) are the same 23 with a build of main, and WHP's [linux-threads] mprotect race fails the same way on main.
+- [x] [namespace-kernel](epoch-0/namespace-kernel.md)'s cases pass against the ported core.
 - [x] `zig build conformance` runs a script of namespace operations (binds, unions, mounts, `..` across mounts, creates in unions, `ORCLOSE`, and flush) on h9 and on a 9front kernel under QEMU, and the transcripts match.
 - [x] `git grep -l waserror src/` finds nothing, and the build compiles none of `chan.c`, `pgrp.c`, `dev.c`, `devmnt.c`, `qio.c`, `devpipe.c`, `devroot.c`, or `sysfile.c` from `third_party/drawterm/kern/`.
-- [ ] `test "two machines don't share /srv [kernel-port]"` and `test "two machines don't share devcmd conversations [kernel-port]"` pass with two machines in one process.
+- [x] `test "two machines don't share /srv [kernel-port]"` and `test "two machines don't share devcmd conversations [kernel-port]"` pass with two machines in one process.
 - [x] `test "a bad guest pointer is a fault, not a host crash [kernel-port]"` passes for read, write, and stat buffers.
 - [x] `zig build bench` shows system call round trips within 5% of before the port.
 - [x] [spec/kernel.md](../spec/kernel.md) describes the kernel as built, with no seam rules.
@@ -254,3 +254,5 @@ The kernel's own path is still about 150 instructions a call more than drawterm'
 - **The C's layout, as constants.** `h9proc.h` puts the C compiler's `sizeof` and every `Proc` field's `offsetof` in an enum, which translate-c carries over as computed, and `proc.zig` checks the translated struct against them at compile time, so a target where the two differ fails to build. On x86_64-windows every field agrees (`errlab` is at 112), but MinGW's `jmp_buf` is 16-aligned and its translation 8-aligned, so the C's `Proc` is 6768 bytes and the Zig's 6760: h9's fields after it start at a 16-aligned offset (a zero-length `__int128` array, since translate-c drops `_Alignas`), the same for both, and the checks there pass.
 - **Alignment.** That makes `Hproc` 16-aligned, which malloc's blocks are on every target h9 builds for (Zig's libc gives wasm32 `max_align_t`'s 16).
 - **The bench.** `zig build bench -- syscall --engine hcpu --arch arm64`, seven runs each, alternating, on this host: one-byte `pwrite` round trips have medians of 0.538 and 0.542 µs (T0 and T1) on the branch and 0.560 and 0.510 on dev, and `nsec` 265 and 240 ns against 264 and 227, within the runs' spread (about 0.43 to 0.59 µs on both). The conversion is an offset of 0, so the hot path does the same loads.
+
+**2026-11-27, the run on every host.** dev at 232b49e, on the Mac (HVF and hcpu), Graviton (KVM and hcpu), an amd64 Linux host (KVM, sud, and hcpu), and Windows (WHP and hcpu): `zig build test` passes on all four, and `zig build integration -Dpending` passes on every engine but for cases that fail the same way with a build of main: WHP's mprotect race, and on the amd64 host Go's os/exec-under-`--memory` case and its Ctrl-C case, which fails now and then on main too. `zig build web-test` and `zig build nskernel-test` pass on the Mac, where `-Dweb` fails the same 23 cases as main. The Done criteria are checked, and waived where only those cases are left.
