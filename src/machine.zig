@@ -3773,7 +3773,14 @@ pub const Machine = struct {
                     leader and qg != null and qg.? == from_in.?.pgid
                 else
                     leader and qg != null and qg.? == @as(u64, @intCast(-pid));
-                if (!want or q.kproc == null) continue;
+                // A child that hasn't run yet counts: on the executors a
+                // fork's child may wait a while for its first turn, and
+                // its parent can signal it meanwhile (a SIGKILL then
+                // waitpid). The kernel queues the note, and setKproc
+                // flags it when the child starts. One still being made
+                // (its clone hasn't returned) has no kernel process yet,
+                // and postNote fails for it, as it would have before.
+                if (!want) continue;
                 if (n == targets.len) break;
                 targets[n] = .{ .pid = q.pid, .linux = ql != null };
                 n += 1;

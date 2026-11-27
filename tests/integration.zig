@@ -9099,6 +9099,12 @@ test "Go os/exec waits for a child from another thread, and RemoveAll empties a 
     try netCase(&le, &.{"/mnt/term/cwd/go/goexec"}, "ok goexec\n");
 }
 
+test "SIGKILL to a child forked a moment ago kills it, though it hasn't run yet [scheduler]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try threadCase(&le, "kill_unstarted");
+}
+
 test "munmap while another thread reads: no stale access after return [linux-threads]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
