@@ -405,7 +405,15 @@ pub fn writeFd(fd: fd_t, data: []const u8) !void {
     while (off < data.len) {
         if (builtin.os.tag == .windows) {
             var put: u32 = 0;
-            if (!win.WriteFile(fd, data[off..].ptr, @intCast(data.len - off), &put, null).toBool()) return error.WriteFailed;
+            if (!win.WriteFile(fd, data[off..].ptr, @intCast(data.len - off), &put, null).toBool()) {
+                // The other end is gone, as in readFd: a pipe whose
+                // reader closed fails with ERROR_BROKEN_PIPE, or with
+                // ERROR_NO_DATA while it's being closed.
+                return switch (@intFromEnum(std.os.windows.GetLastError())) {
+                    win.ERROR_BROKEN_PIPE, win.ERROR_NO_DATA => error.Closed,
+                    else => error.WriteFailed,
+                };
+            }
             off += put;
             continue;
         }
@@ -462,6 +470,8 @@ pub fn isOpen(fd: fd_t) bool {
 
 pub const win = struct {
     const w = std.os.windows;
+    const ERROR_BROKEN_PIPE = 109;
+    const ERROR_NO_DATA = 232;
     pub extern "kernel32" fn ReadFile(h: w.HANDLE, buf: [*]u8, n: u32, got: *u32, ov: ?*anyopaque) callconv(.winapi) w.BOOL;
     pub extern "kernel32" fn WriteFile(h: w.HANDLE, buf: [*]const u8, n: u32, put: *u32, ov: ?*anyopaque) callconv(.winapi) w.BOOL;
     pub extern "kernel32" fn CloseHandle(h: w.HANDLE) callconv(.winapi) w.BOOL;
