@@ -57,6 +57,14 @@ pub const Term = struct {
                 return;
             }
             if (t.code != null) {
+                // The program can write its last output and exit between
+                // a read and the exit check that follows it, so what's
+                // still in the terminal is read before giving up.
+                try t.drainExited();
+                if (std.mem.indexOfPos(u8, t.out.items, t.mark, needle)) |i| {
+                    t.mark = i + needle.len;
+                    return;
+                }
                 dump(t, needle);
                 return error.Exited;
             }
@@ -122,6 +130,19 @@ pub const Term = struct {
     /// Whether the terminal echoes (POSIX only; always true on Windows).
     pub fn echo(t: *Term) bool {
         return t.sys.echo();
+    }
+
+    /// Reads what an exited program left in the terminal, until a read
+    /// finds nothing (Linux's EIO once it's empty, or 50 ms without
+    /// output), for at most a second.
+    fn drainExited(t: *Term) !void {
+        const deadline = now() + 1000;
+        while (now() < deadline) {
+            var buf: [4096]u8 = undefined;
+            const n = try t.sys.read(&buf, 50);
+            if (n == 0) return;
+            try t.out.appendSlice(t.gpa, buf[0..n]);
+        }
     }
 
     fn pump(t: *Term, ms: u32) !void {
