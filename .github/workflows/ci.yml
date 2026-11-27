@@ -277,6 +277,8 @@ jobs:
     # GitHub's runners, as for hcpu-fuzz: the bench and demos run on the
     # emulator, so the test hosts' slots are kept for the KVM and WHP jobs.
     runs-on: ${{ matrix.os }}
+    # A hung guest otherwise holds the runner for GitHub's 6 hours.
+    timeout-minutes: 60
     defaults:
       run:
         shell: bash
@@ -290,8 +292,12 @@ jobs:
           name: hcpu-roots
       - run: mkdir -p .local && tar -C .local -xf roots.tar && rm roots.tar
       - run: zig build -Doptimize=ReleaseSafe --prefix .local/h9-hcpu
+      # About 10 minutes with the compile. A row that never finishes (as
+      # amd64 pwrite did when its counter sat in a register a system call
+      # zeroes) fails here, and the demos still run.
       - name: bench
         if: always()
+        timeout-minutes: 25
         run: zig build bench
       - name: the demos
         if: always()
