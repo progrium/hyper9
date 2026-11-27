@@ -221,7 +221,7 @@ pub const Vcpu = struct {
         const as = v.as orelse return error.BadAddress;
         const rs = &v.engine.ram.runners;
         rs.enter(v.runner, as);
-        defer rs.leave(v.runner);
+        defer rs.leave(v.engine.ram.io, v.runner);
         const epoch = as.epoch.load(.seq_cst);
         if (epoch != v.epoch) {
             v.epoch = epoch;
