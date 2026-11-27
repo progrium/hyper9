@@ -226,6 +226,13 @@ pub const Exec = struct {
     running: ?*engine.Vcpu = null,
     run_lock: std.atomic.Mutex = .unlocked,
     q: Queue = .{},
+    /// The task to run next here, ahead of `q`: one this executor's task
+    /// started or woke (`putNext`), likely to be waited on, which no other
+    /// executor steals. It goes to `q`, where they can, if the task that
+    /// put it there goes on running for a tick instead of parking (the
+    /// monitor's `spillNext`). A fork and exec loop runs on one executor
+    /// and its warm vCPU, not on each in turn.
+    next: std.atomic.Value(?*Task) = .init(null),
     thread: std.Thread = undefined,
     /// The lease whose state the vCPU holds, if it's still there.
     owner: std.atomic.Value(?*Lease) = .init(null),
@@ -278,6 +285,23 @@ pub const Exec = struct {
         return v.run();
     }
 
+    /// `t` runs here next (`next`), and what was next goes on the queue.
+    fn putNext(e: *Exec, t: *Task) void {
+        if (e.next.swap(t, .acq_rel)) |old| {
+            e.q.push(old);
+            e.s.wake();
+        }
+    }
+
+    /// The next task goes on the queue, for any executor to take.
+    fn spillNext(e: *Exec) void {
+        if (e.next.load(.acquire) == null) return;
+        if (e.next.swap(null, .acq_rel)) |t| {
+            e.q.push(t);
+            e.s.wake();
+        }
+    }
+
     fn setState(e: *Exec, st: State) void {
         e.state.store(st, .release);
         e.gen.store(e.gen.raw +% 1, .release);
@@ -296,7 +320,7 @@ pub const Exec = struct {
         while (true) {
             if (e.retiring.load(.acquire)) break;
             const seq = s.seq.load(.acquire);
-            const t = e.q.pop() orelse s.global.pop() orelse s.steal(e) orelse {
+            const t = e.next.swap(null, .acq_rel) orelse e.q.pop() orelse s.global.pop() orelse s.steal(e) orelse {
                 if (s.stopping.load(.acquire) and s.tasks.load(.acquire) == 0) break;
                 _ = s.nidle.fetchAdd(1, .acq_rel);
                 s.io.futexWaitTimeout(u32, &s.seq.raw, seq, .{ .duration = .{ .raw = .fromMilliseconds(10), .clock = .awake } }) catch {};
@@ -306,6 +330,7 @@ pub const Exec = struct {
             e.runTask(t);
         }
         // What's queued here goes to the machine's queue.
+        if (e.next.swap(null, .acq_rel)) |t| s.global.push(t);
         while (e.q.pop()) |t| s.global.push(t);
         s.wake();
         e.owner.store(null, .release);
@@ -487,12 +512,25 @@ pub const Sched = struct {
             return -1;
         };
         _ = s.tasks.fetchAdd(1, .acq_rel);
+        // Started by a task on an executor (a fork): it runs there next,
+        // where its parent is likely to wait for it.
+        if (current()) |e| if (!e.retiring.load(.acquire)) {
+            t.last = e;
+            e.putNext(t);
+            return 0;
+        };
         s.global.push(t);
         s.wake();
         return 0;
     }
 
     fn enqueue(s: *Sched, t: *Task) void {
+        // Woken by a task on the executor it last ran on (a child's exit
+        // waking its parent): it runs there next.
+        if (current()) |e| if (t.last == e and !e.retiring.load(.acquire)) {
+            e.putNext(t);
+            return;
+        };
         if (t.last) |e| if (!e.retiring.load(.acquire)) {
             e.q.push(t);
             s.wake();
@@ -556,6 +594,10 @@ pub const Sched = struct {
                     if (work == null) work = s.anyQueuedLocked();
                     if (work.?) e.yield_due.store(true, .release);
                 }
+                // A task that put another next and goes on running for
+                // a tick, in the kernel or the guest, not parking, lets it
+                // go elsewhere.
+                if (st != .idle and t - e.seen_at >= tick_ns) e.spillNext();
                 switch (st) {
                     .idle => {},
                     .guest => if (t - e.seen_at >= slice_ns) {
@@ -594,6 +636,10 @@ pub const Sched = struct {
         defer s.lock.unlock();
         var moved = false;
         for (s.execs.items) |e| if (e.retiring.load(.acquire)) {
+            if (e.next.swap(null, .acq_rel)) |t| {
+                s.global.push(t);
+                moved = true;
+            }
             while (e.q.pop()) |t| {
                 s.global.push(t);
                 moved = true;
