@@ -1208,6 +1208,23 @@ test "an RFMEM process can use pages another just grew, without a syscall [nativ
     try std.testing.expectEqual(0, r.code);
 }
 
+test "an rfork child takes no note before its first instruction" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try buildC(e, &s, "rfnote", @embedFile("fixtures/rfmem/rfnote.c"));
+    // The parent posts each child a note as soon as rfork returns. Before
+    // h9 held a new child's notes until its first syscall, the child's
+    // handler nearly always ran first, on the stack the parent left,
+    // which crashed a Plan 9 Go program's Ctrl-C under load.
+    const r = try run(e, &.{ "--sandbox", s.path, "--timeout", "60s", "--rc", "./rfnote" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("early 0 of 100\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
 test "concurrent processes contending for one environment don't hang" {
     const e = try env(@src());
     // 8 processes sharing /env, each creating 150 variables, then running
@@ -3567,22 +3584,6 @@ test "a nil dereference becomes a panic that recover catches [go-compat]" {
     defer r.deinit();
     try expectGoOk(r);
     try std.testing.expectEqualStrings("recovered: runtime error: invalid memory address or nil pointer dereference\n", r.out);
-}
-
-test "os/signal receives interrupt on Ctrl-C [go-compat]" {
-    var g: GoEnv = undefined;
-    try goEnv(@src(), &g);
-    defer g.deinit();
-    var argv: std.ArrayList([]const u8) = .empty;
-    defer argv.deinit(gpa);
-    try goArgv(&g, &argv, &.{}, "signal", &.{});
-    defer gpa.free(argv.items[argv.items.len - 1]);
-    var t = try Term.spawn(gpa, argv.items);
-    defer t.deinit();
-    try t.expect("ready", slow(10_000));
-    try t.send("\x03");
-    try t.expect("got interrupt", slow(10_000));
-    try std.testing.expectEqual(0, try t.wait(slow(10_000)));
 }
 
 test "os.Exit(3) exits with status 3 [go-compat]" {
@@ -9308,6 +9309,23 @@ test "Go linux binary starts goroutines and sleeps [linux-threads]" {
         errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
         try std.testing.expect(std.mem.startsWith(u8, r.out, "ok goroutines "));
         try std.testing.expectEqual(0, r.code);
+    }
+}
+
+test "Go linux binary receives SIGINT through os/signal on Ctrl-C [linux-threads]" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest; // no pty
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try goLinux(&le);
+    var it = std.mem.tokenizeScalar(u8, le.engines, ',');
+    while (it.next()) |engine| {
+        errdefer std.debug.print("engine {s}\n", .{engine});
+        var t = try Term.spawn(gpa, &.{ le.h9, "--engine", engine, "--arch", le.arch, "--dir", le.lmount, "--cwd", le.fixtures, "--timeout", "60s", "/mnt/term/cwd/go/gosignal" });
+        defer t.deinit();
+        try t.expect("ready", slow(10_000));
+        try t.send("\x03");
+        try t.expect("got interrupt", slow(10_000));
+        try std.testing.expectEqual(0, try t.wait(slow(10_000)));
     }
 }
 

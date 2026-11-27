@@ -1613,6 +1613,18 @@ pub const Machine = struct {
         /// The FP/SIMD state when the handler was entered, which noted
         /// restores (9front's fpunotify and fpunoted).
         note_extra: ?engine.Extra = null,
+        /// Set in an rfork child: its notes wait until it has made a
+        /// syscall or taken a fault (or `fork_hold_ms` has passed). 9front's
+        /// child enters user mode through forkret, which doesn't deliver
+        /// notes, so a note posted to it before then waits for a trap.
+        /// h9's child joins its note group before its thread first runs,
+        /// which under load is a while, and a note delivered at its first
+        /// run, or at a kick a few instructions in, ran the handler on the
+        /// parent's state. A Go program's child keeps the parent's g in
+        /// its copy of the stack until tstart_plan9 sets its own, so the
+        /// handler used the parent's M and gsignal stack, alongside the
+        /// parent's own handler for the same Ctrl-C.
+        fork_hold: bool = false,
         /// For /proc/n/status: the syscall being served plus 1, or 0 while
         /// running guest code, and the mapped memory in KiB.
         in_sys: web.Atomic(u64) = .init(0),
@@ -2444,6 +2456,9 @@ pub const Machine = struct {
         // exit_group in between posts it a kill note that's lost. It looks
         // here, once it exists: a later exit_group's note reaches it.
         if (p.lx) |l| if (!l.isLeader() and l.g.ending()) return .{ .killed = "kill" };
+        // A guest that spins without a syscall gets its notes after about
+        // ten of 9front's clock ticks.
+        var hold_until: ?std.Io.Timestamp = if (p.fork_hold) std.Io.Timestamp.now(m.io, .awake).addDuration(.fromMilliseconds(fork_hold_ms)) else null;
         var last_fault: struct { addr: u64 = 0, access: @FieldType(engine.Fault, "access") = .read, pc: u64 = 0, gen: u64 = 0 } = .{};
         while (true) {
             if (j.stopping.load(.acquire)) return .{ .killed = if (j.timed_out.load(.acquire)) timeout_note else stopped_note };
@@ -2456,11 +2471,17 @@ pub const Machine = struct {
                 // 9front stops a debugged process on its way back to user
                 // mode, before delivering a note.
                 return st;
+            } else if (hold_until != null) {
+                // A new child (see `fork_hold`): a note waits, with
+                // note_flag still set.
             } else if (p.note_flag.swap(false, .acq_rel)) {
                 if (try deliver(p, vcpu, &u)) |msg| return .{ .killed = msg };
             }
             const exit = try vcpu.run();
             vcpu.getUreg(&u);
+            if (hold_until) |t| if (exit != .interrupted or t.durationTo(std.Io.Timestamp.now(m.io, .awake)).nanoseconds >= 0) {
+                hold_until = null;
+            };
             if (exit != .fault) last_fault = .{};
             if (p.lx) |l| switch (exit) {
                 .syscall => {
@@ -2825,6 +2846,10 @@ pub const Machine = struct {
             if (w == 4) std.mem.writeInt(u32, out[i * 4 ..][0..4], @truncate(v), .little) else std.mem.writeInt(u64, out[i * 8 ..][0..8], v, .little);
         }
     }
+
+    /// How long an rfork child's notes wait at most for its first syscall
+    /// or fault (`Proc.fork_hold`).
+    const fork_hold_ms = 100;
 
     /// 9front's exit status for a broken noted.
     const suicide = "Suicide";
@@ -3813,6 +3838,7 @@ pub const Machine = struct {
         c.noteMem();
         // The handler is inherited; queued notes and handler state aren't.
         c.sys.notify = p.sys.notify;
+        c.fork_hold = true;
         // The child may run, exit and free itself before kern.fork returns.
         const pid = c.pid;
         kern.fork(flag, pid, Proc, childMain, c) catch {

@@ -212,7 +212,7 @@ The cases are tagged `[go-compat]`, built from `tests/fixtures/go/`, and run on 
 - [x] `test "CPU-bound goroutines run on several processes [go-compat]"`: with `GOMAXPROCS=4` and `--cpus 4`, `/proc` shows at least four processes during the run, and it finishes. It also finishes with `--cpus 1`.
 - [x] `test "os/exec runs a child and gets its exit status [go-compat]"`: the fixture re-execs itself from `/mnt/term/cwd`, with an environment variable telling the child what to do.
 - [x] `test "a nil dereference becomes a panic that recover catches [go-compat]"`
-- [x] `test "os/signal receives interrupt on Ctrl-C [go-compat]"`, on a pty as the existing Ctrl-C cases are.
+- [~] `test "os/signal receives interrupt on Ctrl-C [go-compat]"`, on a pty as the existing Ctrl-C cases are. Waived: about 1 in 150 runs under load lost the Ctrl-C or hung, on main too, likely in Go's plan9 runtime (a note interrupting an M already queued on a lock). Jeff chose to cover Ctrl-C with Linux Go instead, so `test "Go linux binary receives SIGINT through os/signal on Ctrl-C [linux-threads]"` replaces it (see [linux-threads](linux-threads.md)).
 - [x] `test "os.Exit(3) exits with status 3 [go-compat]"`: h9 exits 3 and prints nothing to stderr.
 - [x] `test "a numeric exits string becomes the exit code [go-compat]"`: an rc case, so it doesn't need Go. `exit 3` gives 3 with an empty stderr, while `exit 0`, `exit 256`, and `exit 03` give 1 and print the string.
 - [x] `test "net/http fetches from a listener the test opens [go-compat]"`

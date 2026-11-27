@@ -108,6 +108,7 @@ Integration cases tagged `[linux-threads]`:
 
 - [x] `test "pthreads program with 8 threads and a mutex [linux-threads]"`
 - [x] `test "Go linux binary starts goroutines and sleeps [linux-threads]"`
+- [x] `test "Go linux binary receives SIGINT through os/signal on Ctrl-C [linux-threads]"`: on a pty, Ctrl-C reaches `signal.Notify` and the program exits 0. It replaces the plan9 Go Ctrl-C case in [go-compat](go-compat.md).
 - [x] `test "munmap while another thread reads: no stale access after return [linux-threads]"`
 - [x] `test "exit_group kills every thread [linux-threads]"`
 - [x] `test "execve from a non-leader thread [linux-threads]"`
