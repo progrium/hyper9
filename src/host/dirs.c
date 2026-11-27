@@ -7,11 +7,17 @@
  * on a path string, keeps the result inside the tree.
  *
  * On Linux that's one openat2 with RESOLVE_BENEATH (RESOLVE_IN_ROOT for a
- * contained tree). Elsewhere, and on Linux kernels without openat2, it's a
- * walk of one name at a time from the handle with O_NOFOLLOW, which reads
- * each link itself: a relative target is walked in place, and an absolute
- * one, or a ".." above the top, is an escape (EXDEV), or for a contained
- * tree starts again at the top. On Windows it's NtCreateFile relative to
+ * contained tree). On macOS it's one openat or fstatat with
+ * O_RESOLVE_BENEATH (AT_RESOLVE_BENEATH), and O_NOFOLLOW_ANY where no link
+ * may be followed; macOS has nothing like RESOLVE_IN_ROOT, so a contained
+ * tree's open that meets an absolute link or a ".." above the top is
+ * walked instead. Elsewhere, and on kernels without those, it's a walk of
+ * one name at a time from the handle with O_NOFOLLOW, which reads each
+ * link itself: a relative target is walked in place, and an absolute one,
+ * or a ".." above the top, is an escape (EXDEV), or for a contained tree
+ * starts again at the top. On macOS the walk is the slow way: each
+ * directory it opens costs about 5 us, and a 9front fork and exec's few
+ * opens and stats came to some 85 us of them. On Windows it's NtCreateFile relative to
  * the handle, a name at a time with FILE_OPEN_REPARSE_POINT, so no
  * symbolic link or junction is followed by the host.
  *
@@ -270,12 +276,48 @@ enum {
 static int noopenat2;
 #endif
 
-/* For src/host/dirs.zig's cases: the walk alone, as hosts without openat2 have it. */
+#if defined(__APPLE__) && defined(O_RESOLVE_BENEATH) && defined(AT_RESOLVE_BENEATH) && defined(O_NOFOLLOW_ANY) && defined(ENOTCAPABLE)
+#define DARWINBENEATH 1
+/*
+ * Whether the kernel keeps an openat with O_RESOLVE_BENEATH beneath its
+ * directory (macOS 15 and later): 1, 0, or -1 until asked. An older
+ * kernel takes the flag for FMARK, and would open the absolute path the
+ * probe names instead of refusing it.
+ */
+static int darwinbeneath = -1;
+
+static int
+resolvebeneath(void)
+{
+	int fd, ok;
+
+	if(darwinbeneath < 0){
+		fd = open("/", O_RDONLY|O_DIRECTORY|O_CLOEXEC);
+		ok = 0;
+		if(fd >= 0){
+			int t;
+
+			t = openat(fd, "/", O_RDONLY|O_DIRECTORY|O_RESOLVE_BENEATH|O_CLOEXEC);
+			if(t >= 0)
+				closekeep(t);
+			else if(errno == ENOTCAPABLE)
+				ok = 1;
+			closekeep(fd);
+		}
+		darwinbeneath = ok;
+	}
+	return darwinbeneath;
+}
+#endif
+
+/* For src/host/dirs.zig's cases: the walk alone, as hosts without openat2 or O_RESOLVE_BENEATH have it. */
 void
 h9_host_test_noopenat2(int on)
 {
 #ifdef __linux__
 	noopenat2 = on;
+#elif defined(DARWINBENEATH)
+	darwinbeneath = on ? 0 : -1;
 #else
 	(void)on;
 #endif
@@ -307,6 +349,26 @@ beneath(int top, const char *rel, int how, int flags, int mode)
 		if(fd >= 0 || (errno != ENOSYS && errno != EPERM))
 			return fd;
 		noopenat2 = 1;
+	}
+#endif
+#ifdef DARWINBENEATH
+	if(resolvebeneath()){
+		int fd;
+
+		/*
+		 * Relative links that stay beneath top are followed, as the
+		 * walk follows them; an absolute one, or a ".." above top, is
+		 * ENOTCAPABLE. A link as the last name is followed unless the
+		 * caller's flags hold O_NOFOLLOW, as walkopen's open does.
+		 */
+		fd = openat(top, rel, flags|O_RESOLVE_BENEATH|O_CLOEXEC|((how & Wnolinks) ? O_NOFOLLOW_ANY : 0), mode);
+		if(fd >= 0 || errno != ENOTCAPABLE)
+			return fd;
+		if((how & Wcontained) == 0){
+			errno = EXDEV;
+			return -1;
+		}
+		/* A contained tree's link or ".." that leaves it: walk it in place. */
 	}
 #endif
 	if(how & Wnolinks)
@@ -408,6 +470,11 @@ bypath(const char *path, int flags, int mode, int nolinks)
 		errno = EINVAL;
 		return -1;
 	}
+#ifdef DARWINBENEATH
+	/* From "/", where ".." goes nowhere: no link anywhere in it. */
+	if(resolvebeneath())
+		return open(path, flags|O_NOFOLLOW_ANY|O_CLOEXEC, mode);
+#endif
 	if((top = open("/", O_RDONLY|O_DIRECTORY|O_CLOEXEC)) < 0)
 		return -1;
 	fd = beneath(top, path+1, Wnolinks, flags, mode);
@@ -489,11 +556,56 @@ at(const char *path, int follow, char *name)
 	return walk((int)h, rel, how, name);
 }
 
+#ifdef DARWINBENEATH
+/*
+ * hoststat by one fstatat with AT_RESOLVE_BENEATH, which opens nothing:
+ * 0 or -1 as fstatat, or -2 for the walk (a contained tree's link or ".."
+ * that leaves it).
+ */
+static int
+statbeneath(const char *path, struct stat *st, int follow)
+{
+	char rel[PATH_MAX+1], canon[PATH_MAX+1];
+	int hflags, fl;
+	long long h;
+
+	h = h9_host_dir(path, rel, sizeof rel, &hflags);
+	if(h == H9HostNone || h == H9HostOutside)
+		return follow ? stat(path, st) : lstat(path, st);
+	if(h == H9HostToolong){
+		errno = ENAMETOOLONG;
+		return -1;
+	}
+	fl = AT_RESOLVE_BENEATH|(follow ? 0 : AT_SYMLINK_NOFOLLOW);
+	if(fstatat((int)h, rel, st, fl) == 0)
+		return 0;
+	if(errno != ENOTCAPABLE)
+		return -1;
+	if(hflags & H9HostContained)
+		return -2;
+	/* Its links left the handle: by the link free path they resolve to, as at() does. */
+	if(canonical(path, !follow, canon) < 0 || (h = h9_host_dir(canon, rel, sizeof rel, &hflags)) < 0){
+		errno = ENOENT;
+		return -1;
+	}
+	if(fstatat((int)h, rel, st, fl) == 0)
+		return 0;
+	if(errno == ENOTCAPABLE)
+		errno = EXDEV;
+	return -1;
+}
+#endif
+
 static int
 hoststat(const char *path, struct stat *st, int follow)
 {
 	char name[NAME_MAX+1];
 	int dfd, r;
+
+#ifdef DARWINBENEATH
+	if(resolvebeneath() && (r = statbeneath(path, st, follow)) != -2)
+		return r;
+#endif
 
 #ifdef __linux__
 	if(!noopenat2){
