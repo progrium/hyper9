@@ -2,4 +2,8 @@
 # regexps are -test.skip patterns, joined with | for each package.
 # Only tests that stop the whole package run are listed; other failures
 # are counted and left in the output.
-runtime	^TestPageAllocGrow$	# reserves more address space than --memory 4G allows, which is fatal
+time	^TestLongAdjustTimers$	# takes a minute or more on hcpu, and sometimes never finishes
+os	^TestClosedPipeRaceWrite$	# hangs on hcpu: the write never sees the read end close
+os	^(TestSpliceFile|TestSendFile)$	# hang copying 32 KiB or more into a socket; splice is ENOSYS
+os	^(TestRacyRead|TestWriteTimeoutFluctuation)$	# hang on a pipe with a deadline
+runtime	^TestDebugCall	# an int3 kills the program with "sys: breakpoint" instead of raising SIGTRAP

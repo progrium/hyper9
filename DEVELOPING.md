@@ -287,13 +287,15 @@ arm64, amd64, and 386, with `GOTOOLCHAIN=go$GO_VERSION` from
 [scripts/pins.sh](scripts/pins.sh), so any installed Go fetches the same
 toolchain. `zig build integration` builds them when `go` is on `PATH`, and
 their cases run through the Linux personality on every engine in the list;
-without Go they skip. No integration case runs a `plan9` Go binary.
-`zig build go-stdtest` runs Go's own `plan9/amd64` tests for `time`,
-`syscall`, `os`, and `runtime` on the emulator and prints pass, skip, and
-fail counts for each ([scripts/go-stdtest.sh](scripts/go-stdtest.sh), with
-the tests it skips in `scripts/go-stdtest.skip`; `zig build go-stdtest -- os`
-runs one package). It's for finding gaps, not a gate, and nothing depends on
-it.
+without Go they skip. Nothing builds or runs `plan9` Go binaries any more.
+`zig build go-stdtest` runs Go's own tests for `time`, `syscall`, `os`,
+and `runtime` as Linux binaries on hcpu, in the Alpine root, and prints
+pass, skip, and fail counts for each
+([scripts/go-stdtest.sh](scripts/go-stdtest.sh), with the tests it skips
+in `scripts/go-stdtest.skip`; `zig build go-stdtest -- os` runs one
+package). `H9_STDTEST_ARCH` picks the architecture, the host's by default,
+and `H9_STDTEST_ENGINE` the engine. It's for finding gaps, not a gate, and
+nothing depends on it.
 
 The [dotl](design/epoch-0/dotl.md) cases run against three 9P2000.L servers:
 the one in [src/dotl/testserver.zig](src/dotl/testserver.zig), in

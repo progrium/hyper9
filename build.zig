@@ -1652,11 +1652,11 @@ pub fn build(b: *std.Build) void {
         run.has_side_effects = true;
         linux_fixtures.dependOn(&run.step);
     };
-    // Go's own tests for time, syscall, os and runtime on the emulator, by
-    // hand or on a schedule; nothing depends on it.
-    const go_stdtest = b.step("go-stdtest", "Run Go's time, syscall, os and runtime tests on the emulator (needs go)");
+    // Go's own tests for time, syscall, os and runtime, as Linux binaries
+    // on hcpu, by hand or on a schedule; nothing depends on it.
+    const go_stdtest = b.step("go-stdtest", "Run Go's time, syscall, os and runtime tests as Linux binaries on hcpu (needs go and the Alpine root)");
     if (emu == .none) {
-        go_stdtest.dependOn(&b.addFail("go-stdtest: needs the emulator, which this target doesn't have").step);
+        go_stdtest.dependOn(&b.addFail("go-stdtest: needs hcpu, which this target doesn't have").step);
     } else {
         const run_stdtest = b.addSystemCommand(&.{ "bash", "scripts/go-stdtest.sh" });
         run_stdtest.addFileArg2(h9, .{ .make_absolute = true });

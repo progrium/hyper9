@@ -61,4 +61,4 @@ Go's `GOOS=plan9 GOARCH=amd64` binaries run unchanged ([go-compat](../design/epo
 - **Executable and mounts:** `os.Executable` reads `/proc/n/text` ([self-host](../design/epoch-0/self-host.md)), and the `mount` syscall is served (see Syscall table). Execs of 9front commands need `/amd64/bin` in the root, which `zig build mkroot` builds on an x86\_64 host ([i386](../design/epoch-0/i386.md)).
 - **Memory:** rfork shares the parent's pages copy-on-write ([memory-model](../design/memory-model.md)), so a program that runs `os/exec` many times fits in a `--memory` of 512 MB.
 
-No integration case runs a `plan9` Go binary any more: Go programs are tested as Linux binaries, through the Linux personality ([linux-threads](../design/epoch-0/linux-threads.md)). `zig build go-stdtest` still runs Go's own `time`, `syscall`, `os`, and `runtime` tests for `plan9/amd64` to find gaps.
+Nothing in the tests builds or runs a `plan9` Go binary any more: Go programs are tested as Linux binaries, through the Linux personality ([linux-threads](../design/epoch-0/linux-threads.md)).
