@@ -7423,9 +7423,24 @@ test "/proc/self/maps shows a program's segments, read from its file as they're 
 test "a dynamic program and its interpreter run from their files' pages, each mapping one line in /proc/self/maps [cow-fork]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
-    const r = try runLinux(&le, false, &.{ "/bin/cat", "/proc/self/maps" });
+    // Each engine on its own: the maps aren't the same on every engine,
+    // since an amd64 program gets the vDSO's clock and its [vvar] page
+    // only where the guest's rdtsc is the host's (sud and the
+    // hypervisors, not hcpu; abi/linux/vclock.zig), and everything
+    // mapped after them sits two pages lower.
+    var engines = std.mem.tokenizeScalar(u8, le.engines, ',');
+    while (engines.next()) |engine| {
+        var one = le;
+        one.engines = engine;
+        try dynamicMaps(&one);
+    }
+}
+
+/// The dynamic-program maps case above, on `le`'s one engine.
+fn dynamicMaps(le: *const LinuxEnv) !void {
+    const r = try runLinux(le, false, &.{ "/bin/cat", "/proc/self/maps" });
     defer r.deinit();
-    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    errdefer std.debug.print("engine {s}\nstdout: {s}\nstderr: {s}\n", .{ le.engines, r.out, r.err });
     try std.testing.expectEqual(0, r.code);
     // Alpine's cat is busybox, linked against musl, whose loader is the
     // interpreter: both are mapped, and no file mapping is in pieces.
