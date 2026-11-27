@@ -1084,24 +1084,24 @@ fn setreparse(h: HANDLE, tag: w.DWORD, data: []const u8) bool {
 }
 
 /// Turns on SeCreateSymbolicLinkPrivilege in the process's token, once,
-/// where the token holds it. An administrator's token holds it turned
-/// off, and FSCTL_SET_REPARSE_POINT, unlike CreateSymbolicLinkW, doesn't
-/// turn it on for the call, so without this a symbolic link fails with
-/// ERROR_PRIVILEGE_NOT_HELD even for an administrator. A token without
-/// the privilege is left as it is, and the link is EPERM (reparseerr).
-/// H9_TEST_NOLINKPRIV, set to anything, leaves the token as it is, so an
-/// administrator's links take the WSL fallback as an unprivileged user's
-/// do (tests/integration.zig).
+/// where the token holds it. An elevated administrator's token holds it
+/// turned off, and FSCTL_SET_REPARSE_POINT, unlike CreateSymbolicLinkW,
+/// doesn't turn it on for the call, so without this a symbolic link
+/// fails with ERROR_PRIVILEGE_NOT_HELD even for an administrator. A token
+/// without the privilege is left as it is, and fssymlink makes a WSL link.
+/// H9_TEST_NOLINKPRIV, set to anything, turns the privilege off instead,
+/// so a token that has it on (a service's, as on the CI runners) takes
+/// the fallback an unprivileged user's does (tests/integration.zig).
 fn linkprivilege() void {
     const S = struct {
         var done: std.atomic.Value(bool) = .init(false);
     };
     if (S.done.swap(true, .acq_rel)) return;
-    if (w.GetEnvironmentVariableW(std.unicode.utf8ToUtf16LeStringLiteral("H9_TEST_NOLINKPRIV"), null, 0) != 0) return;
+    const off = w.GetEnvironmentVariableW(std.unicode.utf8ToUtf16LeStringLiteral("H9_TEST_NOLINKPRIV"), null, 0) != 0;
     var tok: HANDLE = undefined;
     if (w.OpenProcessToken(w.GetCurrentProcess(), w.TOKEN_ADJUST_PRIVILEGES, &tok) == 0) return;
     defer _ = w.CloseHandle(tok);
-    var tp: w.TOKEN_PRIVILEGE = .{ .count = 1, .luid = undefined, .attrs = w.SE_PRIVILEGE_ENABLED };
+    var tp: w.TOKEN_PRIVILEGE = .{ .count = 1, .luid = undefined, .attrs = if (off) 0 else w.SE_PRIVILEGE_ENABLED };
     if (w.LookupPrivilegeValueW(null, std.unicode.utf8ToUtf16LeStringLiteral("SeCreateSymbolicLinkPrivilege"), &tp.luid) == 0) return;
     _ = w.AdjustTokenPrivileges(tok, 0, &tp, 0, null, null);
 }

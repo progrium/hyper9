@@ -10216,8 +10216,8 @@ test "links and FIFOs are made in the layer [upper-layers]" {
 }
 
 test "a link made without the symlink privilege is a WSL link h9 follows [upper-layers]" {
-    // Windows only: H9_TEST_NOLINKPRIV keeps h9 from turning the privilege
-    // on, so the link takes the fallback an unprivileged user's does.
+    // Windows only: H9_TEST_NOLINKPRIV turns the privilege off in h9's
+    // token, so the link takes the fallback an unprivileged user's does.
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     var all: LinuxEnv = undefined;
     try linuxEnv(@src(), &all);
