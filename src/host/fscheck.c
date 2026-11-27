@@ -850,6 +850,9 @@ typedef struct {
 	/* then, for a symlink, ULONG flags; then the names */
 } Reparse;
 
+/* IO_REPARSE_TAG_LX_SYMLINK, WSL's link. */
+#define Lxsymlink	0xA000001DUL
+
 enum {
 	Reparsebuf = 16*1024,	/* MAXIMUM_REPARSE_DATA_BUFFER_SIZE */
 	Symrelative = 1,	/* SYMLINK_FLAG_RELATIVE */
@@ -857,9 +860,9 @@ enum {
 
 /*
  * The target of the reparse point at path, in target (nul-terminated),
- * and whether it's relative. Returns 0, or -1 if it isn't a symlink or a
- * junction, or can't be read. print picks the name as it was written
- * rather than the substitute name.
+ * and whether it's relative. Returns 0, or -1 if it isn't a symlink, a
+ * junction, or a WSL link, or can't be read. print picks the name as it
+ * was written rather than the substitute name.
  */
 static int
 reparsetarget(wchar_t *path, wchar_t *target, int ntarget, int *relative, int print)
@@ -887,6 +890,23 @@ reparsetarget(wchar_t *path, wchar_t *target, int ntarget, int *relative, int pr
 	}else if(r->tag == IO_REPARSE_TAG_MOUNT_POINT){
 		*relative = 0;
 		names = (wchar_t*)(r+1);
+	}else if(r->tag == Lxsymlink){
+		/*
+		 * WSL's link (devfs-win32's fssymlink without the privilege):
+		 * a version, then the target as UTF-8, as Linux wrote it.
+		 */
+		len = r->len;
+		if(len < 4 || 8 + len > n)
+			return -1;
+		len -= 4;
+		if(len == 0)
+			return -1;
+		n = MultiByteToWideChar(CP_UTF8, 0, (char*)buf + 12, len, target, ntarget - 1);
+		if(n == 0)
+			return -1;
+		target[n] = 0;
+		*relative = target[0] != L'/';
+		return 0;
 	}else
 		return -1;
 	off = print ? r->print_off : r->subst_off;

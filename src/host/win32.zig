@@ -76,6 +76,9 @@ pub const IO_REPARSE_TAG_MOUNT_POINT: DWORD = 0xA0000003;
 pub const IO_REPARSE_TAG_SYMLINK: DWORD = 0xA000000C;
 /// WSL's tag for a FIFO: an empty file with this reparse point.
 pub const IO_REPARSE_TAG_LX_FIFO: DWORD = 0x80000024;
+/// WSL's tag for a symbolic link: a file with this reparse point, whose
+/// data is a version (2) and the target as UTF-8, as Linux writes it.
+pub const IO_REPARSE_TAG_LX_SYMLINK: DWORD = 0xA000001D;
 pub const SYMLINK_FLAG_RELATIVE: DWORD = 1;
 pub const FSCTL_SET_REPARSE_POINT: DWORD = 0x000900A4;
 pub const ERROR_PRIVILEGE_NOT_HELD: DWORD = 1314;
@@ -100,6 +103,7 @@ pub const FileRenameInformation: c_int = 10;
 pub const IO_STATUS_BLOCK = extern struct { status: usize, information: usize };
 pub extern "ntdll" fn NtSetInformationFile(h: HANDLE, iosb: *IO_STATUS_BLOCK, info: *const anyopaque, n: c_ulong, class: c_int) callconv(.winapi) i32;
 pub extern "ntdll" fn RtlNtStatusToDosError(status: i32) callconv(.winapi) c_ulong;
+pub extern "kernel32" fn GetEnvironmentVariableW(name: [*:0]const WCHAR, buf: ?[*]WCHAR, n: DWORD) callconv(.winapi) DWORD;
 pub extern "kernel32" fn GetCurrentProcess() callconv(.winapi) HANDLE;
 pub extern "advapi32" fn OpenProcessToken(proc: HANDLE, access: DWORD, token: *HANDLE) callconv(.winapi) BOOL;
 pub extern "advapi32" fn LookupPrivilegeValueW(system: ?[*:0]const WCHAR, name: [*:0]const WCHAR, luid: *LUID) callconv(.winapi) BOOL;
