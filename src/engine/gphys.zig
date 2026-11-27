@@ -363,6 +363,9 @@ pub const Runners = struct {
     /// One bit per slot, in words of 64.
     taken: [words]std.atomic.Value(u64) = @splat(.init(0)),
     slots: [capacity]Slot = @splat(.{}),
+    /// Shootdowns waiting for a vCPU to leave: while any are, `leave`
+    /// wakes them, a system call it skips otherwise.
+    waiters: std.atomic.Value(u32) = .init(0),
 
     /// As many vCPUs as any engine runs at once: KVM's limit is capped
     /// at this (kvm.zig's max_slots), HVF's and WHP's are 64.
@@ -373,7 +376,9 @@ pub const Runners = struct {
 
     const Slot = struct {
         as: std.atomic.Value(?*const anyopaque) = .init(null),
-        runs: std.atomic.Value(u64) = .init(0),
+        /// Runs left, as a futex word that a shootdown waits on. A u32:
+        /// it's only compared for a change, and futexes are 32 bits.
+        runs: std.atomic.Value(u32) = .init(0),
         /// The engine's kick for this vCPU, and its argument.
         kick: ?*const fn (u64) void = null,
         arg: u64 = 0,
@@ -410,9 +415,14 @@ pub const Runners = struct {
     }
 
     /// Call once the hypervisor's run has returned.
-    pub fn leave(rs: *Runners, i: Index) void {
-        _ = rs.slots[i].runs.fetchAdd(1, .seq_cst);
-        rs.slots[i].as.store(null, .seq_cst);
+    pub fn leave(rs: *Runners, io: std.Io, i: Index) void {
+        const sl = &rs.slots[i];
+        _ = sl.runs.fetchAdd(1, .seq_cst);
+        sl.as.store(null, .seq_cst);
+        // A shootdown raises `waiters` before it reads `runs` to wait on
+        // it: with both sequentially consistent, either it sees the new
+        // `runs` or this sees it waiting.
+        if (rs.waiters.load(.seq_cst) != 0) io.futexWake(u32, &sl.runs.raw, std.math.maxInt(u32));
     }
 
     /// Kicks every vCPU running `as` and waits until each has left its
@@ -421,7 +431,7 @@ pub const Runners = struct {
     fn shootdown(rs: *Runners, io: std.Io, as: *const anyopaque) void {
         for (0..words) |wi| {
             if (rs.taken[wi].load(.seq_cst) == 0) continue;
-            var wait: [64]struct { i: Index, runs: u64 } = undefined;
+            var wait: [64]struct { i: Index, runs: u32 } = undefined;
             var n: usize = 0;
             for (rs.slots[wi * 64 ..][0..64], wi * 64..) |*sl, i| {
                 if (sl.as.load(.seq_cst) != as) continue;
@@ -432,20 +442,27 @@ pub const Runners = struct {
                 wait[n] = .{ .i = @intCast(i), .runs = runs };
                 n += 1;
             }
+            if (n == 0) continue;
+            _ = rs.waiters.fetchAdd(1, .seq_cst);
+            defer _ = rs.waiters.fetchSub(1, .seq_cst);
             for (wait[0..n]) |w| {
                 const sl = &rs.slots[w.i];
-                // Spin a little, then sleep: the vCPU's thread needs a host
-                // CPU to take the kick and leave, and with more runnable
-                // threads than CPUs, spinning kept it off one. An mprotect
-                // loop racing two threads (the [linux-threads] remap_race
-                // case) took 28 s on two host CPUs, against 1.4 s on three;
-                // with the sleep it takes 8 s on two, and 1.4 s on eight.
+                // Spin a little, then wait on `runs`, which `leave` wakes:
+                // the vCPU's thread needs a host CPU to take the kick and
+                // leave, and with more runnable threads than CPUs, spinning
+                // kept it off one. An mprotect loop racing two threads (the
+                // [linux-threads] remap_race case) took 28 s on two host
+                // CPUs, against 1.4 s on three. A sleep gave the CPU up,
+                // but a short sleep is the timer's resolution on Windows,
+                // about 15.6 ms: with one for each of that loop's 20,000
+                // mprotects, the case ran past its two minutes on WHP. The
+                // timeout only covers a wake that never comes.
                 var spins: u32 = 0;
                 while (sl.as.load(.seq_cst) == as and sl.runs.load(.seq_cst) == w.runs) {
-                    if (spins < 5000) {
+                    if (spins < 1000) {
                         spins += 1;
                         std.atomic.spinLoopHint();
-                    } else io.sleep(.fromMicroseconds(10), .awake) catch {};
+                    } else io.futexWaitTimeout(u32, &sl.runs.raw, w.runs, .{ .duration = .{ .raw = .fromMilliseconds(1), .clock = .awake } }) catch {};
                 }
             }
         }
@@ -607,7 +624,7 @@ test "Runners has a slot for every vCPU KVM allows, past the first 64" {
     // A shootdown waits only for slots running the space.
     var as: u8 = 0;
     rs.enter(130, &as);
-    rs.leave(130);
+    rs.leave(std.testing.io, 130);
     rs.shootdown(std.testing.io, &as);
 }
 
