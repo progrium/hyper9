@@ -197,12 +197,40 @@ fn waitReady(c: *ConsoleInput) !void {
     }
 }
 
+/// A reader whose reads wait until `open` is set, so a test can see a
+/// request while the thread is still in its read.
+const Gated = struct {
+    inner: std.Io.Reader,
+    open: std.atomic.Value(bool) = .init(false),
+    r: std.Io.Reader = .{
+        .vtable = &.{ .stream = stream, .readVec = readVec },
+        .buffer = &.{},
+        .seek = 0,
+        .end = 0,
+    },
+
+    fn wait(r: *std.Io.Reader) *Gated {
+        const g: *Gated = @alignCast(@fieldParentPtr("r", r));
+        while (!g.open.load(.acquire)) testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+        return g;
+    }
+    fn stream(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
+        return wait(r).inner.stream(w, limit);
+    }
+    fn readVec(r: *std.Io.Reader, data: [][]u8) std.Io.Reader.Error!usize {
+        return wait(r).inner.readVec(data);
+    }
+};
+
 test "reads on request, keeps the rest for the next read, and reports EOF once" {
-    var src: std.Io.Reader = .fixed("hello");
-    var c: ConsoleInput = .{ .io = testing.io, .src = &src, .cancel = null, .id = 0, .wake = Woken.wake };
+    var src: Gated = .{ .inner = .fixed("hello") };
+    var c: ConsoleInput = .{ .io = testing.io, .src = &src.r, .cancel = null, .id = 0, .wake = Woken.wake };
     var buf: [3]u8 = undefined;
     try testing.expectEqual(ConsoleInput.would_block, c.read(&buf));
+    // The thread is held in its read, so the request is still pending.
+    // Without the gate it can finish first, as it did on macOS CI.
     try testing.expectEqual(ConsoleInput.would_block, c.read(&buf));
+    src.open.store(true, .release);
     try waitReady(&c);
     try testing.expectEqual(3, c.read(&buf));
     try testing.expectEqualStrings("hel", &buf);
