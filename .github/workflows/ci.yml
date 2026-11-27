@@ -1,26 +1,312 @@
-# Temporary (not for merge): diagnoses the macOS hcpu munmap hang.
+# Checks PRs (design/README.md, Checks). Every job starts at once, except
+# the ones that wait a few seconds for `runners` to pick their runner.
+#
+# `check` runs on every PR: it's the only thing that enforces the proposal
+# rules, and it takes seconds. The tests run only on PRs from a proposal's
+# branch, which is named after its slug, so a PR from a `claude/` branch
+# gets `check` alone. A job skipped by its `if` never starts a runner.
+# "Run workflow" in the Actions tab (or `gh workflow run ci --ref BRANCH`)
+# runs everything on any branch.
+#
+# Commits that design-sign pushes with GITHUB_TOKEN don't start this
+# workflow (GitHub doesn't run workflows for them), so a PR's head after a
+# `/sign` has no results from it. Keep that in mind before making these
+# required checks.
 name: ci
 
 on:
+  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# A new push to a PR cancels the run for the one before it.
+concurrency:
+  group: ci-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  diag-munmap:
-    runs-on: macos-latest
-    timeout-minutes: 60
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The tips of every branch, so `check` can find each proposal's.
+      - run: git fetch -q --no-tags --depth=1 origin '+refs/heads/*:refs/remotes/origin/*'
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+      - run: zig build design -- check
+
+  # Which runner each job below gets. While an AWS test host is up, it
+  # serves its own self-hosted runners (h9-kvm-amd64, h9-kvm-arm64, and
+  # h9-whp, real KVM and WHP), and the jobs that would run on the hosted
+  # runner it stands in for go to it instead, if one of its runners is
+  # idle. A stopped host has none online and a busy one none idle, so
+  # their jobs go to GitHub's rather than queue for hours behind other
+  # runs' jobs (a host has only a few runners). A fork's PR always gets
+  # GitHub's, and has no secrets to ask with anyway. RUNNER_STATUS_TOKEN
+  # is a fine-grained token with Administration: Read-only on this repo;
+  # without it, everything runs on GitHub's.
+  runners:
+    if: github.event_name == 'workflow_dispatch' || !startsWith(github.head_ref, 'claude/')
+    runs-on: ubuntu-latest
+    outputs:
+      map: ${{ steps.pick.outputs.map }}
+    steps:
+      - id: pick
+        env:
+          GH_TOKEN: ${{ secrets.RUNNER_STATUS_TOKEN }}
+          FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        run: |
+          idle=
+          if [ "$FORK" != true ] && [ -n "$GH_TOKEN" ]; then
+            idle=$(gh api "repos/$GITHUB_REPOSITORY/actions/runners?per_page=100" \
+              --jq '.runners[] | select(.status == "online" and (.busy | not)) | .labels[].name') || idle=
+          fi
+          pick() { if grep -qx "$2" <<<"$idle"; then echo "$2"; else echo "$1"; fi; }
+          map=$(jq -nc \
+            --arg amd64 "$(pick ubuntu-latest h9-kvm-amd64)" \
+            --arg arm64 "$(pick ubuntu-24.04-arm h9-kvm-arm64)" \
+            --arg windows "$(pick windows-latest h9-whp)" \
+            '{"ubuntu-latest": $amd64, "ubuntu-24.04-arm": $arm64, "windows-latest": $windows}')
+          echo "map=$map" >>"$GITHUB_OUTPUT"
+          echo "$map"
+
+  test:
+    if: github.event_name == 'workflow_dispatch' || !startsWith(github.head_ref, 'claude/')
+    needs: runners
+    runs-on: ${{ fromJSON(needs.runners.outputs.map)['ubuntu-latest'] }}
     steps:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.1
-      - run: . scripts/env.sh && scripts/fetch.sh alpine-arm64 alpine-amd64
-      - run: sysctl -n hw.ncpu hw.physicalcpu machdep.cpu.brand_string || true
-      - run: zig build integration -Doptimize=ReleaseSafe -Darch=arm64 -Dengines=hcpu -Dfilter=no-such-case-zzz
-      - run: zig build integration -Doptimize=ReleaseSafe -Darch=amd64 -Dengines=hcpu -Dfilter=no-such-case-zzz
-      - run: ls zig-out/bin zig-out/fixtures/linux/arm64 | head -30
-      - run: .github/diag/munmap.sh
+      - run: zig build test
+
+  # docs/embedding/package built against h9 as a fetched package: what
+  # `zig fetch` of a URL would unpack (git archive, as GitHub's tarballs
+  # are), filtered by build.zig.zon's paths. A file the build reads that
+  # paths leaves out fails it.
+  package:
+    if: github.event_name == 'workflow_dispatch' || !startsWith(github.head_ref, 'claude/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+      - run: git archive --format=tar.gz --prefix=hyper9/ HEAD >"$RUNNER_TEMP/h9.tar.gz"
+      - working-directory: docs/embedding/package
+        run: |
+          cp ../embed.zig .
+          zig fetch --save=h9 "$RUNNER_TEMP/h9.tar.gz"
+          zig build
+
+  # The integration cases on KVM, with the amd64 root unpacked from the
+  # release's ISO (tools/isoroot.zig), as pages does for 386, instead of
+  # mkroot's QEMU boot.
+  integration:
+    if: github.event_name == 'workflow_dispatch' || !startsWith(github.head_ref, 'claude/')
+    needs: runners
+    runs-on: ${{ fromJSON(needs.runners.outputs.map)['ubuntu-latest'] }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+      # Hosted runners have /dev/kvm, but only root can open it. The test
+      # hosts' runner user is in the kvm group.
+      - name: Let the runner open /dev/kvm
+        if: ${{ !startsWith(runner.name, 'h9-') }}
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - uses: actions/cache@v4
+        id: rootamd64
+        with:
+          path: .local/9front/rootamd64
+          key: ci-rootamd64-${{ hashFiles('scripts/pins.sh', 'tools/isoroot.zig') }}
+      - name: amd64 root from the ISO
+        if: steps.rootamd64.outputs.cache-hit != 'true'
+        run: |
+          scripts/fetch.sh isoamd64
+          . scripts/pins.sh
+          zig build isoroot -- ".local/9front/9front-$NINEFRONT_RELEASE.amd64.iso" .local/9front/rootamd64
+      # diod, the 9P2000.L server the [dotl] cases run against, and the
+      # amd64 Alpine root the Linux cases run in.
+      - run: scripts/fetch.sh diod alpine-amd64
+      - run: zig build integration -Darch=amd64 -Dengines=kvm -Droot="$PWD/.local/9front/rootamd64"
+      # The namespace conformance script, against 9front's recorded
+      # transcript (design/kernel-port.md).
+      - run: zig build conformance -Darch=amd64 -Dengines=kvm -Droot="$PWD/.local/9front/rootamd64"
+
+  # The demo page and its canvas cases in Chromium, over the 386 root.
+  web:
+    if: github.event_name == 'workflow_dispatch' || !startsWith(github.head_ref, 'claude/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/cache@v4
+        id: root386
+        with:
+          path: .local/9front/root386
+          key: ci-root386-${{ hashFiles('scripts/pins.sh', 'tools/isoroot.zig') }}
+      - name: 386 root from the ISO
+        if: steps.root386.outputs.cache-hit != 'true'
+        run: |
+          scripts/fetch.sh iso386
+          . scripts/pins.sh
+          zig build isoroot -- ".local/9front/9front-$NINEFRONT_RELEASE.386.iso" .local/9front/root386
+      - run: |
+          npm install --no-save --no-package-lock playwright@1.63.0
+          npx playwright install --with-deps chromium
+      # The pinned wasm-opt, for the web build's Asyncify pass.
+      - run: scripts/fetch.sh binaryen
+      - run: zig build web-test -Doptimize=ReleaseSafe
+
+  # hcpu's Done criteria (design/epoch-0/hcpu.md) on every host GitHub has: the
+  # roots once, then the unit and engine cases and the integration cases
+  # on the emulator, with the arm64 root, the 386 binaries, and the amd64
+  # root. Only on "Run workflow", since a full pass takes a few hours.
+  hcpu-roots:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq qemu-system-arm qemu-utils libarchive-tools zstd
+      # The arm64 image, the 386 and amd64 ISOs, and the Alpine roots.
+      - run: scripts/fetch.sh image iso386 isoamd64 alpine
+      - run: zig build mkroot -- --arch arm64
+      - run: |
+          . scripts/pins.sh
+          zig build isoroot -- ".local/9front/9front-$NINEFRONT_RELEASE.386.iso" .local/9front/root386
+          zig build isoroot -- ".local/9front/9front-$NINEFRONT_RELEASE.amd64.iso" .local/9front/rootamd64
+      - run: tar -C .local -cf roots.tar "9front/$(readlink .local/9front/root)" 9front/root 9front/root386 9front/rootamd64 linux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hcpu-roots
+          path: roots.tar
+          retention-days: 3
+
+  hcpu:
+    if: github.event_name == 'workflow_dispatch'
+    needs: [runners, hcpu-roots]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-24.04-arm, ubuntu-latest, windows-latest]
+    runs-on: ${{ fromJSON(needs.runners.outputs.map)[matrix.os] || matrix.os }}
+    timeout-minutes: 340
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+      - uses: actions/download-artifact@v4
+        with:
+          name: hcpu-roots
+      # Alpine's roots have symbolic links: on Windows, Git Bash's tar
+      # makes them native ones (the runner is an administrator), but turns
+      # an absolute target such as /bin/sh's /bin/busybox into a path under
+      # Git's own install, so scripts/winlinks.py remakes those links.
+      - run: |
+          mkdir -p .local && tar -C .local -xf roots.tar
+          if [ "$RUNNER_OS" = Windows ]; then python scripts/winlinks.py roots.tar .local 2; fi
+          rm roots.tar
         env:
-          DIAG_SECS: "1200"
+          MSYS: winsymlinks:nativestrict
+      - name: test, T1 and T0
+        if: always()
+        run: zig build test
+      - name: integration, arm64 root
+        if: always()
+        run: zig build integration -Doptimize=ReleaseSafe -Darch=arm64 -Dengines=hcpu -Droot="$PWD/.local/9front/root"
+      - name: integration, 386
+        if: always()
+        run: zig build integration -Doptimize=ReleaseSafe -Darch=386 -Dengines=hcpu -Droot="$PWD/.local/9front/root386"
+      - name: integration, amd64 root
+        if: always()
+        run: zig build integration -Doptimize=ReleaseSafe -Darch=amd64 -Dengines=hcpu -Droot="$PWD/.local/9front/rootamd64"
+
+  # The rest of hcpu's Done criteria that a hosted runner can show: an
+  # hour of fuzzing and the litmus tests on an arm64 and an x86-64 host,
+  # the bench, and the demos. A runner isn't an M3 Max,
+  # and its macOS has no HVF, so those numbers and the hvf,hcpu comparison
+  # are for a real Mac.
+  hcpu-fuzz:
+    if: github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04-arm, ubuntu-latest]
+    # GitHub's runners, not the test hosts': an hour of fuzzing on the
+    # emulator gains nothing from KVM, and it held a host's runner slot
+    # for that hour while KVM jobs queued behind it.
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+      - run: zig build fuzz-long -Doptimize=ReleaseSafe
+      - if: always()
+        run: zig build litmus -Doptimize=ReleaseSafe
+
+  hcpu-demos:
+    if: github.event_name == 'workflow_dispatch'
+    needs: hcpu-roots
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-24.04-arm]
+    # GitHub's runners, as for hcpu-fuzz: the bench and demos run on the
+    # emulator, so the test hosts' slots are kept for the KVM and WHP jobs.
+    runs-on: ${{ matrix.os }}
+    # A hung guest otherwise holds the runner for GitHub's 6 hours.
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+      - uses: actions/download-artifact@v4
+        with:
+          name: hcpu-roots
+      - run: mkdir -p .local && tar -C .local -xf roots.tar && rm roots.tar
+      - run: zig build -Doptimize=ReleaseSafe --prefix .local/h9-hcpu
+      # About 10 minutes with the compile. A row that never finishes (as
+      # amd64 pwrite did when its counter sat in a register a system call
+      # zeroes) fails here, and the demos still run.
+      - name: bench
+        if: always()
+        timeout-minutes: 25
+        run: zig build bench
+      - name: the demos
+        if: always()
+        run: |
+          set -x
+          loop='i=0; while [ $i -lt 1000000 ]; do i=$((i+1)); done; echo $i'
+          if [ "$(uname)" = Linux ]; then
+            time .local/h9-hcpu/bin/h9 --engine hcpu --dir .local/linux/alpine-arm64:#L /bin/busybox sh -c "$loop"
+          else
+            .local/h9-hcpu/bin/h9 --arch 386 --engine hcpu --dir .local/linux/alpine-386:#L /bin/busybox sh -c 'echo hello; ls /etc | wc -l'
+            .local/h9-hcpu/bin/h9 --arch amd64 --engine hcpu --dir .local/linux/alpine-amd64:#L /bin/busybox sh -c 'echo hello; ls /etc | wc -l'
+          fi
