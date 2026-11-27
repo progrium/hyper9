@@ -68,7 +68,7 @@ Archived in [epoch-0/](epoch-0/).
 | [segattach](epoch-0/segattach.md) | [#4](../../../issues/4) | implemented | segattach and shared segments |
 | [net-policy](epoch-0/net-policy.md) | [#5](../../../issues/5) | implemented | Outbound-only network by default, and --net-allow |
 | [ephemeral-writes](epoch-0/ephemeral-writes.md) | [#6](../../../issues/6) | implemented | Ephemeral writes and a private /tmp |
-| [go-compat](epoch-0/go-compat.md) | [#7](../../../issues/7) | implemented | Go compatibility |
+| [go-compat](epoch-0/go-compat.md) | [#7](../../../issues/7) | superseded | Go compatibility |
 | [devsrv](epoch-0/devsrv.md) | [#8](../../../issues/8) | implemented | devsrv, /srv, and mount |
 | [self-host](epoch-0/self-host.md) | [#10](../../../issues/10) | implemented | Self-hosting |
 | [overlay](epoch-0/overlay.md) | [#11](../../../issues/11) | implemented | Copy-on-write overlay as the root's default |
