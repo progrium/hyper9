@@ -1034,9 +1034,26 @@ pub const Device = dev.Native(Dotldc, "dotl", .{
     .gens = &.{&dotlgen},
 });
 
+/// How many of machine `mach`'s conversations on a host descriptor
+/// (`hw`) aren't freed yet. A reader is gone once its conversation is,
+/// since it holds a reference; until then it may still be waiting on the
+/// descriptor. For Machine.run, so that a run doesn't end with a reader
+/// left on an embedder's descriptor to take the next run's replies.
+fn h9_dotl_hostreaders(mach: ?*anyopaque) callconv(.c) c_int {
+    var n: c_int = 0;
+    for (&convs) |*cv| {
+        c.lock(&cv.lk);
+        if (cv.refs > 0 and cv.mach == mach and cv.hw != null)
+            n += 1;
+        c.unlock(&cv.lk);
+    }
+    return n;
+}
+
 pub fn exportC() void {
     @export(&Device.dev, .{ .name = "dotldevtab" });
     @export(&h9_dotl_wide, .{ .name = "h9_dotl_wide" });
+    @export(&h9_dotl_hostreaders, .{ .name = "h9_dotl_hostreaders" });
 }
 
 const testing = std.testing;

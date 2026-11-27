@@ -1219,6 +1219,12 @@ pub const Machine = struct {
         if (job.mach.load(.acquire)) |mc| {
             hidx.unregister(@intFromPtr(mc));
             _ = hstream.waitConnects(@intFromPtr(mc), grace_ms);
+            // An #ℓ reader on an embedder's descriptor (design/epoch-0/fd-mounts.md)
+            // must be gone before the next run uses it, or it can take that
+            // run's replies, and the run waits for them until it times out.
+            // The #ι conversation above it closes it from its own kproc,
+            // which can still be ending after the processes have exited.
+            _ = waitDotlReaders(m.io, mc, grace_ms);
             mc.put();
         }
         kernel.deinit();
@@ -4607,6 +4613,17 @@ pub const Machine = struct {
         else
             std.fmt.bufPrint(&cmd, "fd {d}", .{fds[0]}) catch unreachable;
         return dotlConv("{s}", ctl) catch return m.fail("mount on {s}: {s}", .{ on, kern.errstr() });
+    }
+
+    /// Waits up to `ms` for machine `mc`'s #ℓ conversations on host
+    /// descriptors to end, and returns whether they did.
+    fn waitDotlReaders(io: std.Io, mc: *kern.Mach, ms: u32) bool {
+        var waited: u32 = 0;
+        while (kern.dotlHostReaders(mc) > 0) : (waited += 1) {
+            if (waited >= ms) return false;
+            io.sleep(.fromMilliseconds(1), .awake) catch {};
+        }
+        return true;
     }
 
     /// A destination as the mount was given it: `/` and `#L` for the
