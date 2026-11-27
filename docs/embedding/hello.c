@@ -10,6 +10,8 @@
 #include <stdlib.h>
 #include <h9.h>
 #ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
 #include <windows.h>
 #define OUT ((h9_fd)GetStdHandle(STD_OUTPUT_HANDLE))
 #define ERR ((h9_fd)GetStdHandle(STD_ERROR_HANDLE))
@@ -25,6 +27,14 @@ main(int argc, char **argv)
 		fprintf(stderr, "usage: libh9-hello AOUT [h9 flags...]\n");
 		return 2;
 	}
+#ifdef _WIN32
+	/*
+	 * The guest writes the console's handles directly, so keep stdio
+	 * from turning this program's own \n into \r\n around it.
+	 */
+	_setmode(_fileno(stdout), _O_BINARY);
+	_setmode(_fileno(stderr), _O_BINARY);
+#endif
 	FILE *f = fopen(argv[1], "rb");
 	if (f == NULL) {
 		perror(argv[1]);
