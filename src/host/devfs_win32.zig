@@ -1081,6 +1081,25 @@ fn setreparse(h: HANDLE, tag: w.DWORD, data: []const u8) bool {
     return w.DeviceIoControl(h, w.FSCTL_SET_REPARSE_POINT, &buf, @intCast(8 + data.len), null, 0, &got, null) != 0;
 }
 
+/// Turns on SeCreateSymbolicLinkPrivilege in the process's token, once,
+/// where the token holds it. An administrator's token holds it turned
+/// off, and FSCTL_SET_REPARSE_POINT, unlike CreateSymbolicLinkW, doesn't
+/// turn it on for the call, so without this a symbolic link fails with
+/// ERROR_PRIVILEGE_NOT_HELD even for an administrator. A token without
+/// the privilege is left as it is, and the link is EPERM (reparseerr).
+fn linkprivilege() void {
+    const S = struct {
+        var done: std.atomic.Value(bool) = .init(false);
+    };
+    if (S.done.swap(true, .acq_rel)) return;
+    var tok: HANDLE = undefined;
+    if (w.OpenProcessToken(w.GetCurrentProcess(), w.TOKEN_ADJUST_PRIVILEGES, &tok) == 0) return;
+    defer _ = w.CloseHandle(tok);
+    var tp: w.TOKEN_PRIVILEGE = .{ .count = 1, .luid = undefined, .attrs = w.SE_PRIVILEGE_ENABLED };
+    if (w.LookupPrivilegeValueW(null, std.unicode.utf8ToUtf16LeStringLiteral("SeCreateSymbolicLinkPrivilege"), &tp.luid) == 0) return;
+    _ = w.AdjustTokenPrivileges(tok, 0, &tp, 0, null, null);
+}
+
 /// A reparse point's failure: EPERM for a missing privilege (a symbolic
 /// link needs SeCreateSymbolicLinkPrivilege), else the host's error.
 fn reparseerr() Error {
@@ -1112,8 +1131,9 @@ fn targetisdir(dir: [*:0]const WCHAR, target: []const u8) bool {
 /// is made by a path the host resolves again (design/host-handles.md).
 /// The target is kept verbatim, with '\\' for each '/', and always marked
 /// relative: an absolute Linux target ("/etc/x") is a guest path, not a
-/// host one, and fsreadlink gives it back with '/' (h9_fs_readlinkw). A
-/// missing privilege is EPERM.
+/// host one, and fsreadlink gives it back with '/' (h9_fs_readlinkw). The
+/// reparse point needs SeCreateSymbolicLinkPrivilege turned on
+/// (linkprivilege); a token without it is EPERM.
 fn fssymlink(ch: *Chan, name: [*:0]const u8, target: [*:0]const u8) Error!void {
     const t = std.mem.span(target);
     if (t.len == 0) return port.kerror(&port.Ebadarg);
@@ -1135,6 +1155,7 @@ fn fssymlink(ch: *Chan, name: [*:0]const u8, target: [*:0]const u8) Error!void {
     std.mem.writeInt(u32, data[8..12], w.SYMLINK_FLAG_RELATIVE, .little);
     @memcpy(data[12..][0..bytes], std.mem.sliceAsBytes(tw));
     @memcpy(data[12 + bytes ..][0..bytes], std.mem.sliceAsBytes(tw));
+    linkprivilege();
     const h = try mkentry(ch, name, targetisdir(uifOf(ch).path, t));
     defer _ = w.CloseHandle(h);
     if (!setreparse(h, w.IO_REPARSE_TAG_SYMLINK, data[0 .. 12 + 2 * bytes])) {
