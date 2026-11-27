@@ -247,12 +247,14 @@ jobs:
   # are for a real Mac.
   hcpu-fuzz:
     if: github.event_name == 'workflow_dispatch'
-    needs: runners
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04-arm, ubuntu-latest]
-    runs-on: ${{ fromJSON(needs.runners.outputs.map)[matrix.os] }}
+    # GitHub's runners, not the test hosts': an hour of fuzzing on the
+    # emulator gains nothing from KVM, and it held a host's runner slot
+    # for that hour while KVM jobs queued behind it.
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
@@ -265,12 +267,14 @@ jobs:
 
   hcpu-demos:
     if: github.event_name == 'workflow_dispatch'
-    needs: [runners, hcpu-roots]
+    needs: hcpu-roots
     strategy:
       fail-fast: false
       matrix:
         os: [macos-latest, ubuntu-24.04-arm]
-    runs-on: ${{ fromJSON(needs.runners.outputs.map)[matrix.os] || matrix.os }}
+    # GitHub's runners, as for hcpu-fuzz: the bench and demos run on the
+    # emulator, so the test hosts' slots are kept for the KVM and WHP jobs.
+    runs-on: ${{ matrix.os }}
     defaults:
       run:
         shell: bash
