@@ -13,7 +13,7 @@ branch: []
 
 ## Abstract
 
-A Linux program whose standard input or output is a 9front console file, such as a rio window's, vt's, or a 9/UX Run Command window's `/dev/cons`, gets a real terminal. On its first terminal call on such an fd, h9 connects a `#τ` pty pair to that console. A kernel process of the machine puts the window in raw mode through its `consctl` and copies bytes between the window and the pair's master. The program's fds for that console then move to the pair's slave, which becomes its controlling terminal. devpty's line discipline handles echo, line editing, and signals. The window size comes from vt's `/env/LINES` and `/env/COLS`, or from `/dev/wctl` and the font. A resize becomes `TIOCSWINSZ` and `SIGWINCH`. When the last program using the pair closes it, the window goes back to cooked mode. vi, less, htop, fzf, and readline then work in vt under rio, in 9/UX, and in any other 9front terminal, with no change to rio, vt, or the Linux programs.
+A Linux program whose standard input or output is a 9front console file, such as a rio window's, vt's, or a 9/UX Run Command window's `/dev/cons`, gets a real terminal. On its first terminal call on such an fd, h9 connects a `#τ` pty pair to that console. A kernel process of the machine puts the window in raw mode through its `consctl` and copies bytes between the window and the pair's master. The program's fds for that console then move to the pair's slave, which becomes its controlling terminal. devpty's line discipline handles echo, line editing, and signals. The window size comes from vt's `/env/LINES` and `/env/COLS`, or from `/dev/wctl` and the font. A resize becomes `TIOCSWINSZ` and `SIGWINCH`. When the last program using the pair closes it, the window goes back to cooked mode. vi, less, htop, fzf, and readline then work in vt under rio, in 9/UX's Run Command, and in any other 9front terminal, with no change to rio, vt, or the Linux programs.
 
 ## Background
 
@@ -21,6 +21,7 @@ A Linux program whose standard input or output is a 9front console file, such as
 - **What that breaks.** On Nov 26, 2026, 9/UX ran under h9 at de11fc3 with Alpine 3.22 on `#L`, driven headless through `/dev/kbdin`. Line-oriented Linux programs worked in Run Command: busybox, `apk`, pipes in both directions with 9front programs, `sh -i`, and Delete interrupting a Linux `sleep`. Anything that needs a tty failed. `tty` printed "not a tty", `stty size` failed, and busybox vi printed its escape sequences as text. In a `vt -x` window, vi drew correctly, but the window stayed in cooked mode, so vi got keys a line at a time and Esc never reached it.
 - **linux-pty left this out on purpose.** [linux-pty](epoch-0/linux-pty.md) built `#τ` pairs with Linux's `N_TTY` line discipline in devpty.c, and host masters for embedders (src/hostpty.zig: a kernel process that opens `#τ/ptmx` and pumps the master). Its Rationale says "9front's `vt` and rio windows are its own terminals. This proposal doesn't add anything for the 9front side." This proposal is that side.
 - **What 9front terminals give us.** rio's and vt's `consctl` take `rawon` and `rawoff`, and both reset raw mode when the `consctl` fd that set it closes. vt also takes `winchon` and `winchoff`. vt runs its child in vt's environment group and keeps `/env/TERM`, `/env/LINES`, `/env/COLS`, `/env/XPIXELS`, `/env/YPIXELS`, and `/env/WINCH`, a counter it increments on every resize, current. With `winchon` set, it also posts `interrupt` to the child's note group after a resize. A Linux program's environment is already the machine's `/env`, so `TERM` from vt already reaches it. A plain rio window has no `TERM` and doesn't interpret escape sequences, but `/dev/wctl` gives its rectangle.
+- **9/UX's Run Command is an xterm.** Since 9ux's "Run Command is an xterm" change (progrium/9ux#29), its console emulates `xterm-256color`, with an alternate screen for full-screen programs. Like vt, it shares its environment group with its shell and keeps `TERM`, `LINES`, `COLS`, `XPIXELS`, `YPIXELS`, and `WINCH` current there, and once `winchon` is written to its `consctl` it posts `interrupt` to the shell's note group after a resize. So a bridge treats a Run Command window the way it treats a vt window.
 
 ## Proposal
 
@@ -54,7 +55,7 @@ Resize detection follows vt's protocol. The bridge writes `winchon` on its `cons
 
 ### TERM
 
-A Linux program gets `TERM` from `/env/TERM` as it does today. When a bridged console's environment has no `TERM`, which is the case for plain rio and Run Command windows, h9 sets `TERM=dumb` for Linux processes on it. Programs then line-edit, prompt, and stop colouring, instead of printing escape sequences that the window shows as text. Full-screen programs need a terminal emulator: vt, or a VT mode in the 9/UX console (see Open issues).
+A Linux program gets `TERM` from `/env/TERM` as it does today. When a bridged console's environment has no `TERM`, which is the case for plain rio windows (vt and Run Command set one), h9 sets `TERM=dumb` for Linux processes on it. Programs then line-edit, prompt, and stop colouring, instead of printing escape sequences that the window shows as text. Full-screen programs need a terminal emulator: vt, or 9/UX's Run Command.
 
 ### Disconnecting
 
@@ -111,6 +112,5 @@ Integration cases on the headless screen, tagged `[linux-window-tty]`, with the 
 ## Open issues
 
 - **9front programs that open `/dev/cons` by name under a bridge.** h9 could bind the slave over `/dev/cons` in a bridged process's namespace when it execs a 9front program. That needs `consctl` semantics on a pty, either served by devpty or mapped onto termios.
-- **A VT mode for 9/UX's Run Command.** With this proposal, a Linux program in Run Command gets a terminal with `TERM=dumb`. Full-screen programs there would need libux's console to interpret escape sequences and publish `LINES`, `COLS`, and `WINCH` the way vt does. That's 9/UX's work, not h9's.
 - **rio's margins.** Working out the character size from `wctl` and `$font` can be off by a column if rio's border width changes. Asking terminals to publish `LINES` and `COLS` avoids the guess.
 - **Two machines on one window.** A window served over 9P to a second machine would get a bridge in each machine. Only one can hold raw mode sensibly, and the second could fall back to `ENOTTY`.
