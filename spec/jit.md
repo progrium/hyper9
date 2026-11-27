@@ -31,7 +31,7 @@ Each CPU has two tiers. T0 is an interpreter. T1 is a JIT that lifts regions of 
 
 **Memory.** Guest pages come from one arena (`src/engine/arena.zig`): natively a reserved range of twice the memory cap in address space, whose pages stay unbacked until touched, and on the web real memory grown with `memory.grow`, 256 MiB by default and 2 GiB at most. An address space is a list of regions of the arena. `freePages` drops whatever was decoded or compiled from the pages it frees, so new contents never run stale code.
 
-**Views.** Each vCPU keeps its own copy of its address space's mappings, a `mem.View`, which it brings up to date before it runs guest code whenever the space's generation has moved. The TLB is filled from the View.
+**Views.** Each vCPU keeps its own copy of its address space's mappings, a `mem.View`, which it brings up to date before it runs guest code whenever the space's generation has moved. Generations come from one counter per engine, so no two spaces ever have the same one, and a vCPU never takes a new space allocated where a freed one was for the old one. The TLB is filled from the View.
 
 **No guest lock.** Every vCPU runs guest code at once. Other threads reach a running vCPU only through its context's exit-request word, which T1 checks at every `poll` and T0 at every block:
 
