@@ -327,6 +327,17 @@ fn runProcessWith(argv: []const []const u8, stdin: ?[]const u8, environ: ?*const
         else => |e| {
             // Said here, since the case's own checks never see the output.
             std.debug.print("{s} ... {s}: {t} after {d} ms\n", .{ argv[0], argv[argv.len - 1], e, slow(ms) });
+            if (builtin.os.tag != .windows) if (child.id) |pid| {
+                var pid_buf: [16]u8 = undefined;
+                const ps = std.fmt.bufPrint(&pid_buf, "{d}", .{pid}) catch "";
+                inline for (0..2) |_| {
+                    if (std.process.run(gpa, io, .{ .argv = &.{ "/usr/bin/sample", ps, "3", "-mayDie", "-file", "/dev/stdout" } })) |sr| {
+                        std.debug.print("DIAG sample:\n{s}\n{s}\n", .{ sr.stdout, sr.stderr });
+                        gpa.free(sr.stdout);
+                        gpa.free(sr.stderr);
+                    } else |se| std.debug.print("DIAG sample failed: {t}\n", .{se});
+                }
+            };
             return e;
         },
     }
