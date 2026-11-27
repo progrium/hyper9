@@ -305,7 +305,11 @@ fn runProcessWith(argv: []const []const u8, stdin: ?[]const u8, environ: ?*const
     defer mr.deinit();
     while (mr.fill(64, timeout)) |_| {} else |err| switch (err) {
         error.EndOfStream => {},
-        else => |e| return e,
+        else => |e| {
+            // Said here, since the case's own checks never see the output.
+            std.debug.print("{s} ... {s}: {t} after {d} ms\n", .{ argv[0], argv[argv.len - 1], e, slow(ms) });
+            return e;
+        },
     }
     try mr.checkAnyError();
     const term = try child.wait(io);
@@ -2181,6 +2185,21 @@ fn only(e: Env, engine: []const u8) Env {
     return o;
 }
 
+test "a terminal's last output is read after its program has exited [baseline]" {
+    try skipPending(@src().fn_name);
+    if (builtin.os.tag == .windows) return error.SkipZigTest else {
+        var t = try Term.spawn(gpa, &.{ "/bin/sh", "-c", "echo last" });
+        defer t.deinit();
+        // Reaped with its output unread, as when it writes and exits
+        // between a read and the exit check after it, as h9 does with the
+        // discarded-changes notice.
+        var st: c_int = 0;
+        while (std.c.waitpid(t.sys.pid, &st, 0) < 0) {}
+        t.code = 0;
+        try t.expect("last", slow(1_000));
+    }
+}
+
 test "an interactive rc reads typed lines [baseline]" {
     const e = try env(@src());
     var it = engineList(e);
@@ -3520,7 +3539,10 @@ const RootServer = struct {
         var tries: u32 = 0;
         while (true) : (tries += 1) {
             const c = ip.connect(io, .{ .mode = .stream }) catch |err| {
-                if (tries >= slow(100)) return err;
+                if (tries >= slow(100)) {
+                    std.debug.print("root server: {s} not accepting: {t}\n", .{ listen, err });
+                    return err;
+                }
                 try io.sleep(.fromMilliseconds(100), .awake);
                 continue;
             };

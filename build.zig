@@ -280,6 +280,10 @@ fn integrationTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
             .root_source_file = b.path("tests/integration.zig"),
             .target = target,
             .optimize = optimize,
+            // So a case that fails by returning an error says which and
+            // where, under ReleaseSafe too, rather than "failed without
+            // output".
+            .error_tracing = true,
             .link_libc = target.result.os.tag != .windows,
             .imports = &.{
                 .{ .name = "design", .module = designModule(b) },

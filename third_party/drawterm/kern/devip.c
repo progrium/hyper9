@@ -393,6 +393,7 @@ void
 ipclose(Chan *c)
 {
 	Conv *cc;
+	int sfd;
 
 	switch(TYPE(c->qid)) {
 	case Qcs:
@@ -403,8 +404,22 @@ ipclose(Chan *c)
 		if((c->flag & COPEN) == 0)
 			break;
 		cc = proto[PROTO(c->qid)].conv[CONV(c->qid)];
-		if(decref(&cc->r) != 0)
+		/*
+		 * h9: the last close resets the conversation before it lets go,
+		 * under its lock. protoclone takes any conversation whose ref is
+		 * 0 and sets its sfd, so with decref first, an accept (or a
+		 * clone) could take this one between the decref and the reset,
+		 * which then closed the new connection's socket or lost it with
+		 * sfd = -1, leaving its peer waiting for an answer that never
+		 * came.
+		 */
+		lock(&cc->r.lk);
+		if(--cc->r.ref != 0){
+			if(cc->r.ref < 0)
+				panic("ipclose: ref %ld", cc->r.ref);
+			unlock(&cc->r.lk);
 			break;
+		}
 		strcpy(cc->owner, network);
 		cc->perm = 0666;
 		cc->state = "Closed";
@@ -412,9 +427,12 @@ ipclose(Chan *c)
 		ipzero(cc->raddr);
 		cc->lport = 0;
 		cc->rport = 0;
-		h9so_close(cc->sfd);	/* h9: closesocket on Windows */
+		sfd = cc->sfd;
 		cc->sfd = -1;	/* h9: not closed twice, nor watched once closed */
 		memset(cc->h9opts, 0, sizeof cc->h9opts);
+		unlock(&cc->r.lk);
+		if(sfd >= 0)
+			h9so_close(sfd);	/* h9: closesocket on Windows */
 		break;
 	}
 }
