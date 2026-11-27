@@ -2005,6 +2005,12 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("tests/deadline.zig"),
         .target = b.graph.host,
     }) })).step);
+    // The websocket-9p cases' relay and proxy (tests/wsrelay.zig).
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/wsrelay.zig"),
+        .target = b.graph.host,
+        .imports = &.{.{ .name = "ws", .module = b.createModule(.{ .root_source_file = b.path("src/ws.zig") }) }},
+    }) })).step);
     // The design tool's tests read tools/testdata from the repository root.
     const design_tests = b.addRunArtifact(b.addTest(.{ .root_module = design_tool.root_module }));
     design_tests.setCwd(b.path("."));
