@@ -1089,21 +1089,24 @@ fn setreparse(h: HANDLE, tag: w.DWORD, data: []const u8) bool {
 /// doesn't turn it on for the call, so without this a symbolic link
 /// fails with ERROR_PRIVILEGE_NOT_HELD even for an administrator. A token
 /// without the privilege is left as it is, and fssymlink makes a WSL link.
-/// H9_TEST_NOLINKPRIV, set to anything, turns the privilege off instead,
-/// so a token that has it on (a service's, as on the CI runners) takes
-/// the fallback an unprivileged user's does (tests/integration.zig).
 fn linkprivilege() void {
     const S = struct {
         var done: std.atomic.Value(bool) = .init(false);
     };
     if (S.done.swap(true, .acq_rel)) return;
-    const off = w.GetEnvironmentVariableW(std.unicode.utf8ToUtf16LeStringLiteral("H9_TEST_NOLINKPRIV"), null, 0) != 0;
     var tok: HANDLE = undefined;
     if (w.OpenProcessToken(w.GetCurrentProcess(), w.TOKEN_ADJUST_PRIVILEGES, &tok) == 0) return;
     defer _ = w.CloseHandle(tok);
-    var tp: w.TOKEN_PRIVILEGE = .{ .count = 1, .luid = undefined, .attrs = if (off) 0 else w.SE_PRIVILEGE_ENABLED };
+    var tp: w.TOKEN_PRIVILEGE = .{ .count = 1, .luid = undefined, .attrs = w.SE_PRIVILEGE_ENABLED };
     if (w.LookupPrivilegeValueW(null, std.unicode.utf8ToUtf16LeStringLiteral("SeCreateSymbolicLinkPrivilege"), &tp.luid) == 0) return;
     _ = w.AdjustTokenPrivileges(tok, 0, &tp, 0, null, null);
+}
+
+/// Whether H9_TEST_NOLINKPRIV is set: fssymlink then makes every link a
+/// WSL link, as it does without the privilege, so the fallback is tested
+/// on a host where native links can be made (tests/integration.zig).
+fn nolinkpriv() bool {
+    return w.GetEnvironmentVariableW(std.unicode.utf8ToUtf16LeStringLiteral("H9_TEST_NOLINKPRIV"), null, 0) != 0;
 }
 
 /// A reparse point's failure: EPERM for a missing privilege (a symbolic
@@ -1167,7 +1170,9 @@ fn fssymlink(ch: *Chan, name: [*:0]const u8, target: [*:0]const u8) Error!void {
     linkprivilege();
     const isdir = targetisdir(uifOf(ch).path, t);
     const h = try mkentry(ch, name, isdir);
-    if (setreparse(h, w.IO_REPARSE_TAG_SYMLINK, data[0 .. 12 + 2 * bytes])) {
+    if (nolinkpriv()) {
+        w.SetLastError(w.ERROR_PRIVILEGE_NOT_HELD);
+    } else if (setreparse(h, w.IO_REPARSE_TAG_SYMLINK, data[0 .. 12 + 2 * bytes])) {
         _ = w.CloseHandle(h);
         return;
     }
