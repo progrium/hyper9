@@ -324,7 +324,11 @@ fn runProcessWith(argv: []const []const u8, stdin: ?[]const u8, environ: ?*const
     defer mr.deinit();
     while (mr.fill(64, timeout)) |_| {} else |err| switch (err) {
         error.EndOfStream => {},
-        else => |e| return e,
+        else => |e| {
+            // Said here, since the case's own checks never see the output.
+            std.debug.print("{s} ... {s}: {t} after {d} ms\n", .{ argv[0], argv[argv.len - 1], e, slow(ms) });
+            return e;
+        },
     }
     try mr.checkAnyError();
     const term = try child.wait(io);
@@ -2291,6 +2295,34 @@ fn only(e: Env, engine: []const u8) Env {
     return o;
 }
 
+test "a terminal's last output is read after its program has exited [baseline]" {
+    try skipPending(@src().fn_name);
+    if (builtin.os.tag == .windows) return error.SkipZigTest else {
+        var t = try Term.spawn(gpa, &.{ "/bin/sh", "-c", "echo last" });
+        const pid = t.sys.pid;
+        var st: c_int = 0;
+        defer {
+            // Closing the terminal lets a child macOS still holds (below)
+            // finish exiting; one already reaped gives ECHILD.
+            t.deinit();
+            _ = std.c.waitpid(pid, &st, 0);
+        }
+        // Exited with its output unread, as when it writes and exits
+        // between a read and the exit check after it, as h9 does with the
+        // discarded-changes notice. Linux reaps it here; macOS holds a
+        // session leader's exit until its terminal's output is read, so
+        // a wait that blocked would never return, and there it's only
+        // marked exited.
+        const ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+        for (0..50) |_| {
+            if (std.c.waitpid(pid, &st, std.c.W.NOHANG) == pid) break;
+            _ = std.c.nanosleep(&ts, null);
+        }
+        t.code = 0;
+        try t.expect("last", slow(1_000));
+    }
+}
+
 test "an interactive rc reads typed lines [baseline]" {
     const e = try env(@src());
     var it = engineList(e);
@@ -3738,7 +3770,10 @@ const RootServer = struct {
         var tries: u32 = 0;
         while (true) : (tries += 1) {
             const c = ip.connect(io, .{ .mode = .stream }) catch |err| {
-                if (tries >= slow(100)) return err;
+                if (tries >= slow(100)) {
+                    std.debug.print("root server: {s} not accepting: {t}\n", .{ listen, err });
+                    return err;
+                }
                 try io.sleep(.fromMilliseconds(100), .awake);
                 continue;
             };

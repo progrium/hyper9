@@ -66,6 +66,14 @@ pub const Term = struct {
                     try t.drain(500);
                     continue;
                 }
+                // The program can write its last output and exit between
+                // a read and the exit check that follows it, so what's
+                // still in the terminal is read before giving up.
+                try t.drainExited();
+                if (std.mem.indexOfPos(u8, t.out.items, t.mark, needle)) |i| {
+                    t.mark = i + needle.len;
+                    return;
+                }
                 dump(t, needle);
                 return error.Exited;
             }
@@ -133,6 +141,19 @@ pub const Term = struct {
         return t.sys.echo();
     }
 
+    /// Reads what an exited program left in the terminal, until a read
+    /// finds nothing (Linux's EIO once it's empty, or 50 ms without
+    /// output), for at most a second.
+    fn drainExited(t: *Term) !void {
+        const deadline = now() + 1000;
+        while (now() < deadline) {
+            var buf: [4096]u8 = undefined;
+            const n = try t.sys.read(&buf, 50);
+            if (n == 0) return;
+            try t.out.appendSlice(t.gpa, buf[0..n]);
+        }
+    }
+
     fn pump(t: *Term, ms: u32) !void {
         var buf: [4096]u8 = undefined;
         const n = try t.sys.read(&buf, ms);
@@ -179,6 +200,22 @@ const Posix = struct {
         .linux => 0x540E,
         else => 0x20007461, // _IO('t', 97) on macOS and the BSDs
     };
+
+    /// libc's struct termios. On Linux, std.c.termios is the kernel's,
+    /// 44 bytes with 19 c_cc, but glibc's and musl's have 32 c_cc and the
+    /// speeds, 60 bytes, and their tcgetattr fills all of it: into a bare
+    /// std.c.termios it writes past the end, which ReleaseSafe's stack
+    /// protector catches as a SIGTRAP on arm64.
+    const Termios = extern struct {
+        t: c.termios,
+        pad: [if (builtin.os.tag == .linux) 32 else 0]u8 = undefined,
+    };
+
+    fn getattr(p: *Posix) ?c.termios {
+        var t: Termios = undefined;
+        if (c.tcgetattr(p.master, &t.t) != 0) return null;
+        return t.t;
+    }
 
     master: c_int,
     pid: c.pid_t,
@@ -286,26 +323,22 @@ const Posix = struct {
     }
 
     fn cooked(p: *Posix) bool {
-        var t: c.termios = undefined;
-        if (c.tcgetattr(p.master, &t) != 0) return false;
+        const t = p.getattr() orelse return false;
         return t.lflag.ICANON and t.lflag.ECHO;
     }
 
     fn noEcho(p: *Posix) bool {
-        var t: c.termios = undefined;
-        if (c.tcgetattr(p.master, &t) != 0) return false;
+        const t = p.getattr() orelse return false;
         return t.lflag.ICANON and !t.lflag.ECHO;
     }
 
     fn raw(p: *Posix) bool {
-        var t: c.termios = undefined;
-        if (c.tcgetattr(p.master, &t) != 0) return false;
+        const t = p.getattr() orelse return false;
         return !t.lflag.ICANON;
     }
 
     fn echo(p: *Posix) bool {
-        var t: c.termios = undefined;
-        if (c.tcgetattr(p.master, &t) != 0) return false;
+        const t = p.getattr() orelse return false;
         return t.lflag.ECHO;
     }
 

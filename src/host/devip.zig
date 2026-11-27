@@ -392,7 +392,19 @@ fn ipclose(ch: *Chan) Error!void {
         Qdata, Qctl => {
             if (ch.flag & c.COPEN == 0) return;
             const cc = convof(ch.qid);
-            if (chan.decref(&cc.r) != 0) return;
+            // The last close resets the conversation before it lets go,
+            // under its lock. protoclone takes any conversation whose ref
+            // is 0 and sets its sfd, so with the decref first, an accept
+            // or a clone could take this one between the decref and the
+            // reset, which then closed the new connection's socket or lost
+            // it with sfd = -1, leaving its peer waiting for an answer.
+            c.lock(&cc.r.lk);
+            cc.r.ref -= 1;
+            if (cc.r.ref != 0) {
+                if (cc.r.ref < 0) std.debug.panic("ipclose: ref {d}", .{cc.r.ref});
+                c.unlock(&cc.r.lk);
+                return;
+            }
             @memcpy(cc.owner[0 .. network.len + 1], network ++ "\x00");
             cc.perm = 0o666;
             cc.state = "Closed";
@@ -400,9 +412,11 @@ fn ipclose(ch: *Chan) Error!void {
             cc.raddr = @splat(0);
             cc.lport = 0;
             cc.rport = 0;
-            h9so_close(cc.sfd); // closesocket on Windows
+            const old_fd = cc.sfd;
             cc.sfd = -1; // not closed twice, nor watched once closed
             cc.opts = @splat(0);
+            c.unlock(&cc.r.lk);
+            if (old_fd >= 0) h9so_close(old_fd); // closesocket on Windows
         },
         else => {},
     }
