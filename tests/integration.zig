@@ -10215,6 +10215,34 @@ test "links and FIFOs are made in the layer [upper-layers]" {
     }
 }
 
+test "a link made without the symlink privilege is a WSL link h9 follows [upper-layers]" {
+    // Windows only: H9_TEST_NOLINKPRIV makes h9 take the fallback an
+    // unprivileged user's links take.
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var all: LinuxEnv = undefined;
+    try linuxEnv(@src(), &all);
+    var each = std.mem.tokenizeScalar(u8, all.engines, ',');
+    while (each.next()) |engine| {
+        var le = all;
+        le.engines = engine;
+        var s: Scratch = undefined;
+        try s.init();
+        defer s.deinit();
+        try s.tmp.dir.createDirPath(std.testing.io, "up");
+        var environ = try std.testing.environ.createMap(gpa);
+        defer environ.deinit();
+        try environ.put("H9_TEST_NOLINKPRIV", "1");
+        var p: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+        const r = try runLinuxEnv(&le, false, &.{ "--dir", try std.fmt.bufPrint(&p, "{s}/up:#L:up", .{s.path}), "/bin/sh", "-c", "ln -s /etc/alpine-release /root/lnk && ln -s /etc /root/dl && readlink /root/lnk && cat /root/lnk >/dev/null && test -L /root/dl && ls /root/dl/alpine-release" }, &environ);
+        defer r.deinit();
+        errdefer std.debug.print("stderr: {s}\n", .{r.err});
+        try std.testing.expectEqualStrings("/etc/alpine-release\n/root/dl/alpine-release\n", r.out);
+        var pb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        try std.testing.expectEqual(@as(u32, 0xA000001D), try reparseTag(try std.fmt.bufPrint(&pb, "{s}\\up\\root\\lnk", .{s.path})));
+        try std.testing.expectEqual(@as(u32, 0xA000001D), try reparseTag(try std.fmt.bufPrint(&pb, "{s}\\up\\root\\dl", .{s.path})));
+    }
+}
+
 /// The reparse tag of path's own entry on Windows (FindFirstFileW's
 /// dwReserved0), or 0 if it has none.
 fn reparseTag(path: []const u8) !u32 {

@@ -71,7 +71,7 @@ The layer holds only what the guest changed, in the OCI layer format:
 
 - **Reserved names:** the guest can't make a name starting with `.wh.` in an `up` layer: it's "permission denied". Such a name would read as a whiteout.
 - **What it reads:** a walk tries the layer first, then the trees beneath, as a union does, except that a whiteout ends the walk as "does not exist" and an opaque directory isn't merged with what's below it. A directory read lists each name once and never lists `.wh.` files.
-- **Links and FIFOs** are made in the layer as the tree it's on makes them: `#U` makes host links and FIFOs, `#O` keeps them in memory, and a 9P2000.L server makes them with `Tsymlink` and `Tmknod`. On Windows, a host link needs the privilege Windows asks for (Developer Mode or an elevated process), and a FIFO is "permission denied".
+- **Links and FIFOs** are made in the layer as the tree it's on makes them: `#U` makes host links and FIFOs, `#O` keeps them in memory, and a 9P2000.L server makes them with `Tsymlink` and `Tmknod`. On Windows, a host link is a native one where h9's token holds the symlink privilege, and WSL's kind otherwise, and a FIFO is WSL's.
 - **Owners** are the layer's tree's own: on a host directory, the user h9 runs as.
 
 ### Every stack member reads whiteouts

@@ -149,12 +149,14 @@ fn allowhandle(h: HANDLE, op: c_int) Error!void {
     return verdict(h9_fs_checkhandlew(h, op));
 }
 
-/// A symbolic link or a junction, which a Linux process's walk stops at
-/// (design/epoch-0/linux-symlinks.md). FindFirstFile reads a name's own
-/// entry without following it, with the reparse tag in dwReserved0.
+/// A symbolic link, a junction, or a WSL link (IO_REPARSE_TAG_LX_SYMLINK,
+/// which fssymlink makes without the privilege), which a Linux process's
+/// walk stops at (design/epoch-0/linux-symlinks.md). FindFirstFile reads
+/// a name's own entry without following it, with the reparse tag in
+/// dwReserved0.
 fn wfdislink(wfd: *const FindData) bool {
     return wfd.dwFileAttributes & w.FILE_ATTRIBUTE_REPARSE_POINT != 0 and
-        (wfd.dwReserved0 == w.IO_REPARSE_TAG_SYMLINK or wfd.dwReserved0 == w.IO_REPARSE_TAG_MOUNT_POINT);
+        (wfd.dwReserved0 == w.IO_REPARSE_TAG_SYMLINK or wfd.dwReserved0 == w.IO_REPARSE_TAG_MOUNT_POINT or wfd.dwReserved0 == w.IO_REPARSE_TAG_LX_SYMLINK);
 }
 
 /// A FIFO, as WSL makes them: an empty file with an IO_REPARSE_TAG_LX_FIFO
@@ -1081,6 +1083,32 @@ fn setreparse(h: HANDLE, tag: w.DWORD, data: []const u8) bool {
     return w.DeviceIoControl(h, w.FSCTL_SET_REPARSE_POINT, &buf, @intCast(8 + data.len), null, 0, &got, null) != 0;
 }
 
+/// Turns on SeCreateSymbolicLinkPrivilege in the process's token, once,
+/// where the token holds it. An elevated administrator's token holds it
+/// turned off, and FSCTL_SET_REPARSE_POINT, unlike CreateSymbolicLinkW,
+/// doesn't turn it on for the call, so without this a symbolic link
+/// fails with ERROR_PRIVILEGE_NOT_HELD even for an administrator. A token
+/// without the privilege is left as it is, and fssymlink makes a WSL link.
+fn linkprivilege() void {
+    const S = struct {
+        var done: std.atomic.Value(bool) = .init(false);
+    };
+    if (S.done.swap(true, .acq_rel)) return;
+    var tok: HANDLE = undefined;
+    if (w.OpenProcessToken(w.GetCurrentProcess(), w.TOKEN_ADJUST_PRIVILEGES, &tok) == 0) return;
+    defer _ = w.CloseHandle(tok);
+    var tp: w.TOKEN_PRIVILEGE = .{ .count = 1, .luid = undefined, .attrs = w.SE_PRIVILEGE_ENABLED };
+    if (w.LookupPrivilegeValueW(null, std.unicode.utf8ToUtf16LeStringLiteral("SeCreateSymbolicLinkPrivilege"), &tp.luid) == 0) return;
+    _ = w.AdjustTokenPrivileges(tok, 0, &tp, 0, null, null);
+}
+
+/// Whether H9_TEST_NOLINKPRIV is set: fssymlink then makes every link a
+/// WSL link, as it does without the privilege, so the fallback is tested
+/// on a host where native links can be made (tests/integration.zig).
+fn nolinkpriv() bool {
+    return w.GetEnvironmentVariableW(std.unicode.utf8ToUtf16LeStringLiteral("H9_TEST_NOLINKPRIV"), null, 0) != 0;
+}
+
 /// A reparse point's failure: EPERM for a missing privilege (a symbolic
 /// link needs SeCreateSymbolicLinkPrivilege), else the host's error.
 fn reparseerr() Error {
@@ -1112,8 +1140,12 @@ fn targetisdir(dir: [*:0]const WCHAR, target: []const u8) bool {
 /// is made by a path the host resolves again (design/host-handles.md).
 /// The target is kept verbatim, with '\\' for each '/', and always marked
 /// relative: an absolute Linux target ("/etc/x") is a guest path, not a
-/// host one, and fsreadlink gives it back with '/' (h9_fs_readlinkw). A
-/// missing privilege is EPERM.
+/// host one, and fsreadlink gives it back with '/' (h9_fs_readlinkw). The
+/// reparse point needs SeCreateSymbolicLinkPrivilege turned on
+/// (linkprivilege). A token without it gets a WSL link instead: an
+/// IO_REPARSE_TAG_LX_SYMLINK reparse point on an empty file, set on the
+/// handle the same way, which needs no privilege. h9 and WSL follow it;
+/// Windows' own programs see a reparse point they can't open through.
 fn fssymlink(ch: *Chan, name: [*:0]const u8, target: [*:0]const u8) Error!void {
     const t = std.mem.span(target);
     if (t.len == 0) return port.kerror(&port.Ebadarg);
@@ -1135,11 +1167,40 @@ fn fssymlink(ch: *Chan, name: [*:0]const u8, target: [*:0]const u8) Error!void {
     std.mem.writeInt(u32, data[8..12], w.SYMLINK_FLAG_RELATIVE, .little);
     @memcpy(data[12..][0..bytes], std.mem.sliceAsBytes(tw));
     @memcpy(data[12 + bytes ..][0..bytes], std.mem.sliceAsBytes(tw));
-    const h = try mkentry(ch, name, targetisdir(uifOf(ch).path, t));
-    defer _ = w.CloseHandle(h);
-    if (!setreparse(h, w.IO_REPARSE_TAG_SYMLINK, data[0 .. 12 + 2 * bytes])) {
+    linkprivilege();
+    const isdir = targetisdir(uifOf(ch).path, t);
+    const h = try mkentry(ch, name, isdir);
+    if (nolinkpriv()) {
+        w.SetLastError(w.ERROR_PRIVILEGE_NOT_HELD);
+    } else if (setreparse(h, w.IO_REPARSE_TAG_SYMLINK, data[0 .. 12 + 2 * bytes])) {
+        _ = w.CloseHandle(h);
+        return;
+    }
+    if (w.GetLastError() != w.ERROR_PRIVILEGE_NOT_HELD) {
         const e = reparseerr();
         unmake(h);
+        _ = w.CloseHandle(h);
+        return e;
+    }
+    // No privilege: a WSL link, always on a file. A directory entry made
+    // for a native directory link is deleted and made again as a file.
+    var lh = h;
+    if (isdir) {
+        unmake(h);
+        _ = w.CloseHandle(h);
+        lh = try mkentry(ch, name, false);
+    }
+    defer _ = w.CloseHandle(lh);
+    var lx: [4 + MAX_PATH * 4]u8 = undefined;
+    if (4 + t.len > lx.len) {
+        unmake(lh);
+        return port.kerror(&port.Ebadarg);
+    }
+    std.mem.writeInt(u32, lx[0..4], 2, .little);
+    @memcpy(lx[4..][0..t.len], t);
+    if (!setreparse(lh, w.IO_REPARSE_TAG_LX_SYMLINK, lx[0 .. 4 + t.len])) {
+        const e = reparseerr();
+        unmake(lh);
         return e;
     }
 }
