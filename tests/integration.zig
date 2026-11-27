@@ -1105,12 +1105,14 @@ test "h9.exe starts and falls back to the emulator without the WHP feature [whp]
     const e = try env(@src());
     const r = try runOn(e, "auto", &.{"--check"}, null);
     defer r.deinit();
-    errdefer std.debug.print("--check said:\n{s}\n", .{r.out});
     // For a machine without the feature; with it, the cases above apply.
     if (std.mem.indexOf(u8, r.out, "engine whp: ok") != null) return error.SkipZigTest;
     // WHP runs amd64 only: with another root, it says so before it looks
     // for a hypervisor.
     if (std.mem.indexOf(u8, r.out, "engine whp: can't run this architecture") != null) return error.SkipZigTest;
+    // After the skips: a skip is an error too, and its output on stderr
+    // fails the shard.
+    errdefer std.debug.print("--check said:\n{s}\n", .{r.out});
     try std.testing.expect(std.mem.indexOf(u8, r.out, "engine whp: no usable hypervisor (enable the Windows Hypervisor Platform feature") != null);
     if (std.mem.indexOf(u8, r.out, "engine hcpu: ok") != null) {
         try std.testing.expect(std.mem.indexOf(u8, r.out, "engine auto: ok (uses hcpu)") != null);
