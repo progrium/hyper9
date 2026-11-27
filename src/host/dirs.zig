@@ -257,9 +257,9 @@ fn escapePosix() !void {
     }
     var pb: [512]u8 = undefined;
     const path = Escape.z(&pb, "{s}/tree/sub/file", .{top});
-    // openat2 where the host has it, then the walk of a name at a time
-    // that macOS and the BSDs use; each following links, and as a Linux
-    // process's walk, following none.
+    // openat2 on Linux, or O_RESOLVE_BENEATH on macOS, then the walk of
+    // a name at a time that the BSDs and older kernels use; each following
+    // links, and as a Linux process's walk, following none.
     var inside: u32 = 0;
     for ([_]c_int{ 0, 1 }) |walk| {
         h9_host_test_noopenat2(walk);
