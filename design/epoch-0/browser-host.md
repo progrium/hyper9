@@ -5,7 +5,7 @@ title: A browser host on wasm, with v86
 status: implemented
 created: 2026-11-04
 authors: [progrium]
-depends: [go-compat, i386]
+depends: [i386]
 areas: [vmm, kern, build, tests]
 branch: [main]
 ---

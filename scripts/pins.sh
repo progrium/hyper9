@@ -15,7 +15,7 @@ NINEFRONT_386_ISO_SHA256=068e8ff723a3e5b8c6fdec4862f53e0b7d04e04b3b54baca022b9d2
 # runs the integration cases on (.github/workflows/ci.yml).
 NINEFRONT_AMD64_ISO_SHA256=ee90b5e8a8d6b4ee8ad950322f91e338f698dae18c7f5e5800a650bbfa173fd9
 
-# Go for the go-compat fixtures and go-stdtest (design/epoch-0/go-compat.md):
+# Go for the Linux Go fixtures and go-stdtest (design/epoch-0/linux-threads.md):
 # GOTOOLCHAIN=go$GO_VERSION makes any installed Go fetch this exact release.
 GO_VERSION=1.27.3
 

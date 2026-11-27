@@ -66,8 +66,8 @@ fn getenv(comptime slot: usize, key: []const u8) ?[]const u8 {
     return buf[0 .. n + 1 + p.len];
 }
 
-/// The path zig build gives for `key` (H9_TEST_BIN, H9_TEST_LINUX,
-/// H9_TEST_GO, or H9_TEST_SERVER) when the environment doesn't set it:
+/// The path zig build gives for `key` (H9_TEST_BIN, H9_TEST_LINUX, or
+/// H9_TEST_SERVER) when the environment doesn't set it:
 /// build options, since the install prefix isn't known until the build
 /// runs. A relative one is relative to where zig build ran, which is this
 /// process's directory.
@@ -3384,220 +3384,11 @@ test "plumber starts and serves /mnt/plumb [devsrv]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-// Go compatibility (design/epoch-0/go-compat.md). The Go cases run the
-// plan9/amd64 programs from tests/fixtures/go, which `zig build
-// go-fixtures` builds into H9_TEST_GO, on the sud engine where the
-// build runs the cases on it (H9_TEST_GO_ENGINE), else on the emulator.
-// They don't need the root tree: each gets a scratch root holding only
-// the directories the namespace binds onto, and the fixtures at
-// /mnt/term/cwd. Without Go, or either engine, H9_TEST_GO is unset and
-// they skip.
+// Numeric exit statuses and /dev/bintime, which go-compat added
+// (design/epoch-0/go-compat.md). They're rc cases, so they need the root
+// tree but not Go; Go itself is covered through the Linux personality.
 
-const GoEnv = struct {
-    h9: []const u8,
-    dir: []const u8,
-    root: Scratch,
-
-    fn deinit(g: *GoEnv) void {
-        g.root.deinit();
-    }
-};
-
-/// The mount points the namespace binds onto, as 9front's root has them.
-const go_root_dirs = [_][]const u8{ "bin", "dev", "env", "fd", "mnt/term/cwd", "net", "net.alt", "proc", "root", "srv", "tmp" };
-
-fn goEnv(comptime src: std.builtin.SourceLocation, g: *GoEnv) !void {
-    try skipPending(src.fn_name);
-    const h9 = getenv(0, "H9_TEST_BIN") orelse return error.SkipZigTest;
-    const dir = getenv(1, "H9_TEST_GO") orelse return error.SkipZigTest;
-    std.Io.Dir.cwd().access(std.testing.io, try hostPath(dir, "hello"), .{}) catch return error.SkipZigTest;
-    g.h9 = h9;
-    g.dir = dir;
-    try g.root.init();
-    for (go_root_dirs) |d| try g.root.tmp.dir.createDirPath(std.testing.io, d);
-}
-
-/// The engine the Go cases run on: the sud engine when the build
-/// says it's in the list (Linux x86_64, design/epoch-0/native-backend.md), else
-/// the emulator.
-fn goEngine() []const u8 {
-    const v = getenv(3, "H9_TEST_GO_ENGINE") orelse return "hcpu";
-    return if (std.mem.eql(u8, v, "sud")) "sud" else "hcpu";
-}
-
-/// The argv for running fixture `prog` with h9 flags `flags` and arguments `args`.
-fn goArgv(g: *const GoEnv, argv: *std.ArrayList([]const u8), flags: []const []const u8, prog: []const u8, args: []const []const u8) !void {
-    try argv.appendSlice(gpa, &.{ g.h9, "--engine", goEngine(), "--arch", "amd64", "--dir", g.root.path, "--cwd", g.dir, "--timeout", "60s" });
-    try argv.appendSlice(gpa, flags);
-    try argv.append(gpa, try std.fmt.allocPrint(gpa, "/mnt/term/cwd/{s}", .{prog}));
-    try argv.appendSlice(gpa, args);
-}
-
-fn runGo(g: *const GoEnv, flags: []const []const u8, prog: []const u8, args: []const []const u8) !Result {
-    var argv: std.ArrayList([]const u8) = .empty;
-    defer argv.deinit(gpa);
-    try goArgv(g, &argv, flags, prog, args);
-    defer gpa.free(argv.items[argv.items.len - args.len - 1]);
-    const r = try runProcess(argv.items, null);
-    const code = switch (r.term) {
-        .exited => |c| c,
-        else => {
-            std.debug.print("h9 {s}: {any}\n{s}", .{ prog, r.term, r.stderr });
-            gpa.free(r.stdout);
-            gpa.free(r.stderr);
-            return error.Crashed;
-        },
-    };
-    return .{ .code = code, .out = r.stdout, .err = r.stderr };
-}
-
-/// The integer at the start of line `i` of `out`.
-fn lineInt(comptime T: type, out: []const u8, i: usize) !T {
-    var lines = std.mem.splitScalar(u8, out, '\n');
-    var n: usize = 0;
-    while (lines.next()) |line| : (n += 1) if (n == i) {
-        var toks = std.mem.tokenizeScalar(u8, line, ' ');
-        return std.fmt.parseInt(T, toks.next() orelse return error.NoNumber, 10);
-    };
-    return error.NoNumber;
-}
-
-fn expectGoOk(r: Result) !void {
-    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
-    try std.testing.expectEqual(0, r.code);
-}
-
-test "a Go hello world prints and exits 0 [go-compat]" {
-    var g: GoEnv = undefined;
-    try goEnv(@src(), &g);
-    defer g.deinit();
-    const r = try runGo(&g, &.{}, "hello", &.{});
-    defer r.deinit();
-    try std.testing.expectEqualStrings("hello from go\n", r.out);
-    try std.testing.expectEqualStrings("", r.err);
-    try expectGoOk(r);
-}
-
-test "goroutines sleep 100 ms and the elapsed time is right [go-compat]" {
-    var g: GoEnv = undefined;
-    try goEnv(@src(), &g);
-    defer g.deinit();
-    const r = try runGo(&g, &.{}, "sleep", &.{});
-    defer r.deinit();
-    try expectGoOk(r);
-    const ms = try lineInt(u32, r.out, 0);
-    errdefer std.debug.print("elapsed {d} ms\n", .{ms});
-    try std.testing.expect(ms >= 100 and ms < slow(200));
-}
-
-test "time.Now has sub-second resolution and matches the host [go-compat]" {
-    var g: GoEnv = undefined;
-    try goEnv(@src(), &g);
-    defer g.deinit();
-    const before = std.Io.Timestamp.now(std.testing.io, .real).nanoseconds;
-    const r = try runGo(&g, &.{}, "clock", &.{});
-    defer r.deinit();
-    const after = std.Io.Timestamp.now(std.testing.io, .real).nanoseconds;
-    try expectGoOk(r);
-    errdefer std.debug.print("stdout: {s}\n", .{r.out});
-    const now = try lineInt(i96, r.out, 0);
-    // The guest's reading is between the host's, give or take a second.
-    try std.testing.expect(now > before - std.time.ns_per_s and now < after + std.time.ns_per_s);
-    try std.testing.expect(try lineInt(i64, r.out, 1) >= 10 * std.time.ns_per_ms);
-}
-
-test "runtime.NumCPU follows --cpus [go-compat]" {
-    var g: GoEnv = undefined;
-    try goEnv(@src(), &g);
-    defer g.deinit();
-    const r = try runGo(&g, &.{ "--cpus", "2" }, "numcpu", &.{});
-    defer r.deinit();
-    try expectGoOk(r);
-    try std.testing.expectEqualStrings("2 2\n", r.out);
-}
-
-test "os.Getpid and os.Getppid match /proc [go-compat]" {
-    var g: GoEnv = undefined;
-    try goEnv(@src(), &g);
-    defer g.deinit();
-    const r = try runGo(&g, &.{}, "pid", &.{});
-    defer r.deinit();
-    try expectGoOk(r);
-    // Line 1 is Getpid and Getppid; line 2 is the name in
-    // /proc/<Getpid>/status, which is this program's only if the pid is
-    // right, and /proc/<Getpid>/ppid.
-    var lines = std.mem.splitScalar(u8, r.out, '\n');
-    var ids = std.mem.tokenizeScalar(u8, lines.next().?, ' ');
-    _ = ids.next().?;
-    const ppid = ids.next().?;
-    var proc = std.mem.tokenizeScalar(u8, lines.next().?, ' ');
-    try std.testing.expectEqualStrings("pid", proc.next().?);
-    try std.testing.expectEqualStrings(ppid, proc.next().?);
-}
-
-test "CPU-bound goroutines run on several processes [go-compat]" {
-    var g: GoEnv = undefined;
-    try goEnv(@src(), &g);
-    defer g.deinit();
-    {
-        const r = try runGo(&g, &.{ "--cpus", "4", "--env", "GOMAXPROCS=4" }, "spin", &.{});
-        defer r.deinit();
-        try expectGoOk(r);
-        errdefer std.debug.print("processes: {s}\n", .{r.out});
-        try std.testing.expect(try lineInt(u32, r.out, 0) >= 4);
-    }
-    const r = try runGo(&g, &.{ "--cpus", "1", "--env", "GOMAXPROCS=4" }, "spin", &.{});
-    defer r.deinit();
-    try expectGoOk(r);
-}
-
-test "os/exec runs a child and gets its exit status [go-compat]" {
-    var g: GoEnv = undefined;
-    try goEnv(@src(), &g);
-    defer g.deinit();
-    const r = try runGo(&g, &.{}, "exec", &.{"/mnt/term/cwd/exec"});
-    defer r.deinit();
-    try expectGoOk(r);
-    errdefer std.debug.print("stdout: {s}\n", .{r.out});
-    try std.testing.expect(std.mem.startsWith(u8, r.out, "child ok\nstatus 1 'exec "));
-    try std.testing.expect(std.mem.endsWith(u8, r.out, ": 7'\n"));
-}
-
-test "a Go program runs os/exec 100 times under --memory 512M [memory-model]" {
-    var g: GoEnv = undefined;
-    try goEnv(@src(), &g);
-    defer g.deinit();
-    // rfork shares the parent's heap copy-on-write, so each child costs
-    // only what it writes. When rfork copied it, this needed about 4 GB.
-    // A later --timeout replaces goArgv's 60 s, which the emulator can need.
-    const r = try runGo(&g, &.{ "--memory", "512M", "--timeout", "300s" }, "execloop", &.{ "/mnt/term/cwd/execloop", "100" });
-    defer r.deinit();
-    try expectGoOk(r);
-    try std.testing.expectEqualStrings("100 ran\n", r.out);
-}
-
-test "a nil dereference becomes a panic that recover catches [go-compat]" {
-    var g: GoEnv = undefined;
-    try goEnv(@src(), &g);
-    defer g.deinit();
-    const r = try runGo(&g, &.{}, "nilpanic", &.{});
-    defer r.deinit();
-    try expectGoOk(r);
-    try std.testing.expectEqualStrings("recovered: runtime error: invalid memory address or nil pointer dereference\n", r.out);
-}
-
-test "os.Exit(3) exits with status 3 [go-compat]" {
-    var g: GoEnv = undefined;
-    try goEnv(@src(), &g);
-    defer g.deinit();
-    const r = try runGo(&g, &.{}, "exit", &.{"3"});
-    defer r.deinit();
-    try std.testing.expectEqualStrings("exiting 3\n", r.out);
-    try std.testing.expectEqualStrings("", r.err);
-    try std.testing.expectEqual(3, r.code);
-}
-
-test "a numeric exits string becomes the exit code [go-compat]" {
+test "a numeric exits string becomes the exit code [exit-status]" {
     const e = try env(@src());
     {
         const r = try run(e, &.{ "--rc", "exit 3" });
@@ -3623,53 +3414,7 @@ test "a numeric exits string becomes the exit code [go-compat]" {
     }
 }
 
-test "net/http fetches from a listener the test opens [go-compat]" {
-    var g: GoEnv = undefined;
-    try goEnv(@src(), &g);
-    defer g.deinit();
-    const io = std.testing.io;
-    var srv = try listenLocal();
-    defer srv.deinit(io);
-    var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/x", .{srv.socket.address.getPort()});
-    const Server = struct {
-        fn serve(s: *std.Io.net.Server) void {
-            const c = deadline.accept(s, io) catch return;
-            defer c.close(io);
-            var rbuf: [1024]u8 = undefined;
-            var r = c.reader(io, &rbuf);
-            // The request ends with an empty line.
-            while (r.interface.takeDelimiterExclusive('\n')) |line| {
-                r.interface.toss(1);
-                if (std.mem.trimEnd(u8, line, "\r").len == 0) break;
-            } else |_| return;
-            var wbuf: [256]u8 = undefined;
-            var w = c.writer(io, &wbuf);
-            w.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: close\r\n\r\nhi from host\n") catch return;
-            w.interface.flush() catch {};
-        }
-    };
-    const t = try std.Thread.spawn(.{}, Server.serve, .{&srv});
-    defer t.join();
-    const r = try runGo(&g, &.{}, "http", &.{url});
-    defer r.deinit();
-    try expectGoOk(r);
-    try std.testing.expectEqualStrings("200\nhi from host\n", r.out);
-}
-
-test "syscall.Gettimeofday has microsecond resolution [go-compat]" {
-    var g: GoEnv = undefined;
-    try goEnv(@src(), &g);
-    defer g.deinit();
-    const r = try runGo(&g, &.{}, "gettimeofday", &.{});
-    defer r.deinit();
-    try expectGoOk(r);
-    errdefer std.debug.print("stdout: {s}\n", .{r.out});
-    // Five readings 1 ms apart: whole seconds would give one distinct value.
-    try std.testing.expect(try lineInt(u32, r.out, 0) >= 4);
-}
-
-test "/dev/bintime has four words and a monotonic clock [go-compat]" {
+test "/dev/bintime has four words and a monotonic clock" {
     const e = try env(@src());
     // The clock differs from run to run, so each engine is checked on its
     // own rather than compared with the others.
@@ -9420,6 +9165,192 @@ test "Go GC with a goroutine in a call-free loop, at 1 ms slices [linux-threads]
     try linuxEnv(@src(), &le);
     try goLinux(&le);
     try netCase(&le, &.{"/mnt/term/cwd/go/gcloop"}, "ok gcloop 20\n");
+}
+
+// The Go cases go-compat ran with Go's plan9 port, ported to Linux Go
+// programs in tests/fixtures/linux/go and run through the Linux
+// personality on every engine.
+
+/// The integer at the start of line `i` of `out`.
+fn lineInt(comptime T: type, out: []const u8, i: usize) !T {
+    var lines = std.mem.splitScalar(u8, out, '\n');
+    var n: usize = 0;
+    while (lines.next()) |line| : (n += 1) if (n == i) {
+        var toks = std.mem.tokenizeScalar(u8, line, ' ');
+        return std.fmt.parseInt(T, toks.next() orelse return error.NoNumber, 10);
+    };
+    return error.NoNumber;
+}
+
+/// Runs `args` on each engine in `all` by itself, for output that differs
+/// from run to run, and calls `check` with each result, which exited 0.
+fn goEach(all: *const LinuxEnv, args: []const []const u8, ctx: anytype, comptime check: fn (@TypeOf(ctx), Result) anyerror!void) !void {
+    try goLinux(all);
+    var each = std.mem.tokenizeScalar(u8, all.engines, ',');
+    while (each.next()) |engine| {
+        var le = all.*;
+        le.engines = engine;
+        const r = try runLinux(&le, false, args);
+        defer r.deinit();
+        errdefer std.debug.print("engine {s}\nstdout: {s}\nstderr: {s}\n", .{ engine, r.out, r.err });
+        try std.testing.expectEqual(0, r.code);
+        try check(ctx, r);
+    }
+}
+
+test "a Go hello world prints and exits 0 [linux-threads]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try goLinux(&le);
+    const r = try runLinux(&le, false, &.{"/mnt/term/cwd/go/gohello"});
+    defer r.deinit();
+    try std.testing.expectEqualStrings("hello from go\n", r.out);
+    try std.testing.expectEqualStrings("", r.err);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "Go goroutines sleep 100 ms and the elapsed time is right [linux-threads]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try goEach(&le, &.{"/mnt/term/cwd/go/gosleep"}, {}, struct {
+        fn check(_: void, r: Result) !void {
+            const ms = try lineInt(u32, r.out, 0);
+            try std.testing.expect(ms >= 100 and ms < slow(200));
+        }
+    }.check);
+}
+
+test "Go's time.Now has sub-second resolution and matches the host [linux-threads]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    const before = std.Io.Timestamp.now(std.testing.io, .real).nanoseconds;
+    try goEach(&le, &.{"/mnt/term/cwd/go/goclock"}, before, struct {
+        fn check(start: i96, r: Result) !void {
+            const after = std.Io.Timestamp.now(std.testing.io, .real).nanoseconds;
+            const now = try lineInt(i96, r.out, 0);
+            // The guest's reading is between the host's, give or take a second.
+            try std.testing.expect(now > start - std.time.ns_per_s and now < after + std.time.ns_per_s);
+            try std.testing.expect(try lineInt(i64, r.out, 1) >= 10 * std.time.ns_per_ms);
+        }
+    }.check);
+}
+
+test "Go's runtime.NumCPU follows --cpus [linux-threads]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try goLinux(&le);
+    const r = try runLinux(&le, false, &.{ "--cpus", "2", "/mnt/term/cwd/go/gonumcpu" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("2 2\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "Go's os.Getpid and os.Getppid match /proc [linux-threads]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try goEach(&le, &.{"/mnt/term/cwd/go/gopid"}, {}, struct {
+        fn check(_: void, r: Result) !void {
+            // Line 1 is Getpid and Getppid; line 2 is the name in
+            // /proc/<Getpid>/status, which is this program's only if the
+            // pid is right, and its PPid.
+            var lines = std.mem.splitScalar(u8, r.out, '\n');
+            var ids = std.mem.tokenizeScalar(u8, lines.next().?, ' ');
+            _ = ids.next() orelse return error.NoPid;
+            const ppid = ids.next() orelse return error.NoPpid;
+            var proc = std.mem.tokenizeScalar(u8, lines.next() orelse return error.NoProc, ' ');
+            try std.testing.expectEqualStrings("gopid", proc.next() orelse return error.NoName);
+            try std.testing.expectEqualStrings(ppid, proc.next() orelse return error.NoPpid);
+        }
+    }.check);
+}
+
+test "CPU-bound Go goroutines run on several threads [linux-threads]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try goEach(&le, &.{ "--cpus", "4", "env", "GOMAXPROCS=4", "/mnt/term/cwd/go/gospin" }, {}, struct {
+        fn check(_: void, r: Result) !void {
+            try std.testing.expect(try lineInt(u32, r.out, 0) >= 4);
+        }
+    }.check);
+    // It also finishes with one CPU.
+    try goEach(&le, &.{ "--cpus", "1", "env", "GOMAXPROCS=4", "/mnt/term/cwd/go/gospin" }, {}, struct {
+        fn check(_: void, _: Result) !void {}
+    }.check);
+}
+
+test "Go's os/exec runs a child and gets its exit status [linux-threads]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try goLinux(&le);
+    try netCase(&le, &.{"/mnt/term/cwd/go/gochild"}, "child ok\nstatus 7\nchild ok\nstatus 7\n");
+}
+
+test "a Go nil dereference becomes a panic that recover catches [linux-threads]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try goLinux(&le);
+    try netCase(&le, &.{"/mnt/term/cwd/go/gonilpanic"}, "recovered: runtime error: invalid memory address or nil pointer dereference\n");
+}
+
+test "Go's os.Exit(3) exits with status 3 [linux-threads]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try goLinux(&le);
+    const r = try runLinux(&le, false, &.{ "/mnt/term/cwd/go/goexit", "3" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("exiting 3\n", r.out);
+    try std.testing.expectEqualStrings("", r.err);
+    try std.testing.expectEqual(3, r.code);
+}
+
+test "Go's net/http fetches from a listener the test opens [linux-threads]" {
+    var all: LinuxEnv = undefined;
+    try linuxEnv(@src(), &all);
+    try goLinux(&all);
+    const io = std.testing.io;
+    var each = std.mem.tokenizeScalar(u8, all.engines, ',');
+    while (each.next()) |engine| {
+        errdefer std.debug.print("engine {s}\n", .{engine});
+        var le = all;
+        le.engines = engine;
+        var srv = try listenLocal();
+        defer srv.deinit(io);
+        var url_buf: [64]u8 = undefined;
+        const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/x", .{srv.socket.address.getPort()});
+        const Server = struct {
+            fn serve(s: *std.Io.net.Server) void {
+                const c = deadline.accept(s, io) catch return;
+                defer c.close(io);
+                var rbuf: [1024]u8 = undefined;
+                var r = c.reader(io, &rbuf);
+                // The request ends with an empty line.
+                while (r.interface.takeDelimiterExclusive('\n')) |line| {
+                    r.interface.toss(1);
+                    if (std.mem.trimEnd(u8, line, "\r").len == 0) break;
+                } else |_| return;
+                var wbuf: [256]u8 = undefined;
+                var w = c.writer(io, &wbuf);
+                w.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: close\r\n\r\nhi from host\n") catch return;
+                w.interface.flush() catch {};
+            }
+        };
+        const t = try std.Thread.spawn(.{}, Server.serve, .{&srv});
+        defer t.join();
+        try netCase(&le, &.{ "--net=enable", "/mnt/term/cwd/go/gohttp", url }, "200\nhi from host\n");
+    }
+}
+
+test "Go's syscall.Gettimeofday has microsecond resolution [linux-threads]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try goEach(&le, &.{"/mnt/term/cwd/go/gotimeofday"}, {}, struct {
+        fn check(_: void, r: Result) !void {
+            // Five readings 1 ms apart: whole seconds would give one
+            // distinct value.
+            try std.testing.expect(try lineInt(u32, r.out, 0) >= 4);
+        }
+    }.check);
 }
 
 // The web host's cases (design/epoch-0/browser-host.md). They run on
