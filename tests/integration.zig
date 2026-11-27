@@ -2189,12 +2189,25 @@ test "a terminal's last output is read after its program has exited [baseline]" 
     try skipPending(@src().fn_name);
     if (builtin.os.tag == .windows) return error.SkipZigTest else {
         var t = try Term.spawn(gpa, &.{ "/bin/sh", "-c", "echo last" });
-        defer t.deinit();
-        // Reaped with its output unread, as when it writes and exits
-        // between a read and the exit check after it, as h9 does with the
-        // discarded-changes notice.
+        const pid = t.sys.pid;
         var st: c_int = 0;
-        while (std.c.waitpid(t.sys.pid, &st, 0) < 0) {}
+        defer {
+            // Closing the terminal lets a child macOS still holds (below)
+            // finish exiting; one already reaped gives ECHILD.
+            t.deinit();
+            _ = std.c.waitpid(pid, &st, 0);
+        }
+        // Exited with its output unread, as when it writes and exits
+        // between a read and the exit check after it, as h9 does with the
+        // discarded-changes notice. Linux reaps it here; macOS holds a
+        // session leader's exit until its terminal's output is read, so
+        // a wait that blocked would never return, and there it's only
+        // marked exited.
+        const ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+        for (0..50) |_| {
+            if (std.c.waitpid(pid, &st, std.c.W.NOHANG) == pid) break;
+            _ = std.c.nanosleep(&ts, null);
+        }
         t.code = 0;
         try t.expect("last", slow(1_000));
     }
