@@ -41,8 +41,10 @@ jobs:
   # Which runner each job below gets. While an AWS test host is up, it
   # serves its own self-hosted runners (h9-kvm-amd64, h9-kvm-arm64, and
   # h9-whp, real KVM and WHP), and the jobs that would run on the hosted
-  # runner it stands in for go to it instead. A stopped host has none
-  # online, so its jobs fall back to GitHub's. A fork's PR always gets
+  # runner it stands in for go to it instead, if one of its runners is
+  # idle. A stopped host has none online and a busy one none idle, so
+  # their jobs go to GitHub's rather than queue for hours behind other
+  # runs' jobs (a host has only a few runners). A fork's PR always gets
   # GitHub's, and has no secrets to ask with anyway. RUNNER_STATUS_TOKEN
   # is a fine-grained token with Administration: Read-only on this repo;
   # without it, everything runs on GitHub's.
@@ -57,12 +59,12 @@ jobs:
           GH_TOKEN: ${{ secrets.RUNNER_STATUS_TOKEN }}
           FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
         run: |
-          online=
+          idle=
           if [ "$FORK" != true ] && [ -n "$GH_TOKEN" ]; then
-            online=$(gh api "repos/$GITHUB_REPOSITORY/actions/runners?per_page=100" \
-              --jq '.runners[] | select(.status == "online") | .labels[].name') || online=
+            idle=$(gh api "repos/$GITHUB_REPOSITORY/actions/runners?per_page=100" \
+              --jq '.runners[] | select(.status == "online" and (.busy | not)) | .labels[].name') || idle=
           fi
-          pick() { if grep -qx "$2" <<<"$online"; then echo "$2"; else echo "$1"; fi; }
+          pick() { if grep -qx "$2" <<<"$idle"; then echo "$2"; else echo "$1"; fi; }
           map=$(jq -nc \
             --arg amd64 "$(pick ubuntu-latest h9-kvm-amd64)" \
             --arg arm64 "$(pick ubuntu-24.04-arm h9-kvm-arm64)" \
