@@ -303,6 +303,9 @@ const c_stub = struct {
     fn h9_child_nserved(_: c_ulong) c_int {
         return 0;
     }
+    fn h9_dotl_hostreaders(_: ?*anyopaque) c_int {
+        return 0;
+    }
     fn h9_child_unserve(_: c_ulong) void {}
     fn h9_hstream_fd(_: c_ulong) c_int {
         return -1;
@@ -443,6 +446,7 @@ const c_real = struct {
     extern fn h9_child_wake(id: c_ulong) void;
     extern fn h9_child_dropsrc(ch: ?*anyopaque) void;
     extern fn h9_child_nserved(id: c_ulong) c_int;
+    extern fn h9_dotl_hostreaders(mach: ?*anyopaque) c_int;
     extern fn h9_child_unserve(id: c_ulong) void;
     extern fn h9_hstream_fd(id: c_ulong) c_int;
     extern fn h9_hstream_wait(id: c_ulong) c_int;
@@ -1375,6 +1379,12 @@ pub fn childDropSource(ch: *anyopaque) void {
 /// `id` still has (src/kern/dev/machine.zig's source).
 pub fn childServed(id: u32) u32 {
     return @intCast(c.h9_child_nserved(id));
+}
+
+/// How many of machine `m`'s #ℓ conversations on a host descriptor
+/// (src/kern/dev/dotl.zig) haven't ended yet, readers and all.
+pub fn dotlHostReaders(m: *Mach) u32 {
+    return @intCast(c.h9_dotl_hostreaders(m));
 }
 
 /// Ends the connections of child machine conversation `id`'s servers
