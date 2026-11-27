@@ -8,57 +8,19 @@ permissions:
   contents: read
 
 jobs:
-  hcpu-roots:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: 0.17.1
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq qemu-system-arm qemu-utils libarchive-tools zstd
-      # The arm64 image, the 386 and amd64 ISOs, and the Alpine roots.
-      - run: scripts/fetch.sh image iso386 isoamd64 alpine
-      - run: zig build mkroot -- --arch arm64
-      - run: |
-          . scripts/pins.sh
-          zig build isoroot -- ".local/9front/9front-$NINEFRONT_RELEASE.386.iso" .local/9front/root386
-          zig build isoroot -- ".local/9front/9front-$NINEFRONT_RELEASE.amd64.iso" .local/9front/rootamd64
-      - run: tar -C .local -cf roots.tar "9front/$(readlink .local/9front/root)" 9front/root 9front/root386 9front/rootamd64 linux
-      - uses: actions/upload-artifact@v4
-        with:
-          name: hcpu-roots
-          path: roots.tar
-          retention-days: 3
-
-  diag-hcpu-mac:
-    needs: [hcpu-roots]
-    strategy:
-      fail-fast: false
-      matrix:
-        n: [1, 2, 3]
+  diag-munmap:
     runs-on: macos-latest
-    timeout-minutes: 120
-    defaults:
-      run:
-        shell: bash
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.1
-      - uses: actions/download-artifact@v4
-        with:
-          name: hcpu-roots
-      - run: mkdir -p .local && tar -C .local -xf roots.tar && rm roots.tar
-      - name: integration, arm64 root, 1
-        if: always()
-        run: zig build integration -Doptimize=ReleaseSafe -Darch=arm64 -Dengines=hcpu -Droot="$PWD/.local/9front/root" 2>&1 | tail -c 400000
-      - name: integration, amd64 root, 1
-        if: always()
-        run: zig build integration -Doptimize=ReleaseSafe -Darch=amd64 -Dengines=hcpu -Droot="$PWD/.local/9front/rootamd64" 2>&1 | tail -c 400000
-      - name: integration, arm64 root, 2
-        if: always()
-        run: zig build integration -Doptimize=ReleaseSafe -Darch=arm64 -Dengines=hcpu -Droot="$PWD/.local/9front/root" 2>&1 | tail -c 400000
-      - name: integration, amd64 root, 2
-        if: always()
-        run: zig build integration -Doptimize=ReleaseSafe -Darch=amd64 -Dengines=hcpu -Droot="$PWD/.local/9front/rootamd64" 2>&1 | tail -c 400000
+      - run: . scripts/env.sh && scripts/fetch.sh alpine-arm64 alpine-amd64
+      - run: sysctl -n hw.ncpu hw.physicalcpu machdep.cpu.brand_string || true
+      - run: zig build integration -Doptimize=ReleaseSafe -Darch=arm64 -Dengines=hcpu -Dfilter=no-such-case-zzz
+      - run: zig build integration -Doptimize=ReleaseSafe -Darch=amd64 -Dengines=hcpu -Dfilter=no-such-case-zzz
+      - run: ls zig-out/bin zig-out/fixtures/linux/arm64 | head -30
+      - run: .github/diag/munmap.sh
+        env:
+          DIAG_SECS: "1200"
