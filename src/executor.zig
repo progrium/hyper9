@@ -233,6 +233,11 @@ pub const Exec = struct {
     /// monitor's `spillNext`). A fork and exec loop runs on one executor
     /// and its warm vCPU, not on each in turn.
     next: std.atomic.Value(?*Task) = .init(null),
+    /// Counts `putNext`s, so the monitor times how long one has waited.
+    next_gen: std.atomic.Value(u32) = .init(0),
+    /// The monitor's: the `next_gen` it last saw, and when it first saw it.
+    seen_next_gen: u32 = 0,
+    seen_next_at: i64 = 0,
     thread: std.Thread = undefined,
     /// The lease whose state the vCPU holds, if it's still there.
     owner: std.atomic.Value(?*Lease) = .init(null),
@@ -287,6 +292,7 @@ pub const Exec = struct {
 
     /// `t` runs here next (`next`), and what was next goes on the queue.
     fn putNext(e: *Exec, t: *Task) void {
+        _ = e.next_gen.fetchAdd(1, .release);
         if (e.next.swap(t, .acq_rel)) |old| {
             e.q.push(old);
             e.s.wake();
@@ -594,10 +600,14 @@ pub const Sched = struct {
                     if (work == null) work = s.anyQueuedLocked();
                     if (work.?) e.yield_due.store(true, .release);
                 }
-                // A task that put another next and goes on running for
-                // a tick, in the kernel or the guest, not parking, lets it
-                // go elsewhere.
-                if (st != .idle and t - e.seen_at >= tick_ns) e.spillNext();
+                // A task put next that has waited a tick, while the one
+                // that put it runs on instead of parking (in the guest,
+                // where it may exit often, or the kernel), goes elsewhere.
+                const ng = e.next_gen.load(.acquire);
+                if (ng != e.seen_next_gen) {
+                    e.seen_next_gen = ng;
+                    e.seen_next_at = t;
+                } else if (t - e.seen_next_at >= tick_ns) e.spillNext();
                 switch (st) {
                     .idle => {},
                     .guest => if (t - e.seen_at >= slice_ns) {
