@@ -2239,6 +2239,10 @@ fn addSchedTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
                 .target = t,
                 .optimize = o,
                 .link_libc = t.result.os.tag != .windows,
+                // Not every wasm-opt reads the DWARF in a Debug build's
+                // module (133 stops at DW_LNE_define_file), so the wasm
+                // build has none, for whichever one is on PATH.
+                .strip = if (t.result.cpu.arch.isWasm()) true else null,
             }) });
         }
     };
