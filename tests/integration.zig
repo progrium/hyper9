@@ -12958,9 +12958,11 @@ test "an h9 root over --serve speaks 9P2000.L through both translators [dotl]" {
     const addr = try servedAddr(&t, &ab);
     try t.expect("ready", slow(10_000));
     // The client offers 9P2000.L.Z and the server answers 9P2000.L.
+    // The served /tmp has the root's /tmp under it, which needn't be
+    // empty, so the case works in a directory of its own there.
     const r = try runServed(e, addr,
         \\cat /net/dotl/*/status
-        \\cd /mnt/temp/tmp && echo hi >f && cat f && mkdir d && mv f g && ls -F && rm g && rm d && ls
+        \\cd /mnt/temp/tmp && mkdir w && cd w && echo hi >f && cat f && mkdir d && mv f g && ls -F && rm g && rm d && ls && cd .. && rm w
         \\cat /mnt/temp/mnt/term/cwd/marker
     );
     defer r.deinit();
