@@ -2,9 +2,11 @@
 # the ones that wait a few seconds for `runners` to pick their runner.
 #
 # `check` runs on every PR: it's the only thing that enforces the proposal
-# rules, and it takes seconds. The tests run only on PRs from a proposal's
-# branch, which is named after its slug, so a PR from a `claude/` branch
-# gets `check` alone. A job skipped by its `if` never starts a runner.
+# rules, and it takes seconds. `test` (zig build test) runs on every PR
+# too. The heavier jobs run only on PRs from a proposal's branch, which is
+# named after its slug, so a PR from a `claude/` branch gets `check` and
+# `test` alone, and its `test` runs on GitHub's runner, never a test
+# host's. A job skipped by its `if` never starts a runner.
 # "Run workflow" in the Actions tab (or `gh workflow run ci --ref BRANCH`)
 # runs everything on any branch.
 #
@@ -45,11 +47,12 @@ jobs:
   # idle. A stopped host has none online and a busy one none idle, so
   # their jobs go to GitHub's rather than queue for hours behind other
   # runs' jobs (a host has only a few runners). A fork's PR always gets
-  # GitHub's, and has no secrets to ask with anyway. RUNNER_STATUS_TOKEN
+  # GitHub's, and has no secrets to ask with anyway. So does a PR from a
+  # `claude/` branch, whose only job here is `test`: the test hosts are
+  # kept for the proposal branches' KVM and WHP jobs. RUNNER_STATUS_TOKEN
   # is a fine-grained token with Administration: Read-only on this repo;
   # without it, everything runs on GitHub's.
   runners:
-    if: github.event_name == 'workflow_dispatch' || !startsWith(github.head_ref, 'claude/')
     runs-on: ubuntu-latest
     outputs:
       map: ${{ steps.pick.outputs.map }}
@@ -57,10 +60,10 @@ jobs:
       - id: pick
         env:
           GH_TOKEN: ${{ secrets.RUNNER_STATUS_TOKEN }}
-          FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+          HOSTED: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || startsWith(github.head_ref, 'claude/')) }}
         run: |
           idle=
-          if [ "$FORK" != true ] && [ -n "$GH_TOKEN" ]; then
+          if [ "$HOSTED" != true ] && [ -n "$GH_TOKEN" ]; then
             idle=$(gh api "repos/$GITHUB_REPOSITORY/actions/runners?per_page=100" \
               --jq '.runners[] | select(.status == "online" and (.busy | not)) | .labels[].name') || idle=
           fi
@@ -74,7 +77,6 @@ jobs:
           echo "$map"
 
   test:
-    if: github.event_name == 'workflow_dispatch' || !startsWith(github.head_ref, 'claude/')
     needs: runners
     runs-on: ${{ fromJSON(needs.runners.outputs.map)['ubuntu-latest'] }}
     steps:
