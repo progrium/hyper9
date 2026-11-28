@@ -234,27 +234,20 @@ static void eventfd_waker(void) {
 	unsigned seed = 1;
 	struct timespec t0;
 	clock_gettime(CLOCK_MONOTONIC, &t0);
-	long dmax = 0; int nslow = 0;
 	for (int i = 1; i <= ew_n && atomic_load(&ew_lost) == 0; i++) {
 		if (ms_since(&t0) > 20000) { atomic_store(&ew_lost, 3); atomic_store(&ew_seen, ew_n); break; }
 		atomic_store(&ew_sent, i);
 		/* Vary when the write lands in the waiter's next epoll_wait. */
 		for (volatile int k = rand_r(&seed) % 4000; k > 0; k--)
 			;
-		struct timespec tw;
-		clock_gettime(CLOCK_MONOTONIC, &tw);
 		if (write(e, &one, 8) != 8) break;
 		while (atomic_load(&ew_seen) < i) sched_yield();
-		long dw = ms_since(&tw);
-		if (dw > dmax) dmax = dw;
-		if (dw > 200) { nslow++; fprintf(stderr, "DIAG slow i=%d ms=%ld\n", i, dw); }
 	}
 	/* A waiter still in epoll_wait after a give-up takes the next write. */
 	write(e, &one, 8);
 	pthread_join(t, 0);
 	close(ew_ep);
 	close(e);
-	fprintf(stderr, "DIAG lost=%d sent=%d seen=%d ms=%ld dmax=%ld nslow=%d\n", atomic_load(&ew_lost), atomic_load(&ew_sent), atomic_load(&ew_seen), (long)ms_since(&t0), dmax, nslow);
 	CHECK("eventfd_waker", atomic_load(&ew_lost) == 0 /* 1: timed out, 3: too slow */);
 	printf("ok eventfd_waker\n");
 }
