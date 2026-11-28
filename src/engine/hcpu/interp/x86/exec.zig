@@ -508,9 +508,16 @@ pub fn ExecIn(comptime mode: Mode, comptime M: type) type {
 
         inline fn loopFor(x: *X, comptime count_branches: bool) ExitT {
             var taken: u32 = 0;
+            // One compare per instruction: `limit` is the budget or the
+            // next multiple of 256, where a stop request is read, if
+            // that comes first. The budget is still exact.
+            var limit: u64 = 0;
             while (true) {
-                if (x.n >= x.opts.budget) return .stopped;
-                if (x.n & 255 == 0 and x.stopRequested()) return .stopped;
+                if (x.n >= limit) {
+                    if (x.n >= x.opts.budget) return .stopped;
+                    if (x.stopRequested()) return .stopped;
+                    limit = @min(x.opts.budget, (x.n | 255) + 1);
+                }
                 const at = x.pc();
                 x.step() catch return x.exit;
                 x.n += 1;
