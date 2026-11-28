@@ -83,16 +83,16 @@ fn buildPath(key: []const u8) ?[]const u8 {
 fn env(comptime src: std.builtin.SourceLocation) !Env {
     try skipPending(src.fn_name);
     try skipWeb(src.fn_name);
-    const h9 = getenv(0, "H9_TEST_BIN") orelse return error.SkipZigTest;
-    const root = getenv(1, "H9_TEST_ROOT") orelse return error.SkipZigTest;
+    const h9 = getenv(0, "H9_TEST_BIN") orelse return skip("no h9 (H9_TEST_BIN)", .{});
+    const root = getenv(1, "H9_TEST_ROOT") orelse return skip("no 9front root (H9_TEST_ROOT)", .{});
     // The tree from zig build mkroot is arm64, plus the host's architecture
     // or the ones its --arch names. Without H9_TEST_ARCH, h9 runs the host's architecture,
     // so x86_64 hosts (linux-amd64) skip these.
     const arch = getenv(4, "H9_TEST_ARCH");
-    if (arch == null and builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    if (arch == null and builtin.cpu.arch != .aarch64) return skip("the 9front cases need -Darch on a host that isn't arm64", .{});
     var cat_buf: [32]u8 = undefined;
     const cat = try std.fmt.bufPrint(&cat_buf, "{s}/bin/cat", .{arch orelse "arm64"});
-    std.Io.Dir.cwd().access(std.testing.io, try hostPath(root, cat), .{}) catch return error.SkipZigTest;
+    std.Io.Dir.cwd().access(std.testing.io, try hostPath(root, cat), .{}) catch return skip("the 9front root has no {s} (zig build mkroot)", .{cat});
     const engines = getenv(2, "H9_TEST_ENGINES") orelse "auto";
     return .{ .h9 = h9, .root = root, .engines = engines, .arch = arch };
 }
@@ -146,36 +146,29 @@ fn onWeb() bool {
 fn skipWeb(name: []const u8) !void {
     if (!onWeb()) return;
     const test_name = if (std.mem.indexOf(u8, name, "test.")) |i| name[i + 5 ..] else name;
-    for (web_skips) |n| if (std.mem.startsWith(u8, test_name, n)) return error.SkipZigTest;
+    for (web_skips) |n| if (std.mem.startsWith(u8, test_name, n)) return skip("the web host can't run it (web_skips)", .{});
     if (name.len == 0 or name[name.len - 1] != ']') return;
     const open = std.mem.lastIndexOfScalar(u8, name, '[') orelse return;
     var tags = std.mem.splitScalar(u8, name[open + 1 .. name.len - 1], ',');
     while (tags.next()) |raw| for (web_skip_tags) |t| {
-        if (std.mem.eql(u8, std.mem.trim(u8, raw, " "), t)) return error.SkipZigTest;
+        if (std.mem.eql(u8, std.mem.trim(u8, raw, " "), t)) return skip("the web host can't run [{s}] cases (web_skip_tags)", .{t});
     };
 }
 
-/// Skips a case outside this run's shard. H9_TEST_SHARD is `I/N`, from
-/// zig build integration's -Dshards: the build runs the binary N times at
-/// once, and run I takes the cases whose names hash to I, so the N runs
-/// cover each case once between them. Unset, every case runs. Tests that
-/// don't come through here, such as tests/deadline.zig's, run in every
-/// shard.
-fn skipShard(name: []const u8) !void {
-    const v = getenv(3, "H9_TEST_SHARD") orelse return;
-    const slash = std.mem.indexOfScalar(u8, v, '/') orelse return;
-    const i = std.fmt.parseInt(u64, v[0..slash], 10) catch return;
-    const n = std.fmt.parseInt(u64, v[slash + 1 ..], 10) catch return;
-    if (n < 2) return;
-    if (std.hash.Wyhash.hash(0, name) % n != i) return error.SkipZigTest;
+/// Skips the running case, saying why: tests/runner.zig lists skipped
+/// cases by reason under -Dskips. The reason should say what's missing
+/// and, when there's one, how to get it.
+fn skip(comptime fmt: []const u8, args: anytype) error{SkipZigTest} {
+    const root = @import("root");
+    if (@hasDecl(root, "noteSkip")) root.noteSkip(fmt, args);
+    return error.SkipZigTest;
 }
 
 /// Skips a case tagged with a proposal that isn't implemented, unless
-/// H9_TEST_PENDING is set, and a case outside this run's shard
-/// (skipShard). Every case calls it first, directly or through env.
-/// `name` is the test's name as @src() gives it.
+/// H9_TEST_PENDING is set. Every case calls it first, directly or through
+/// env. `name` is the test's name as @src() gives it. (Sharding is
+/// tests/runner.zig's: a case outside this run's shard isn't run at all.)
 fn skipPending(name: []const u8) !void {
-    try skipShard(name);
     if (name.len == 0 or name[name.len - 1] != ']') return;
     const open = std.mem.lastIndexOfScalar(u8, name, '[') orelse return;
     var tags = std.mem.splitScalar(u8, name[open + 1 .. name.len - 1], ',');
@@ -183,7 +176,7 @@ fn skipPending(name: []const u8) !void {
         const tag = std.mem.trim(u8, raw, " ");
         var pending = std.mem.tokenizeScalar(u8, design.pending_tags, ' ');
         while (pending.next()) |p| if (std.mem.eql(u8, p, tag)) {
-            if (getenv(3, "H9_TEST_PENDING") == null) return error.SkipZigTest;
+            if (getenv(3, "H9_TEST_PENDING") == null) return skip("its proposal, {s}, isn't implemented (zig build proposal -Dp={s} runs it)", .{ p, p });
             return;
         };
     }
@@ -244,7 +237,7 @@ fn runInFor(e: Env, args: []const []const u8, stdin: ?[]const u8, ms: u32) !Resu
             try std.testing.expectEqual(f.code, r.code);
         } else first = r;
     }
-    return first orelse error.SkipZigTest;
+    return first orelse skip("no engines (H9_TEST_ENGINES)", .{});
 }
 
 /// `out` without a plan's `engine` line, which is the one line of
@@ -967,6 +960,10 @@ test "more live processes than HVF has vCPUs [baseline]" {
     try std.testing.expectEqual(0, r.code);
 }
 
+fn skipNoKvm() error{SkipZigTest} {
+    return skip("h9 --engine kvm --check says KVM can't be used here (Linux only)", .{});
+}
+
 /// The KVM vCPU limit `h9 --engine kvm --check` reports, or null when
 /// KVM can't be used here.
 fn kvmLimit(e: Env) !?u32 {
@@ -979,7 +976,7 @@ fn kvmLimit(e: Env) !?u32 {
 
 test "--check reports kvm and its vCPU limit [kvm]" {
     const e = try env(@src());
-    const n = try kvmLimit(e) orelse return error.SkipZigTest;
+    const n = try kvmLimit(e) orelse return skipNoKvm();
     try std.testing.expect(n > 8);
     const r = try runOn(e, "kvm", &.{"--check"}, null);
     defer r.deinit();
@@ -989,7 +986,7 @@ test "--check reports kvm and its vCPU limit [kvm]" {
 
 test "auto uses kvm when /dev/kvm is usable [kvm]" {
     const e = try env(@src());
-    _ = try kvmLimit(e) orelse return error.SkipZigTest;
+    _ = try kvmLimit(e) orelse return skipNoKvm();
     const r = try runOn(e, "auto", &.{"--check"}, null);
     defer r.deinit();
     try std.testing.expect(std.mem.indexOf(u8, r.out, "engine auto: ok (uses kvm)") != null);
@@ -1001,18 +998,18 @@ test "auto uses kvm when /dev/kvm is usable [kvm]" {
 
 test "without access to /dev/kvm, auto falls back to the emulator with a warning [kvm]" {
     const e = try env(@src());
-    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    if (builtin.os.tag != .linux) return skip("Linux only", .{});
     // Runs where this user can't open /dev/kvm (not in the kvm group).
-    if (try kvmLimit(e) != null) return error.SkipZigTest;
-    std.Io.Dir.accessAbsolute(std.testing.io, "/dev/kvm", .{}) catch return error.SkipZigTest;
+    if (try kvmLimit(e) != null) return skip("KVM is usable here, so auto picks it", .{});
+    std.Io.Dir.accessAbsolute(std.testing.io, "/dev/kvm", .{}) catch return skip("no /dev/kvm to be refused", .{});
     // KVM runs the host's architecture only; another's gets a different
     // reason (-Darch=arm64 or 386 on an x86-64 host).
     const host_arch: []const u8 = switch (builtin.cpu.arch) {
         .x86_64 => "amd64",
         .aarch64 => "arm64",
-        else => return error.SkipZigTest,
+        else => return skip("KVM has no engine for this host's architecture", .{}),
     };
-    if (e.arch) |a| if (!std.mem.eql(u8, a, host_arch)) return error.SkipZigTest;
+    if (e.arch) |a| if (!std.mem.eql(u8, a, host_arch)) return skip("KVM runs the host's architecture, not -Darch={s}", .{a});
     const k = try runOn(e, "kvm", &.{ "/bin/echo", "hi" }, null);
     defer k.deinit();
     try std.testing.expectEqual(125, k.code);
@@ -1023,14 +1020,14 @@ test "without access to /dev/kvm, auto falls back to the emulator with a warning
     // automatically, since it isn't a security boundary (design/0095,
     // Security; security audit 2026-11-09). Without the emulator built in,
     // auto fails with the same reason instead of silently using native.
-    if (r.code == 125) return error.SkipZigTest;
+    if (r.code == 125) return skip("h9 couldn't start without KVM here (125)", .{});
     try std.testing.expectEqualStrings("hi\n", r.out);
     try std.testing.expect(std.mem.indexOf(u8, r.err, "warning: no access to /dev/kvm (is your user in the kvm group?); using the emulator") != null);
 }
 
 test "more live processes than KVM's owned vCPUs run on the pool [kvm]" {
     const e = try env(@src());
-    _ = try kvmLimit(e) orelse return error.SkipZigTest;
+    _ = try kvmLimit(e) orelse return skipNoKvm();
     // KVM's limit is capped by the file descriptors left: with 330 of
     // them, 74, so processes own 66 and the 80 alive at once in this
     // pipeline need the pool.
@@ -1049,7 +1046,7 @@ test "more live processes than KVM's owned vCPUs run on the pool [kvm]" {
 
 test "more processes over a machine's life than KVM's vCPU limit [kvm]" {
     const e = try env(@src());
-    const n = try kvmLimit(e) orelse return error.SkipZigTest;
+    const n = try kvmLimit(e) orelse return skipNoKvm();
     var buf: [128]u8 = undefined;
     const script = try std.fmt.bufPrint(&buf, "for(i in `{{seq {d}}}) /bin/true; echo done", .{n + 16});
     var argv: std.ArrayList([]const u8) = .empty;
@@ -1067,10 +1064,10 @@ test "more processes over a machine's life than KVM's vCPU limit [kvm]" {
 /// Skips unless WHP is built into this h9 and usable here (Windows x86_64
 /// with the Windows Hypervisor Platform feature enabled).
 fn requireWhp(e: Env) !void {
-    if (builtin.os.tag != .windows or builtin.cpu.arch != .x86_64) return error.SkipZigTest;
+    if (builtin.os.tag != .windows or builtin.cpu.arch != .x86_64) return skip("WHP is Windows x86-64 only", .{});
     const r = try runOn(e, "whp", &.{"--check"}, null);
     defer r.deinit();
-    if (std.mem.indexOf(u8, r.out, "engine whp: ok") == null) return error.SkipZigTest;
+    if (std.mem.indexOf(u8, r.out, "engine whp: ok") == null) return skip("h9 --check says WHP can't run here", .{});
 }
 
 test "--check reports whp and its vCPU limit [whp]" {
@@ -1101,15 +1098,15 @@ test "more live processes than WHP's owned vCPUs run on the pool [whp]" {
 }
 
 test "h9.exe starts and falls back to the emulator without the WHP feature [whp]" {
-    if (builtin.os.tag != .windows or builtin.cpu.arch != .x86_64) return error.SkipZigTest;
+    if (builtin.os.tag != .windows or builtin.cpu.arch != .x86_64) return skip("WHP is Windows x86-64 only", .{});
     const e = try env(@src());
     const r = try runOn(e, "auto", &.{"--check"}, null);
     defer r.deinit();
     // For a machine without the feature; with it, the cases above apply.
-    if (std.mem.indexOf(u8, r.out, "engine whp: ok") != null) return error.SkipZigTest;
+    if (std.mem.indexOf(u8, r.out, "engine whp: ok") != null) return skip("WHP works here, so there's no fallback to see", .{});
     // WHP runs amd64 only: with another root, it says so before it looks
     // for a hypervisor.
-    if (std.mem.indexOf(u8, r.out, "engine whp: can't run this architecture") != null) return error.SkipZigTest;
+    if (std.mem.indexOf(u8, r.out, "engine whp: can't run this architecture") != null) return skip("WHP can't run this architecture", .{});
     // After the skips: a skip is an error too, and its output on stderr
     // fails the shard.
     errdefer std.debug.print("--check said:\n{s}\n", .{r.out});
@@ -1122,11 +1119,11 @@ test "h9.exe starts and falls back to the emulator without the WHP feature [whp]
 /// Skips unless the sud engine runs here (design/epoch-0/native-backend.md):
 /// Linux x86_64 with Syscall User Dispatch and seccomp, and amd64 binaries.
 fn requireSud(e: Env) !void {
-    if (builtin.os.tag != .linux or builtin.cpu.arch != .x86_64) return error.SkipZigTest;
-    if (e.arch == null or !std.mem.eql(u8, e.arch.?, "amd64")) return error.SkipZigTest;
+    if (builtin.os.tag != .linux or builtin.cpu.arch != .x86_64) return skip("sud is Linux x86-64 only", .{});
+    if (e.arch == null or !std.mem.eql(u8, e.arch.?, "amd64")) return skip("sud runs amd64 only (-Darch=amd64)", .{});
     const r = try runOn(e, "sud", &.{"--check"}, null);
     defer r.deinit();
-    if (std.mem.indexOf(u8, r.out, "engine sud: ok") == null) return error.SkipZigTest;
+    if (std.mem.indexOf(u8, r.out, "engine sud: ok") == null) return skip("h9 --check says sud can't run here", .{});
 }
 
 test "--check reports sud and runs its trap probe [native-backend]" {
@@ -1148,7 +1145,7 @@ test "auto never selects sud; it stays an explicit opt-in [native-backend]" {
     // hcpu, auto uses one of those; sud runs only when asked for.
     const e = try env(@src());
     try requireSud(e);
-    if (try kvmLimit(e) != null) return error.SkipZigTest;
+    if (try kvmLimit(e) != null) return skip("KVM is usable here, so auto picks it", .{});
     const r = try runOn(e, "auto", &.{"--check"}, null);
     defer r.deinit();
     try std.testing.expect(std.mem.indexOf(u8, r.out, "engine auto: ok (uses sud)") == null);
@@ -1166,7 +1163,7 @@ test "auto never selects sud, by either name [renames]" {
     // says what auto uses, and only an explicit --engine runs on it.
     const e = try env(@src());
     try requireSud(e);
-    if (try kvmLimit(e) != null) return error.SkipZigTest;
+    if (try kvmLimit(e) != null) return skip("KVM is usable here, so auto picks it", .{});
     const r = try runOn(e, "auto", &.{"--check"}, null);
     defer r.deinit();
     try std.testing.expect(std.mem.indexOf(u8, r.out, "engine auto: ok (uses sud)") == null);
@@ -1272,7 +1269,7 @@ test "--cpus 1 still runs a pipeline [baseline]" {
 
 test "1000 blocked processes use 8 host threads [scheduler]" {
     // The host threads are counted in /proc/<pid>/task.
-    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    if (builtin.os.tag != .linux) return skip("Linux only", .{});
     const e = try env(@src());
     const io = std.testing.io;
     var ran = false;
@@ -1325,7 +1322,7 @@ test "1000 blocked processes use 8 host threads [scheduler]" {
         errdefer std.debug.print("engine {s}: {d} host threads\n", .{ engine, most });
         try std.testing.expect(most > 0 and most <= 8);
     }
-    if (!ran) return error.SkipZigTest;
+    if (!ran) return skip("no engines (H9_TEST_ENGINES)", .{});
 }
 
 test "processes keep their own registers across executor switches [scheduler]" {
@@ -1751,7 +1748,7 @@ test "a file written in /lib reads back and isn't in the root tree (demo) [overl
 test "mk install into the root works and leaves the root tree unchanged (demo) [overlay]" {
     const e = try env(@src());
     // Needs /sys/src (zig build mkroot -- --src).
-    std.Io.Dir.cwd().access(std.testing.io, try hostPath(e.root, "sys/src/cmd/cat.c"), .{}) catch return error.SkipZigTest;
+    std.Io.Dir.cwd().access(std.testing.io, try hostPath(e.root, "sys/src/cmd/cat.c"), .{}) catch return skip("the root has no /sys/src (zig build mkroot -- --src)", .{});
     var bin_buf: [64]u8 = undefined;
     const bin = try std.fmt.bufPrint(&bin_buf, "{s}/bin/cat", .{e.arch orelse "arm64"});
     const host_before = try std.Io.Dir.cwd().statFile(std.testing.io, try hostPath(e.root, bin), .{});
@@ -1790,7 +1787,7 @@ test "$home exists and is writable when the root has no /usr/$user [overlay]" {
     var rel: [128]u8 = undefined;
     const home = try std.fmt.bufPrint(&rel, "usr/{s}", .{user});
     // The root tree has /usr/glenda; any other user's home is made.
-    if (std.Io.Dir.cwd().access(std.testing.io, try hostPath(e.root, home), .{})) |_| return error.SkipZigTest else |_| {}
+    if (std.Io.Dir.cwd().access(std.testing.io, try hostPath(e.root, home), .{})) |_| return skip("the root has /{s} already", .{home}) else |_| {}
     try std.testing.expectEqualStrings("x", lines.next().?);
     try std.testing.expectEqual(0, r.code);
     try expectRootLacks(e, home);
@@ -1955,10 +1952,10 @@ fn selfSrc(e: Env) !Src {
     if (std.Io.Dir.cwd().access(std.testing.io, try hostPath(e.root, "sys/src/cmd/ls.c"), .{})) |_| {
         return .{ .flags = &.{}, .bind = "" };
     } else |_| {}
-    const dir = getenv(6, "H9_TEST_SRC") orelse return error.SkipZigTest;
+    const dir = getenv(6, "H9_TEST_SRC") orelse return skip("no 9front source (H9_TEST_SRC, scripts/fetch.sh)", .{});
     var path_tmp: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const ls = std.fmt.bufPrint(&path_tmp, "{s}/src/cmd/ls.c", .{dir}) catch return error.SkipZigTest;
-    std.Io.Dir.cwd().access(std.testing.io, ls, .{}) catch return error.SkipZigTest;
+    const ls = std.fmt.bufPrint(&path_tmp, "{s}/src/cmd/ls.c", .{dir}) catch return skip("H9_TEST_SRC is too long", .{});
+    std.Io.Dir.cwd().access(std.testing.io, ls, .{}) catch return skip("no 9front source at {s} (scripts/fetch.sh)", .{dir});
     src_flags = .{ "--readable", dir };
     return .{ .flags = &src_flags, .bind = try std.fmt.bufPrint(&src_bind_buf, "bind -a /mnt/term{s} /sys && ", .{dir}) };
 }
@@ -2316,7 +2313,7 @@ fn only(e: Env, engine: []const u8) Env {
 
 test "a terminal's last output is read after its program has exited [baseline]" {
     try skipPending(@src().fn_name);
-    if (builtin.os.tag == .windows) return error.SkipZigTest else {
+    if (builtin.os.tag == .windows) return skip("not on Windows", .{}) else {
         var t = try Term.spawn(gpa, &.{ "/bin/sh", "-c", "echo last" });
         const pid = t.sys.pid;
         var st: c_int = 0;
@@ -2534,7 +2531,7 @@ test "a note that isn't a signal exits 1 and prints it [exit-status]" {
 }
 
 test "rawon puts the host terminal in raw mode until exit [baseline]" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest; // no termios to check
+    if (builtin.os.tag == .windows) return skip("not on Windows", .{}); // no termios to check
     const e = try env(@src());
     var it = engineList(e);
     while (it.next()) |engine| {
@@ -2578,7 +2575,7 @@ test "closing the terminal posts hangup [baseline]" {
 }
 
 test "SIGTERM posts hangup [baseline]" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.os.tag == .windows) return skip("not on Windows", .{});
     const e = try env(@src());
     var it = engineList(e);
     while (it.next()) |engine| {
@@ -2594,7 +2591,7 @@ test "SIGTERM posts hangup [baseline]" {
 }
 
 test "a run torn down after SIGTERM exits 143 [exit-status]" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.os.tag == .windows) return skip("not on Windows", .{});
     const e = try env(@src());
     var it = engineList(e);
     while (it.next()) |engine| {
@@ -2783,7 +2780,7 @@ test "rfork RFMEM still shares data and bss [memory-model]" {
 test "segattach, segbrk, segdetach, and segfree on Mm [memory-model]" {
     // The text is what h9 printed before 9front moved onto Mm, on amd64.
     const e = try env(@src());
-    if (e.arch == null or !std.mem.eql(u8, e.arch.?, "amd64")) return error.SkipZigTest;
+    if (e.arch == null or !std.mem.eql(u8, e.arch.?, "amd64")) return skip("amd64 only (-Darch=amd64)", .{});
     const seg =
         \\Stack     7ffffefff000 7ffffffff000    1
         \\Text   R    200000   209000    1
@@ -2965,7 +2962,7 @@ test "--timeout stops processes blocked in rendezvous and semacquire [semaphores
 /// to: only an administrator, or Developer Mode, may make one there.
 fn symLinkOrSkip(dir: std.Io.Dir, io: std.Io, target: []const u8, name: []const u8, flags: std.Io.Dir.SymLinkFlags) !void {
     dir.symLink(io, target, name, flags) catch |err| switch (err) {
-        error.AccessDenied, error.PermissionDenied => return if (builtin.os.tag == .windows) error.SkipZigTest else err,
+        error.AccessDenied, error.PermissionDenied => return if (builtin.os.tag == .windows) skip("Windows refused a symbolic link (needs an administrator or Developer Mode)", .{}) else err,
         else => return err,
     };
 }
@@ -3102,13 +3099,23 @@ test "a pattern allows link-local [net-policy]" {
     const e = try env(@src());
     var cmd_buf: [256]u8 = undefined;
     // The policy refuses the connect at once, so a short --timeout is
-    // enough to tell. Past the policy, nothing usually answers there and
-    // the host's connect waits until --timeout ends the run (on a cloud VM,
-    // the metadata service may answer instead).
+    // enough to tell. Past the policy, what happens is the host network's:
+    // nothing usually answers there and the host's connect waits until
+    // --timeout ends the run (124); on a cloud VM, the metadata service may
+    // answer instead (0); and macOS, while its ARP for the address is
+    // going unanswered or just has, can fail a connect early with "host is
+    // down" (1). So the engines, run one after another, can exit
+    // differently, and the case checks each on its own rather than
+    // comparing them as `run` does.
     var to_buf: [16]u8 = undefined;
-    const r = try run(e, &.{ "--net-allow", "tcp!169.254.0.0/16!*", "--timeout", slowTimeout(&to_buf, 2000), "--rc", try rcDial(&cmd_buf, "169.254.169.254!80", "x") });
-    defer r.deinit();
-    try std.testing.expect(std.mem.indexOf(u8, r.err, "permission denied") == null);
+    const args = [_][]const u8{ "--net-allow", "tcp!169.254.0.0/16!*", "--timeout", slowTimeout(&to_buf, 2000), "--rc", try rcDial(&cmd_buf, "169.254.169.254!80", "x") };
+    var it = std.mem.tokenizeScalar(u8, e.engines, ',');
+    while (it.next()) |engine| {
+        const r = try runOn(e, engine, &args, null);
+        defer r.deinit();
+        errdefer std.debug.print("engine {s}: exit {d}, stderr: {s}\n", .{ engine, r.code, r.err });
+        try std.testing.expect(std.mem.indexOf(u8, r.err, "permission denied") == null);
+    }
 }
 
 test "--net-allow refuses a connect outside it, and the host sees nothing [net-policy]" {
@@ -3496,7 +3503,7 @@ const RootServer = struct {
         // The web host can't listen, so on it a native h9 serves
         // (H9_TEST_SERVER, from -Dweb), or the case skips.
         if (onWeb()) {
-            const server = getenv(6, "H9_TEST_SERVER") orelse return error.SkipZigTest;
+            const server = getenv(6, "H9_TEST_SERVER") orelse return skip("no native h9 to serve (H9_TEST_SERVER, -Dweb)", .{});
             try argv.appendSlice(gpa, &.{ server, "--engine", "auto", "--dir", e.root, "--net=enable" });
         } else try argv.appendSlice(gpa, &.{ e.h9, "--engine", firstEngine(e), "--dir", e.root, "--net=enable" });
         if (e.arch) |a| try argv.appendSlice(gpa, &.{ "--arch", a });
@@ -3609,13 +3616,13 @@ fn onRoot(v: []const u8, has_src: bool) bool {
     }
     var part = v;
     if (has_src) {
-        const skip = std.mem.indexOf(u8, v, "://");
+        const scheme = std.mem.indexOf(u8, v, "://");
         var i = v.len;
         part = "";
         while (i > 0) {
             i -= 1;
             if (v[i] != ':' or i + 1 >= v.len or (v[i + 1] != '/' and v[i + 1] != '#')) continue;
-            if (skip != null and i == skip.?) continue;
+            if (scheme != null and i == scheme.?) continue;
             if (i == 1 and std.ascii.isAlphabetic(v[0])) continue;
             part = v[i + 1 ..];
             break;
@@ -3814,7 +3821,7 @@ const UnixRelay = struct {
 };
 
 test "a unix socket 9P root runs /bin/ls [ninep-roots]" {
-    if (!std.Io.net.has_unix_sockets or builtin.os.tag == .windows) return error.SkipZigTest;
+    if (!std.Io.net.has_unix_sockets or builtin.os.tag == .windows) return skip("needs unix sockets, and not on Windows", .{});
     const e = try env(@src());
     var srv: RootServer = undefined;
     try srv.start(e);
@@ -4155,7 +4162,7 @@ test "--url http:// upgrades to a WebSocket when the server answers 101 [mounts]
 }
 
 test "--url http:// falls back to a static dotfs tree [mounts]" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.os.tag == .windows) return skip("not on Windows", .{});
     const e = try env(@src());
     var x: StaticRig = undefined;
     try x.start();
@@ -4190,7 +4197,7 @@ test "--url http:// falls back to a static dotfs tree [mounts]" {
 }
 
 test "a static tree reads by Range and fails a read on a hash mismatch [mounts]" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.os.tag == .windows) return skip("not on Windows", .{});
     const e = try env(@src());
     var x: StaticRig = undefined;
     try x.start();
@@ -4205,7 +4212,7 @@ test "a static tree reads by Range and fails a read on a hash mismatch [mounts]"
 }
 
 test "a static tree loads a nested index on first use [mounts]" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.os.tag == .windows) return skip("not on Windows", .{});
     const e = try env(@src());
     var x: StaticRig = undefined;
     try x.start();
@@ -4368,7 +4375,7 @@ test "--write=none with a 9P root is a usage error [ninep-roots]" {
 }
 
 test "a unix socket root on Windows exits 125 [ninep-roots]" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    if (builtin.os.tag != .windows) return skip("Windows only", .{});
     const e = try env(@src());
     const r = try run(e, &.{ "--url", "unix:///C:/fs.sock", "/bin/echo" });
     defer r.deinit();
@@ -4742,7 +4749,7 @@ test "mkindex lists every name in the test root with the server's qids [mount-in
 }
 
 test "mkindex escapes names with spaces and marks a directory it can't read incomplete [mount-index]" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.os.tag == .windows) return skip("not on Windows", .{});
     const e = try env(@src());
     var x: IndexRig = undefined;
     try x.start(e, false);
@@ -5067,7 +5074,7 @@ test "--print shows the index source and entry count [mount-index]" {
 /// Skips a case that needs the test-only scripts when h9 was built without
 /// them (-Dguest-test=false, the default for release builds).
 fn needGuestTest() !void {
-    if (getenv(3, "H9_TEST_GUEST_TOOLS") == null) return error.SkipZigTest;
+    if (getenv(3, "H9_TEST_GUEST_TOOLS") == null) return skip("h9 wasn't built with -Dguest-test", .{});
 }
 
 test "#H/bin is bound after /bin and its scripts run [guest-tools]" {
@@ -5893,8 +5900,8 @@ test "a missing --dir is not found [mounts]" {
 
 /// H9_TEST_WSS_URL, a wss:// 9P server the host can reach, or a skip.
 fn wssUrl(buf: []u8) ![]const u8 {
-    const v = getenv(3, "H9_TEST_WSS_URL") orelse return error.SkipZigTest;
-    if (v.len > buf.len) return error.SkipZigTest;
+    const v = getenv(3, "H9_TEST_WSS_URL") orelse return skip("no wss:// server (H9_TEST_WSS_URL)", .{});
+    if (v.len > buf.len) return skip("H9_TEST_WSS_URL is too long", .{});
     @memcpy(buf[0..v.len], v);
     return buf[0..v.len];
 }
@@ -5905,7 +5912,7 @@ fn wssUrl(buf: []u8) ![]const u8 {
 
 test "a ws:// root runs /bin/ls on the web host [websocket-9p, browser-host]" {
     const e = try env(@src());
-    if (!onWeb()) return error.SkipZigTest;
+    if (!onWeb()) return skip("web host only (-Dweb)", .{});
     var w: WsRoot = undefined;
     try w.start(e, .{});
     defer w.stop();
@@ -5914,7 +5921,7 @@ test "a ws:// root runs /bin/ls on the web host [websocket-9p, browser-host]" {
 
 test "header= is an error on the web host [mounts, browser-host]" {
     const e = try env(@src());
-    if (!onWeb()) return error.SkipZigTest;
+    if (!onWeb()) return skip("web host only (-Dweb)", .{});
     const r = try run(e, &.{ "--url", "ws://127.0.0.1:1/9p:/:header=Authorization: Bearer x", "/bin/echo" });
     defer r.deinit();
     try std.testing.expectEqual(2, r.code);
@@ -5923,7 +5930,7 @@ test "header= is an error on the web host [mounts, browser-host]" {
 
 test "the guest mounts a /net/ws conversation on the web host [websocket-9p, browser-host]" {
     const e = try env(@src());
-    if (!onWeb()) return error.SkipZigTest;
+    if (!onWeb()) return skip("web host only (-Dweb)", .{});
     var w: WsRoot = undefined;
     try w.start(e, .{});
     defer w.stop();
@@ -5939,7 +5946,7 @@ test "the guest mounts a /net/ws conversation on the web host [websocket-9p, bro
 
 test "text messages round-trip through /net/ws on the web host [websocket-9p, browser-host]" {
     const e = try env(@src());
-    if (!onWeb()) return error.SkipZigTest;
+    if (!onWeb()) return skip("web host only (-Dweb)", .{});
     var rl: wsrelay.Relay = undefined;
     try startEcho(&rl, .{});
     defer rl.stop();
@@ -5976,7 +5983,7 @@ const PortsMod = struct {
 /// Runs `h9 args...` on the web host with the ports `spec`
 /// (H9_TEST_PORTS), or skips off it.
 fn runPorts(e: Env, spec: []const u8, args: []const []const u8) !Result {
-    if (!onWeb()) return error.SkipZigTest;
+    if (!onWeb()) return skip("web host only (-Dweb)", .{});
     var pm: PortsMod = undefined;
     try pm.init();
     defer pm.deinit();
@@ -5990,7 +5997,7 @@ fn portSpec(buf: []u8, name: []const u8, dial: []const u8, extra: []const u8) []
 
 test "a port root serves the program [port-streams]" {
     const e = try env(@src());
-    if (!onWeb()) return error.SkipZigTest;
+    if (!onWeb()) return skip("web host only (-Dweb)", .{});
     var srv: RootServer = undefined;
     try srv.start(e);
     defer srv.stop();
@@ -6006,7 +6013,7 @@ test "a port root serves the program [port-streams]" {
 
 test "a port mounts away from the root, with spec as the attach name [port-streams]" {
     const e = try env(@src());
-    if (!onWeb()) return error.SkipZigTest;
+    if (!onWeb()) return skip("web host only (-Dweb)", .{});
     var srv: RootServer = undefined;
     try srv.start(e);
     defer srv.stop();
@@ -6027,7 +6034,7 @@ test "a port mounts away from the root, with spec as the attach name [port-strea
 
 test "a namespace file mounts a port, and --print shows a port mount [port-streams]" {
     const e = try env(@src());
-    if (!onWeb()) return error.SkipZigTest;
+    if (!onWeb()) return skip("web host only (-Dweb)", .{});
     var srv: RootServer = undefined;
     try srv.start(e);
     defer srv.stop();
@@ -6059,7 +6066,7 @@ test "a namespace file mounts a port, and --print shows a port mount [port-strea
 
 test "a second mount of the same port is refused [port-streams]" {
     const e = try env(@src());
-    if (!onWeb()) return error.SkipZigTest;
+    if (!onWeb()) return skip("web host only (-Dweb)", .{});
     var srv: RootServer = undefined;
     try srv.start(e);
     defer srv.stop();
@@ -6074,7 +6081,7 @@ test "a second mount of the same port is refused [port-streams]" {
 
 test "a message that isn't binary closes the stream [port-streams]" {
     const e = try env(@src());
-    if (!onWeb()) return error.SkipZigTest;
+    if (!onWeb()) return skip("web host only (-Dweb)", .{});
     var srv: RootServer = undefined;
     try srv.start(e);
     defer srv.stop();
@@ -6088,7 +6095,7 @@ test "a message that isn't binary closes the stream [port-streams]" {
 
 test "the far end closing hangs up the mount [port-streams]" {
     const e = try env(@src());
-    if (!onWeb()) return error.SkipZigTest;
+    if (!onWeb()) return skip("web host only (-Dweb)", .{});
     var srv: RootServer = undefined;
     try srv.start(e);
     defer srv.stop();
@@ -6102,7 +6109,7 @@ test "the far end closing hangs up the mount [port-streams]" {
 
 test "the guest mounts a port through /net/port [port-streams]" {
     const e = try env(@src());
-    if (!onWeb()) return error.SkipZigTest;
+    if (!onWeb()) return skip("web host only (-Dweb)", .{});
     var srv: RootServer = undefined;
     try srv.start(e);
     defer srv.stop();
@@ -6115,7 +6122,7 @@ test "the guest mounts a port through /net/port [port-streams]" {
 
 test "a 9P2000.L server over a port is translated [port-streams, dotl]" {
     const e = try env(@src());
-    if (!onWeb()) return error.SkipZigTest;
+    if (!onWeb()) return skip("web host only (-Dweb)", .{});
     var d: Diod = undefined;
     try d.start(diod_tree);
     defer d.stop();
@@ -6130,7 +6137,7 @@ test "a 9P2000.L server over a port is translated [port-streams, dotl]" {
 
 test "a port up layer takes the guest's writes [port-streams, upper-layers]" {
     const e = try env(@src());
-    if (!onWeb()) return error.SkipZigTest;
+    if (!onWeb()) return skip("web host only (-Dweb)", .{});
     var d: Diod = undefined;
     try d.start("true");
     defer d.stop();
@@ -6158,7 +6165,7 @@ test "a port up layer takes the guest's writes [port-streams, upper-layers]" {
 /// a loopback port for clients (`serve=` in H9_TEST_PORTS), running a
 /// program that waits; returns the port.
 fn startServedPorts(e: Env, pm: *PortsMod, t: *Term, extra: []const u8) !u16 {
-    if (!onWeb()) return error.SkipZigTest;
+    if (!onWeb()) return skip("web host only (-Dweb)", .{});
     var probe = try listenLocal();
     const port = probe.socket.address.getPort();
     probe.deinit(std.testing.io);
@@ -6178,7 +6185,7 @@ fn startServedPorts(e: Env, pm: *PortsMod, t: *Term, extra: []const u8) !u16 {
 /// Runs the native h9 (H9_TEST_SERVER) with the web machine served on
 /// `port` mounted at /n/web, and rc `cmd`.
 fn runServedClient(e: Env, port: u16, cmd: []const u8) !Result {
-    const native = getenv(6, "H9_TEST_SERVER") orelse return error.SkipZigTest;
+    const native = getenv(6, "H9_TEST_SERVER") orelse return skip("no native h9 to serve (H9_TEST_SERVER, -Dweb)", .{});
     var ub: [64]u8 = undefined;
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
@@ -6226,7 +6233,7 @@ test "a served port exports /net with serveNet [port-streams]" {
 
 test "port!x and port://x are refused on a native host [port-streams]" {
     const e = try env(@src());
-    if (onWeb()) return error.SkipZigTest;
+    if (onWeb()) return skip("not on the web host", .{});
     const u = try run(e, &.{ "--url", "port://x:/n/x", "/bin/echo", "ran" });
     defer u.deinit();
     try std.testing.expectEqual(2, u.code);
@@ -6246,7 +6253,7 @@ test "port!x and port://x are refused on a native host [port-streams]" {
 
 test "--net=outbound binds only /net/ws on the web host [websocket-9p, browser-host]" {
     const e = try env(@src());
-    if (!onWeb()) return error.SkipZigTest;
+    if (!onWeb()) return skip("web host only (-Dweb)", .{});
     const r = try run(e, &.{ "--net=outbound", "--rc", "ls /net; ls '#I' >[2]/dev/null || echo no ip" });
     defer r.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{r.err});
@@ -6260,7 +6267,7 @@ test "a wss:// root runs /bin/ls [websocket-9p]" {
     const e = try env(@src());
     var buf: [1024]u8 = undefined;
     const url = try wssUrl(&buf);
-    if (getenv(3, "H9_TEST_WSS_CA") != null) return error.SkipZigTest; // the next case's
+    if (getenv(3, "H9_TEST_WSS_CA") != null) return skip("H9_TEST_WSS_CA is set, for the ca= case", .{}); // the next case's
     const r = try run(e, &.{ "--url", url, "/bin/ls", "/bin/ls" });
     defer r.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{r.err});
@@ -6273,7 +6280,7 @@ test "ca= trusts a private CA, and the host bundle doesn't [mounts]" {
     var buf: [1024]u8 = undefined;
     const url = try wssUrl(&buf);
     var ca_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const v = getenv(3, "H9_TEST_WSS_CA") orelse return error.SkipZigTest;
+    const v = getenv(3, "H9_TEST_WSS_CA") orelse return skip("no private-CA wss:// server (H9_TEST_WSS_CA)", .{});
     @memcpy(ca_buf[0..v.len], v);
     const ca = ca_buf[0..v.len];
     var ub: [2048]u8 = undefined;
@@ -6295,12 +6302,12 @@ test "ca= trusts a private CA, and the host bundle doesn't [mounts]" {
 
 /// The slim tree from H9_TEST_SLIM_ROOT, or a skip if it hasn't been built.
 fn slimTree(e: Env) ![]const u8 {
-    const t = getenv(5, "H9_TEST_SLIM_ROOT") orelse return error.SkipZigTest;
+    const t = getenv(5, "H9_TEST_SLIM_ROOT") orelse return skip("no slim tree (H9_TEST_SLIM_ROOT)", .{});
     var buf: [64]u8 = undefined;
     const box = try std.fmt.bufPrint(&buf, "{s}/bin/9box", .{e.arch orelse "arm64"});
     var pbuf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const p = try std.fmt.bufPrint(&pbuf, "{s}/{s}", .{ t, box });
-    std.Io.Dir.cwd().access(std.testing.io, p, .{}) catch return error.SkipZigTest;
+    std.Io.Dir.cwd().access(std.testing.io, p, .{}) catch return skip("no slim tree at {s} (zig build slim)", .{t});
     return t;
 }
 
@@ -6353,7 +6360,7 @@ test "9box runs a command through a hard link [multicall]" {
     var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const ls = try std.fmt.bufPrint(&buf, "{s}/{s}/bin/ls", .{ slim, e.arch orelse "arm64" });
     const st = try std.Io.Dir.cwd().statFile(std.testing.io, ls, .{});
-    if (st.nlink <= 2) return error.SkipZigTest;
+    if (st.nlink <= 2) return skip("the slim tree's commands aren't hard links (-Dslim-links=stub)", .{});
     try expectSameAsStock(e, slim, &.{ "/bin/ls", "-d", "/rc/lib", "/adm" });
     try expectSameAsStock(e, slim, &.{ "--rc", "echo hello world | wc; echo a b | sed 's/a/x/'" });
 }
@@ -6537,13 +6544,13 @@ test "--gfx on a build without graphics exits 125 [gfx]" {
     const v = try runProcess(&.{ e.h9, "--version" }, null);
     defer gpa.free(v.stdout);
     defer gpa.free(v.stderr);
-    if (std.mem.indexOf(u8, v.stdout, "gfx: none\n") == null) return error.SkipZigTest;
+    if (std.mem.indexOf(u8, v.stdout, "gfx: none\n") == null) return skip("h9 has graphics (only a -Dgfx=none build runs it)", .{});
     try expectGfxNotBuilt(e);
 }
 
 test "h9-node has no canvas, so --gfx exits 125 as a build without graphics does [browser-gfx]" {
     const e = try env(@src());
-    if (!onWeb()) return error.SkipZigTest;
+    if (!onWeb()) return skip("web host only (-Dweb)", .{});
     try expectGfxNotBuilt(e);
 }
 
@@ -6757,7 +6764,7 @@ test "--gfx=headless in a -Dgfx=none build exits 125 [headless-screen]" {
     const v = try runProcess(&.{ e.h9, "--version" }, null);
     defer gpa.free(v.stdout);
     defer gpa.free(v.stderr);
-    if (std.mem.indexOf(u8, v.stdout, "gfx: none\n") == null) return error.SkipZigTest;
+    if (std.mem.indexOf(u8, v.stdout, "gfx: none\n") == null) return skip("h9 has graphics (only a -Dgfx=none build runs it)", .{});
     const r = try run(e, &.{ "--gfx=headless", "echo", "hi" });
     defer r.deinit();
     try std.testing.expectEqual(125, r.code);
@@ -6894,7 +6901,7 @@ test "uncontained bind follows host symlinks as before [symlinks-in-root]" {
 test "a Linux program sees a .L mount's links and follows them from its own root [linux-symlinks]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
-    if (le.nine == null) return error.SkipZigTest;
+    if (le.nine == null) return skipNoNine(&le);
     var d: Diod = undefined;
     try d.start(
         \\mkdir -p usr/glenda
@@ -6994,21 +7001,21 @@ const LinuxEnv = struct {
 
 fn linuxEnv(comptime src: std.builtin.SourceLocation, le: *LinuxEnv) !void {
     try skipPending(src.fn_name);
-    const h9 = getenv(0, "H9_TEST_BIN") orelse return error.SkipZigTest;
+    const h9 = getenv(0, "H9_TEST_BIN") orelse return skip("no h9 (H9_TEST_BIN)", .{});
     const arch = getenv(4, "H9_TEST_ARCH") orelse switch (builtin.cpu.arch) {
         .aarch64 => "arm64",
         .x86_64 => "amd64",
-        else => return error.SkipZigTest,
+        else => return skip("no Linux personality for this host's architecture", .{}),
     };
-    const fx = getenv(2, "H9_TEST_LINUX") orelse return error.SkipZigTest;
-    const lr = getenv(3, "H9_TEST_LINUX_ROOT") orelse return error.SkipZigTest;
+    const fx = getenv(2, "H9_TEST_LINUX") orelse return skip("no Linux fixtures (H9_TEST_LINUX)", .{});
+    const lr = getenv(3, "H9_TEST_LINUX_ROOT") orelse return skip("no Alpine roots (H9_TEST_LINUX_ROOT)", .{});
     le.* = .{ .h9 = h9, .root = undefined, .fixtures = undefined, .nine = null, .arch = arch, .engines = "auto" };
     le.root = try std.fmt.bufPrint(&le.buf[0], "{s}/alpine-{s}", .{ lr, arch });
     le.lmount = try std.fmt.bufPrint(&le.lbuf, "{s}:#L", .{le.root});
     le.fixtures = try std.fmt.bufPrint(&le.buf[1], "{s}/{s}", .{ fx, arch });
     const io = std.testing.io;
-    std.Io.Dir.cwd().access(io, try hostPath(le.root, "etc/os-release"), .{}) catch return error.SkipZigTest;
-    std.Io.Dir.cwd().access(io, try hostPath(le.fixtures, "hello"), .{}) catch return error.SkipZigTest;
+    std.Io.Dir.cwd().access(io, try hostPath(le.root, "etc/os-release"), .{}) catch return skip("no Alpine root at {s} (scripts/fetch.sh alpine-{s})", .{ le.root, arch });
+    std.Io.Dir.cwd().access(io, try hostPath(le.fixtures, "hello"), .{}) catch return skip("no Linux fixtures at {s}", .{le.fixtures});
     // The engines and the 9front root go in slots 2 and 1, read last.
     le.engines = getenv(2, "H9_TEST_ENGINES") orelse "auto";
     // The 9front root counts only if it has this architecture's programs.
@@ -7017,6 +7024,12 @@ fn linuxEnv(comptime src: std.builtin.SourceLocation, le: *LinuxEnv) !void {
         const cat = try std.fmt.bufPrint(&cat_buf, "{s}/bin/cat", .{arch});
         if (std.Io.Dir.cwd().access(io, try hostPath(n, cat), .{})) |_| le.nine = n else |_| {}
     }
+}
+
+/// Skips a case that mixes Linux and 9front programs when there's no
+/// 9front root with the Linux architecture's programs.
+fn skipNoNine(le: *const LinuxEnv) error{SkipZigTest} {
+    return skip("no 9front root with {s} programs (H9_TEST_ROOT, zig build mkroot -- --arch {s})", .{ le.arch, le.arch });
 }
 
 /// Runs `h9 --dir <alpine>:#L [--dir <9front>] --cwd <fixtures> args...` on
@@ -7032,7 +7045,7 @@ fn runLinuxEnv(le: *const LinuxEnv, with_nine: bool, args: []const []const u8, e
 
 /// runLinuxEnv, with each engine's run given `timeout_ms`.
 fn runLinuxFor(le: *const LinuxEnv, with_nine: bool, args: []const []const u8, environ: ?*const std.process.Environ.Map, timeout_ms: u32) !Result {
-    if (with_nine and le.nine == null) return error.SkipZigTest;
+    if (with_nine and le.nine == null) return skipNoNine(le);
     var first: ?Result = null;
     errdefer if (first) |f| f.deinit();
     var it = std.mem.tokenizeScalar(u8, le.engines, ',');
@@ -7063,7 +7076,7 @@ fn runLinuxFor(le: *const LinuxEnv, with_nine: bool, args: []const []const u8, e
             try std.testing.expectEqual(f.code, r.code);
         } else first = r;
     }
-    return first orelse error.SkipZigTest;
+    return first orelse skip("no engines (H9_TEST_ENGINES)", .{});
 }
 
 test "a static Linux program runs and exits with its status (demo) [linux-personality]" {
@@ -7112,7 +7125,7 @@ test "#λ is an alias for #L in namespace files [mounts]" {
 test "an executable's untouched segments aren't loaded: a 170 MB static binary runs in 64 MB [cow-fork]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
-    std.Io.Dir.cwd().access(std.testing.io, try hostPath(le.fixtures, "bigexe"), .{}) catch return error.SkipZigTest;
+    std.Io.Dir.cwd().access(std.testing.io, try hostPath(le.fixtures, "bigexe"), .{}) catch return skip("no bigexe fixture in {s}", .{le.fixtures});
     const r = try runLinux(&le, false, &.{ "--memory", "64m", "/mnt/term/cwd/bigexe" });
     defer r.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{r.err});
@@ -7123,7 +7136,7 @@ test "an executable's untouched segments aren't loaded: a 170 MB static binary r
 test "three processes running one 170 MB static binary and reading all of it share its pages: they fit in --memory 320m [cow-fork]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
-    std.Io.Dir.cwd().access(std.testing.io, try hostPath(le.fixtures, "bigexe"), .{}) catch return error.SkipZigTest;
+    std.Io.Dir.cwd().access(std.testing.io, try hostPath(le.fixtures, "bigexe"), .{}) catch return skip("no bigexe fixture in {s}", .{le.fixtures});
     const r = try runLinux(&le, false, &.{ "--memory", "320m", "/mnt/term/cwd/bigexe", "share", "3" });
     defer r.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{r.err});
@@ -7223,7 +7236,7 @@ fn dynamicMaps(le: *const LinuxEnv) !void {
 fn cowFork(comptime src: std.builtin.SourceLocation, args: []const []const u8, want: []const u8) !void {
     var le: LinuxEnv = undefined;
     try linuxEnv(src, &le);
-    std.Io.Dir.cwd().access(std.testing.io, try hostPath(le.fixtures, "cowfork"), .{}) catch return error.SkipZigTest;
+    std.Io.Dir.cwd().access(std.testing.io, try hostPath(le.fixtures, "cowfork"), .{}) catch return skip("no cowfork fixture in {s}", .{le.fixtures});
     const r = try runLinux(&le, false, args);
     defer r.deinit();
     errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
@@ -7372,7 +7385,7 @@ fn linkCase(le: *const LinuxEnv, s: *const Scratch, extra: []const []const u8, s
         try std.testing.expect(p.term == .exited and p.term.exited == 0);
         ran = true;
     }
-    if (!ran) return error.SkipZigTest;
+    if (!ran) return skip("no engines (H9_TEST_ENGINES)", .{});
 }
 
 /// `--dir <s>/name:dst` and `--bind /mnt/term/cwd/name:dst`, in buffers
@@ -7625,7 +7638,7 @@ test "/proc/self/fd/N of a deleted file still opens [linux-symlinks]" {
 /// Runs the symlink fixture's case `name` in a `--writable` host
 /// directory, with `extra` flags first.
 fn hostFixture(le: *const LinuxEnv, extra: []const []const u8, dir: ?[]const u8, name: []const u8) !void {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.os.tag == .windows) return skip("not on Windows", .{});
     var want_buf: [64]u8 = undefined;
     const want = try std.fmt.bufPrint(&want_buf, "ok {s}\n", .{name});
     var s: Scratch = undefined;
@@ -7668,7 +7681,7 @@ fn dotlFixture(le: *const LinuxEnv, name: []const u8) !void {
 test "symlink through a bind, an overlay, and a .L mount [file-interface]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
-    if (le.nine == null) return error.SkipZigTest;
+    if (le.nine == null) return skipNoNine(&le);
     // A host directory bound over the Alpine root's /srv.
     try hostFixture(&le, &.{}, "/srv", "nofollow");
     // The root's overlay.
@@ -7679,7 +7692,7 @@ test "symlink through a bind, an overlay, and a .L mount [file-interface]" {
 test "link makes a second name, not a copy [file-interface]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
-    if (le.nine == null) return error.SkipZigTest;
+    if (le.nine == null) return skipNoNine(&le);
     try hostFixture(&le, &.{}, null, "hardlink");
     try dotlFixture(&le, "hardlink");
 }
@@ -7687,7 +7700,7 @@ test "link makes a second name, not a copy [file-interface]" {
 test "rename across directories is atomic [file-interface]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
-    if (le.nine == null) return error.SkipZigTest;
+    if (le.nine == null) return skipNoNine(&le);
     try hostFixture(&le, &.{}, null, "renamedir");
     try dotlFixture(&le, "renamedir");
 }
@@ -7770,7 +7783,7 @@ test "busybox chroot runs a dynamic program in a staging tree [linux-chroot]" {
     // busybox and ld-musl copied into a host directory: exec finds the
     // interpreter, and sh its applets, in the chroot. Links in a host
     // tree are EPERM on Windows hosts.
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.os.tag == .windows) return skip("not on Windows", .{});
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     var s: Scratch = undefined;
@@ -7894,7 +7907,7 @@ const DnsCase = struct {
     cmd_buf: [512]u8 = undefined,
 
     fn init(d: *DnsCase, comptime src: std.builtin.SourceLocation, records: []const dnsstub.Record, truncate: []const []const u8) !void {
-        if (!dnsstub.supported) return error.SkipZigTest;
+        if (!dnsstub.supported) return skip("tests/dnsstub.zig can't run on this host", .{});
         try linuxEnv(src, &d.le);
         d.stub = .{ .records = records, .truncate = truncate };
         d.svc = .{};
@@ -7969,7 +7982,7 @@ const v6_doc = [16]u8{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
 const dual_records = [_]dnsstub.Record{.{ .name = "svc.test", .a = .{ 127, 0, 0, 1 }, .aaaa = v6_doc }};
 
 test "an unroutable AAAA record ranks after a reachable A record under a name pattern [linux-dns]" {
-    if (dnsstub.routes6(v6_doc)) return error.SkipZigTest;
+    if (dnsstub.routes6(v6_doc)) return skip("this host routes the IPv6 documentation prefix", .{});
     var d: DnsCase = undefined;
     try d.init(@src(), &dual_records, &.{});
     defer d.deinit();
@@ -7977,7 +7990,7 @@ test "an unroutable AAAA record ranks after a reachable A record under a name pa
 }
 
 test "a UDP connect to a looked-up address is a probe, which can't send [linux-dns]" {
-    if (dnsstub.routes6(v6_doc)) return error.SkipZigTest;
+    if (dnsstub.routes6(v6_doc)) return skip("this host routes the IPv6 documentation prefix", .{});
     var d: DnsCase = undefined;
     try d.init(@src(), &dual_records, &.{});
     defer d.deinit();
@@ -8075,15 +8088,15 @@ test "--print shows the resolver caveat [linux-dns]" {
 // returns from its syscalls with IRET (tests/fixtures/linux/tls386.c).
 test "set_thread_area gives TLS entries 6 to 8, %fs keeps its own base, and IRET returns at ring 3 [linux-i386]" {
     try skipPending(@src().fn_name);
-    const h9 = getenv(0, "H9_TEST_BIN") orelse return error.SkipZigTest;
-    const fx = getenv(2, "H9_TEST_LINUX") orelse return error.SkipZigTest;
+    const h9 = getenv(0, "H9_TEST_BIN") orelse return skip("no h9 (H9_TEST_BIN)", .{});
+    const fx = getenv(2, "H9_TEST_LINUX") orelse return skip("no Linux fixtures (H9_TEST_LINUX)", .{});
     var fb: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const fixtures = try std.fmt.bufPrint(&fb, "{s}/386", .{fx});
-    std.Io.Dir.cwd().access(std.testing.io, try hostPath(fixtures, "tls386"), .{}) catch return error.SkipZigTest;
+    std.Io.Dir.cwd().access(std.testing.io, try hostPath(fixtures, "tls386"), .{}) catch return skip("no 386 Linux fixtures at {s}", .{fixtures});
     const p = try runProcessWith(&.{ h9, "--engine", "hcpu", "--arch", "386", "--cwd", fixtures, "/mnt/term/cwd/tls386" }, null, null, 60_000);
     defer gpa.free(p.stdout);
     defer gpa.free(p.stderr);
-    if (std.mem.indexOf(u8, p.stderr, "emulator isn't built") != null) return error.SkipZigTest;
+    if (std.mem.indexOf(u8, p.stderr, "emulator isn't built") != null) return skip("h9 was built without hcpu", .{});
     errdefer std.debug.print("stderr: {s}\n", .{p.stderr});
     try std.testing.expectEqualStrings("ok tls386\n", p.stdout);
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, p.term);
@@ -8091,16 +8104,16 @@ test "set_thread_area gives TLS entries 6 to 8, %fs keeps its own base, and IRET
 
 test "an Alpine x86 shell runs on the emulator, with TLS, signals, pipes, and fork (demo) [linux-i386]" {
     try skipPending(@src().fn_name);
-    const h9 = getenv(0, "H9_TEST_BIN") orelse return error.SkipZigTest;
-    const lr = getenv(3, "H9_TEST_LINUX_ROOT") orelse return error.SkipZigTest;
-    const fx = getenv(2, "H9_TEST_LINUX") orelse return error.SkipZigTest;
+    const h9 = getenv(0, "H9_TEST_BIN") orelse return skip("no h9 (H9_TEST_BIN)", .{});
+    const lr = getenv(3, "H9_TEST_LINUX_ROOT") orelse return skip("no Alpine roots (H9_TEST_LINUX_ROOT)", .{});
+    const fx = getenv(2, "H9_TEST_LINUX") orelse return skip("no Linux fixtures (H9_TEST_LINUX)", .{});
     var rb: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var fb: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var lb: [std.Io.Dir.max_path_bytes + 3]u8 = undefined;
     const root = try std.fmt.bufPrint(&rb, "{s}/alpine-386", .{lr});
     const fixtures = try std.fmt.bufPrint(&fb, "{s}/386", .{fx});
-    std.Io.Dir.cwd().access(std.testing.io, try hostPath(root, "etc/os-release"), .{}) catch return error.SkipZigTest;
-    std.Io.Dir.cwd().access(std.testing.io, try hostPath(fixtures, "threads"), .{}) catch return error.SkipZigTest;
+    std.Io.Dir.cwd().access(std.testing.io, try hostPath(root, "etc/os-release"), .{}) catch return skip("no Alpine root at {s} (scripts/fetch.sh alpine-386)", .{root});
+    std.Io.Dir.cwd().access(std.testing.io, try hostPath(fixtures, "threads"), .{}) catch return skip("no 386 Linux fixtures at {s}", .{fixtures});
     // busybox is a dynamic PIE, so the loader's TLS is set up through
     // set_thread_area; the trap runs a handler and returns through
     // sigreturn; the pipeline and $(...) fork; threads gives each thread
@@ -8114,7 +8127,7 @@ test "an Alpine x86 shell runs on the emulator, with TLS, signals, pipes, and fo
     const p = try runProcessWith(&.{ h9, "--engine", "hcpu", "--arch", "386", "--dir", try std.fmt.bufPrint(&lb, "{s}:#L", .{root}), "--cwd", fixtures, "/bin/sh", "-c", script }, null, null, 120_000);
     defer gpa.free(p.stdout);
     defer gpa.free(p.stderr);
-    if (std.mem.indexOf(u8, p.stderr, "emulator isn't built") != null) return error.SkipZigTest;
+    if (std.mem.indexOf(u8, p.stderr, "emulator isn't built") != null) return skip("h9 was built without hcpu", .{});
     errdefer std.debug.print("stderr: {s}\n", .{p.stderr});
     try std.testing.expectEqualStrings("i686\nusr1\n2\nok timed_tls\nok fork_thread\n", p.stdout);
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, p.term);
@@ -8249,7 +8262,7 @@ test "fsync reaches a .L server as Tfsync [file-interface]" {
     // with datasync, not a null wstat the translator turns into one.
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
-    if (le.nine == null) return error.SkipZigTest;
+    if (le.nine == null) return skipNoNine(&le);
     var d: DotlServer = undefined;
     try d.startShared(std.testing.io, dotlTree, "9P2000.L");
     defer d.finish(std.testing.io);
@@ -8265,7 +8278,7 @@ test "chmod, truncate, and utimensat on a .L mount are its Tsetattr, with nanose
     // wstat it used to send can't carry.
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
-    if (le.nine == null) return error.SkipZigTest;
+    if (le.nine == null) return skipNoNine(&le);
     var d: DotlServer = undefined;
     try d.startShared(std.testing.io, dotlTree, "9P2000.L");
     defer d.finish(std.testing.io);
@@ -8427,7 +8440,7 @@ test "a mode-0000 file in a host tree can have its times and mode set and be ren
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     // devfs-win32's host files have no Unix permission bits.
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.os.tag == .windows) return skip("not on Windows", .{});
     // In a writable host directory, where h9 changes the host file. Run
     // as root, the host lets h9 open the file anyway; as anyone else,
     // h9 mustn't need to open it.
@@ -8655,12 +8668,12 @@ test "Python's pty.spawn runs a command in a pty [linux-pty]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     // The workloads' root (scripts/fetch.sh workloads) has Python.
-    if (!std.mem.eql(u8, le.arch, "amd64")) return error.SkipZigTest;
-    const lr = getenv(3, "H9_TEST_LINUX_ROOT") orelse return error.SkipZigTest;
+    if (!std.mem.eql(u8, le.arch, "amd64")) return skip("amd64 only (-Darch=amd64)", .{});
+    const lr = getenv(3, "H9_TEST_LINUX_ROOT") orelse return skip("no Alpine roots (H9_TEST_LINUX_ROOT)", .{});
     var rb: [std.Io.Dir.max_path_bytes]u8 = undefined;
     le.root = try std.fmt.bufPrint(&rb, "{s}/workloads-amd64", .{lr});
     le.lmount = try std.fmt.bufPrint(&le.lbuf, "{s}:#L", .{le.root});
-    std.Io.Dir.cwd().access(std.testing.io, try hostPath(le.root, "usr/bin/python3"), .{}) catch return error.SkipZigTest;
+    std.Io.Dir.cwd().access(std.testing.io, try hostPath(le.root, "usr/bin/python3"), .{}) catch return skip("the Alpine root has no python3", .{});
     const r = try runLinux(&le, false, &.{ "python3", "-c", "import pty; pty.spawn([\"tty\"])" });
     defer r.deinit();
     errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
@@ -8986,7 +8999,7 @@ test "Go net/http server and client in one Linux program [linux-net]" {
 
 /// Skips unless the Linux Go fixtures were built.
 fn goLinux(le: *const LinuxEnv) !void {
-    std.Io.Dir.cwd().access(std.testing.io, try hostPath(le.fixtures, "go/goroutines"), .{}) catch return error.SkipZigTest;
+    std.Io.Dir.cwd().access(std.testing.io, try hostPath(le.fixtures, "go/goroutines"), .{}) catch return skip("no Linux Go fixtures (built when go is on PATH)", .{});
 }
 
 fn threadCase(le: *const LinuxEnv, name: []const u8) !void {
@@ -9027,7 +9040,7 @@ test "thread-local storage, timed waits and fork from a thread [linux-threads]" 
 }
 
 test "a Linux program's termios reaches the host terminal: echo off keeps lines, ICANON off is raw and keeps echo [linux-personality]" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest; // no termios to check
+    if (builtin.os.tag == .windows) return skip("not on Windows", .{}); // no termios to check
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     var it = std.mem.tokenizeScalar(u8, le.engines, ',');
@@ -9053,7 +9066,7 @@ test "a Linux program's termios reaches the host terminal: echo off keeps lines,
 }
 
 test "a Linux program in raw mode gets Enter as CR without ICRNL, polls with VMIN 0, and sees the terminal's size [linux-personality]" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest; // no termios to check
+    if (builtin.os.tag == .windows) return skip("not on Windows", .{}); // no termios to check
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     var it = std.mem.tokenizeScalar(u8, le.engines, ',');
@@ -9091,7 +9104,7 @@ test "Go linux binary starts goroutines and sleeps [linux-threads]" {
 }
 
 test "Go linux binary receives SIGINT through os/signal on Ctrl-C [linux-threads]" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest; // no pty
+    if (builtin.os.tag == .windows) return skip("not on Windows", .{}); // no pty
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try goLinux(&le);
@@ -9497,7 +9510,7 @@ test "a coroutine stack overflow panics instead of corrupting [browser-host]" {
     const e = try env(@src());
     // Coroutines are the web host's; native kernel processes are threads
     // with guard pages.
-    if (getenv(3, "H9_TEST_WEB") == null) return error.SkipZigTest;
+    if (getenv(3, "H9_TEST_WEB") == null) return skip("web host only (-Dweb)", .{});
     var it = engineList(e);
     while (it.next()) |engine| {
         // Every coroutine gets an 8 KiB stack, which running a command overflows.
@@ -9525,11 +9538,11 @@ fn needBuiltin(e: Env) !void {
     const v = try runProcess(&.{ e.h9, "--version" }, null);
     defer gpa.free(v.stdout);
     defer gpa.free(v.stderr);
-    const at = std.mem.indexOf(u8, v.stdout, "built-in root: ") orelse return error.SkipZigTest;
+    const at = std.mem.indexOf(u8, v.stdout, "built-in root: ") orelse return skip("h9 has no built-in root", .{});
     const line = v.stdout[at..(std.mem.indexOfScalarPos(u8, v.stdout, at, '\n') orelse v.stdout.len)];
     var it = std.mem.tokenizeAny(u8, line, " ,()");
     while (it.next()) |w| if (std.mem.eql(u8, w, testArch(e))) return;
-    return error.SkipZigTest;
+    return skip("the built-in root has no {s} commands (zig build slim -Darch={s})", .{ testArch(e), testArch(e) });
 }
 
 /// The environment without H9ROOT.
@@ -10255,7 +10268,7 @@ test "links and FIFOs are made in the layer [upper-layers]" {
 test "a link made without the symlink privilege is a WSL link h9 follows [upper-layers]" {
     // Windows only: H9_TEST_NOLINKPRIV makes h9 take the fallback an
     // unprivileged user's links take.
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    if (builtin.os.tag != .windows) return skip("Windows only", .{});
     var all: LinuxEnv = undefined;
     try linuxEnv(@src(), &all);
     var each = std.mem.tokenizeScalar(u8, all.engines, ',');
@@ -10283,7 +10296,7 @@ test "a link made without the symlink privilege is a WSL link h9 follows [upper-
 /// The reparse tag of path's own entry on Windows (FindFirstFileW's
 /// dwReserved0), or 0 if it has none.
 fn reparseTag(path: []const u8) !u32 {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    if (builtin.os.tag != .windows) return skip("Windows only", .{});
     const W = struct {
         const FindData = extern struct {
             attrs: u32,
@@ -10483,7 +10496,7 @@ test "up on a 9P2000.L mount keeps the layer on the server [upper-layers]" {
         const e = only(all, engine);
         // The web host has no TCP; "a port up layer takes the guest's
         // writes" is this case there.
-        if (onWeb()) return error.SkipZigTest;
+        if (onWeb()) return skip("not on the web host", .{});
         var d: Diod = undefined;
         try d.start("true");
         defer d.stop();
@@ -10712,7 +10725,7 @@ test "--ns replays a plan printed over the built-in root [builtin-root]" {
 test "--check passes with only the built-in root [builtin-root]" {
     const e = try env(@src());
     // --check runs the host's architecture.
-    if (e.arch != null) return error.SkipZigTest;
+    if (e.arch != null) return skip("--check runs the host's architecture, so not with -Darch", .{});
     try needBuiltin(e);
     const r = try runNoRoot(e, e.h9, &.{ "--builtin", "--check" });
     defer r.deinit();
@@ -10763,7 +10776,7 @@ test "a missing command names the built-in root in its error [builtin-root]" {
 /// The case's environment, skipped on Windows: the cases signal the server.
 fn serveEnv(comptime src: std.builtin.SourceLocation) !Env {
     const e = try env(src);
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.os.tag == .windows) return skip("not on Windows", .{});
     return e;
 }
 
@@ -11223,7 +11236,7 @@ test "the 33rd connection is refused [serve]" {
 
 test "--serve with no program serves until a hangup and exits 0 [serve]" {
     // It ends the server with SIGHUP, which Windows has no way to send.
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.os.tag == .windows) return skip("not on Windows", .{});
     const e = try serveEnv(@src());
     var s: Scratch = undefined;
     try serveScratch(&s);
@@ -11912,7 +11925,7 @@ test "an interrupt to the program leaves clients connected [serve]" {
 
 test "two runs on one stale unix socket: one listens, one exits 125 [serve]" {
     // It stops the winner with SIGTERM, which Windows has no way to send.
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.os.tag == .windows) return skip("not on Windows", .{});
     const e = try serveEnv(@src());
     var s: Scratch = undefined;
     try serveScratch(&s);
@@ -12347,7 +12360,7 @@ test "a 9P2000.L.Z mount moves to the next address when the server isn't the lea
 }
 
 test "a .L.Z unix socket root survives the server restarting mid-write [dotl]" {
-    if (!std.Io.net.has_unix_sockets or builtin.os.tag == .windows) return error.SkipZigTest;
+    if (!std.Io.net.has_unix_sockets or builtin.os.tag == .windows) return skip("needs unix sockets, and not on Windows", .{});
     const e = try env(@src());
     dotl_root_from = .{ .root = e.root, .arch = e.arch orelse switch (builtin.cpu.arch) {
         .aarch64 => "arm64",
@@ -12431,8 +12444,8 @@ const Diod = struct {
     /// should send.
     fn start(d: *Diod, setup: []const u8) !void {
         const io = std.testing.io;
-        const bin = getenv(5, "H9_TEST_DIOD") orelse return error.SkipZigTest;
-        std.Io.Dir.cwd().access(io, bin, .{}) catch return error.SkipZigTest;
+        const bin = getenv(5, "H9_TEST_DIOD") orelse return skip("no diod (H9_TEST_DIOD)", .{});
+        std.Io.Dir.cwd().access(io, bin, .{}) catch return skip("no diod at {s} (scripts/fetch.sh diod, x86-64 Linux only)", .{bin});
         try d.s.init();
         errdefer d.s.deinit();
         var script: std.ArrayList(u8) = .empty;
@@ -12687,8 +12700,8 @@ const ZeroFs = struct {
 
     fn start(z: *ZeroFs) !void {
         const io = std.testing.io;
-        const bin = getenv(5, "H9_TEST_ZEROFS") orelse return error.SkipZigTest;
-        std.Io.Dir.cwd().access(io, bin, .{}) catch return error.SkipZigTest;
+        const bin = getenv(5, "H9_TEST_ZEROFS") orelse return skip("no ZeroFS (H9_TEST_ZEROFS)", .{});
+        std.Io.Dir.cwd().access(io, bin, .{}) catch return skip("no ZeroFS at {s} (scripts/fetch.sh zerofs)", .{bin});
         try z.s.init();
         errdefer z.s.deinit();
         var probe = try listenLocal();
@@ -12927,7 +12940,7 @@ fn v9fsAsRoot() ?[]const u8 {
 test "Linux v9fs mounts --serve over a unix socket [dotl]" {
     const e = try serveEnv(@src());
     // Linux's own 9P client, as root: in the linux-kvm VM, for one.
-    const sudo = v9fsAsRoot() orelse return error.SkipZigTest;
+    const sudo = v9fsAsRoot() orelse return skip("mounting v9fs needs Linux and root or passwordless sudo", .{});
     var s: Scratch = undefined;
     try serveScratch(&s);
     defer s.deinit();
@@ -12980,7 +12993,7 @@ test "a .L client of --serve under --write=none gets EROFS [dotl]" {
 /// every run appends `get URL | <stdin's first line, or "-">` to
 /// `$d/name.log`.
 fn credHelper(s: *Scratch, name: []const u8, body: []const u8) ![]const u8 {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.os.tag == .windows) return skip("not on Windows", .{});
     var buf: [1024]u8 = undefined;
     const script = try std.fmt.bufPrint(&buf,
         \\#!/bin/sh

@@ -270,7 +270,12 @@ root tree through `h9` itself, checking output and exit codes.
 `zig build integration` splits the cases four ways by a hash of their names
 and runs the four parts at once, since the cases mostly wait on h9,
 terminals, and sockets; `-Dshards=N` picks another count, and `-Dshards=1`
-runs them in one process. `zig build test` likewise runs
+runs them in one process. Each part lists only its own cases to the build
+runner ([tests/runner.zig](tests/runner.zig), the integration cases' test
+runner), so a part's skips are cases that skipped, not the other parts'
+cases. A case that skips says why, and `-Dskips` prints each part's skipped
+cases grouped by reason, such as a missing root, fixture, or server, a
+proposal that isn't implemented, or an engine or host the case needs. `zig build test` likewise runs
 [src/engine/hcpu/hcpu.zig](src/engine/hcpu/hcpu.zig)'s tests as four binaries split by name.
 `zig build install-tests` installs both, built for `-Dtarget`, as
 `zig-out/bin/engine-tests` and `zig-out/bin/integration-tests`, to run in a
