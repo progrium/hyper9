@@ -282,6 +282,61 @@ fn escapePosix() !void {
     try std.testing.expect(inside > 0);
 }
 
+test "a tree's ancestors open O_PATH, for a look, and nothing outside it opens to read [host-handles]" {
+    // O_PATH is Linux's. The case is for musl's O_ACCMODE, which has
+    // O_PATH in it and once made every ancestor's look fail (issue 351):
+    // zig build test -Dtarget=x86_64-linux-musl runs it there.
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    const kern = @import("../kern.zig");
+    const policy = @import("../policy.zig");
+    if (!kern.available) return error.SkipZigTest;
+    var ar: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer ar.deinit();
+    const a = ar.allocator();
+    // T/tree/file is inside, T/out/file outside, and T an ancestor.
+    const top = try std.fmt.allocPrintSentinel(a, "/tmp/h9-lookonly-{d}", .{std.c.getpid()}, 0);
+    var p: [4][512]u8 = undefined;
+    const tree = Escape.z(&p[0], "{s}/tree", .{top});
+    const out = Escape.z(&p[1], "{s}/out", .{top});
+    const in_file = Escape.z(&p[2], "{s}/tree/file", .{top});
+    const out_file = Escape.z(&p[3], "{s}/out/file", .{top});
+    for ([_][*:0]const u8{ top, tree, out }) |d| _ = std.c.mkdir(d, 0o755);
+    try writeFile(in_file, "inside");
+    try writeFile(out_file, "outside");
+    defer {
+        _ = std.c.unlink(in_file);
+        _ = std.c.unlink(out_file);
+        for ([_][*:0]const u8{ tree, out, top }) |d| _ = std.c.rmdir(d);
+    }
+
+    var msg: []const u8 = "";
+    const tree_s = std.mem.span(tree);
+    var plan = try policy.compile(a, .{ .mounts = &.{}, .cwd = null, .arch = .amd64 }, .{ .readable = &.{tree_s} }, &msg);
+    const h = try host.fromPlan(a, std.testing.io, &plan, .{ .open_dirs = true });
+    defer host.closeDirs(h);
+    plan.host = &h;
+    kern.setPlan(&plan);
+    defer kern.setPlan(null);
+
+    for ([_]c_int{ 0, 1 }) |nolinks| {
+        // A look at an ancestor: what a stat of it, or a walk through it
+        // to the tree, opens.
+        for ([_]std.c.O{ .{ .PATH = true }, .{ .PATH = true, .DIRECTORY = true }, .{ .DIRECTORY = true } }) |o| {
+            const fd = h9_host_open(top, @bitCast(o), 0, nolinks);
+            try std.testing.expect(fd >= 0);
+            _ = std.c.close(fd);
+        }
+        const fd = h9_host_open(in_file, @bitCast(std.c.O{ .ACCMODE = .RDONLY }), 0, nolinks);
+        try std.testing.expect(fd >= 0);
+        var buf: [16]u8 = undefined;
+        const k = std.c.read(fd, &buf, buf.len);
+        _ = std.c.close(fd);
+        try std.testing.expectEqualStrings("inside", buf[0..@intCast(@max(k, 0))]);
+        // Not a look: a file outside the tree, to read.
+        try std.testing.expect(h9_host_open(out_file, @bitCast(std.c.O{ .ACCMODE = .RDONLY }), 0, nolinks) < 0);
+    }
+}
+
 // Windows: the same swap, with a directory symbolic link (which needs
 // Developer Mode or the privilege to make; without it the case skips),
 // opened through devfs-win32's CreateFile (src/host/dirs.c).

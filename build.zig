@@ -590,6 +590,10 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.O
         .linkage = .static,
         .root_module = kernPort(b, target, optimize, flags, gfx != .none),
     });
+    // Position-independent for libh9, a shared library, which links it
+    // too: glibc's targets are by default, but musl's link statically,
+    // so theirs aren't.
+    if (target.result.isMuslLibC()) kern.root_module.pic = true;
     kern.root_module.addIncludePath(b.path(drawterm));
     kern.root_module.addIncludePath(b.path(drawterm ++ "/include"));
     kern.root_module.addIncludePath(b.path(drawterm ++ "/kern"));
@@ -2115,6 +2119,9 @@ pub fn build(b: *std.Build) void {
     b.step("libh9-example", "Build docs/embedding/hello.c, libh9 from C, as zig-out/bin/libh9-hello").dependOn(&b.addInstallArtifact(libh9_example, .{}).step);
     if (emu != .none and runs_here) {
         const run_c = b.addRunArtifact(libh9_example);
+        // A musl build's loader is /lib/ld-musl-*.so.1, which a glibc host
+        // hasn't: it's skipped there.
+        run_c.skip_foreign_checks = true;
         run_c.addFileArg(host_hello);
         run_c.addArgs(&.{ "--engine", "hcpu" });
         run_c.addCheck(.{ .expect_stdout_match = "engine hcpu, arch " });
