@@ -103,6 +103,23 @@ jobs:
           zig fetch --save=h9 "$RUNNER_TEMP/h9.tar.gz"
           zig build
 
+  # h9 built for musl, static, as the Linux releases are (scripts/release.sh):
+  # a glibc build doesn't show what musl's headers and flags change (issue
+  # 351). The arm64 build is only compiled. On amd64, the unit and engine
+  # cases, then the Linux integration cases on sud, in the Alpine root.
+  musl:
+    if: github.event_name == 'workflow_dispatch' || !startsWith(github.head_ref, 'claude/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+      - run: zig build -Dtarget=aarch64-linux-musl --prefix "$RUNNER_TEMP/arm64"
+      - run: zig build test -Dtarget=x86_64-linux-musl
+      - run: scripts/fetch.sh alpine-amd64
+      - run: zig build integration -Dtarget=x86_64-linux-musl -Darch=amd64 -Dengines=sud -Dfilter=linux
+
   # The integration cases on KVM, with the amd64 root unpacked from the
   # release's ISO (tools/isoroot.zig), as pages does for 386, instead of
   # mkroot's QEMU boot.
