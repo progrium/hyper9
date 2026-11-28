@@ -7241,6 +7241,10 @@ test "a fork of a process with 600 MB of written heap runs under --memory 1g, an
     try cowFork(@src(), &.{ "--memory", "1g", "/mnt/term/cwd/cowfork", "big" }, "ok big\n");
 }
 
+test "threads writing shared pages while another thread forks lose none of their writes [cow-fork]" {
+    try cowFork(@src(), &.{ "/mnt/term/cwd/cowfork", "racewrite" }, "ok racewrite\n");
+}
+
 test "after fork, a read() into a buffer, a write from another thread, and a futex word change stay in the process that made them [cow-fork]" {
     try cowFork(@src(), &.{ "/mnt/term/cwd/cowfork", "isolate" }, "ok isolate\n");
 }

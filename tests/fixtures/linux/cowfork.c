@@ -26,6 +26,10 @@
  *             bytes, and the child reads the written ones in its copy
  *   maps      /proc/self/maps shows each file mapping, the segments of
  *             this program included, as one line, not in pieces
+ *   racewrite threads writing their own words of shared pages while
+ *             another thread forks keep every write: none comes back
+ *             older, as when a thread's fault copied a chunk while
+ *             another still wrote the old pages through a stale TLB
  *   hold      (for txtbsy) says "r" on stdout and waits for stdin's end
  */
 #define _GNU_SOURCE
@@ -36,6 +40,7 @@
 #include <setjmp.h>
 #include <signal.h>
 #include <stdatomic.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -536,6 +541,49 @@ static void privwrite(void) {
 	printf("ok privwrite\n");
 }
 
+/* racewrite: word w of `rw_buf` belongs to thread w % RW_THREADS, which
+ * checks its words still hold what it last wrote before writing the next
+ * value; the main thread forks meanwhile. */
+enum { RW_THREADS = 6, RW_WORDS = MB / 8, RW_STRIDE = RW_THREADS * 64 };
+static uint64_t *rw_buf;
+static atomic_int rw_stop;
+static atomic_long rw_lost, rw_rounds;
+
+static void *rw_thread(void *arg) {
+	long t = (long)arg;
+	uint64_t gen = 0;
+	while (!atomic_load(&rw_stop)) {
+		for (long w = t; w < RW_WORDS; w += RW_STRIDE)
+			if (rw_buf[w] != gen) atomic_fetch_add(&rw_lost, 1);
+		gen++;
+		for (long w = t; w < RW_WORDS; w += RW_STRIDE)
+			rw_buf[w] = gen;
+		atomic_fetch_add(&rw_rounds, 1);
+	}
+	return NULL;
+}
+
+static void racewrite(void) {
+	rw_buf = mmap(NULL, MB, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	CHECK("racewrite", rw_buf != MAP_FAILED);
+	memset(rw_buf, 0, MB);
+	pthread_t th[RW_THREADS];
+	for (long i = 0; i < RW_THREADS; i++)
+		CHECK("racewrite", pthread_create(&th[i], NULL, rw_thread, (void *)i) == 0);
+	for (int i = 0; i < 1500; i++) {
+		pid_t c = fork();
+		if (c == 0)
+			_exit(0);
+		CHECK("racewrite", c > 0 && waitpid(c, NULL, 0) == c);
+	}
+	atomic_store(&rw_stop, 1);
+	for (int i = 0; i < RW_THREADS; i++)
+		pthread_join(th[i], NULL);
+	CHECK("racewrite", atomic_load(&rw_rounds) > 0);
+	CHECK("racewrite", atomic_load(&rw_lost) == 0);
+	printf("ok racewrite\n");
+}
+
 int main(int argc, char **argv) {
 	setvbuf(stdout, NULL, _IOLBF, 0);
 	for (int i = 1; i < argc; i++) {
@@ -562,6 +610,8 @@ int main(int argc, char **argv) {
 			holes();
 		else if (!strcmp(a, "privwrite"))
 			privwrite();
+		else if (!strcmp(a, "racewrite"))
+			racewrite();
 		else {
 			printf("FAIL %s: no such case\n", a);
 			failed = 1;
