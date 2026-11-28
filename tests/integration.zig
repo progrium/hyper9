@@ -8549,6 +8549,18 @@ test "CPUID shows no AVX feature in any leaf where it hides AVX, as Zig reads it
     try netCase(&le, &.{ "/mnt/term/cwd/files", "cpuid_avx" }, "ok cpuid_avx\n");
 }
 
+test "setrlimit and prlimit keep limits per process, on another process too, and a fork inherits them [linux-personality]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "rlimits" }, "ok rlimits\n");
+}
+
+test "trailing slashes, NAME_MAX, ., dangling links, directory reads, links of links, epoll, and utimensat nanoseconds answer as Linux's in the overlay [linux-personality]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "path_edges" }, "ok path_edges\n");
+}
+
 test "INT3 or BRK raises SIGTRAP, and the handler returns past it [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);

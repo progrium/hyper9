@@ -860,6 +860,9 @@ fn followlink(ch: *Chan, path: *Path, names: [*]const [*:0]const u8, k: c_int, r
         kstrcpy(up().errstr, &port.Enonexist, port.ERRMAX);
         return null;
     }
+    // A target ending in a slash names a directory, as Linux's do:
+    // a link to "file/" is ENOTDIR.
+    const trail = buf[@intCast(n - 1)] == '/';
     // The names to walk: the link's directory's (if relative), the
     // target's, and the rest.
     const abs = buf[0] == '/';
@@ -913,6 +916,11 @@ fn followlink(ch: *Chan, path: *Path, names: [*]const [*:0]const u8, k: c_int, r
     const r = try walkl(&s, nn, @intCast(nnn), nomount, null, follow, nlinks);
     if (r < 0) {
         cclose(s);
+        return null;
+    }
+    if (trail and nrest == 0 and (s.qid.type & c.QTDIR) == 0) {
+        cclose(s);
+        kstrcpy(up().errstr, &port.Enotdir, port.ERRMAX);
         return null;
     }
     return s;

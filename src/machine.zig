@@ -3007,6 +3007,7 @@ pub const Machine = struct {
             old.put();
             p.dbg_lock.unlock();
             l.sig.execReset();
+            l.keepcaps = false;
             l.execFds();
             l.vdso = prog.vdso;
         } else {
@@ -3020,7 +3021,7 @@ pub const Machine = struct {
                 .arch = m.arch,
                 .pid = p.pid,
                 .mm = prog.mm,
-                .host = .{ .ctx = j, .kill = linuxKill, .pgidOf = linuxPgid },
+                .host = .{ .ctx = j, .kill = linuxKill, .pgidOf = linuxPgid, .prlimitOf = linuxPrlimit },
                 .pgid = p.pid,
                 .sid = p.pid,
                 .hwcap = lexec.hwcap(m.arch, m.engine),
@@ -3854,6 +3855,17 @@ pub const Machine = struct {
         defer j.lock.unlock();
         for (j.procs.items) |q| if (q.pid == pid) return if (q.lx) |ql| ql.pgid else q.pid;
         return null;
+    }
+
+    fn linuxPrlimit(ctx: *anyopaque, pid: u32, res: u32, new: ?[2]u64, old: *[2]u64) i64 {
+        const j: *Job = @ptrCast(@alignCast(ctx));
+        j.lockSpin();
+        defer j.lock.unlock();
+        for (j.procs.items) |q| if (q.pid == pid) {
+            const ql = q.lx orelse return -attr.E.PERM;
+            return ql.limit(res, new, old);
+        };
+        return -attr.E.SRCH;
     }
 
     /// rfork. With RF.PROC, starts a child that resumes from `u` with 0
