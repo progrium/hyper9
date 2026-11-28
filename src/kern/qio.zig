@@ -1125,6 +1125,50 @@ pub fn qiwrite(q: *Queue, vp: [*]const u8, len: c_int) c_int {
     return sofar;
 }
 
+/// h9: the bytes a write could add to q now without passing its limit,
+/// 0 when it's full or closed.
+pub fn qroom(q: *Queue) c_int {
+    c.ilock(&q.lk);
+    defer c.iunlock(&q.lk);
+    if (q.state & Qclosed != 0) return 0;
+    return @max(q.limit - @as(c_int, @bitCast(q.wp -% q.rp)), 0);
+}
+
+/// h9: an O_NONBLOCK write (src/abi/linux/sys.zig): queues as much of
+/// vp as fits under the limit now and never waits for the reader. The
+/// bytes queued, 0 if none fit (or, for a write of at most `atomic`
+/// bytes, if not all of it fits), or -1 if the queue is closed, for the
+/// caller's ordinary write to fail as a closed pipe's does. The limit
+/// can be passed by a block's overhead, and by two writers at once.
+pub fn qtrywrite(q: *Queue, vp: [*]const u8, len: c_int, atomic: c_int) c_int {
+    assert(len >= 0);
+    var sofar: c_int = 0;
+    while (sofar < len) {
+        c.ilock(&q.lk);
+        const closed = q.state & Qclosed != 0;
+        const room = q.limit - @as(c_int, @bitCast(q.wp -% q.rp));
+        c.iunlock(&q.lk);
+        if (closed) return if (sofar > 0) sofar else -1;
+        if (room <= 0) break;
+        var n = @min(len - sofar, room, Maxatomic);
+        if (sofar == 0 and len <= atomic and n < len) return 0;
+        const b = allocb(n);
+        const k: usize = @intCast(n);
+        @memmove(b.wp[0..k], (vp + @as(usize, @intCast(sofar)))[0..k]);
+        b.wp += k;
+        c.ilock(&q.lk);
+        if (q.state & Qclosed != 0) {
+            c.iunlock(&q.lk);
+            freeb(b);
+            return if (sofar > 0) sofar else -1;
+        }
+        n = qaddlist(q, b);
+        _ = iunlock_writer(q);
+        sofar += n;
+    }
+    return sofar;
+}
+
 /// Throw away the next `len` bytes in the queue.
 pub fn qdiscard(q: *Queue, len: c_int) c_int {
     var tofree: ?*Block = null;

@@ -197,6 +197,10 @@ pub fn noteSignal(msg: []const u8) ?NoteSignal {
         }
         return .{ .signo = SIGSEGV, .info = info };
     }
+    // An INT3 or a BRK (machine.zig posts it for every engine's
+    // breakpoint exit): Linux's SIGTRAP, with x86's si_code for INT3. Go's
+    // runtime injects calls for a debugger with one (TestDebugCall).
+    if (starts(u8, msg, "sys: breakpoint")) return .{ .signo = SIGTRAP, .info = .{ .code = SI_KERNEL } };
     if (starts(u8, msg, "sys: trap: illegal instruction")) return .{ .signo = SIGILL, .info = .{ .code = 1 } };
     if (starts(u8, msg, "sys: trap: divide error") or starts(u8, msg, "sys: fp:")) return .{ .signo = SIGFPE, .info = .{ .code = 1 } };
     if (starts(u8, msg, "sys: trap: misaligned") or starts(u8, msg, "sys: trap: alignment")) return .{ .signo = SIGBUS, .info = .{ .code = 1 } };
@@ -660,6 +664,7 @@ test "note signals" {
     const f = noteSignal("sys: trap: fault read addr=0x1234 pc=0x5").?;
     try std.testing.expectEqual(@as(u8, SIGSEGV), f.signo);
     try std.testing.expectEqual(@as(u64, 0x1234), f.info.addr);
+    try std.testing.expectEqual(@as(u8, SIGTRAP), noteSignal("sys: breakpoint").?.signo);
     try std.testing.expect(noteSignal("something else") == null);
     var s: State = .{};
     try std.testing.expect(!s.post(SIGCHLD, .{}));
