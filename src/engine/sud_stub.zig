@@ -442,6 +442,21 @@ fn saveRegs(ctl: *volatile abi.Ctl, k: usize, mc: *const Mcontext) void {
         @memcpy(@volatileCast(&ctl.fx), fp[0..abi.fx_len]);
         const magic = std.mem.readInt(u32, fp[464..468], .little);
         ctl.xstate_bv = if (magic == FP_XSTATE_MAGIC1) std.mem.readInt(u64, fp[512..520], .little) else 3;
+        // The XSAVE state past the FXSAVE image goes with the vCPU: to
+        // the next stub thread it runs on, and into a guest signal
+        // frame, so a handler's AVX doesn't leak into what it
+        // interrupted. Components in their initial state aren't copied.
+        const n = xsLen(fp);
+        ctl.xlen = n;
+        if (n > 0) {
+            ctl.xfeatures = std.mem.readInt(u64, fp[472..480], .little);
+            const xs = @volatileCast(&ctl.xs);
+            if (ctl.xstate_bv & ~@as(u64, 3) != 0) {
+                @memcpy(xs[0..n], fp[512..][0..n]);
+            } else {
+                @memcpy(xs[0..64], fp[512..576]);
+            }
+        }
     }
     var fs: u64 = 0;
     _ = sys(.arch_prctl, ARCH_GET_FS, @intFromPtr(&fs), 0, 0, 0, 0);
@@ -479,6 +494,17 @@ fn loadRegs(ctl: *volatile abi.Ctl, k: usize, mc: *Mcontext) void {
         const mxcsr = std.mem.readInt(u32, fp[24..28], .little);
         std.mem.writeInt(u32, fp[24..28], mxcsr & 0xffff, .little);
         if (std.mem.readInt(u32, fp[464..468], .little) == FP_XSTATE_MAGIC1) {
+            const n = xsLen(fp);
+            if (n > 0 and ctl.xlen == n) {
+                const xs = @volatileCast(&ctl.xs);
+                const bv = std.mem.readInt(u64, xs[0..8], .little);
+                // The header's reserved bytes must be zero, and its
+                // features the frame's, or rt_sigreturn fails.
+                @memset(fp[520..576], 0);
+                const feat = std.mem.readInt(u64, fp[472..480], .little);
+                std.mem.writeInt(u64, fp[512..520], bv & feat, .little);
+                if (bv & ~@as(u64, 3) != 0) @memcpy(fp[576..][0 .. n - 64], xs[64..n]);
+            }
             // x87 and SSE come from the image, not their initial state.
             const bv = std.mem.readInt(u64, fp[512..520], .little);
             std.mem.writeInt(u64, fp[512..520], bv | 3, .little);
@@ -492,6 +518,16 @@ fn loadRegs(ctl: *volatile abi.Ctl, k: usize, mc: *Mcontext) void {
         gs_bases[k] = ctl.gs_base;
         _ = sys(.arch_prctl, ARCH_SET_GS, gs_bases[k], 0, 0, 0, 0);
     }
+}
+
+/// How many bytes of the frame's XSAVE state past the FXSAVE image fit
+/// in `Ctl.xs`: none without the XSAVE marker, or if it's bigger than
+/// `xs` holds (AMX's tiles), so that state then stays with the thread.
+fn xsLen(fp: [*]u8) u32 {
+    if (std.mem.readInt(u32, fp[464..468], .little) != FP_XSTATE_MAGIC1) return 0;
+    const size = std.mem.readInt(u32, fp[480..484], .little);
+    if (size < 576 or size - 512 > abi.xs_max) return 0;
+    return size - 512;
 }
 
 fn handler(sig: i32, info: *const Siginfo, ucp: *anyopaque) callconv(.c) void {

@@ -293,9 +293,26 @@ pub const X86Extra = struct {
     /// entries set_thread_area has given out (bit 0 is entry 6).
     tls_more: [2]u64 = @splat(0),
     tls_used: u8 = 0,
+    /// XSAVE's state past the FXSAVE image, as Linux's signal frames
+    /// hold it: the header (XSTATE_BV first) and the components after
+    /// it, AVX's and AVX-512's registers, in XSAVE's standard layout from
+    /// byte 512. Only the engine that runs guest code with AVX on (sud)
+    /// fills it, and its first `xlen` bytes are what it carries; the
+    /// others hide AVX, and leave `xlen` 0.
+    xs: [xs_max]u8 align(64) = @splat(0),
+    xlen: u32 = 0,
+    /// The components the host saves, XSAVE's feature bits: what a
+    /// header taken back from a guest's signal frame may set.
+    xfeatures: u64 = 0,
 
     pub const init: X86Extra = .{ .fx = .{ .fcw = 0x037f, .mxcsr = 0x1f80 } };
 };
+
+/// The most of XSAVE's state past FXSAVE's that `X86Extra` carries:
+/// enough for AVX-512, PKRU and AMX's tile configuration (Linux's
+/// 2816-byte frame on a Sapphire Rapids host), not AMX's tile data,
+/// which a process gets only by asking (arch_prctl).
+pub const xs_max = 2816 - 512;
 
 /// The 512-byte FXSAVE area (Intel SDM vol. 1, 10.5.1), 16-byte aligned,
 /// in the 64-bit layout: on 386, FXSAVE's FPU IP and DP fields are 32-bit
