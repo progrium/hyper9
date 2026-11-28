@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -650,6 +651,52 @@ static void kill_unstarted(void) {
 	printf("ok kill_unstarted\n");
 }
 
+/* Threads share the working directory, as CLONE_FS has it: a chdir or
+ * fchdir in one moves them all. Erlang's file server changes directory in
+ * one thread and Mix compiles relative paths in another. */
+static char cwd_top[64];
+static void *cwd_chdir(void *arg) {
+	return (void *)(long)chdir((const char *)arg);
+}
+static void *cwd_fchdir(void *arg) {
+	int fd = open((const char *)arg, O_RDONLY | O_DIRECTORY);
+	long r = fd < 0 ? -1 : fchdir(fd);
+	if (fd >= 0) close(fd);
+	return (void *)r;
+}
+static void *cwd_check(void *arg) {
+	char b[256];
+	if (!getcwd(b, sizeof b) || strcmp(b, (const char *)arg) != 0) return (void *)1L;
+	int fd = open("sub/f", O_RDONLY);
+	if (fd < 0) return (void *)2L;
+	close(fd);
+	return 0;
+}
+static void cwd_threads(void) {
+	snprintf(cwd_top, sizeof cwd_top, "/tmp/cwd_threads.%d", getpid());
+	char sub[96], f[128], b[256];
+	snprintf(sub, sizeof sub, "%s/sub", cwd_top);
+	snprintf(f, sizeof f, "%s/f", sub);
+	CHECK("cwd_threads", mkdir(cwd_top, 0755) == 0 && mkdir(sub, 0755) == 0);
+	int fd = open(f, O_CREAT | O_WRONLY, 0644);
+	CHECK("cwd_threads", fd >= 0 && close(fd) == 0 && chdir(cwd_top) == 0);
+	pthread_t t;
+	void *r;
+	/* A thread's chdir moves this one. */
+	CHECK("cwd_threads", pthread_create(&t, 0, cwd_chdir, "sub") == 0 && pthread_join(t, &r) == 0 && r == 0);
+	CHECK("cwd_threads", getcwd(b, sizeof b) && strcmp(b, sub) == 0);
+	fd = open("f", O_RDONLY);
+	CHECK("cwd_threads", fd >= 0 && close(fd) == 0);
+	/* This one's chdir moves a thread made before it. */
+	CHECK("cwd_threads", chdir("..") == 0);
+	CHECK("cwd_threads", pthread_create(&t, 0, cwd_check, cwd_top) == 0 && pthread_join(t, &r) == 0 && r == 0);
+	/* And a thread's fchdir moves this one. */
+	CHECK("cwd_threads", pthread_create(&t, 0, cwd_fchdir, sub) == 0 && pthread_join(t, &r) == 0 && r == 0);
+	CHECK("cwd_threads", getcwd(b, sizeof b) && strcmp(b, sub) == 0);
+	CHECK("cwd_threads", chdir("/") == 0 && unlink(f) == 0 && rmdir(sub) == 0 && rmdir(cwd_top) == 0);
+	printf("ok cwd_threads\n");
+}
+
 int main(int argc, char **argv) {
 	setvbuf(stdout, 0, _IONBF, 0);
 	for (int i = 1; i < argc; i++) {
@@ -671,6 +718,7 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "kill_unstarted")) kill_unstarted();
 		if (all || !strcmp(n, "pipe_intr")) pipe_intr();
 		if (all || !strcmp(n, "getdents_threads")) getdents_threads();
+		if (all || !strcmp(n, "cwd_threads")) cwd_threads();
 		if (!strcmp(n, "exit_main")) exit_main();
 		if (!strcmp(n, "exit_thread")) exit_thread();
 		if (!strcmp(n, "exec_thread")) exec_thread(argv);

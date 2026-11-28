@@ -612,6 +612,7 @@ fn resolveMount(arena: std.mem.Allocator, io: std.Io, given: h9.Machine.Mount) M
             // An archive is read from the host, as is; a tree is bound
             // through #U, which takes Windows paths as /C:/a/b.
             m.src = if (m.kind == .archive) real else kernPath(arena, real);
+            if (m.kind == .dir) m.file = if (std.Io.Dir.cwd().statFile(io, real, .{})) |st| st.kind != .directory else |_| false;
         },
         .url => {
             // A page's port (design/epoch-0/port-streams.md): only the web host

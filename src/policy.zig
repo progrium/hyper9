@@ -749,14 +749,14 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     var stack_n = [2]usize{ 0, 0 };
     for (in.mounts) |m| if (m.stack()) |st| {
         stack_n[@intFromEnum(st[0])] += 1;
-        if ((m.access == .rw or m.access == .up) and can_write and !eph) stack_rw[@intFromEnum(st[0])] = true;
+        if ((m.access == .rw or m.access == .up) and can_write and !eph and !m.file) stack_rw[@intFromEnum(st[0])] = true;
         // A 9P server decides what's writable under --write=scope, as
         // before (design/epoch-0/ninep-roots.md).
         if ((m.kind == .url or m.kind == .fd) and write == .scope and m.access != .ro) stack_rw[@intFromEnum(st[0])] = true;
     };
     // `--writable` on a stack's host directory makes it write the host,
     // as `--writable "$H9ROOT"` did before.
-    for (in.mounts) |m| if (m.stack()) |st| if (m.kind == .dir and hostWritable(pol.writable, m.src, can_write and !eph)) {
+    for (in.mounts) |m| if (m.stack()) |st| if (m.kind == .dir and !m.file and hostWritable(pol.writable, m.src, can_write and !eph)) {
         stack_rw[@intFromEnum(st[0])] = true;
     };
     const overlay_mode = write == .overlay or eph;

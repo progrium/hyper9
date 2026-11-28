@@ -239,6 +239,14 @@ pub const Group = struct {
     /// reaped (getrusage's RUSAGE_SELF and RUSAGE_CHILDREN).
     cpu_ended: cputime.Times = .{},
     cpu_children: cputime.Times = .{},
+    /// The working directory a member last changed to, as a clone
+    /// (kc.dotGet), and how many times one has. Linux's threads share it
+    /// (CLONE_FS) and h9's are processes with their own, so each member
+    /// takes it at its next call when its own `dot_gen` is behind
+    /// (`syncDot`): Erlang's file server changes directory in one thread
+    /// and Mix compiles relative paths in another.
+    dot: ?*anyopaque = null,
+    dot_gen: std.atomic.Value(u32) = .init(0),
 
     pub const End = struct { msg: []const u8, killed: bool };
 
@@ -247,6 +255,7 @@ pub const Group = struct {
     }
 
     fn destroy(g: *Group) void {
+        if (g.dot) |d| kc.chanPut(d);
         var it = g.dirbufs.valueIterator();
         while (it.next()) |b| freeDirBuf(g.gpa, b.*);
         g.dirbufs.deinit(g.gpa);
@@ -385,6 +394,8 @@ pub const Process = struct {
     /// The thread group: what the process's threads share. Set by
     /// `newGroup`, `forkChild` and `threadChild`.
     g: *Group = undefined,
+    /// The group's `dot_gen` this thread's working directory is from.
+    dot_gen: u32 = 0,
     /// set_robust_list's head, walked at thread exit.
     robust_list: u64 = 0,
     /// Set by exit (not exit_group): only this thread ends.
@@ -448,6 +459,39 @@ pub const Process = struct {
         return p.g.tgid;
     }
 
+    /// Records the working directory the calling thread just changed to
+    /// as the group's, for the other members' next calls.
+    fn shareDot(p: *Process) void {
+        const g = p.g;
+        // Alone, it has no one to share with; a thread it makes later
+        // starts in its directory.
+        if (@atomicLoad(usize, &g.members.items.len, .monotonic) <= 1) return;
+        const d = kc.dotGet() orelse return;
+        g.lockSpin();
+        const old = g.dot;
+        g.dot = d;
+        p.dot_gen = g.dot_gen.load(.monotonic) +% 1;
+        g.dot_gen.store(p.dot_gen, .release);
+        g.lock.unlock();
+        if (old) |o| kc.chanPut(o);
+    }
+
+    /// Takes the group's working directory if another member changed it
+    /// since this thread last did or took it.
+    fn syncDot(p: *Process) void {
+        const g = p.g;
+        if (g.dot_gen.load(.acquire) == p.dot_gen) return;
+        g.lockSpin();
+        const gen = g.dot_gen.load(.monotonic);
+        const d = g.dot;
+        if (d) |x| kc.chanRef(x);
+        g.lock.unlock();
+        p.dot_gen = gen;
+        const x = d orelse return;
+        defer kc.chanPut(x);
+        kc.setDot(x) catch {};
+    }
+
     pub fn isLeader(p: *const Process) bool {
         return p.pid == p.g.tgid;
     }
@@ -463,6 +507,8 @@ pub const Process = struct {
         c.exe_len = p.exe_len;
         _ = p.g.refs.fetchAdd(1, .acq_rel);
         c.g = p.g;
+        // The kernel's fork gave it the creator's directory.
+        c.dot_gen = p.dot_gen;
         return c;
     }
 
@@ -831,6 +877,7 @@ pub fn dispatch(p: *Process, u: *const engine.Ureg) Outcome {
     vclock.tick();
     var c = Call.of(u);
     p.restart = null;
+    p.syncDot();
     var s = lookup(p.arch, c.nr) orelse {
         p.traceLine("syscall {d} = -ENOSYS (unknown)", .{c.nr});
         return ret(-E.NOSYS);
@@ -1086,9 +1133,15 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const engine.Ureg) Err!Outcome {
         .chdir => {
             const path = try p.string(c.a[0], &p.name_buf);
             if (path.len == 0) return ret(-E.NOENT);
-            return okOr(kern.chdir(path));
+            kern.chdir(path) catch return ret(kerr());
+            p.shareDot();
+            return ret(0);
         },
-        .fchdir => return okOr(kc.fchdir(c.int(0))),
+        .fchdir => {
+            kc.fchdir(c.int(0)) catch return ret(kerr());
+            p.shareDot();
+            return ret(0);
+        },
         .readlinkat => return ret(try readlink(p, c.int(0), c.a[1], c.a[2], c.a[3])),
         .readlink => return ret(try readlink(p, AT_FDCWD, c.a[0], c.a[1], c.a[2])),
         .statfs, .fstatfs => {
