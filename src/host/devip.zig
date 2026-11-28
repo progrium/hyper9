@@ -470,7 +470,12 @@ fn setladdr(cv: *Conv) Error!void {
 }
 
 fn mksocket(cv: *Conv, addr: *[IPaddrlen]u8) Error!void {
-    if (cv.sfd == -1) cv.sfd = try dev.raising(&h9so_socket, .{ cv.p.stype, addr, &cv.opts }); // with its options
+    if (cv.sfd != -1) return;
+    cv.sfd = try dev.raising(&h9so_socket, .{ cv.p.stype, addr, &cv.opts }); // with its options
+    // A poll or a blocked recv waiting on the conversation before it had
+    // a socket watches nothing on the host: have it look again, and
+    // watch this one.
+    linuxnet.h9_pollwake();
 }
 
 fn setlport(cv: *Conv) Error!void {

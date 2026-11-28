@@ -207,9 +207,17 @@ fn again(r: c_int) c_int {
 /// devip's readiness (src/host/devip.zig's ready): a conversation's host
 /// socket's, and always for the rest.
 pub fn ipready(ch: *Chan, ev: c_int) c_int {
-    const s = h9_ip_sfd(ch, null);
-    if (s < 0)
+    var udp: c_int = 0;
+    const s = h9_ip_sfd(ch, &udp);
+    if (s < 0) {
+        // A datagram socket that has no host socket yet (unbound, or
+        // bound to any port) has nothing to read until it sends or
+        // connects, as Linux's has nothing until a datagram comes: it's
+        // writable only. Erlang's resolver, polling its fresh UDP socket,
+        // read ENOTCONN and gave up on the lookup.
+        if (udp != 0) return ev & rd.Out;
         return dev.readydefault(ev); // not a conversation, or no socket yet
+    }
     return h9so_ready(s, ev | rd.Err | rd.Hup);
 }
 
@@ -608,8 +616,10 @@ fn h9_linux_sockrecv(fd: c_int, buf: ?*anyopaque, n: c_int, peek: c_int, dontwai
     }
     var udp: c_int = 0;
     const s = sockof(fd, &udp) catch return -9; // EBADF
+    // A datagram socket without a host socket has nothing queued yet;
+    // a stream socket's isn't connected.
     if (s < 0)
-        return -107; // ENOTCONN
+        return if (udp != 0) -11 else -107; // EAGAIN, ENOTCONN
     const m = again(h9so_recvfrom(s, buf, n, peek, dontwait, raddr, rport));
     // A reply from the machine's resolver comes from the address the guest asked (design/linux-dns.md).
     if (m >= 0) if (raddr) |a|

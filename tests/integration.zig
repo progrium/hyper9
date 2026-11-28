@@ -8808,6 +8808,12 @@ test "an edge-triggered eventfd that stays readable wakes epoll_wait in another 
     try netCase(&le, &.{ "/mnt/term/cwd/net", "eventfd_waker" }, "ok eventfd_waker\n");
 }
 
+test "an EPOLL_CTL_MOD that rearms a oneshot entry while another thread's epoll_wait copies the entries wakes that wait [linux-net]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "--net=enable", "/mnt/term/cwd/net", "epoll_rearm" }, "ok epoll_rearm\n");
+}
+
 // The writer waits for the waiter in a sched_yield loop. With one CPU,
 // the waiter its write wakes waits to run on the writer's executor, and
 // only a sched_yield that gives the executor up lets it (design/scheduler.md).
@@ -8941,6 +8947,12 @@ test "UDP sendto and recvfrom on an unconnected socket [linux-net]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "--net=enable", "/mnt/term/cwd/net", "udp" }, "ok udp\n");
+}
+
+test "a fresh UDP socket has nothing to read until it sends, and a recv blocked on it wakes for the reply [linux-net]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "--net=enable", "/mnt/term/cwd/net", "udp_fresh" }, "ok udp_fresh\n");
 }
 
 test "sendmmsg and recvmmsg batch datagrams, and UDP_SEGMENT and UDP_GRO are refused, as QUIC stacks need [linux-net]" {

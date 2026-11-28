@@ -7172,6 +7172,15 @@ fn epollWait(p: *Process, epfd: i32, events_va: u64, maxevents: i32, timeout_ms:
     var out_buf: std.ArrayList(u8) = .empty;
     defer out_buf.deinit(p.gpa);
     while (true) {
+        // The generation before the entries are copied: an epoll_ctl in
+        // another thread changes them and then moves it (pollWake), so a
+        // change this copy missed ends the wait below. Taken after the
+        // copy, as the poll's own was, it could already count an
+        // EPOLL_CTL_MOD that rearmed a oneshot entry the copy still had
+        // disarmed, and the wait slept through it: Erlang's poll thread,
+        // whose schedulers rearm each socket after a read, stopped
+        // seeing a TLS download's data, and Mix timed out.
+        const gen0 = kc.pollGen();
         {
             p.g.lockSpin();
             defer p.g.lock.unlock();
@@ -7196,6 +7205,7 @@ fn epollWait(p: *Process, epfd: i32, events_va: u64, maxevents: i32, timeout_ms:
         // hasn't changed since it was reported isn't ready, so the wait
         // below must be for the next wake, not for readiness alone.
         _ = kc.poll(pf.items[0..n], 0, &gen) catch return -E.INTR;
+        gen = gen0;
         var out: usize = 0;
         out_buf.clearRetainingCapacity();
         {
