@@ -85,6 +85,10 @@ pub const Mount = struct {
     recursive: bool = false,
     /// `--dir` only: symlinks resolve inside the tree. Always on under `#L`.
     contained: bool = false,
+    /// `--dir` only: the host path is a file, not a tree. The CLI sets it;
+    /// a file on a stack is bound over its path rather than joining the
+    /// stack, so a writable one doesn't make the stack writable.
+    file: bool = false,
     /// `--url` settings.
     spec: ?[]const u8 = null,
     user: ?[]const u8 = null,

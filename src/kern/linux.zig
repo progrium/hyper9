@@ -460,6 +460,34 @@ fn h9_linux_getcwd(buf: [*]u8, n: c_int) callconv(.c) c_int {
     return c.snprint(buf, n, @constCast("%s"), chan.chanpath(d));
 }
 
+/// A clone of the working directory, for the other threads of a process
+/// to take (h9_linux_dotset): Linux's threads share it (CLONE_FS), and
+/// each of h9's is its own process with its own. Null on an error.
+fn h9_linux_dotget() callconv(.c) ?*anyopaque {
+    const d: *Chan = up().dot orelse return null;
+    return chan.cclone(d) catch {
+        _ = syserr();
+        return null;
+    };
+}
+
+/// Another reference to ch, from h9_linux_dotget, for h9_linux_chanput.
+fn h9_linux_chanref(v: *anyopaque) callconv(.c) void {
+    const ch: *Chan = @ptrCast(@alignCast(v));
+    _ = chan.incref(&ch.ref);
+}
+
+/// Makes a clone of ch, from h9_linux_dotget, the working directory.
+fn h9_linux_dotset(v: *anyopaque) callconv(.c) c_int {
+    const n = chan.cclone(@ptrCast(@alignCast(v))) catch return syserr();
+    const old = swapchan(n, false) catch {
+        chan.cclose(n);
+        return syserr();
+    };
+    if (old) |o| chan.cclose(o);
+    return 0;
+}
+
 /// Makes fd's directory the working directory.
 fn h9_linux_fchdir(fd: c_int) callconv(.c) c_int {
     const old = h9_linux_dotfd(fd) orelse return -1;
@@ -694,6 +722,9 @@ pub fn exportC() void {
     @export(&h9_linux_ppid, .{ .name = "h9_linux_ppid" });
     @export(&h9_linux_getcwd, .{ .name = "h9_linux_getcwd" });
     @export(&h9_linux_fchdir, .{ .name = "h9_linux_fchdir" });
+    @export(&h9_linux_dotget, .{ .name = "h9_linux_dotget" });
+    @export(&h9_linux_dotset, .{ .name = "h9_linux_dotset" });
+    @export(&h9_linux_chanref, .{ .name = "h9_linux_chanref" });
     @export(&h9_linux_chroot, .{ .name = "h9_linux_chroot" });
     @export(&h9_fs_atroot, .{ .name = "h9_fs_atroot" });
     @export(&h9_fs_markroot, .{ .name = "h9_fs_markroot" });
