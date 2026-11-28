@@ -324,20 +324,31 @@ fn decodeLazy(m: *Machine, o: *const Op, pc: u64) Flow {
 // ---------------------------------------------------------------- the loop
 
 /// Runs until a syscall, a breakpoint, a fault, a kick, or `max_steps`
-/// instructions (maxInt for no limit).
+/// instructions (maxInt for no limit). Up to `exact_steps`, it stops after
+/// exactly that many; past it, at the first taken branch or page crossing
+/// after that many, so the loop checks the count once per stretch of
+/// straight-line code instead of once per instruction. Every guest loop
+/// has a taken branch, and a page holds 1024 instructions, so it runs at
+/// most 1024 more. (A budget is a time slice: its exact end doesn't
+/// matter, only that it comes.)
 pub fn run(m: *Machine, max_steps: u64) Exit {
-    return runLoop(m, max_steps, false, 0);
+    if (max_steps <= exact_steps) return runLoop(m, max_steps, false, 0, true);
+    return runLoop(m, max_steps, false, 0, false);
 }
+
+/// max_steps up to which `run` and `runBranches` stop exactly.
+pub const exact_steps = 1024;
 
 /// As `run`, but also stops (`.interrupted`, with the PC at the target)
 /// after `branches` taken branches: the web host's T1 runs cold code this
 /// way, so the next block's head comes back to its dispatcher to be
 /// counted (src/engine/hcpu/jit/wasm_t1.zig).
 pub fn runBranches(m: *Machine, max_steps: u64, branches: u32) Exit {
-    return runLoop(m, max_steps, true, branches);
+    if (max_steps <= exact_steps) return runLoop(m, max_steps, true, branches, true);
+    return runLoop(m, max_steps, true, branches, false);
 }
 
-fn runLoop(m: *Machine, max_steps: u64, comptime counted: bool, branches: u32) Exit {
+fn runLoop(m: *Machine, max_steps: u64, comptime counted: bool, branches: u32, comptime exact: bool) Exit {
     const cpu = m.cpu;
     var taken: u32 = 0;
     if (m.requested()) return .interrupted;
@@ -353,7 +364,7 @@ fn runLoop(m: *Machine, max_steps: u64, comptime counted: bool, branches: u32) E
     var n: u64 = 0;
     while (true) {
         const o = &page.ops[i];
-        if (n == max_steps) {
+        if (exact and n == max_steps) {
             cpu.retired = start +% n;
             cpu.pc = base + i * 4;
             return .interrupted;
@@ -368,7 +379,7 @@ fn runLoop(m: *Machine, max_steps: u64, comptime counted: bool, branches: u32) E
                 if (o.k != .next_page) n += 1;
                 // Every guest loop has a taken branch or crosses a page, so
                 // checking here bounds how long a kick waits.
-                if (m.requested()) {
+                if (m.requested() or (!exact and n >= max_steps)) {
                     cpu.retired = start +% n;
                     cpu.pc = t;
                     return .interrupted;

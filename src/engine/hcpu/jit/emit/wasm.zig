@@ -92,6 +92,8 @@ pub const Options = struct {
     /// With cells: a chain whose cell is 0, and an indirect branch, look
     /// their target up in the vCPU's jump cache (ctx.jump, whose entries'
     /// `code` the runtime sets to a table slot) and tail-call it on a hit.
+    /// A target may be in either entry of the even-aligned pair at
+    /// ctx.jumpIndex(pc).
     jump: bool = false,
     /// The address of 48 bytes, 16-aligned, where an FP or vector op that
     /// isn't lowered stages its operands for `ext` (ir_eval.evalExtC). 0:
@@ -880,7 +882,7 @@ const E = struct {
         try w.get(0);
         try w.memop(0x29, ctx.off.exit_pc);
         try w.tee(pc);
-        // ctx.jumpIndex: ((pc ^ pc >> 12) >> 2) & (jump_entries - 1)
+        // The pair of ctx.jumpIndex(pc): ((pc ^ pc >> 12) >> 2) & (jump_entries - 2)
         try w.get(pc);
         try w.i64c(12);
         try w.byte(0x88);
@@ -888,20 +890,16 @@ const E = struct {
         try w.i64c(2);
         try w.byte(0x88);
         try w.byte(0xA7);
-        try w.i32c(ctx.jump_entries - 1);
+        try w.i32c(ctx.jump_entries - 2);
         try w.byte(0x71);
         try w.i32c(@sizeOf(ctx.JumpEntry));
         try w.byte(0x6C);
         try w.get(0);
         try w.memop(0x28, ctx.off.jump);
         try w.byte(0x6A);
-        try w.tee(ent);
-        try w.memop(0x29, 0);
-        try w.get(pc);
-        try w.byte(0x51); // i64.eq
-        try e.open(0x04, .other);
+        try w.set(ent);
+        try jumpProbe(w, ent, pc, ent);
         try w.get(ent);
-        try w.memop(0x28, @offsetOf(ctx.JumpEntry, "code"));
         try w.byte(0x23); // global.get base
         try w.uleb(0);
         try w.byte(0x6B); // i32.sub
@@ -912,7 +910,6 @@ const E = struct {
         try w.get(ent);
         try w.set(1);
         try e.br(.top);
-        try e.end();
         try e.end();
     }
 
@@ -2779,11 +2776,11 @@ fn function(
             try w.byte(0x72); // i32.or
             try w.byte(0x71); // i32.and
             try w.bytes(&.{ 0x04, VOID });
-            // ent = ctx.jump + jumpIndex(pc) * 24
+            // ent = ctx.jump + (jumpIndex(pc) & ~1) * 24
             try w.get(0);
             try w.memop(0x29, ctx.off.exit_pc);
             try w.tee(pc);
-            // ctx.jumpIndex: ((pc ^ pc >> 12) >> 2) & (jump_entries - 1)
+            // The pair of ctx.jumpIndex(pc): ((pc ^ pc >> 12) >> 2) & (jump_entries - 2)
             try w.get(pc);
             try w.i64c(12);
             try w.byte(0x88); // i64.shr_u
@@ -2791,22 +2788,15 @@ fn function(
             try w.i64c(2);
             try w.byte(0x88); // i64.shr_u
             try w.byte(0xA7); // i32.wrap_i64
-            try w.i32c(ctx.jump_entries - 1);
+            try w.i32c(ctx.jump_entries - 2);
             try w.byte(0x71);
             try w.i32c(@sizeOf(ctx.JumpEntry));
             try w.byte(0x6C); // i32.mul
             try w.get(0);
             try w.memop(0x28, ctx.off.jump);
             try w.byte(0x6A);
-            try w.tee(ent);
-            try w.memop(0x29, 0);
-            try w.get(pc);
-            try w.byte(0x51); // i64.eq
-            try w.bytes(&.{ 0x04, VOID });
-            try w.get(ent);
-            try w.memop(0x28, @offsetOf(ctx.JumpEntry, "code"));
-            try w.set(e.l32(.cell));
-            try w.byte(0x0B);
+            try w.set(ent);
+            try jumpProbe(w, ent, pc, e.l32(.cell));
             try w.byte(0x0B);
         }
         try w.get(e.l32(.cell));
@@ -2819,6 +2809,34 @@ fn function(
     try w.get(e.l32(.code));
     try w.byte(0x0B); // end function
     return e.w.b.toOwnedSlice(gpa);
+}
+
+/// Looks `pc` up in the jump cache's pair of entries at `ent` (the runtime
+/// fills both: wasm_t1.zig's jumpPut), and sets local `out` to the
+/// matching entry's `code`, or 0. `out` may be `ent`.
+fn jumpProbe(w: *W, ent: u32, pc: u32, out: u32) !void {
+    const way = @sizeOf(ctx.JumpEntry);
+    const code = @offsetOf(ctx.JumpEntry, "code");
+    try w.get(ent);
+    try w.memop(0x29, 0);
+    try w.get(pc);
+    try w.byte(0x51); // i64.eq
+    try w.bytes(&.{ 0x04, I32 }); // if (result i32)
+    try w.get(ent);
+    try w.memop(0x28, code);
+    try w.byte(0x05); // else
+    try w.get(ent);
+    try w.memop(0x29, way);
+    try w.get(pc);
+    try w.byte(0x51); // i64.eq
+    try w.bytes(&.{ 0x04, I32 });
+    try w.get(ent);
+    try w.memop(0x28, way + code);
+    try w.byte(0x05);
+    try w.i32c(0);
+    try w.byte(0x0B);
+    try w.byte(0x0B);
+    try w.set(out);
 }
 
 /// The module around the function bodies: one per region, or one for all

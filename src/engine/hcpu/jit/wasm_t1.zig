@@ -464,6 +464,7 @@ pub fn run(gpa: std.mem.Allocator, cx: *Ctx, cfg: Config) Result {
         if (std.c.getenv("H9_JIT_HOT")) |v| hot = std.fmt.parseInt(u32, std.mem.span(v), 10) catch hot;
         if (std.c.getenv("H9_JIT_PATIENCE")) |v| patience = std.fmt.parseInt(u32, std.mem.span(v), 10) catch patience;
         if (std.c.getenv("H9_JIT_COLD")) |v| cold_branches = std.fmt.parseInt(u32, std.mem.span(v), 10) catch cold_branches;
+        if (std.c.getenv("H9_JIT_ONEFN")) |v| one_function_max = std.fmt.parseInt(usize, std.mem.span(v), 10) catch one_function_max;
         if (std.c.getenv("H9_JIT_WARMUP")) |v| warmup = std.fmt.parseInt(u64, std.mem.span(v), 10) catch warmup;
     }
     if (st.flush_wanted or st.used_slots > max_slots - batch_max or st.map.count() > max_entries) flush();
@@ -511,11 +512,7 @@ pub fn run(gpa: std.mem.Allocator, cx: *Ctx, cfg: Config) Result {
             return cold();
         }
         stats.entries += 1;
-        if (jump) |j| {
-            // So compiled code finds it too (emit/wasm.zig's Options.jump).
-            const x = &j[ctx_mod.jumpIndex(pc)];
-            x.* = .{ .pc = pc, .tb = 0, .code = e.slot };
-        }
+        if (jump) |j| jumpPut(j, pc, e.slot);
         const f: ctx_mod.EntryFn = @ptrFromInt(e.slot);
         const x: Exit = @enumFromInt(f(cx));
         setPc(pc_addr, cfg.pc_bytes, cx.exit_pc);
@@ -530,6 +527,21 @@ pub fn run(gpa: std.mem.Allocator, cx: *Ctx, cfg: Config) Result {
             },
         }
     }
+}
+
+/// So compiled code finds `pc` too (emit/wasm.zig's Options.jump), which
+/// looks in both entries of the pair at jumpIndex(pc) & ~1: a new PC goes
+/// in the first and moves what was there to the second. With one entry
+/// per index, an ash loop's hot return targets shared entries, and half
+/// its indirect branches came back here.
+fn jumpPut(j: *[ctx_mod.jump_entries]ctx_mod.JumpEntry, pc: u64, slot: u32) void {
+    const k = ctx_mod.jumpIndex(pc) & ~@as(usize, 1);
+    if (j[k].pc == pc) {
+        j[k].code = slot;
+        return;
+    }
+    j[k + 1] = j[k];
+    j[k] = .{ .pc = pc, .tb = 0, .code = slot };
 }
 
 fn cold() Result {
@@ -633,7 +645,11 @@ fn build(cfg: Config) void {
 }
 
 /// The most IR instructions a batch has to be emitted as one function.
-/// awk's hot loop is a batch of 64 regions and about 3300.
+/// awk's hot loop is a batch of 64 regions and about 3300. Smaller is a
+/// trade, not a win: at 512 an ash loop and jq ran 15% faster and sort and
+/// sha256sum 10% slower, since a function per region keeps only its own
+/// registers in locals, but a chain between two of them is a tail call.
+/// H9_JIT_ONEFN sets it.
 pub var one_function_max: usize = 4096;
 
 fn buildBatch(entries: []*Entry) !void {
