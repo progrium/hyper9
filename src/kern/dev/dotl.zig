@@ -475,6 +475,21 @@ fn redial(cv: *Conv, next: bool) bool {
             return false;
         sync.tsleep(&up().ksleep, &return0, null, 1000) catch return false;
     }
+    // The reader's wait goes to the new connection's descriptor. The old
+    // wait's is closed with the old connection below, and its number can
+    // be reused by then (a sud stub's pidfd, say), so a wait left on it
+    // could sleep on something else for good.
+    var hw: ?*anyopaque = null;
+    if (dev.of(ch).dc == 0x3C6)
+        hw = h9_hostwait_new(dev.aux(ch).*);
+    c.lock(&cv.lk);
+    const oldhw = cv.hw;
+    cv.hw = hw;
+    if (cv.closing)
+        h9_hostwait_wake(hw);
+    c.unlock(&cv.lk);
+    // Wakes take cv.hw under lk, so none has the old one now.
+    h9_hostwait_free(oldhw);
     // Writes to the old connection are done with.
     sync.qlock(&cv.wl);
     const old = cv.srv;
