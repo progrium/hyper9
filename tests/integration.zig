@@ -5355,17 +5355,19 @@ test "a server close makes guest file operations fail [websocket-9p]" {
 
 test "an idle ws:// root pings, and a server that stops answering fails it [websocket-9p]" {
     const e = try env(@src());
-    // H9_TEST_KEEPALIVE shortens the keepalive's 30 s idle time to 1 s:
-    // h9 pings after 1 s without a frame and fails the connection 1 s
-    // after an unanswered ping. The sleeps are a few idle periods long.
+    // H9_TEST_KEEPALIVE shortens the keepalive's 30 s idle time to 300 ms:
+    // h9 pings after 300 ms without a frame and fails the connection
+    // 300 ms after an unanswered ping. The sleeps are a few idle periods
+    // long. (At 1 s, the case was ten seconds of sleep.)
+    const idle_ms = slow(300);
     var ka_buf: [16]u8 = undefined;
-    const ka = try std.fmt.bufPrint(&ka_buf, "{d}", .{slow(1000)});
+    const ka = try std.fmt.bufPrint(&ka_buf, "{d}", .{idle_ms});
     var cmd_buf: [64]u8 = undefined;
     {
         var w: WsRoot = undefined;
         try w.start(e, .{});
         defer w.stop();
-        const cmd = try std.fmt.bufPrint(&cmd_buf, "sleep {d}; /bin/echo still", .{slow(1000) * 4 / 1000});
+        const cmd = try std.fmt.bufPrint(&cmd_buf, "sleep {d}.{d:0>3}; /bin/echo still", .{ idle_ms * 4 / 1000, idle_ms * 4 % 1000 });
         const r = try runEnv(e, firstEngine(e), &.{ "--url", w.url(), "--rc", cmd }, &.{.{ "H9_TEST_KEEPALIVE", ka }}, slow(30_000));
         defer r.deinit();
         errdefer std.debug.print("stderr: {s}\n", .{r.err});
@@ -5377,7 +5379,7 @@ test "an idle ws:// root pings, and a server that stops answering fails it [webs
         var w: WsRoot = undefined;
         try w.start(e, .{ .no_pong = true });
         defer w.stop();
-        const cmd = try std.fmt.bufPrint(&cmd_buf, "sleep {d}; /bin/echo still", .{slow(1000) * 6 / 1000});
+        const cmd = try std.fmt.bufPrint(&cmd_buf, "sleep {d}.{d:0>3}; /bin/echo still", .{ idle_ms * 6 / 1000, idle_ms * 6 % 1000 });
         const r = try runEnv(e, firstEngine(e), &.{ "--url", w.url(), "--rc", cmd }, &.{.{ "H9_TEST_KEEPALIVE", ka }}, slow(30_000));
         defer r.deinit();
         errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
