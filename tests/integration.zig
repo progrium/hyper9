@@ -8969,7 +8969,7 @@ test "edge-triggered epoll in another thread reports a TCP socket's next data af
     try netCase(&le, &.{ "--net=enable", "--env", port_env, "/mnt/term/cwd/net", "tcp_et_drain" }, "ok tcp_et_drain\n");
 }
 
-test "getsockname on an IPv4 TCP socket between bind and listen gives AF_INET and the bound port [linux-net]" {
+test "getsockname on an IPv4 TCP socket between bind and listen gives AF_INET and the bound port, one bind to port 0 picked [linux-net]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "--net=enable", "/mnt/term/cwd/net", "bound_name" }, "ok bound_name\n");
