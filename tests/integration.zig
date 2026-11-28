@@ -9206,6 +9206,103 @@ test "threads faulting pages in while others munmap don't fault twice on a mappe
     try std.testing.expectEqual(0, r.code);
 }
 
+/// A child process of `parent` (a sud stub, for h9) and its start time in
+/// clock ticks, from /proc/<pid>/stat.
+const HostChild = struct { pid: i32, start: u64 };
+
+/// The children of host process `parent`, up to `out.len`.
+fn hostChildren(parent: i32, out: []HostChild) !usize {
+    const io = std.testing.io;
+    var proc = try std.Io.Dir.openDirAbsolute(io, "/proc", .{ .iterate = true });
+    defer proc.close(io);
+    var n: usize = 0;
+    var it = proc.iterate();
+    while (try it.next(io)) |ent| {
+        const pid = std.fmt.parseInt(i32, ent.name, 10) catch continue;
+        var pb: [64]u8 = undefined;
+        var buf: [1024]u8 = undefined;
+        const stat = proc.readFile(io, try std.fmt.bufPrint(&pb, "{d}/stat", .{pid}), &buf) catch continue;
+        // After the command's closing parenthesis: state, ppid, and at
+        // the 20th field after state, the start time.
+        const rest = stat[(std.mem.lastIndexOfScalar(u8, stat, ')') orelse continue) + 1 ..];
+        var f = std.mem.tokenizeScalar(u8, rest, ' ');
+        var i: usize = 0;
+        var ppid: i32 = 0;
+        var start: u64 = 0;
+        while (f.next()) |field| : (i += 1) {
+            if (i == 1) ppid = std.fmt.parseInt(i32, field, 10) catch 0;
+            if (i == 19) {
+                start = std.fmt.parseInt(u64, field, 10) catch 0;
+                break;
+            }
+        }
+        if (ppid != parent or n == out.len) continue;
+        out[n] = .{ .pid = pid, .start = start };
+        n += 1;
+    }
+    return n;
+}
+
+test "a sud stub killed from outside kills its process, even one blocked in a syscall [native-backend]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try linuxSud(&le);
+    const io = std.testing.io;
+    // The shell waits for sleep, which is blocked in its nanosleep, so
+    // nothing runs on sleep's stub. Before h9 watched its stubs, killing
+    // that stub went unnoticed until the sleep ended, and the shell then
+    // saw status 1 (h9's HypervisorFailed), not death by SIGKILL. That
+    // left a Postgres backend's row lock held long after its stub was
+    // OOM-killed, with the postmaster never told (issue #358).
+    var child = try std.process.spawn(io, .{
+        .argv = &.{ le.h9, "--engine", "sud", "--arch", le.arch, "--dir", le.lmount, "/bin/sh", "-c", "sleep 60; echo status=$?; while :; do :; done" },
+        .stdin = .ignore,
+        .stdout = .pipe,
+        .stderr = .pipe,
+        .create_no_window = true,
+    });
+    defer child.kill(io);
+    const h9_pid = child.id.?;
+    // The shell's stub and sleep's, once sleep has started; a stub
+    // between fork and exec is replaced at the exec, so wait a little
+    // more for that to settle, then kill the youngest, which is sleep's.
+    var kids: [8]HostChild = undefined;
+    var n: usize = 0;
+    var tries: u32 = 0;
+    while (n < 2) : (tries += 1) {
+        if (tries > slow(400)) return error.Timeout;
+        try io.sleep(.fromMilliseconds(50), .awake);
+        n = try hostChildren(h9_pid, &kids);
+    }
+    try io.sleep(.fromMilliseconds(500), .awake);
+    n = try hostChildren(h9_pid, &kids);
+    errdefer std.debug.print("h9's children: {any}\n", .{kids[0..n]});
+    try std.testing.expectEqual(2, n);
+    const victim = if (kids[0].start > kids[1].start) kids[0] else kids[1];
+    try std.posix.kill(victim.pid, .KILL);
+    var mr_buf: std.Io.File.MultiReader.Buffer(2) = undefined;
+    var mr: std.Io.File.MultiReader = undefined;
+    mr.init(gpa, io, mr_buf.toStreams(), &.{ child.stdout.?, child.stderr.? });
+    defer mr.deinit();
+    // The shell's line, well before the sleep would end; then the shell
+    // spins, on its own stub, until the case kills h9.
+    const timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(slow(20_000)), .clock = .awake } };
+    while (std.mem.indexOfScalar(u8, mr.reader(0).buffered(), '\n') == null) {
+        mr.fill(64, timeout) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => |x| return x,
+        };
+    }
+    const out = mr.reader(0).buffered();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ out, mr.reader(1).buffered() });
+    // 128 + 9, as a Linux shell reports a child killed by SIGKILL.
+    try std.testing.expectEqualStrings("status=137\n", out);
+    // The dead stub was reaped, not left a zombie: only the shell's is
+    // left.
+    n = try hostChildren(h9_pid, &kids);
+    try std.testing.expectEqual(1, n);
+}
+
 test "exit_group kills every thread [linux-threads]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);

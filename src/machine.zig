@@ -1370,6 +1370,34 @@ pub const Machine = struct {
             }
         }
 
+        /// The engine's `LostHook`: address space `as` has lost its
+        /// backing (a sud stub killed from outside h9), so every process
+        /// in it is killed, as by SIGKILL. A process blocked in a system
+        /// call is interrupted by the note; one running guest code finds
+        /// its run failed (`runLoop`). Runs on the engine's thread.
+        fn spaceLost(ctx: *anyopaque, as: engine.AddressSpace) void {
+            const j: *Job = @ptrCast(@alignCast(ctx));
+            const mc = j.mach.load(.acquire) orelse return;
+            // A Linux process's threads and vfork children share a space:
+            // at most a stub's threads, since each runs on one.
+            var pids: [512]u32 = undefined;
+            var n: usize = 0;
+            {
+                j.lockSpin();
+                defer j.lock.unlock();
+                for (j.procs.items) |q| {
+                    const qa = q.as orelse continue;
+                    if (n == pids.len) break;
+                    if (std.meta.eql(qa, as)) {
+                        pids[n] = q.pid;
+                        n += 1;
+                    }
+                }
+            }
+            // Outside the job's lock, which the note's kick takes.
+            for (pids[0..n]) |pid| _ = mc.postPid(pid, "kill");
+        }
+
         /// Posts a host-side note, if the first process has started.
         /// Returns whether the note reached a process.
         fn post(j: *Job, to: kern.Mach.To, msg: [*:0]const u8) bool {
@@ -2483,7 +2511,17 @@ pub const Machine = struct {
             } else if (p.note_flag.swap(false, .acq_rel)) {
                 if (try deliver(p, vcpu, &u)) |msg| return .{ .killed = msg };
             }
-            const exit = try vcpu.run();
+            // Every space this process runs in (exec makes new ones) tells
+            // the job if its backing is lost (`spaceLost`).
+            p.as.?.setLostHook(.{ .ctx = j, .call = Job.spaceLost });
+            const exit = vcpu.run() catch |err| {
+                // The space's backing died from outside h9 (a sud stub
+                // killed by the OOM killer or a kill -9): the process is
+                // killed by SIGKILL, as on Linux, not failed.
+                if (err == error.HypervisorFailed and p.as.?.lost())
+                    return .{ .killed = if (p.lx != null) lsig.deathNote(lsig.SIGKILL, &p.msg_buf) else "kill" };
+                return err;
+            };
             vcpu.getUreg(&u);
             if (hold_until) |t| if (exit != .interrupted or t.durationTo(std.Io.Timestamp.now(m.io, .awake)).nanoseconds >= 0) {
                 hold_until = null;

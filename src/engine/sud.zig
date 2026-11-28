@@ -23,6 +23,12 @@
 //! Kicks send the stub thread SIGURG; it reports it as `interrupted` only
 //! while `Ctl.kick` is set, so a signal that arrives after the run it was
 //! meant for has ended just resumes the guest.
+//!
+//! A stub can die from outside h9 (the OOM killer, a `kill -9`). The
+//! engine's watcher thread polls a pidfd for each one, so a death is
+//! noticed at once, not only by a vCPU waiting on the stub: it marks the
+//! stub lost, wakes those waits, and tells the space's `LostHook`, which
+//! kills its processes, those blocked in system calls too.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -185,6 +191,7 @@ pub const Engine = struct {
     ram: gphys.Ram,
     ram_fd: i32,
     stub_fd: i32,
+    watch: Watch = .{},
 
     pub fn create(gpa: std.mem.Allocator, io: std.Io, opts: engine.Options) engine.CreateError!*Engine {
         if (opts.arch != .amd64) return error.WrongArch;
@@ -265,6 +272,7 @@ pub const Engine = struct {
     }
 
     pub fn destroy(b: *Engine) void {
+        b.watch.stop(b.gpa);
         closeFd(b.stub_fd);
         b.ram.deinit();
         closeFd(b.ram_fd);
@@ -356,10 +364,135 @@ fn spawnChild(arg: usize) callconv(.c) u8 {
     return 127;
 }
 
+/// The engine's watch on its stubs: a pidfd for each in an epoll set,
+/// which a thread of its own waits on, started with the first stub.
+/// Without it (a kernel with no pidfd_open, say), a death is still found
+/// by `Stub.wait`, but only while a vCPU runs on the stub.
+const Watch = struct {
+    /// Guards `spaces` and the hooks it calls, so a space isn't freed
+    /// while its death is handled.
+    lock: std.atomic.Mutex = .unlocked,
+    epfd: i32 = -1,
+    /// Written to stop the thread; in the set with data 0.
+    wake: i32 = -1,
+    thread: ?std.Thread = null,
+    /// The spaces whose stubs are watched.
+    spaces: std.ArrayList(*AddressSpace) = .empty,
+
+    /// Starts the thread, if it isn't running. Called with `lock` held.
+    fn begin(w: *Watch) bool {
+        if (w.thread != null) return true;
+        if (w.epfd < 0) {
+            const rc = linux.epoll_create1(linux.EPOLL.CLOEXEC);
+            if (failed(rc)) return false;
+            w.epfd = @intCast(rc);
+        }
+        if (w.wake < 0) {
+            const rc = linux.eventfd(0, linux.EFD.CLOEXEC);
+            if (failed(rc)) return false;
+            w.wake = @intCast(rc);
+            var ev: linux.epoll_event = .{ .events = linux.EPOLL.IN, .data = .{ .ptr = 0 } };
+            if (failed(linux.epoll_ctl(w.epfd, linux.EPOLL.CTL_ADD, w.wake, &ev))) {
+                closeFd(w.wake);
+                w.wake = -1;
+                return false;
+            }
+        }
+        w.thread = std.Thread.spawn(.{}, watchMain, .{w}) catch return false;
+        return true;
+    }
+
+    /// Watches the stub of `as`, which has just started.
+    fn add(w: *Watch, gpa: std.mem.Allocator, as: *AddressSpace) void {
+        const s = &as.stub.?;
+        lockSlow(&w.lock);
+        defer w.lock.unlock();
+        if (!w.begin()) return;
+        w.spaces.ensureUnusedCapacity(gpa, 1) catch return;
+        const rc = linux.pidfd_open(s.pid, 0);
+        if (failed(rc)) return;
+        const fd: i32 = @intCast(rc);
+        // One shot: a death is handled once, and the fd stays readable.
+        var ev: linux.epoll_event = .{ .events = linux.EPOLL.IN | linux.EPOLL.ONESHOT, .data = .{ .ptr = @intFromPtr(as) } };
+        if (failed(linux.epoll_ctl(w.epfd, linux.EPOLL.CTL_ADD, fd, &ev))) {
+            closeFd(fd);
+            return;
+        }
+        s.pidfd = fd;
+        w.spaces.appendAssumeCapacity(as);
+    }
+
+    /// Stops watching `as`, before its stub is stopped; waits for a
+    /// death being handled for it.
+    fn remove(w: *Watch, as: *AddressSpace) void {
+        const s = &(as.stub orelse return);
+        if (s.pidfd < 0) return;
+        lockSlow(&w.lock);
+        defer w.lock.unlock();
+        for (w.spaces.items, 0..) |x, i| if (x == as) {
+            _ = w.spaces.swapRemove(i);
+            break;
+        };
+        // Closing it takes it out of the epoll set.
+        closeFd(s.pidfd);
+        s.pidfd = -1;
+    }
+
+    fn stop(w: *Watch, gpa: std.mem.Allocator) void {
+        if (w.thread) |t| {
+            const one: u64 = 1;
+            _ = linux.write(w.wake, std.mem.asBytes(&one), 8);
+            t.join();
+        }
+        if (w.wake >= 0) closeFd(w.wake);
+        if (w.epfd >= 0) closeFd(w.epfd);
+        w.spaces.deinit(gpa);
+        w.* = .{};
+    }
+
+    fn watchMain(w: *Watch) void {
+        var evs: [16]linux.epoll_event = undefined;
+        while (true) {
+            const rc = linux.epoll_wait(w.epfd, &evs, evs.len, -1);
+            if (linux.errno(rc) == .INTR) continue;
+            if (failed(rc)) return;
+            for (evs[0..rc]) |ev| {
+                if (ev.data.ptr == 0) return;
+                w.died(@ptrFromInt(ev.data.ptr));
+            }
+        }
+    }
+
+    /// A watched stub's pidfd is readable: its process has ended.
+    fn died(w: *Watch, as: *AddressSpace) void {
+        lockSlow(&w.lock);
+        defer w.lock.unlock();
+        // Its space was destroyed after the event came, and maybe another
+        // made at the same address since, with a stub of its own.
+        const known = for (w.spaces.items) |x| {
+            if (x == as) break true;
+        } else false;
+        if (!known) return;
+        const s = &as.stub.?;
+        if (!s.dead()) {
+            var ev: linux.epoll_event = .{ .events = linux.EPOLL.IN | linux.EPOLL.ONESHOT, .data = .{ .ptr = @intFromPtr(as) } };
+            _ = linux.epoll_ctl(w.epfd, linux.EPOLL.CTL_MOD, s.pidfd, &ev);
+            return;
+        }
+        s.markLost();
+        if (as.lost_hook) |h| h.call(h.ctx, .{ .sud = as });
+    }
+};
+
 /// One running stub, as h9 sees it.
 const Stub = struct {
     pid: i32,
     ctls: *[abi.max_threads]abi.Ctl,
+    /// Its pidfd, while the engine's `Watch` has it.
+    pidfd: i32 = -1,
+    /// Set once the stub has died from outside h9 (`Watch.died`, or a
+    /// wait that found it dead): runs on it fail from then on.
+    gone: std.atomic.Value(bool) = .init(false),
 
     /// Starts a stub and waits until its control thread is ready.
     fn start(b: *Engine) engine.Error!Stub {
@@ -436,6 +569,13 @@ const Stub = struct {
         return std.mem.readInt(i32, info[16..20], .little) != 0;
     }
 
+    /// Marks the stub dead, and wakes every h9 thread waiting on one of its
+    /// threads, which then fails.
+    fn markLost(s: *Stub) void {
+        s.gone.store(true, .release);
+        for (s.ctls) |*c| _ = linux.futex_3arg(&c.state, .{ .cmd = .WAKE, .private = false }, std.math.maxInt(i32));
+    }
+
     /// Hands thread `k` `state` (run or ops).
     fn go(s: *Stub, k: usize, state: abi.State) void {
         const ctl = &s.ctls[k];
@@ -448,6 +588,7 @@ const Stub = struct {
     fn wait(s: *Stub, k: usize) engine.Error!void {
         const ctl = &s.ctls[k];
         const exited = @intFromEnum(abi.State.exited);
+        if (s.gone.load(.acquire)) return error.HypervisorFailed;
         if (@atomicLoad(u32, &ctl.state, .seq_cst) == exited) return;
         // Spin only while the stub's thread, this one, and the others
         // awake for guests leave a CPU free (`abi.Sched`).
@@ -465,7 +606,8 @@ const Stub = struct {
             const cur = @atomicLoad(u32, &ctl.state, .seq_cst);
             if (cur == exited) break;
             const rc = linux.futex_4arg(&ctl.state, .{ .cmd = .WAIT, .private = false }, cur, &ts);
-            if (linux.errno(rc) == .TIMEDOUT and s.dead()) {
+            if (s.gone.load(.acquire) or (linux.errno(rc) == .TIMEDOUT and s.dead())) {
+                s.gone.store(true, .release);
                 @atomicStore(u32, &ctl.host_waiting, 0, .seq_cst);
                 return error.HypervisorFailed;
             }
@@ -505,6 +647,10 @@ pub const AddressSpace = struct {
     /// [1, nthreads) have been started.
     threads: [abi.max_threads]Thread = @splat(.{}),
     nthreads: u32 = 1,
+    /// Told if the stub dies from outside h9; set once, under the
+    /// engine's `Watch.lock`.
+    lost_hook: ?engine.LostHook = null,
+    hooked: std.atomic.Value(bool) = .init(false),
 
     const Region = struct { va: u64, mem: []align(engine.page_size) u8 };
 
@@ -603,7 +749,23 @@ pub const AddressSpace = struct {
         if (as.stub) |*s| as.flushOps(s, 0) catch {};
     }
 
+    pub fn setLostHook(as: *AddressSpace, h: engine.LostHook) void {
+        if (as.hooked.load(.acquire)) return;
+        const w = &as.engine.watch;
+        lockSlow(&w.lock);
+        defer w.lock.unlock();
+        if (as.lost_hook == null) as.lost_hook = h;
+        as.hooked.store(true, .release);
+    }
+
+    /// Whether the stub has died from outside h9.
+    pub fn lost(as: *AddressSpace) bool {
+        const s = &(as.stub orelse return false);
+        return s.gone.load(.acquire);
+    }
+
     pub fn destroy(as: *AddressSpace) void {
+        as.engine.watch.remove(as);
         if (as.stub) |*s| s.stop();
         const gpa = as.engine.gpa;
         as.regions.deinit(gpa);
@@ -614,7 +776,10 @@ pub const AddressSpace = struct {
     fn startStub(as: *AddressSpace) engine.Error!*Stub {
         lockSlow(&as.ctl_lock);
         defer as.ctl_lock.unlock();
-        if (as.stub == null) as.stub = try Stub.start(as.engine);
+        if (as.stub == null) {
+            as.stub = try Stub.start(as.engine);
+            as.engine.watch.add(as.engine.gpa, as);
+        }
         return &as.stub.?;
     }
 
