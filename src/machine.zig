@@ -4088,8 +4088,19 @@ pub const Machine = struct {
         // Named unions the plan made but never bound go when it's built.
         defer for ([_]policy.mount.Stack{ .root, .linux }) |st| kern.unionUnpin(st.name());
         var cow_buf: [24]u8 = undefined;
+        // A host file on a stack, as `--dir FILE:#L/PATH`: a stack's
+        // members are trees, so it's bound over its path once the stacks
+        // are built (bindFiles).
+        var files: [32]policy.Bind = undefined;
+        var nfiles: usize = 0;
         for (m.plan.binds) |b0| {
             var b = b0;
+            if (b.recursive and !b.empty and !b.upper and !b.mount and stackName(b.to) != null and hostFile(b.from)) {
+                if (nfiles == files.len) return m.fail("{s} {s}: more than {d} files on the stacks", .{ b.what orelse b.from, b.to, files.len });
+                files[nfiles] = b;
+                nfiles += 1;
+                continue;
+            }
             // A caller's channel the child only reads, under an overlay
             // of the child's own (design/child-machines.md).
             if (b0.parent_cow) {
@@ -4151,6 +4162,7 @@ pub const Machine = struct {
             }
             if (!b.optional) return m.fail("bind {s} {s}: {s}", .{ b.from, b.to, kern.errstr() });
         }
+        for (files[0..nfiles]) |b| try m.bindFile(b);
         if (cwd_at) |at| kern.chdir(at) catch return m.fail("cwd: {s}", .{kern.errstr()});
         if (m.plan.root_overlay) makeHome();
         if (hasLinux(m.opts)) linuxEtc();
@@ -4200,6 +4212,24 @@ pub const Machine = struct {
         var st: [512]u8 = undefined;
         const to = try std.fmt.bufPrintSentinel(&buf, "{s}", .{b.to}, 0);
         if (kern.stat(to, &st)) |_| return true else |_| {}
+        // A host file goes over a file: an empty one, in made directories.
+        if (hostFile(b.from)) {
+            if (!m.plan.root_overlay) {
+                if (b.optional or b.fallback != null) return true;
+                return m.fail("{s}: {s} does not exist (the root is read-only)", .{ b.what orelse b.from, b.to });
+            }
+            if (std.fs.path.dirnamePosix(b.to)) |dir| {
+                var db: [std.fs.max_path_bytes + 8]u8 = undefined;
+                const d = std.fmt.bufPrintSentinel(&db, "{s}", .{dir}, 0) catch return m.fail("{s}: name too long", .{b.to});
+                mkdirAll(d) catch {};
+            }
+            const fd = kern.create(to, kern.OREAD, 0o644) catch {
+                if (b.optional or b.fallback != null) return true;
+                return m.fail("{s}: can't make {s}: {s}", .{ b.what orelse b.from, b.to, kern.errstr() });
+            };
+            kern.close(fd) catch {};
+            return true;
+        }
         if (!m.plan.root_overlay) {
             if (b.optional or b.fallback != null) return true;
             return m.fail("{s}: {s} does not exist (the root is read-only)", .{ b.what orelse b.from, b.to });
@@ -4209,6 +4239,48 @@ pub const Machine = struct {
             return m.fail("{s}: can't make {s}: {s}", .{ b.what orelse b.from, b.to, kern.errstr() });
         };
         return true;
+    }
+
+    /// Whether `from` is a `#U` path (`#U!c` too) that names a host file
+    /// rather than a directory.
+    fn hostFile(from: []const u8) bool {
+        if (!std.mem.startsWith(u8, from, "#U")) return false;
+        var buf: [std.fs.max_path_bytes + 8]u8 = undefined;
+        const path = std.fmt.bufPrintSentinel(&buf, "#U{s}", .{plainHost(from)}, 0) catch return false;
+        var st: [512]u8 = undefined;
+        const n = kern.stat(path, &st) catch return false;
+        return n >= 25 and std.mem.readInt(u32, st[21..25], .little) & dmdir == 0;
+    }
+
+    /// The host path of a `#U` or `#U!c` path: a single file has no tree
+    /// for `!c` to keep its links inside.
+    fn plainHost(from: []const u8) []const u8 {
+        return if (std.mem.startsWith(u8, from, "#U!c")) from[4..] else from[2..];
+    }
+
+    /// Binds a host file over its path on a stack (`#Olinux/etc/app.conf`),
+    /// made there as an empty file, and its directories, if the stack
+    /// doesn't have it: Plan 9 binds a file only over a file.
+    fn bindFile(m: *Machine, b: policy.Bind) RunError!void {
+        var fb: [std.fs.max_path_bytes + 8]u8 = undefined;
+        var tb: [std.fs.max_path_bytes + 8]u8 = undefined;
+        const from = std.fmt.bufPrintSentinel(&fb, "#U{s}", .{plainHost(b.from)}, 0) catch return m.fail("{s}: name too long", .{b.from});
+        const to = std.fmt.bufPrintSentinel(&tb, "{s}", .{b.to}, 0) catch return m.fail("{s}: name too long", .{b.to});
+        var st: [512]u8 = undefined;
+        if (kern.stat(to, &st)) |n| {
+            if (n >= 25 and std.mem.readInt(u32, st[21..25], .little) & dmdir != 0)
+                return m.fail("{s} {s}: a file can't go over a directory", .{ b.what orelse b.from, b.to });
+        } else |_| {
+            var db: [std.fs.max_path_bytes + 8]u8 = undefined;
+            if (std.fs.path.dirnamePosix(b.to)) |dir| {
+                const d = std.fmt.bufPrintSentinel(&db, "{s}", .{dir}, 0) catch return m.fail("{s}: name too long", .{b.to});
+                mkdirAll(d) catch {};
+            }
+            const fd = kern.create(to, kern.OREAD, 0o644) catch
+                return m.fail("{s}: can't make {s} (the stack is read-only without an overlay): {s}", .{ b.what orelse b.from, b.to, kern.errstr() });
+            kern.close(fd) catch {};
+        }
+        kern.bind(from, to, kern.MREPL) catch return m.fail("bind {s} {s}: {s}", .{ from, b.to, kern.errstr() });
     }
 
     /// Makes `path` and its missing parents as directories.

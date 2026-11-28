@@ -7147,6 +7147,31 @@ test "a rename across directories in a --dir on #L moves the file, as on Linux [
     try std.testing.expectEqualStrings("ok rename_across\n", r.out);
 }
 
+test "a --dir of one file goes over its path on #L, made if it's missing, and rw writes the host file [mounts]" {
+    // A stack's members are trees, so a file was "not a directory" on #L
+    // and "inconsistent mount" elsewhere, though a --dir may be a file.
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "app.conf", .data = "port=80\n" });
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "log", .data = "one\n" });
+    var a: [std.Io.Dir.max_path_bytes + 32]u8 = undefined;
+    var b: [std.Io.Dir.max_path_bytes + 32]u8 = undefined;
+    const script = "cat /new/dir/app.conf && echo two >> /log && cat /log && ! echo x >> /new/dir/app.conf 2>/dev/null";
+    const conf = try std.fmt.bufPrint(&a, "{s}/app.conf:#L/new/dir/app.conf:ro", .{s.path});
+    const log = try std.fmt.bufPrint(&b, "{s}/log:#L/log:rw", .{s.path});
+    const r = try runLinux(&le, false, &.{ "--dir", conf, "--dir", log, "/bin/sh", "-c", script });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("port=80\none\ntwo\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+    const data = try s.tmp.dir.readFileAlloc(std.testing.io, "log", std.testing.allocator, .unlimited);
+    defer std.testing.allocator.free(data);
+    try std.testing.expectEqualStrings("one\ntwo\n", data);
+}
+
 test "an fstat through a --dir on #L matches the path's stat, to the nanosecond [mounts]" {
     // An open file's union chan has its member open, which overlay's
     // getattr didn't ask, so fstat had whole seconds and no change time.
