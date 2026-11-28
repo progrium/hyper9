@@ -10,7 +10,7 @@ This describes, as built, h9 on wasm32-wasi: the web host, under Node or in a pa
 
 ## Web host (`web`)
 
-`zig build web` builds h9 for wasm32-wasi into `zig-out/web/` ([browser-host](../design/epoch-0/browser-host.md)). The kernel, the machine, and the CLI are the same code; what differs is underneath them. Native hosts are unchanged.
+`zig build web` builds h9 for wasm32-wasi into `zig-out/web/` ([browser-host](../design/epoch-0/browser-host.md)). It builds ReleaseFast whatever `-Doptimize` is, since the page and `h9-node` ship that build and ReleaseSafe's checks slow the emulator's CPUs by about a quarter there; `-Dweb-optimize` picks another mode, for `zig build web`, `web-test`, and `integration -Dweb` alike. The kernel, the machine, and the CLI are the same code; what differs is underneath them. Native hosts are unchanged.
 
 | Piece | Web host |
 | --- | --- |

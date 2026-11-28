@@ -215,6 +215,8 @@ Integration (Chrome 137 or later, Node 24 or later). With a 386 root tree
 (`zig build mkroot -- --arch 386`, linked or copied as
 `.local/9front/root386`, or `-Dweb-root=DIR`) it also packs the demo page's
 root archive, `root.h9a`, from the paths in `src/web/root.list`.
+It's ReleaseFast whatever `-Doptimize` is; `-Dweb-optimize=ReleaseSafe` or
+`-Dweb-optimize=Debug` builds it with runtime safety, for chasing a bug.
 
 ```sh
 zig-out/web/h9-node --dir .local/9front/root386 --rc 'ls /bin | wc -l'   # the CLI under Node

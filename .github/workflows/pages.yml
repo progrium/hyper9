@@ -82,7 +82,7 @@ jobs:
         run: |
           zig build -Doptimize=ReleaseSafe
           scripts/nine-arm64-web.sh
-      - run: zig build web -Doptimize=ReleaseSafe -Dweb-root=.local/9front/root386
+      - run: zig build web -Dweb-root=.local/9front/root386
       # The Wine page's demo, from the wine-draw branch, in wine-draw/.
       - uses: actions/checkout@v4
         with:
@@ -110,7 +110,7 @@ jobs:
         continue-on-error: true
         working-directory: wine-draw
         run: |
-          zig build web -Doptimize=ReleaseSafe -Dweb-root="$GITHUB_WORKSPACE/.local/9front/root386"
+          zig build web -Dweb-root="$GITHUB_WORKSPACE/.local/9front/root386"
           test -f zig-out/web/wine.h9a
       - name: Demo page in Chromium
         run: |
