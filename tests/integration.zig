@@ -7127,6 +7127,9 @@ test "a rename across directories in a --dir on #L moves the file, as on Linux [
     // every other rename was EXDEV, which rustc's .rmeta writes fail on.
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
+    // On Windows a host tree's rename across directories is EXDEV, for
+    // the sandbox's sake (devfs_win32.zig's fsrename), so this is too.
+    if (builtin.os.tag == .windows) return skip("not on Windows", .{});
     var s: Scratch = undefined;
     try s.init();
     defer s.deinit();
