@@ -1407,13 +1407,65 @@ const E = struct {
                 try e.leaveCode(.indirect);
             },
             .br, .brcond => unreachable, // the control flow's
-            else => if (i.op.isPure() and wt(t) != null)
+            else => if (try e.vecInline(i)) {} else if (i.op.isPure() and wt(t) != null)
                 try e.fallback(i)
             else if (i.op.isExt())
                 try e.extOp(i)
             else
                 return error.Unsupported,
         }
+    }
+
+    /// The vector ops that are one or two wasm SIMD instructions: lanes
+    /// in and out, splats, bitwise ops, and lane-wise add and sub. False
+    /// for the rest, which go through `ext`.
+    fn vecInline(e: *E, i: ir.Inst) !bool {
+        const w = &e.w;
+        const x: ir.ExtAux = @bitCast(i.aux);
+        const es: u32 = x.esize;
+        switch (i.op) {
+            .@"v.make" => {
+                try e.val64(i.a);
+                try w.simd(0x12); // i64x2.splat
+                try e.val64(i.b);
+                try w.simd(0x1E); // i64x2.replace_lane
+                try w.byte(1);
+            },
+            .@"v.lane" => {
+                try e.val(i.a);
+                try w.simd(([_]u32{ 0x16, 0x19, 0x1B, 0x1D })[es]); // extract_lane(_u)
+                try w.byte(@intCast(x.imm));
+            },
+            .@"v.ins" => {
+                try e.val(i.a);
+                try e.val(i.b);
+                try w.simd(([_]u32{ 0x17, 0x1A, 0x1C, 0x1E })[es]); // replace_lane
+                try w.byte(@intCast(x.imm));
+            },
+            .@"v.dup" => {
+                try e.val(i.a);
+                try w.simd(([_]u32{ 0x0F, 0x10, 0x11, 0x12 })[es]); // splat
+            },
+            .@"v.and", .@"v.or", .@"v.xor", .@"v.andn" => {
+                try e.val(i.a);
+                try e.val(i.b);
+                try w.simd(switch (i.op) {
+                    .@"v.and" => 0x4E,
+                    .@"v.andn" => 0x4F,
+                    .@"v.or" => 0x50,
+                    else => 0x51,
+                });
+            },
+            .@"v.add", .@"v.sub" => {
+                try e.val(i.a);
+                try e.val(i.b);
+                const add = [_]u32{ 0x6E, 0x8E, 0xAE, 0xCE };
+                const sub = [_]u32{ 0x71, 0x91, 0xB1, 0xD1 };
+                try w.simd(if (i.op == .@"v.add") add[es] else sub[es]);
+            },
+            else => return false,
+        }
+        return true;
     }
 
     /// An FP or vector op through `ext` (ir_eval.evalExtC): its operands
@@ -2084,6 +2136,15 @@ const E = struct {
         // Every terminator is a way out of the block, but a branch to
         // blocks that take the flags still pending.
         if (!e.keep[b]) try e.flushPending();
+        // A loop header that starts with packed NZCV pending, entered
+        // from here with none: hand it the slot's value.
+        if (e.pend == null) {
+            const s = succs(e.r, b);
+            for (s[0][0..s[1]]) |t| if (e.pin[t]) |p| {
+                try e.materialize(p);
+                break;
+            };
+        }
     }
 
     /// The Pend a `pending.flags` makes.
@@ -2192,8 +2253,11 @@ const E = struct {
     /// of each predecessor writing them: a block whose predecessors all
     /// end with the same Pend (and that isn't the entry) starts with it,
     /// and a block whose successors all start with it leaves it pending.
-    /// One pass in reverse postorder: a back edge's source isn't done
-    /// yet, so a loop header starts with none.
+    /// Solved optimistically to a fixed point, so a loop header can take
+    /// the flags its back edge leaves pending. A loop header may also take
+    /// packed NZCV from a predecessor that left none: that predecessor
+    /// loads the slot into the pending locals on its way in (body), so the
+    /// loop stores NZCV only on its ways out, not on every back edge.
     fn flowPend(e: *E) !void {
         const n = e.r.blocks.items.len;
         e.pin = try e.gpa.alloc(?Pend, n);
@@ -2202,64 +2266,125 @@ const E = struct {
         @memset(e.keep, false);
         const out = try e.gpa.alloc(?Pend, n);
         defer e.gpa.free(out);
-        const done = try e.gpa.alloc(bool, n);
-        defer e.gpa.free(done);
-        @memset(done, false);
-        // Predecessor counts, to know when all have been seen.
-        const npred = try e.gpa.alloc(u32, n);
+        @memset(out, null);
+        const known = try e.gpa.alloc(bool, n);
+        defer e.gpa.free(known);
+        @memset(known, false);
+        // Predecessor lists.
+        const npred = try e.gpa.alloc(u32, n + 1);
         defer e.gpa.free(npred);
         @memset(npred, 0);
-        for (e.cfg.order) |b| {
-            const s = succs(e.r, b);
-            for (s[0][0..s[1]]) |t| npred[t] += 1;
+        for (0..n) |b| {
+            const sb = succs(e.r, @intCast(b));
+            for (sb[0][0..sb[1]]) |t| npred[t + 1] += 1;
         }
-        const seen = try e.gpa.alloc(u32, n);
-        defer e.gpa.free(seen);
-        @memset(seen, 0);
-        const meet = try e.gpa.alloc(?Pend, n);
-        defer e.gpa.free(meet);
-        @memset(meet, null);
-        const mixed = try e.gpa.alloc(bool, n);
-        defer e.gpa.free(mixed);
-        @memset(mixed, false);
-        for (e.cfg.order) |b| {
-            if (b != 0 and seen[b] == npred[b] and !mixed[b]) e.pin[b] = meet[b];
-            var st = e.pin[b];
-            const blk = e.r.blocks.items[b];
-            for (blk.start..blk.start + blk.len - 1) |idx| {
-                if (e.plan.kind[idx] != .root) continue;
-                const i = e.r.insts.items[idx];
-                switch (i.op) {
-                    .@"pending.flags" => st = e.pendOf(i),
-                    .setreg => if (st) |p| if (i.aux < p.off + 4 and p.off < i.aux + byteSize(e.ty(i.a)).?) {
-                        st = null;
-                    },
-                    .@"call.interp", .copy => st = null,
-                    .@"call.helper" => if (i.aux2 & ir.helper_no_regs == 0) {
-                        st = null;
-                    },
-                    else => {},
+        for (1..n + 1) |k| npred[k] += npred[k - 1];
+        const preds = try e.gpa.alloc(BlockId, npred[n]);
+        defer e.gpa.free(preds);
+        const fill = try e.gpa.alloc(u32, n);
+        defer e.gpa.free(fill);
+        @memset(fill, 0);
+        for (0..n) |b| {
+            const sb = succs(e.r, @intCast(b));
+            for (sb[0][0..sb[1]]) |t| {
+                preds[npred[t] + fill[t]] = @intCast(b);
+                fill[t] += 1;
+            }
+        }
+        var changed = true;
+        var rounds: u32 = 0;
+        while (changed and rounds < 8) : (rounds += 1) {
+            changed = false;
+            for (e.cfg.order) |b| {
+                var in: ?Pend = null;
+                if (b != 0 or e.cfg.header[0]) {
+                    var ok = true;
+                    // The region's entry leaves nothing pending.
+                    var any_null = b == 0;
+                    var any = false;
+                    for (preds[npred[b]..npred[b + 1]]) |p| {
+                        if (!known[p]) continue;
+                        if (out[p]) |op| {
+                            if (in) |cur| {
+                                if (!pendEq(cur, op)) ok = false;
+                            } else in = op;
+                            any = true;
+                        } else any_null = true;
+                    }
+                    if (!ok or !any) in = null;
+                    if (in) |cur| if (any_null and !(e.cfg.header[b] and materializable(cur))) {
+                        in = null;
+                    };
                 }
+                e.pin[b] = in;
+                var st = in;
+                const blk = e.r.blocks.items[b];
+                for (blk.start..blk.start + blk.len - 1) |idx| {
+                    if (e.plan.kind[idx] != .root) continue;
+                    const i = e.r.insts.items[idx];
+                    switch (i.op) {
+                        .@"pending.flags" => st = e.pendOf(i),
+                        .setreg => if (st) |p| if (i.aux < p.off + 4 and p.off < i.aux + byteSize(e.ty(i.a)).?) {
+                            st = null;
+                        },
+                        .@"call.interp", .copy => st = null,
+                        .@"call.helper" => if (i.aux2 & ir.helper_no_regs == 0) {
+                            st = null;
+                        },
+                        else => {},
+                    }
+                }
+                const same = known[b] and ((out[b] == null and st == null) or (out[b] != null and st != null and std.meta.eql(out[b].?, st.?)));
+                if (!same) changed = true;
+                out[b] = st;
+                known[b] = true;
             }
-            out[b] = st;
-            done[b] = true;
-            const s = succs(e.r, b);
-            for (s[0][0..s[1]]) |t| {
-                if (seen[t] == 0) meet[t] = st else if (!std.meta.eql(meet[t], st)) mixed[t] = true;
-                if (st == null) mixed[t] = true;
-                seen[t] += 1;
-            }
+        }
+        if (changed) {
+            // Not settled: fall back to no flags across blocks.
+            @memset(e.pin, null);
+            return;
         }
         for (e.cfg.order) |b| {
             if (out[b] == null) continue;
             const s = succs(e.r, b);
             if (s[1] == 0) continue;
             var all = true;
-            for (s[0][0..s[1]]) |t| if (e.pin[t] == null) {
+            for (s[0][0..s[1]]) |t| if (e.pin[t] == null or !pendEq(e.pin[t].?, out[b].?)) {
                 all = false;
             };
             e.keep[b] = all;
         }
+    }
+
+    /// Two Pends the same pending locals hold alike: packed flags are
+    /// packed flags, whichever op made them.
+    fn pendEq(a: Pend, b: Pend) bool {
+        if (materializable(a) and materializable(b)) return a.off == b.off and a.mask == b.mask;
+        return std.meta.eql(a, b);
+    }
+
+    /// Packed NZCV, which a predecessor can load from its slot.
+    fn materializable(p: Pend) bool {
+        return !p.lazy and !p.rec and p.mask == 0xf000_0000;
+    }
+
+    /// Loads the slot of `p` into the pending locals, as pendingFlags
+    /// leaves packed flags, for a successor that starts with them.
+    fn materialize(e: *E, p: Pend) !void {
+        const w = &e.w;
+        try w.get(e.l32(.cpu));
+        try w.memop(0x28, p.off); // i32.load
+        try w.byte(0xAD); // i64.extend_i32_u
+        try w.i64c(p.mask);
+        try w.byte(0x83); // i64.and
+        try w.set(e.l64(.pa));
+        try w.i64c(p.mask);
+        try w.set(e.l64(.pb));
+        try w.i64c(1);
+        try w.set(e.l64(.pcode));
+        try w.i32c(@intCast(p.off));
+        try w.set(e.l32(.poff));
     }
 
     /// `pending.flags`: an eflags op used only here is kept as its
@@ -2678,6 +2803,9 @@ fn function(
             e.pin = &.{};
             e.keep = &.{};
         }
+        // Block 0 a loop header that starts with packed NZCV pending:
+        // the region's entry loads it.
+        if (e.pin[0]) |p| try e.materialize(p);
         if (opts.structured and cfgs[ri].reducible) {
             batch.structured += 1;
             try e.tree(0);
