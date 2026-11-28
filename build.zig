@@ -590,6 +590,10 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.O
         .linkage = .static,
         .root_module = kernPort(b, target, optimize, flags, gfx != .none),
     });
+    // Position-independent for libh9, a shared library, which links it
+    // too: glibc's targets are by default, but musl's link statically,
+    // so theirs aren't.
+    if (target.result.isMuslLibC()) kern.root_module.pic = true;
     kern.root_module.addIncludePath(b.path(drawterm));
     kern.root_module.addIncludePath(b.path(drawterm ++ "/include"));
     kern.root_module.addIncludePath(b.path(drawterm ++ "/kern"));
@@ -676,6 +680,7 @@ fn kernPort(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.
     tc.addIncludePath(b.path("src/kern"));
     tc.addIncludePath(b.path("src/host"));
     for (flags) |f| if (std.mem.startsWith(u8, f, "-D")) tc.defineCMacroRaw(f[2..]);
+    if (target.result.isMuslLibC()) tc.defineCMacroRaw("H9_MUSL=1"); // src/host/musl_timespec.h
     if (target.result.os.tag == .macos) if (b.graph.environ_map.get("SDKROOT")) |sdk|
         tc.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr/include" }) });
     // Which kernel the Zig is built into, for the files only one of them
@@ -707,6 +712,7 @@ fn kernPort(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.
     // the kernel's Zig names and which calls back into it, with the host
     // C library through translate-c (src/host/libc.h).
     const libc = b.addTranslateC(.{ .root_source_file = b.path("src/host/libc.h"), .target = target, .optimize = optimize });
+    if (target.result.isMuslLibC()) libc.defineCMacroRaw("H9_MUSL=1"); // src/host/musl_timespec.h
     const devices = b.createModule(.{
         .root_source_file = b.path("src/host/devices.zig"),
         .target = target,
@@ -2113,6 +2119,9 @@ pub fn build(b: *std.Build) void {
     b.step("libh9-example", "Build docs/embedding/hello.c, libh9 from C, as zig-out/bin/libh9-hello").dependOn(&b.addInstallArtifact(libh9_example, .{}).step);
     if (emu != .none and runs_here) {
         const run_c = b.addRunArtifact(libh9_example);
+        // A musl build's loader is /lib/ld-musl-*.so.1, which a glibc host
+        // hasn't: it's skipped there.
+        run_c.skip_foreign_checks = true;
         run_c.addFileArg(host_hello);
         run_c.addArgs(&.{ "--engine", "hcpu" });
         run_c.addCheck(.{ .expect_stdout_match = "engine hcpu, arch " });

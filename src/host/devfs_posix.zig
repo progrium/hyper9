@@ -17,6 +17,9 @@ const std = @import("std");
 const builtin = @import("builtin");
 const kern = @import("kern");
 const hc = @import("host_libc");
+/// The access mode bits of open flags. Not O_ACCMODE: musl's has O_PATH
+/// (its O_SEARCH) in it, so an O_PATH handle wouldn't read as O_RDONLY.
+const accmode: c_int = hc.O_WRONLY | hc.O_RDWR;
 const fs = @import("devfs.zig");
 
 const port = kern;
@@ -634,8 +637,8 @@ fn fsopen(ch: *Chan, mode: c_int) Error!*Chan {
     } else {
         var m = try omodeflags(omode & 3);
         // A truncation needs write access and must wait for the check.
-        if (mode & c.OTRUNC != 0 and m & hc.O_ACCMODE == hc.O_RDONLY)
-            m = (m & ~@as(c_int, hc.O_ACCMODE)) | hc.O_RDWR;
+        if (mode & c.OTRUNC != 0 and m & accmode == hc.O_RDONLY)
+            m = (m & ~accmode) | hc.O_RDWR;
         const fd = openpath(uif, uif.path, m, 0o666);
         if (fd < 0) return oserr();
         errdefer _ = hc.close(fd);
@@ -831,7 +834,7 @@ fn fswstat(ch: *Chan, buf: [*]u8, n: c_int) Error!c_int {
         (beneath.stat(uif.path, &st) < 0 or st.st_dev != fdst.st_dev or st.st_ino != fdst.st_ino))
     {
         const fl = hc.fcntl(uif.fd, hc.F_GETFL);
-        if (fl < 0 or fl & hc.O_ACCMODE == hc.O_RDONLY or d.name[0] != 0) return oserrOf(hc.ENOENT);
+        if (fl < 0 or fl & accmode == hc.O_RDONLY or d.name[0] != 0) return oserrOf(hc.ENOENT);
         wfd = uif.fd;
         st = fdst;
     } else if (ch.qid.type & fs.QTSYMLINK != 0 or beneath.stat(uif.path, &st) < 0) {

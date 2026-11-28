@@ -164,6 +164,14 @@ zig build bench                                  # compute and syscall speed, hc
 zig build bench -- syscall --engine hcpu --arch arm64  # only those system call rows (also compute, loop, --repeat N)
 ```
 
+The Linux releases are built for musl, so check a change to the host's
+C, or to what translate-c sees of it (`src/host/libc.h` and
+`src/kern/port.h`), on a musl build too: `zig build test
+-Dtarget=x86_64-linux-musl`, then `zig build integration
+-Dtarget=x86_64-linux-musl -Darch=amd64 -Dengines=sud -Dfilter=linux`
+for the Linux cases in the Alpine root. The
+[ci workflow](.github/workflows/ci.yml)'s `musl` job runs both.
+
 Unicorn is kept as a test oracle only: `zig build lockstep`
 ([tools/lockstep.zig](tools/lockstep.zig)), and the fuzzers' lockstep
 mode, check T0 against it an instruction at a time. They link the

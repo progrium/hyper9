@@ -1045,6 +1045,40 @@ static void proc_fd_dir(void) {
 	printf("ok proc_fd_dir\n");
 }
 
+/* O_PATH fds as musl sees them: its O_ACCMODE has O_PATH (its O_SEARCH)
+ * in it, so F_GETFL's access mode reads as O_SEARCH, not O_RDONLY, as
+ * once tripped h9's own musl build on the host (issue 351). Each names
+ * its file for fstat, fchdir, and the *at calls, and reads nothing. */
+static void o_path(void) {
+	char dir[64], file[80], buf[4];
+	struct stat st;
+	snprintf(dir, sizeof dir, "/tmp/opath.%d", (int)getpid());
+	snprintf(file, sizeof file, "%s/f", dir);
+	CHECK("o_path", mkdir(dir, 0700) == 0);
+	int f = open(file, O_WRONLY | O_CREAT | O_EXCL, 0600);
+	CHECK("o_path", f >= 0 && write(f, "hi", 2) == 2 && close(f) == 0);
+	int d = open(dir, O_PATH | O_DIRECTORY | O_CLOEXEC);
+	int p = open(file, O_PATH | O_CLOEXEC);
+	CHECK("o_path", d >= 0 && p >= 0);
+	for (int i = 0; i < 2; i++) {
+		int fl = fcntl(i ? p : d, F_GETFL);
+		CHECK("o_path", fl >= 0 && (fl & O_PATH) != 0 && (fl & (O_WRONLY | O_RDWR)) == 0);
+#ifdef O_SEARCH
+		CHECK("o_path", (fl & O_ACCMODE) == O_SEARCH);
+#endif
+	}
+	CHECK("o_path", fstat(d, &st) == 0 && S_ISDIR(st.st_mode));
+	CHECK("o_path", fstat(p, &st) == 0 && S_ISREG(st.st_mode) && st.st_size == 2);
+	CHECK("o_path", read(p, buf, sizeof buf) < 0 && errno == EBADF);
+	CHECK("o_path", read(d, buf, sizeof buf) < 0 && errno == EBADF);
+	CHECK("o_path", fstatat(d, "f", &st, 0) == 0 && st.st_size == 2);
+	f = openat(d, "f", O_RDONLY | O_CLOEXEC);
+	CHECK("o_path", f >= 0 && read(f, buf, sizeof buf) == 2 && memcmp(buf, "hi", 2) == 0 && close(f) == 0);
+	CHECK("o_path", fchdir(d) == 0 && access("f", R_OK) == 0 && chdir("/") == 0);
+	CHECK("o_path", close(p) == 0 && unlinkat(d, "f", 0) == 0 && close(d) == 0 && rmdir(dir) == 0);
+	printf("ok o_path\n");
+}
+
 /* A directory fd opened while the directory is only below an up layer
  * (design/epoch-0/upper-layers.md) still names it once a create through it has
  * made the directory in the layer, as apk's cache fd does: renameat and
@@ -1158,6 +1192,7 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "lazy_map")) lazy_map();
 		if (all || !strcmp(n, "image_dontneed")) image_dontneed();
 		if (all || !strcmp(n, "proc_fd_dir")) proc_fd_dir();
+		if (all || !strcmp(n, "o_path")) o_path();
 		if (all || !strcmp(n, "seek_long_name")) seek_long_name();
 		if (all || !strcmp(n, "mremap_span")) mremap_span();
 		if (all || !strcmp(n, "host_fds")) host_fds();

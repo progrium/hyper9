@@ -449,11 +449,16 @@ canonical(const char *path, int nofollow, char *buf)
 	return 0;
 }
 
-/* Whether flags open a directory, or nothing, for reading only. */
+/*
+ * Whether flags open a directory, or nothing, for reading only. The
+ * access mode is O_WRONLY|O_RDWR's bits, not O_ACCMODE's: musl's
+ * O_ACCMODE has O_PATH (its O_SEARCH) in it, so every O_PATH open
+ * would count as more than a look.
+ */
 static int
 lookonly(int flags)
 {
-	if((flags & O_ACCMODE) != O_RDONLY || (flags & (O_CREAT|O_TRUNC)) != 0)
+	if((flags & (O_WRONLY|O_RDWR)) != O_RDONLY || (flags & (O_CREAT|O_TRUNC)) != 0)
 		return 0;
 	return (flags & O_DIRECTORY) != 0 || (O_PATH != 0 && (flags & O_PATH) != 0);
 }
