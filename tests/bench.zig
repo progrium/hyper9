@@ -252,16 +252,18 @@ pub fn main(init: std.process.Init) !void {
 
     var bad = false;
     // zig build bench -- [compute | loop | syscall] [--engine E] [--arch A]
-    // [--repeat N]: the compute benchmarks only, the loop rows only without
-    // T0, or the system call rows only (pwrite and nsec); --engine and
-    // --arch run one engine's or one architecture's rows only;
-    // each timing the fastest of N runs (default 3).
+    // [--tier T] [--repeat N]: the compute benchmarks only, the loop rows
+    // only without T0, or the system call rows only (pwrite and nsec);
+    // --engine, --arch, and --tier run one engine's, one architecture's,
+    // or one hcpu tier's rows only; each timing the fastest of N runs
+    // (default 3).
     const argv = try init.minimal.args.toSlice(init.arena.allocator());
     var compute_only = false;
     var loop_only = false;
     var syscall_only = false;
     var only_engine: ?engine.Choice = null;
     var only_arch: ?aout.Arch = null;
+    var only_tier: ?[]const u8 = null;
     var repeat: usize = 3;
     var ai: usize = 1;
     while (ai < argv.len) : (ai += 1) {
@@ -283,11 +285,14 @@ pub fn main(init: std.process.Init) !void {
                 std.debug.print("bench: no arch {s}\n", .{argv[ai]});
                 std.process.exit(2);
             };
+        } else if (std.mem.eql(u8, argv[ai], "--tier") and ai + 1 < argv.len) {
+            ai += 1;
+            only_tier = argv[ai];
         } else if (std.mem.eql(u8, argv[ai], "--repeat") and ai + 1 < argv.len) {
             ai += 1;
             repeat = @max(1, try std.fmt.parseUnsigned(usize, argv[ai], 10));
         } else {
-            std.debug.print("usage: bench [compute | loop | syscall] [--engine E] [--arch A] [--repeat N]\n", .{});
+            std.debug.print("usage: bench [compute | loop | syscall] [--engine E] [--arch A] [--tier T] [--repeat N]\n", .{});
             std.process.exit(2);
         }
     }
@@ -297,6 +302,7 @@ pub fn main(init: std.process.Init) !void {
         if (syscall_only and !std.mem.eql(u8, c.name, "pwrite") and !std.mem.eql(u8, c.name, "nsec")) continue;
         if (only_engine) |e| if (e != kind) continue;
         if (only_arch) |a| if (a != c.arch) continue;
+        if (only_tier) |t| if (tier == null or !std.mem.eql(u8, t, tier.?)) continue;
         setTier(tier);
         defer setTier(null);
         var ns: i96 = try runOne(gpa, io, kind, c) orelse continue;
@@ -345,9 +351,12 @@ pub fn main(init: std.process.Init) !void {
         var hex: [8]u8 = undefined;
         _ = std.fmt.bufPrint(&hex, "{x:0>8}", .{want}) catch unreachable;
         for ([_]aout.Arch{ .arm64, .i386 }) |arch| {
+            if (only_arch) |a| if (a != arch) continue;
             const text = if (arch == .arm64) c.arm64 else c.i386;
             for ([_]engine.Choice{ .hvf, .kvm, .sud, .hcpu }) |kind| {
+                if (only_engine) |e| if (e != kind) continue;
                 for (tiersOf(kind)) |tier| {
+                    if (only_tier) |t| if (tier == null or !std.mem.eql(u8, t, tier.?)) continue;
                     setTier(tier);
                     defer setTier(null);
                     const before = engine.hcpuRetired();

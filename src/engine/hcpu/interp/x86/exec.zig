@@ -483,8 +483,16 @@ pub fn ExecIn(comptime mode: Mode, comptime M: type) type {
         /// (it is a syscall).
         cur: *PageCacheT.Page = undefined,
         cur_vp: W = no_vp,
+        /// The code epoch `cur` holds for, and where it's read: a fetch
+        /// on `cur` is two compares and two loads. With no PageCache it's
+        /// `never`, which cur_vp's no_vp keeps from mattering.
+        cur_epoch: usize = 0,
+        epoch_at: *const std.atomic.Value(usize) = &never,
+        /// The PageCache's pool, which `cur`'s indexes are into.
+        pool: [*]const InstT = undefined,
 
         const no_vp = std.math.maxInt(W);
+        const never: std.atomic.Value(usize) = .init(0);
 
         inline fn pc(x: *const X) W {
             return @field(x.c, pc_name);
@@ -512,15 +520,18 @@ pub fn ExecIn(comptime mode: Mode, comptime M: type) type {
             // next multiple of 256, where a stop request is read, if
             // that comes first. The budget is still exact.
             var limit: u64 = 0;
+            // Kept in a local: x is in memory, since step takes it.
+            var n: u64 = 0;
+            defer x.n = n;
             while (true) {
-                if (x.n >= limit) {
-                    if (x.n >= x.opts.budget) return .stopped;
+                if (n >= limit) {
+                    if (n >= x.opts.budget) return .stopped;
                     if (x.stopRequested()) return .stopped;
-                    limit = @min(x.opts.budget, (x.n | 255) + 1);
+                    limit = @min(x.opts.budget, (n | 255) + 1);
                 }
                 const at = x.pc();
                 x.step() catch return x.exit;
-                x.n += 1;
+                n += 1;
                 x.c.retired += 1;
                 if (count_branches and x.pc() != at +% x.i.len) {
                     taken += 1;
@@ -810,29 +821,36 @@ pub fn ExecIn(comptime mode: Mode, comptime M: type) type {
         const has_hit = @typeInfo(MemT) == .@"struct" and @hasDecl(MemT, "hit");
 
         inline fn fetch(x: *X) Trap!*const InstT {
-            if (has_caches and tracks_code) if (x.c.pages) |pcache| if (x.m.codeEpoch()) |epoch| {
+            if (has_caches and tracks_code) {
                 const eip = x.pc();
-                if (eip >> 12 == x.cur_vp and epoch == pcache.epoch) {
+                if (eip >> 12 == x.cur_vp and x.epoch_at.load(.monotonic) == x.cur_epoch) {
                     const k = x.cur.idx[@intCast(eip & (page_size - 1))];
-                    if (k != 0) return &pcache.pool[k - 1];
+                    if (k != 0) return &x.pool[k - 1];
                 }
-                return x.fetchPage(pcache, epoch);
-            };
+                return x.fetchPage();
+            }
             return x.fetchEntry();
         }
 
         /// A fetch the current page doesn't have: through the PageCache,
         /// decoding it there.
-        noinline fn fetchPage(x: *X, pcache: *PageCacheT, epoch: usize) Trap!*const InstT {
+        noinline fn fetchPage(x: *X) Trap!*const InstT {
+            const pcache = x.c.pages orelse return x.fetchEntry();
+            const at_epoch = x.m.codeEpochPtr() orelse return x.fetchEntry();
+            const epoch = at_epoch.load(.monotonic);
+            x.epoch_at = at_epoch;
+            x.pool = &pcache.pool;
             if (epoch != pcache.epoch) {
                 pcache.epoch = epoch;
                 pcache.drop();
                 x.cur_vp = no_vp;
             }
+            x.cur_epoch = epoch;
             const eip = x.pc();
             const vp = eip >> 12;
             const off: usize = @intCast(eip & (page_size - 1));
             if (vp != x.cur_vp or x.cur.gen != pcache.gen) {
+                x.cur_vp = no_vp;
                 const host = @intFromPtr(try x.ptr(eip, .exec)) - off;
                 x.cur = pcache.page(vp, host) orelse return x.fetchEntry();
                 x.cur_vp = vp;
@@ -916,7 +934,7 @@ pub fn ExecIn(comptime mode: Mode, comptime M: type) type {
             };
         }
 
-        fn step(x: *X) Trap!void {
+        inline fn step(x: *X) Trap!void {
             x.i = try x.fetch();
             const i = x.i;
             x.next = x.pc() +% i.len;
@@ -950,8 +968,58 @@ pub fn ExecIn(comptime mode: Mode, comptime M: type) type {
             break :blk hs;
         };
 
+        /// The table entries most of a program's instructions are (the
+        /// integer moves, ALU forms, compares, jumps, calls, pushes, and
+        /// pops of compiled C), which `exec` runs in its own body through
+        /// a switch instead of an indirect call through `handlers`.
+        const hot_ops = [_]table.Op{ .mov, .movzx, .movsx, .lea, .add, .sub, .@"and", .@"or", .xor, .cmp, .@"test", .inc, .dec, .jcc, .jmp, .call, .ret, .push, .pop, .shl, .shr, .sar, .nop };
+        const hot_entries = blk: {
+            @setEvalBranchQuota(1_000_000);
+            var list: [table.entry_count]u16 = undefined;
+            var n: usize = 0;
+            for (0..table.entry_count) |k| {
+                const e = table.entryAt(k);
+                if (long and invalid64(e)) continue;
+                for (hot_ops) |o| if (e.op == o) {
+                    list[n] = @intCast(k);
+                    n += 1;
+                    break;
+                };
+            }
+            const out = list[0..n].*;
+            break :blk out;
+        };
+        /// Per entry: 1 + its index in hot_entries, or 0.
+        const hot_slot = blk: {
+            @setEvalBranchQuota(1_000_000);
+            var t: [table.entry_count]u16 = @splat(0);
+            for (hot_entries, 0..) |k, h| t[k] = h + 1;
+            break :blk t;
+        };
+
+        /// The condition of a Jcc entry, from the opcode it's for, if
+        /// it's one opcode's.
+        fn ccOf(comptime e: *const table.Entry) ?u4 {
+            @setEvalBranchQuota(100_000);
+            const k = table.entryIndex(e);
+            var found: ?u4 = null;
+            var n: u32 = 0;
+            for ([_]u16{ 0x70, 0x0f80 }) |base| for (0..16) |c| {
+                const s = table.slotIn(mode, base + @as(u16, @intCast(c)));
+                if (!s.grouped and s.first == k) {
+                    found = @intCast(c);
+                    n += 1;
+                }
+            };
+            return if (n == 1) found else null;
+        }
+
         fn exec(x: *X) Trap!void {
-            return handlers[x.i.entry](x);
+            const k = x.i.entry;
+            switch (hot_slot[k]) {
+                inline 1...hot_entries.len => |h| return x.execEntry(comptime table.entryAt(hot_entries[h - 1])),
+                else => return handlers[k](x),
+            }
         }
 
         /// Whether long mode removes `op` (PUSHA, POPA, the BCD
@@ -986,9 +1054,9 @@ pub fn ExecIn(comptime mode: Mode, comptime M: type) type {
                             return a +% f.d;
                         }
                     };
-                    const d: W = if (i.op == .inc) 1 else std.math.maxInt(W);
+                    const d: W = if (e.op == .inc) 1 else std.math.maxInt(W);
                     const a = try x.modify(e.dst, i.size, F{ .d = d });
-                    x.c.fl.recordIncDec(if (i.op == .inc) .inc else .dec, i.size, a, a +% d);
+                    x.c.fl.recordIncDec(if (e.op == .inc) .inc else .dec, i.size, a, a +% d);
                 },
                 .not => {
                     const F = struct {
@@ -1031,7 +1099,7 @@ pub fn ExecIn(comptime mode: Mode, comptime M: type) type {
                         else => 4,
                     };
                     const v = try x.get(e.src, ss);
-                    x.wr(i.reg(), i.size, if (i.op == .movzx) v else @bitCast(sx(v, ss)));
+                    x.wr(i.reg(), i.size, if (e.op == .movzx) v else @bitCast(sx(v, ss)));
                 },
                 .lea => x.wr(i.reg(), i.size, x.ea()),
                 .xchg => {
@@ -1155,7 +1223,9 @@ pub fn ExecIn(comptime mode: Mode, comptime M: type) type {
                     try x.loadSeg(e.sreg, @truncate(sel));
                     x.wr(i.reg(), size, off);
                 },
-                .jcc => if (x.c.fl.cond(i.cc())) x.jump(x.next +% i.imm),
+                .jcc => if (comptime ccOf(e)) |cc| {
+                    if (x.c.fl.condC(cc)) x.jump(x.next +% i.imm);
+                } else if (x.c.fl.cond(i.cc())) x.jump(x.next +% i.imm),
                 .jmp => x.jump(x.next +% i.imm),
                 .jmp_ind => x.next = try x.get(e.src, i.size),
                 .call => {
@@ -1185,7 +1255,7 @@ pub fn ExecIn(comptime mode: Mode, comptime M: type) type {
                     const t = try x.load(sp, size);
                     const cs: u16 = @truncate(try x.load(sp +% size, size));
                     if (cs != x.c.seg[@intFromEnum(cpu_mod.Seg.cs)]) return x.exc(cpu_mod.vec_gp);
-                    if (i.op == .iret) {
+                    if (e.op == .iret) {
                         const fl = try x.load(sp +% 2 * size, size);
                         const mask = if (size == 2) flags.popf_mask & 0xffff else flags.popf_mask;
                         x.c.fl.setMasked(mask, fl);
@@ -1198,8 +1268,8 @@ pub fn ExecIn(comptime mode: Mode, comptime M: type) type {
                     const cx = x.rd(1, size) -% 1;
                     x.wr(1, size, cx);
                     var taken = cx & mk(size) != 0;
-                    if (i.op == .loope) taken = taken and x.c.fl.zf();
-                    if (i.op == .loopne) taken = taken and !x.c.fl.zf();
+                    if (e.op == .loope) taken = taken and x.c.fl.zf();
+                    if (e.op == .loopne) taken = taken and !x.c.fl.zf();
                     if (taken) x.jump(x.next +% i.imm);
                 },
                 .jcxz => {
@@ -1215,7 +1285,7 @@ pub fn ExecIn(comptime mode: Mode, comptime M: type) type {
                     const size = i.size;
                     const v = try x.get(e.src, size);
                     if (v != 0) {
-                        const r: W = if (i.op == .bsf) @ctz(v) else @bitSizeOf(W) - 1 - @clz(v);
+                        const r: W = if (e.op == .bsf) @ctz(v) else @bitSizeOf(W) - 1 - @clz(v);
                         x.wr(i.reg(), size, r);
                     }
                     // A zero source leaves the destination whole, upper half
@@ -1346,12 +1416,12 @@ pub fn ExecIn(comptime mode: Mode, comptime M: type) type {
             x.c.loadSeg(@enumFromInt(n), sel) catch return x.exc(cpu_mod.vec_gp);
         }
 
-        fn alu(x: *X, comptime e: *const table.Entry) Trap!void {
+        inline fn alu(x: *X, comptime e: *const table.Entry) Trap!void {
             const i = x.i;
             const size = i.size;
             const b = try x.get(e.src, size);
             const fl = &x.c.fl;
-            switch (i.op) {
+            switch (e.op) {
                 .cmp => {
                     const a = try x.get(e.dst, size);
                     fl.record(.sub, size, a, b, a -% b, 0);
@@ -1361,13 +1431,12 @@ pub fn ExecIn(comptime mode: Mode, comptime M: type) type {
                     fl.record(.logic, size, 0, 0, a & b, 0);
                 },
                 else => {
-                    const cin: u1 = if (i.op == .adc or i.op == .sbb) @intFromBool(fl.cf()) else 0;
+                    const cin: u1 = if (e.op == .adc or e.op == .sbb) @intFromBool(fl.cf()) else 0;
                     const F = struct {
-                        op: table.Op,
                         b: W,
                         cin: u1,
                         fn apply(f: @This(), a: W) W {
-                            return switch (f.op) {
+                            return switch (comptime e.op) {
                                 .add, .adc => a +% f.b +% f.cin,
                                 .sub, .sbb => a -% f.b -% f.cin,
                                 .@"and" => a & f.b,
@@ -1377,10 +1446,10 @@ pub fn ExecIn(comptime mode: Mode, comptime M: type) type {
                             };
                         }
                     };
-                    const f: F = .{ .op = i.op, .b = b, .cin = cin };
+                    const f: F = .{ .b = b, .cin = cin };
                     const a = try x.modify(e.dst, size, f);
                     const res = f.apply(a);
-                    switch (i.op) {
+                    switch (e.op) {
                         .add, .adc => fl.record(.add, size, a, b, res, cin),
                         .sub, .sbb => fl.record(.sub, size, a, b, res, cin),
                         else => fl.record(.logic, size, 0, 0, res, 0),
@@ -1471,7 +1540,7 @@ pub fn ExecIn(comptime mode: Mode, comptime M: type) type {
             return if (size == 8) 63 else 31;
         }
 
-        fn shift(x: *X, comptime e: *const table.Entry) Trap!void {
+        inline fn shift(x: *X, comptime e: *const table.Entry) Trap!void {
             const i = x.i;
             const size = i.size;
             const count = (try x.get(e.src, 1)) & countMask(size);
@@ -1602,7 +1671,7 @@ pub fn ExecIn(comptime mode: Mode, comptime M: type) type {
             x.c.fl.setMasked(flags.CF | flags.OF, (if (cf) flags.CF else 0) | (if (of) flags.OF else 0));
         }
 
-        fn popOp(x: *X, comptime e: *const table.Entry) Trap!void {
+        inline fn popOp(x: *X, comptime e: *const table.Entry) Trap!void {
             const i = x.i;
             const size = i.size;
             const old_sp = x.c.r[4];
