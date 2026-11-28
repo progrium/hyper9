@@ -186,7 +186,7 @@ const Integration = struct {
 /// h9 as --arch (from -Darch). `guest_test` says h9 was built with
 /// -Dguest-test. `src`, if given, is a 9front checkout's `sys` directory,
 /// which the self-host cases bind over /sys when the root lacks /sys/src. The cases are split
-/// `shards` ways (H9_TEST_SHARD, tests/integration.zig's skipShard), one
+/// `shards` ways (H9_TEST_SHARD, which tests/runner.zig reads), one
 /// run of the same binary for each, which the build runner runs side by
 /// side: the cases mostly wait on h9, terminals, and sockets, so one run
 /// leaves most cores idle. `step` depends on every run.
@@ -275,6 +275,9 @@ fn integrationTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
             },
         }),
         .filters = filters,
+        // Shards by listing only this run's cases, and says why cases
+        // skipped with -Dskips (tests/runner.zig).
+        .test_runner = .{ .path = b.path("tests/runner.zig"), .mode = .server },
     });
 }
 
@@ -1670,9 +1673,11 @@ pub fn build(b: *std.Build) void {
     }
     const it_filters = b.option([]const []const u8, "filter", "Run only the integration cases whose names contain one of these") orelse &.{};
     const it_shards = b.option(u32, "shards", "Split the integration cases across this many runs at once (default 4; 1 runs them in one)") orelse 4;
+    const it_skips = b.option(bool, "skips", "List the integration cases that skipped, by reason") orelse false;
     const integration_step = b.step("integration", "Run real 9front binaries from the root tree through h9");
     for (addIntegration(b, integration_step, it_shards, optimize, it_filters, it, root, engine_list, run_pending, guest_test, src_dir)) |run_integration| {
         if (!test_web) run_integration.step.dependOn(linux_fixtures);
+        if (it_skips) run_integration.setEnvironmentVariable("H9_TEST_SKIPS", "1");
         // -Djit-check checks every region against T0, one region at a time
         // across vCPUs: the cases' timeouts stretch (H9_TEST_SLOW, unless it's
         // set already). Eight processes contending for /env need about 40.

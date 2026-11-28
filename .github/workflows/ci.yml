@@ -229,6 +229,10 @@ jobs:
           rm roots.tar
         env:
           MSYS: winsymlinks:nativestrict
+      # Homebrew's wasm-opt, as on a developer's Mac, for sched-test's
+      # wasm cases; without one on PATH, they're only compiled.
+      - if: runner.os == 'macOS'
+        run: brew install binaryen
       - name: test, T1 and T0
         if: always()
         run: zig build test
