@@ -186,10 +186,6 @@ fn sizeLog2(t: Type) ?u2 {
     };
 }
 
-fn sfOf(bits: u32) u32 {
-    return if (bits > 32) 0x8000_0000 else 0;
-}
-
 // ---------------------------------------------------------------- emitter state
 
 const Fixup = struct {

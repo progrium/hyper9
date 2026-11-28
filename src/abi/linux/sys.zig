@@ -709,6 +709,19 @@ pub const Process = struct {
         return .{ try p.readPtr(va + 2 * w * i), try p.readPtr(va + 2 * w * i + w) };
     }
 
+    /// The sum of the lengths of the `cnt` iovecs at `va`. As on Linux, a
+    /// sum past SSIZE_MAX is EINVAL: the lengths are the guest's, and
+    /// unchecked they'd overflow.
+    pub fn iovTotal(p: *Process, va: u64, cnt: u64) Err!u64 {
+        var total: u64 = 0;
+        var i: u64 = 0;
+        while (i < cnt) : (i += 1) {
+            total = std.math.add(u64, total, (try p.iovec(va, i))[1]) catch return error.Invalid;
+            if (total > std.math.maxInt(i64)) return error.Invalid;
+        }
+        return total;
+    }
+
     /// A NUL-terminated string at `va`, into `buf`.
     pub fn string(p: *Process, va: u64, buf: []u8) Err![:0]u8 {
         if (va == 0) return error.Fault;
@@ -740,7 +753,7 @@ pub const Process = struct {
     }
 };
 
-pub const Err = error{ Fault, NameTooLong, TooBig, NoMem };
+pub const Err = error{ Fault, NameTooLong, TooBig, NoMem, Invalid };
 
 fn errnoOf(e: Err) i64 {
     return switch (e) {
@@ -748,6 +761,7 @@ fn errnoOf(e: Err) i64 {
         error.NameTooLong => -E.NAMETOOLONG,
         error.TooBig => -E.@"2BIG",
         error.NoMem => -E.NOMEM,
+        error.Invalid => -E.INVAL,
     };
 }
 
@@ -963,9 +977,7 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const engine.Ureg) Err!Outcome {
         .readv => return ret(try rwv(p, c.int(0), c.a[1], c.a[2], -1, .read)),
         .writev => {
             if (passcred_live.load(.monotonic) > 0) {
-                var total: u64 = 0;
-                var i: u64 = 0;
-                while (i < @min(c.a[2], 1024)) : (i += 1) total += (try p.iovec(c.a[1], i))[1];
+                const total = try p.iovTotal(c.a[1], @min(c.a[2], 1024));
                 if (try passcredWrite(p, c.int(0), total)) |e| return ret(e);
             }
             return ret(synced(p, c.int(0), try rwv(p, c.int(0), c.a[1], c.a[2], -1, .write)));
@@ -2368,9 +2380,7 @@ fn msgSockRwv(p: *Process, fd: i32, iov: u64, cnt: u64, comptime dir: Dir) Err!?
     const u = unixOf(p, fd) orelse return null;
     if (u.stype == SOCK_STREAM or u.netlink) return null;
     if (u.state != .connected) return -E.NOTCONN;
-    var total: u64 = 0;
-    var i: u64 = 0;
-    while (i < cnt) : (i += 1) total += (try p.iovec(iov, i))[1];
+    const total = try p.iovTotal(iov, cnt);
     const max = 4 << 20;
     if (total > max) return -E.MSGSIZE;
     if (total == 0) return null;
@@ -2383,16 +2393,18 @@ fn msgSockRwv(p: *Process, fd: i32, iov: u64, cnt: u64, comptime dir: Dir) Err!?
     }
     switch (dir) {
         .write => {
+            // The iovecs are read again: another thread may have changed
+            // them since the sum, so each is clamped to what's left.
             var o: usize = 0;
-            i = 0;
-            while (i < cnt) : (i += 1) {
+            var i: u64 = 0;
+            while (i < cnt and o < tmp.len) : (i += 1) {
                 const base, const len = try p.iovec(iov, i);
-                const l: usize = @intCast(len);
+                const l: usize = @intCast(@min(len, tmp.len - o));
                 if (l == 0) continue;
                 p.mm.copy(base, tmp[o..][0..l], false) catch return -E.FAULT;
                 o += l;
             }
-            return pipeWrite(p, fd, tmp);
+            return pipeWrite(p, fd, tmp[0..o]);
         },
         .read => {
             const key = scmKey(info.qpath, false);
@@ -2400,7 +2412,7 @@ fn msgSockRwv(p: *Process, fd: i32, iov: u64, cnt: u64, comptime dir: Dir) Err!?
             const n = kern.pread(@intCast(fd), tmp[0..@intCast(len)], -1) catch return kerr();
             if (n > 0 and scm_live.load(.monotonic) > 0) scmConsumed(p, key, n);
             var o: usize = 0;
-            i = 0;
+            var i: u64 = 0;
             while (i < cnt and o < n) : (i += 1) {
                 const base, const l0 = try p.iovec(iov, i);
                 const l = @min(@as(usize, @intCast(l0)), n - o);
@@ -3213,31 +3225,6 @@ fn syncfs(fd: i32) i64 {
     kc.syncfs(fd) catch return if (info.dc == 'U') -E.IO else 0;
     return 0;
 }
-
-/// A Plan 9 wstat message that changes nothing (nulldir), with the given
-/// fields set.
-const Wstat = struct {
-    mode: ?u32 = null,
-    atime: ?u32 = null,
-    mtime: ?u32 = null,
-    length: ?u64 = null,
-    name: ?[]const u8 = null,
-
-    fn encode(w: Wstat, buf: []u8) []u8 {
-        const name = w.name orelse "";
-        const size: usize = 41 + 8 + name.len;
-        std.mem.writeInt(u16, buf[0..2], @intCast(size - 2), .little);
-        @memset(buf[2..41], 0xff);
-        std.mem.writeInt(u32, buf[21..25], w.mode orelse 0xffffffff, .little);
-        std.mem.writeInt(u32, buf[25..29], w.atime orelse 0xffffffff, .little);
-        std.mem.writeInt(u32, buf[29..33], w.mtime orelse 0xffffffff, .little);
-        std.mem.writeInt(u64, buf[33..41], w.length orelse 0xffffffffffffffff, .little);
-        std.mem.writeInt(u16, buf[41..43], @intCast(name.len), .little);
-        @memcpy(buf[43..][0..name.len], name);
-        @memset(buf[43 + name.len ..][0..6], 0);
-        return buf[0..size];
-    }
-};
 
 fn rename(p: *Process, olddir: i32, old_va: u64, newdir: i32, new_va: u64, flags: u32) Err!i64 {
     const RENAME_NOREPLACE = 1;
@@ -4980,11 +4967,6 @@ fn futex(p: *Process, uaddr_in: u64, op: u32, val: u32, timeout: u64, uaddr2_in:
     }
 }
 
-/// Wakes one waiter on the futex at va.
-pub fn futexWakeOne(p: *Process, va: u64) void {
-    _ = kc.futexWake(p.mm, va, 1, 0xffffffff, 0, 0, null);
-}
-
 /// What a thread does on its way out (design/0049): marks the robust
 /// futexes it holds as their owner died, waking a waiter on each, then
 /// zeroes its clear-tid word and wakes a waiter there (pthread_join).
@@ -5718,10 +5700,7 @@ const MsgHdr = struct {
 
     fn total(m: MsgHdr, p: *Process) Err!u64 {
         if (m.iovlen > 1024) return error.TooBig;
-        var n: u64 = 0;
-        var i: u64 = 0;
-        while (i < m.iovlen) : (i += 1) n += (try p.iovec(m.iov, i))[1];
-        return n;
+        return p.iovTotal(m.iov, m.iovlen);
     }
 };
 

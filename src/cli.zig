@@ -258,8 +258,8 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
         } else if (flag(a, "--help")) {
             if (c.mode != .run) return error.Usage;
             c.mode = .help;
-        } else if (value(args, &i, "--engine") orelse value(args, &i, "--backend")) |v| {
-            c.engine = try engineValue(v);
+        } else if (value(args, &i, "--engine")) |v| {
+            c.engine = try enumValue(engine.Choice, v);
         } else if (value(args, &i, "--arch")) |v| {
             c.arch = engine.Arch.fromName(v orelse return error.Usage) orelse return error.Usage;
         } else if (value(args, &i, "--cred")) |v| {
@@ -566,20 +566,6 @@ fn count(v: ?[]const u8) Error!u32 {
     return if (n == 0) error.Usage else n;
 }
 
-/// An `--engine` value. `--backend`, which `--engine` replaced, and the
-/// old names `native`, `emu`, and `v86` are accepted for one release
-/// (design/epoch-0/renames.md), and the usage text doesn't mention them.
-fn engineValue(v: ?[]const u8) Error!engine.Choice {
-    const name = v orelse return error.Usage;
-    const old = [_]struct { []const u8, engine.Choice }{
-        .{ "native", .sud },
-        .{ "emu", .hcpu },
-        .{ "v86", .hcpu },
-    };
-    for (old) |o| if (std.mem.eql(u8, name, o[0])) return o[1];
-    return enumValue(engine.Choice, name);
-}
-
 fn enumValue(comptime E: type, v: ?[]const u8) Error!E {
     return std.meta.stringToEnum(E, v orelse return error.Usage) orelse error.Usage;
 }
@@ -793,29 +779,10 @@ test "--engine and its values [renames]" {
     try t.expectError(error.Usage, parse(t.allocator, &.{ "h9", "--engine", "emulator", "/bin/echo" }));
 }
 
-test "--backend, native, emu, and v86 are aliases [renames]" {
-    const pairs = [_][2][]const u8{
-        .{ "native", "sud" },
-        .{ "emu", "hcpu" },
-        .{ "v86", "hcpu" },
-        .{ "kvm", "kvm" },
-    };
-    for (pairs) |p| {
-        const new = try parse(t.allocator, &.{ "h9", "--engine", p[1], "/bin/echo" });
-        defer t.allocator.free(new.env);
-        inline for (.{ "--engine", "--backend" }) |flag_name| {
-            const old = try parse(t.allocator, &.{ "h9", flag_name, p[0], "/bin/echo" });
-            defer t.allocator.free(old.env);
-            try t.expectEqual(new.engine, old.engine);
-            try t.expectEqual(new.mode, old.mode);
-            try t.expectEqualStrings(new.argv[0], old.argv[0]);
-        }
-    }
-    const eq = try parse(t.allocator, &.{ "h9", "--backend=emu", "/bin/echo" });
-    defer t.allocator.free(eq.env);
-    try t.expectEqual(engine.Choice.hcpu, eq.engine);
-    inline for (.{ "--backend", "native", "emu", "v86" }) |old| {
-        try t.expect(std.mem.indexOf(u8, usage, old) == null);
+test "--backend and the old engine names are gone [renames]" {
+    try t.expectError(error.Usage, parse(t.allocator, &.{ "h9", "--backend", "hcpu", "/bin/echo" }));
+    inline for (.{ "native", "emu", "v86" }) |old| {
+        try t.expectError(error.Usage, parse(t.allocator, &.{ "h9", "--engine", old, "/bin/echo" }));
     }
 }
 

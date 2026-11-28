@@ -171,3 +171,5 @@ Each step is one PR that changes names and nothing else, so its diff can be revi
 - **What keeps "backend".** The plan's `gfx` field, which `--print` shows, names the GUI backend, so it keeps its name, as do `h9.gfx.backend` and the `-Dgfx` help. The page's `createMachine` keeps its `backend` option and the demo page its `?backend=` parameter; they pass the value as `--engine`, where the old values parse for the release the aliases last.
 - **The greps.** `git grep -il personalit` also finds the `linux-personality` slug, in links and test tags, which slugs keep. It and `git grep -wl vmm` also find SPEC.md's table of sections from before the split, which names them as they were. [README.md](../README.md) has the table of old names, under Old names.
 - **Order.** `engine.Kind` keeps its order, `hcpu` before `sud`, so `--version` lists the engines as before.
+
+**2026-11-28, the aliases go.** `--backend`, and `native`, `emu`, and `v86` as `--engine` values, are removed: they're usage errors now. The web host's `createMachine` keeps its `backend` option, which passes `--engine`, so it takes `hcpu` alone.

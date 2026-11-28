@@ -125,13 +125,13 @@ The cache (`src/rootindex/cache.zig`) is `--index-cache`, by default `$XDG_CACHE
 
 Unix and TCP listeners are host sockets with an accept thread each.
 
-A unix listener first takes an exclusive `flock` on `PATH.lock` (mode 0600) for the whole run, so two runs can't both decide a socket is stale; then an existing socket that refuses a connection is removed, one that answers is an address in use, and a path that isn't a socket is left alone (`not a socket`).
+A unix listener first takes an exclusive `flock` on `PATH.lock` (mode 0600, opened with `O_NOFOLLOW`, so a link there is `not a socket`) for the whole run, so two runs can't both decide a socket is stale; then an existing socket that refuses a connection is removed, one that answers is an address in use, and a path that isn't a socket is left alone (`not a socket`).
 
-The socket is made mode 0600, and the socket and lock file are removed at the end of the run.
+The socket is bound in a new 0700 directory beside PATH (`.h9sock-XXXXXX`), made mode 0600, and renamed to PATH, so it's never reachable with the umask's looser mode and the process's umask isn't changed; a PATH too long for that is bound in place, then made 0600. The socket and lock file are removed at the end of the run.
 
 A TCP listener sets `SO_REUSEADDR`, so a port is free again as soon as the run ends.
 
-A `ws://` listener reads the HTTP request on its accept thread and answers it with `ws.zig`'s server side: 404 for another path, 405 for another method, 426 for a request that isn't a version 13 upgrade, 403 for an `Origin` `--serve-origin` doesn't allow, 401 without the token (compared as SHA-256 digests in constant time), and 400 for subprotocols offered without `9p`; otherwise 101, selecting `9p` when it was offered.
+A `ws://` listener reads the HTTP request on its accept thread and answers it with `ws.zig`'s server side: 400 for a request line and headers over 4 KiB, which is refused whole so no header goes unchecked, 404 for another path, 405 for another method, 426 for a request that isn't a version 13 upgrade, 403 for an `Origin` `--serve-origin` doesn't allow, 401 without the token (compared as SHA-256 digests in constant time), and 400 for subprotocols offered without `9p`; otherwise 101, selecting `9p` when it was offered.
 
 A machine serves at most 32 connections at once; past that a connection is closed on accept, or answered 503 on a WebSocket listener, and `--trace` logs each accept and refusal.
 

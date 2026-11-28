@@ -177,7 +177,7 @@ h9.wasm imports `jit_compile` and `jit_drop`, and exports `jit_eval`, `jit_slow_
 | `-Djit-verify` | Every region verified after lifting and after `opt` (on by default in Debug and ReleaseSafe builds) |
 | `-Dhcpu-debug` | `src/engine/hcpu/interp` and `src/engine/hcpu/jit` built Debug too; otherwise they're ReleaseFast in a Debug h9 |
 
-The emulator is always built in, with both tiers, and there's no option to pick another; `zig build web` builds it with the wasm JIT. `--engine hcpu` selects it (and, for one release, `--engine emu` and `--engine v86`, its old names); `--version` and `--check` report it as `hcpu (jit)` or `hcpu (interpreter)`.
+The emulator is always built in, with both tiers, and there's no option to pick another; `zig build web` builds it with the wasm JIT. `--engine hcpu` selects it; `--version` and `--check` report it as `hcpu (jit)` or `hcpu (interpreter)`.
 
 | Variable | Does |
 | --- | --- |

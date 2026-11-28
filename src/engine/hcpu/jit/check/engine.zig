@@ -47,11 +47,6 @@ pub const a64_guest = &check.a64.guest;
 pub const x86_guest = &check.x86.guest;
 pub const x64_guest = &check.x86.guest64;
 
-/// A Backing over the engine's View: the address space a vCPU runs in.
-pub fn viewBacking(v: *mem.View) check.Backing {
-    return .{ .ctx = v, .page = viewPage };
-}
-
 fn viewPage(p: *anyopaque, vp: u64) ?check.Backing.Page {
     const v: *const mem.View = @ptrCast(@alignCast(p));
     const va = vp << mem.page_shift;

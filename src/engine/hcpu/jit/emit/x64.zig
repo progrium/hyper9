@@ -501,16 +501,6 @@ const E = struct {
         try e.d32(@bitCast(imm));
     }
 
-    /// op qword [base+disp], imm32: /n of 0x81 (0x83 for an imm8).
-    fn aluMemImm(e: *E, n: u8, base: u8, disp: i32, imm: i32) !void {
-        if (imm >= -128 and imm <= 127) {
-            try e.rm(true, &.{0x83}, n, base, disp);
-            return e.b(@bitCast(@as(i8, @intCast(imm))));
-        }
-        try e.rm(true, &.{0x81}, n, base, disp);
-        try e.d32(@bitCast(imm));
-    }
-
     fn shiftImm(e: *E, w: bool, n: u8, dst: u8, by: u8) !void {
         try e.rr(w, &.{0xc1}, n, dst);
         try e.b(by);

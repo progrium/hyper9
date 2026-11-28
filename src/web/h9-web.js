@@ -1133,7 +1133,7 @@ function attachCanvas(canvas, worker, { clipboard, scale, size, events }) {
  *   root.h9a beside this file is the root
  * - binds: --bind lines, each 'SRC:DST[:OPTS]'
  * - memory: --memory, such as '256M'
- * - backend: --engine: 'hcpu' (h9's own CPUs, h86, ha64, and hx64, the default), or 'emu' or 'v86', its old names
+ * - backend: --engine: 'hcpu' (h9's own CPUs, h86, ha64, and hx64), the default and the only one
  * - arch: --arch: the guest's CPU, '386' (h86, the default), 'arm64'
  *   (ha64), or 'amd64' (hx64); 'arm64' and 'amd64' run Linux programs
  *   of their architecture, such as Alpine's

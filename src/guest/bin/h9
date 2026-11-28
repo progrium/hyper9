@@ -88,7 +88,7 @@ while(! ~ $#* 0 && ~ $#prog 0){
 		~ $#* 0 && usage
 		prog=$1
 		shift
-	case --engine --backend --arch --gfx --gfx-scale --gfx-size --serve --serve-root --serve-token --serve-origin --serve-net --host-cmd --url --archive --check --plan --host-fs --sandbox --index --index-cache --cred --user-map --trace -v --verbose
+	case --engine --arch --gfx --gfx-scale --gfx-size --serve --serve-root --serve-token --serve-origin --serve-net --host-cmd --url --archive --check --plan --host-fs --sandbox --index --index-cache --cred --user-map --trace -v --verbose
 		echo h9: $f: not in a child machine >[1=2]
 		exit usage
 	case -*
