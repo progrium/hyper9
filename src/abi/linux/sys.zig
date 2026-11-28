@@ -4228,7 +4228,41 @@ fn execve(p: *Process, dirfd: i32, path_va: u64, argv_va: u64, envp_va: u64, fla
     const argv = try strings(p, argv_va);
     errdefer freeStrings(p.gpa, argv);
     const envp = try strings(p, envp_va);
+    if (p.trace != null) traceExecEnv(p, path_va, envp_va, envp);
     return .{ .exec = .{ .path = owned, .argv = argv, .envp = envp } };
+}
+
+/// For --trace: execve's path and PATH entry as bytes, with PATH's
+/// address, so a PATH that goes bad can be matched with the call that
+/// wrote over it.
+fn traceExecEnv(p: *Process, path_va: u64, envp_va: u64, envp: []const [:0]u8) void {
+    var pb: [64]u8 = undefined;
+    if (p.mm.copy(path_va, &pb, false)) |_| traceBytes(p, "execve path", path_va, &pb) else |_| {}
+    for (envp, 0..) |e, i| {
+        if (!std.mem.startsWith(u8, e, "PATH=")) continue;
+        const va = p.readPtr(envp_va + p.longSize() * i) catch return;
+        // The string and what follows its NUL.
+        var b: [1024]u8 = undefined;
+        const n = @min(b.len, e.len + 65);
+        p.mm.copy(va, b[0..n], false) catch return;
+        traceBytes(p, "execve env", va, b[0..n]);
+    }
+}
+
+fn traceBytes(p: *Process, what: []const u8, va: u64, b: []const u8) void {
+    var out: [4096 + 64]u8 = undefined;
+    var n: usize = 0;
+    for (b) |ch| {
+        if (n + 4 > out.len) break;
+        if (ch >= 0x21 and ch < 0x7f and ch != '\\') {
+            out[n] = ch;
+            n += 1;
+        } else {
+            _ = std.fmt.bufPrint(out[n..][0..4], "\\x{x:0>2}", .{ch}) catch break;
+            n += 4;
+        }
+    }
+    p.traceLine("{s} @0x{x}: {s}", .{ what, va, out[0..n] });
 }
 
 fn strings(p: *Process, va: u64) Err![][:0]u8 {
