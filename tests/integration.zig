@@ -9075,8 +9075,18 @@ test "TCP echo between a Linux client and a 9front server [linux-net]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     // aux/listen1 runs cat (a 9front path: listen1 is a 9front program)
-    // for one connection; busybox nc talks to it.
-    const r = try runLinux(&le, true, &.{ "--net=enable", "sh", "-c", "/9/bin/aux/listen1 -1 -t tcp!127.0.0.1!17007 /bin/cat & sleep 1; echo ping | nc -w 2 127.0.0.1 17007" });
+    // for one connection; busybox nc talks to it. The port is a free
+    // one, not a fixed one another run on the host may hold, and nc
+    // tries again until listen1 accepts, rather than after a second's
+    // sleep that a loaded host can outlast. A refused connect isn't the
+    // one connection listen1 serves.
+    const io = std.testing.io;
+    var probe = try listenLocal();
+    const port = probe.socket.address.getPort();
+    probe.deinit(io);
+    var cmd_buf: [256]u8 = undefined;
+    const cmd = try std.fmt.bufPrint(&cmd_buf, "/9/bin/aux/listen1 -1 -t tcp!127.0.0.1!{d} /bin/cat & i=0; until echo ping | nc -w 2 127.0.0.1 {d} 2>/dev/null; do i=$((i+1)); [ $i -ge {d} ] && exit 1; sleep 0.1; done", .{ port, port, slow(100) });
+    const r = try runLinux(&le, true, &.{ "--net=enable", "sh", "-c", cmd });
     defer r.deinit();
     errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
     try std.testing.expectEqualStrings("ping\n", r.out);

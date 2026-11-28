@@ -170,7 +170,10 @@ pub const Sleeper = struct {
     }
 
     /// Sleeps until a waker fires, or ms passes (0: no limit), or a note
-    /// (an error). True if it fired.
+    /// (an error). True if it fired. False isn't always the time passing:
+    /// a waker that set `fired` before the owner's `arm` can make its
+    /// wakeup after the owner's next sleep began, which ends that sleep
+    /// with nothing fired. A caller with a deadline checks the clock.
     pub fn wait(s: *Sleeper, ms: c_uint) port.Error!bool {
         if (ms == 0)
             try sync.sleep(&s.r, hasfired, s)
