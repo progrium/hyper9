@@ -6,10 +6,10 @@ cd "$(dirname "$0")/../.."
 end=$(( $(date +%s) + ${DIAG_SECS:-1200} ))
 mkdir -p /tmp/d
 loop() {
-  local a=$1 k=$2 i=0
+  local a=$1 k=$2 i=0 b=${3:-zig-out/bin/h9}
   while [ "$(date +%s)" -lt "$end" ] && [ ! -f /tmp/d/stop ]; do
     i=$((i+1))
-    zig-out/bin/h9 --engine hcpu --arch $a --dir .local/linux/alpine-$a:#L --cwd zig-out/fixtures/linux/$a /mnt/term/cwd/net eventfd_waker > /tmp/d/out-$a-$k.txt 2>&1 &
+    $b --engine hcpu --arch $a --dir .local/linux/alpine-$a:#L --cwd zig-out/fixtures/linux/$a /mnt/term/cwd/net eventfd_waker > /tmp/d/out-$a-$k.txt 2>&1 &
     local pid=$! t=0 sampled=0
     while kill -0 $pid 2>/dev/null && [ $t -lt 600 ]; do
       sleep 0.1; t=$((t+1))
@@ -34,12 +34,23 @@ load() {
     timeout 60 zig-out/bin/h9 --engine hcpu --arch $a --dir .local/linux/alpine-$a:#L --cwd zig-out/fixtures/linux/$a /mnt/term/cwd/threads munmap >/dev/null 2>&1
   done
 }
-for k in 1 2 3; do loop amd64 $k & done
-for k in 1 2; do loop arm64 $k & done
+if [ -n "$DIAG_AB" ]; then
+  # A/B: main's h9 (loops 1x) beside this branch's (loops 2x), on one runner.
+  loop amd64 11 $DIAG_AB & loop amd64 12 $DIAG_AB & loop arm64 11 $DIAG_AB &
+  loop amd64 21 & loop amd64 22 & loop arm64 21 &
+else
+  for k in 1 2 3; do loop amd64 $k & done
+  for k in 1 2; do loop arm64 $k & done
+fi
 [ "${DIAG_LOAD:-1}" = 1 ] && { load amd64 & load arm64 & }
 wait
 echo "runs: $(wc -l < /tmp/d/times.txt)"
-for a in amd64 arm64; do
+for a in "amd64 1" "amd64 2" "arm64 1" "arm64 2"; do
+  set -- $a
+  echo "$1 loops $2x (1x main, 2x fix): runs $(grep -c "^$1 $2" /tmp/d/times.txt), failed $(grep "^$1 $2" /tmp/d/times.txt | grep -vc 'lost=0')"
+  grep "^$1 $2" /tmp/d/times.txt | awk '{print $4}' | sort -n | awk '{x[NR]=$1} END {print "  deciseconds p50", x[int(NR/2)], "p99", x[int(NR*0.99)], "max", x[NR]}'
+done
+for a in; do
   echo "$a: runs $(grep -c "^$a " /tmp/d/times.txt), failed $(grep "^$a " /tmp/d/times.txt | grep -vc 'lost=0')"
   grep "^$a " /tmp/d/times.txt | awk '{print $4}' | sort -n | awk '{x[NR]=$1} END {print "  deciseconds p50", x[int(NR/2)], "p99", x[int(NR*0.99)], "max", x[NR]}'
 done

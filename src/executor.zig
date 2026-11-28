@@ -571,6 +571,15 @@ pub const Sched = struct {
         return null;
     }
 
+    /// steal, unless another holds the lock: for a yield, which may
+    /// come in a spin.
+    fn trySteal(s: *Sched, e: *Exec) ?*Task {
+        if (!s.lock.tryLock()) return null;
+        defer s.lock.unlock();
+        for (s.execs.items) |x| if (x != e) if (x.q.pop()) |t| return t;
+        return null;
+    }
+
     fn monitorMain(s: *Sched) void {
         while (true) {
             s.io.sleep(.fromNanoseconds(tick_ns), .awake) catch {};
@@ -735,7 +744,12 @@ pub fn yieldToWaiting() bool {
     if (comptime !enabled) return false;
     const e = current() orelse return false;
     if (currentTask() == null) return false;
-    if (e.next.load(.acquire) == null and e.q.isEmpty() and e.s.global.isEmpty()) return false;
+    if (e.next.load(.acquire) == null and e.q.isEmpty() and e.s.global.isEmpty()) {
+        // One woken on another executor, whose thread the host may not
+        // run for a while on a busy host, runs here instead.
+        const t = e.s.trySteal(e) orelse return false;
+        e.putNext(t);
+    }
     c.h9_sched_yield();
     return true;
 }

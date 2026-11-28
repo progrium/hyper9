@@ -12,15 +12,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, macos-latest, ubuntu-24.04-arm]
+        os: [macos-latest, macos-latest, macos-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.1
       - run: scripts/fetch.sh alpine-amd64 alpine-arm64
       - run: zig build -Doptimize=ReleaseSafe && zig build -Doptimize=ReleaseSafe linux-fixtures
       - run: sysctl -n hw.ncpu 2>/dev/null || nproc
-      - run: DIAG_SECS=1200 .github/diag/eventfd.sh
+      - name: main's h9
+        run: |
+          git worktree add ../main e6e2646
+          (cd ../main && zig build -Doptimize=ReleaseSafe --prefix "$PWD/../h9-main")
+      - run: DIAG_SECS=1500 DIAG_AB=$PWD/../h9-main/bin/h9 .github/diag/eventfd.sh
