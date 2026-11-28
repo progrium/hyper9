@@ -9117,6 +9117,12 @@ test "getdents64 from many threads, on their own fds and on one shared fd [linux
     try threadCase(&le, "getdents_threads");
 }
 
+test "a chdir or fchdir in one thread moves the process's other threads, as CLONE_FS shares it [linux-threads]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try threadCase(&le, "cwd_threads");
+}
+
 test "a signal breaks the read of a second thread blocked on the same pipe [linux-threads]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);

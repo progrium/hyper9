@@ -25,6 +25,9 @@ const real = struct {
     extern fn h9_linux_ppid() c_uint;
     extern fn h9_linux_getcwd(buf: [*]u8, n: c_int) c_int;
     extern fn h9_linux_fchdir(fd: c_int) c_int;
+    extern fn h9_linux_dotget() ?*anyopaque;
+    extern fn h9_linux_dotset(ch: *anyopaque) c_int;
+    extern fn h9_linux_chanref(ch: *anyopaque) void;
     extern fn h9_linux_chroot(path: [*:0]const u8) c_int;
     extern fn h9_linux_setgen(f: Gen) void;
     extern fn h9_poll(fds: [*]PollFd, n: c_int, ms: c_int, gen: ?*c_uint, once: c_int) c_int;
@@ -124,6 +127,13 @@ const stub = struct {
     fn h9_linux_fchdir(_: c_int) c_int {
         return -1;
     }
+    fn h9_linux_dotget() ?*anyopaque {
+        return null;
+    }
+    fn h9_linux_dotset(_: *anyopaque) c_int {
+        return -1;
+    }
+    fn h9_linux_chanref(_: *anyopaque) void {}
     fn h9_linux_chroot(_: [*:0]const u8) c_int {
         return -1;
     }
@@ -653,6 +663,22 @@ pub fn getcwd(buf: []u8) Error![]u8 {
 
 pub fn fchdir(fd: i32) Error!void {
     _ = try check(c.h9_linux_fchdir(fd));
+}
+
+/// A clone of the working directory, for `setDot` in another thread, or
+/// null; `chanPut` drops it.
+pub fn dotGet() ?*anyopaque {
+    return c.h9_linux_dotget();
+}
+
+/// Another reference to `ch`, from `dotGet`, for `chanPut`.
+pub fn chanRef(ch: *anyopaque) void {
+    c.h9_linux_chanref(ch);
+}
+
+/// Makes the working directory a clone of `ch`, from `dotGet`.
+pub fn setDot(ch: *anyopaque) Error!void {
+    _ = try check(c.h9_linux_dotset(ch));
 }
 
 /// Makes path the calling process's Linux root (design/epoch-0/linux-chroot.md).
