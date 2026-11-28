@@ -167,7 +167,7 @@ pub const Flags = extern struct {
         return f.bits & DF != 0;
     }
 
-    pub fn cf(f: *const Flags) bool {
+    pub inline fn cf(f: *const Flags) bool {
         const l = &f.lazy;
         const m = sizeMask64(l.size);
         return switch (l.kind) {
@@ -228,6 +228,62 @@ pub const Flags = extern struct {
     pub fn pf(f: *const Flags) bool {
         if (f.lazy.kind == .none) return f.bits & PF != 0;
         return parity(f.lazy.res);
+    }
+
+    /// `cond` for a condition known at compile time, with the records
+    /// most branches follow (a compare, a logic op or TEST, and ZF and SF
+    /// after any arithmetic) inline.
+    pub inline fn condC(f: *const Flags, comptime cc: u4) bool {
+        const l = &f.lazy;
+        const c: Cond = @enumFromInt(cc);
+        switch (l.kind) {
+            .sub => if (l.cin == 0) {
+                const m = sizeMask64(l.size);
+                const a = l.a & m;
+                const b = l.b & m;
+                const sh: u6 = @intCast(64 - @as(u32, l.size) * 8);
+                const sa: i64 = @as(i64, @bitCast(a << sh)) >> sh;
+                const sbv: i64 = @as(i64, @bitCast(b << sh)) >> sh;
+                switch (c) {
+                    .b => return a < b,
+                    .ae => return a >= b,
+                    .e => return a == b,
+                    .ne => return a != b,
+                    .be => return a <= b,
+                    .a => return a > b,
+                    .l => return sa < sbv,
+                    .ge => return sa >= sbv,
+                    .le => return sa <= sbv,
+                    .g => return sa > sbv,
+                    else => {},
+                }
+            },
+            .logic => {
+                // CF and OF are clear.
+                const r = l.res & sizeMask64(l.size);
+                const neg = (r >> @intCast(@as(u32, l.size) * 8 - 1)) & 1 != 0;
+                switch (c) {
+                    .o, .b => return false,
+                    .no, .ae => return true,
+                    .e, .be => return r == 0,
+                    .ne, .a => return r != 0,
+                    .s, .l => return neg,
+                    .ns, .ge => return !neg,
+                    .le => return r == 0 or neg,
+                    .g => return r != 0 and !neg,
+                    else => {},
+                }
+            },
+            .none => {},
+            else => switch (c) {
+                .e => return l.res & sizeMask64(l.size) == 0,
+                .ne => return l.res & sizeMask64(l.size) != 0,
+                .s => return l.res & signBit64(l.size) != 0,
+                .ns => return l.res & signBit64(l.size) == 0,
+                else => {},
+            },
+        }
+        return f.cond(cc);
     }
 
     /// Whether condition `cc` holds. A compare's conditions come straight
@@ -295,6 +351,27 @@ test "add and sub flags" {
         g.materialize();
         try std.testing.expectEqual(f.cond(@intCast(cc)), g.cond(@intCast(cc)));
     }
+}
+
+test "condC agrees with cond" {
+    const recs = [_]Lazy{
+        .{ .kind = .sub, .size = 4, .a = 1, .b = 2, .res = 0xffff_ffff },
+        .{ .kind = .sub, .size = 1, .a = 0x80, .b = 1, .res = 0x7f },
+        .{ .kind = .sub, .size = 2, .a = 5, .b = 5, .res = 0 },
+        .{ .kind = .logic, .size = 4, .res = 0 },
+        .{ .kind = .logic, .size = 4, .res = 0x8000_0000 },
+        .{ .kind = .logic, .size = 1, .res = 0x1_7f },
+        .{ .kind = .logic, .size = 8, .res = 0x8000_0000_0000_0001 },
+        .{ .kind = .add, .size = 4, .a = 0xffff_ffff, .b = 1, .res = 0x1_0000_0000 },
+        .{ .kind = .dec, .size = 4, .a = 1, .b = 1, .res = 0, .cin = 1 },
+        .{ .kind = .inc, .size = 2, .a = 0x7fff, .b = 1, .res = 0x8000 },
+        .{ .kind = .shl, .size = 4, .a = 0x4000_0000, .res = 0x8000_0000 },
+        .{ .kind = .sub, .size = 4, .a = 3, .b = 2, .res = 0, .cin = 1 },
+    };
+    inline for (0..16) |cc| for (recs) |r| {
+        const f: Flags = .{ .lazy = r };
+        try std.testing.expectEqual(f.cond(cc), f.condC(cc));
+    };
 }
 
 test "64-bit records" {

@@ -58,6 +58,13 @@ pub const TlbMem = struct {
         return code.epoch.load(.monotonic);
     }
 
+    /// Where `codeEpoch` reads, for a fetch to compare against without
+    /// going through `code` each time.
+    pub inline fn codeEpochPtr(m: *TlbMem) ?*const std.atomic.Value(usize) {
+        const code = m.code orelse return null;
+        return &code.epoch;
+    }
+
     /// `translate` for a lift.Mem.
     pub fn translateFn(p: *anyopaque, va: u32, access: cpu_mod.Access) ?[*]u8 {
         const m: *TlbMem = @ptrCast(@alignCast(p));
