@@ -571,6 +571,15 @@ pub const Sched = struct {
         return null;
     }
 
+    /// steal, unless another holds the lock: for a yield, which may
+    /// come in a spin.
+    fn trySteal(s: *Sched, e: *Exec) ?*Task {
+        if (!s.lock.tryLock()) return null;
+        defer s.lock.unlock();
+        for (s.execs.items) |x| if (x != e) if (x.q.pop()) |t| return t;
+        return null;
+    }
+
     fn monitorMain(s: *Sched) void {
         while (true) {
             s.io.sleep(.fromNanoseconds(tick_ns), .awake) catch {};
@@ -720,6 +729,29 @@ fn current() ?*Exec {
 fn currentTask() ?*Task {
     if (comptime !enabled) return null;
     return @ptrCast(@alignCast(c.h9_sched_task_current()));
+}
+
+/// Gives the executor up if a task waits to run on it, for a process's
+/// sched_yield (sleep(0)): the caller goes on the machine's queue and
+/// returns once an executor resumes it. True if it yielded. A task that
+/// a process wakes is put next on its executor (`putNext`), where no
+/// other executor takes it, so a process that spins on sched_yield
+/// waiting for it to run would otherwise keep it waiting for the
+/// monitor (`spillNext`, and then the slice): on one host core, for good.
+/// Only the lock-free queues are looked at, since a spinning yield comes
+/// here often.
+pub fn yieldToWaiting() bool {
+    if (comptime !enabled) return false;
+    const e = current() orelse return false;
+    if (currentTask() == null) return false;
+    if (e.next.load(.acquire) == null and e.q.isEmpty() and e.s.global.isEmpty()) {
+        // One woken on another executor, whose thread the host may not
+        // run for a while on a busy host, runs here instead.
+        const t = e.s.trySteal(e) orelse return false;
+        e.putNext(t);
+    }
+    c.h9_sched_yield();
+    return true;
 }
 
 /// The calling task's host CPU time so far, if it's a task: what

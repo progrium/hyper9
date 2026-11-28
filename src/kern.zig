@@ -21,6 +21,7 @@ const host_dirs = @import("host/dirs.zig");
 const dotl_kern = @import("dotl/kern.zig");
 const hidx_kern = @import("rootindex/kern.zig");
 const hstream = @import("hstream.zig");
+const executor = @import("executor.zig");
 
 /// False where kern isn't built (a checkout without drawterm).
 pub const available = build_options.kern;
@@ -980,7 +981,10 @@ pub fn interrupt(p: *Proc) void {
 }
 
 /// Sleeps for `ms` milliseconds, or until the process is interrupted.
+/// sleep(0) yields: on a machine's executors, to a process waiting to
+/// run there, and otherwise to the host's other threads.
 pub fn sleep(ms: i64) Error!void {
+    if (ms <= 0 and executor.yieldToWaiting()) return;
     _ = try check(c.h9_kern_sleep(@intCast(std.math.clamp(ms, std.math.minInt(c_long), std.math.maxInt(c_long)))));
 }
 
