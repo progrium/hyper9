@@ -100,8 +100,9 @@ fn env(comptime src: std.builtin.SourceLocation) !Env {
 /// Cases the web host can't run (design/epoch-0/browser-host.md), skipped
 /// when H9_TEST_WEB is set (-Dweb): by name, those that need a host TTY,
 /// POSIX signals, or what a page's WebSocket can't do; by tag, the
-/// network's, 9P roots', and serving's proposals, since the web host has
-/// only WebSockets and can't listen.
+/// network's, 9P roots', serving's, and the mount index's proposals, since
+/// the web host has only WebSockets and can't listen, and the headless
+/// screen's, since its build has no graphics but the page's canvas.
 const web_skips = [_][]const u8{
     "the discarded-changes notice is printed on a terminal and not otherwise",
     "--timeout stops a console read on a terminal at once",
@@ -135,8 +136,33 @@ const web_skips = [_][]const u8{
     "header= wins over a helper's header of the same name",
     "9P-Uid and 9P-User name files without --user-map",
     "--user-map wins over 9P-Uid",
+    // 9P over TCP or a unix socket, and --serve, which the web host hasn't:
+    // the mounts and plan-format cases that dial a local 9P server or
+    // index one, and file-interface's that dial a .L server.
+    "--url tcp:// and unix:// mount 9P, with spec from the path or spec=",
+    "--url to /srv/NAME posts without mounting",
+    "a 9P root is never walked for dev, env, fd, proc, srv, or net",
+    "a 9P server's .fs/index answers walks without the server",
+    "index= on a mount off / names its index",
+    "spec= is sent as the attach name",
+    "user= is sent as the attach uname",
+    "a pinned root with a different index is refused",
+    "--print output round-trips through --plan for every policy case",
+    "a 9front ls sees the same Dir as before",
+    // ca= is a usage error on the web host, as on a ws:// root above.
+    "ca= is accepted on a --url without a scheme",
+    // The web host's user is glenda (os-wasm.c), whose stock profile
+    // starts the terminal's services and rio on a login rc.
+    "--rc alone on a terminal is an interactive login rc",
+    "--rc alone runs the root's rcmain.local, then stdin",
+    "--rc alone without rcmain.local is a plain rc",
+    // It counts the native executor's host threads.
+    "1000 blocked processes use 8 host threads",
+    // A page's static tree is fetched through the browser's cache;
+    // statictree.js keeps no --index-cache.
+    "--url http:// falls back to a static dotfs tree",
 };
-const web_skip_tags = [_][]const u8{ "net-policy", "ninep-roots", "dotl", "serve" };
+const web_skip_tags = [_][]const u8{ "net-policy", "ninep-roots", "dotl", "serve", "kernel-serve", "mount-index", "headless-screen" };
 
 /// Whether the cases run on the web host (-Dweb).
 fn onWeb() bool {
@@ -5836,7 +5862,7 @@ test "an unreachable --url without a scheme exits 125 naming its ws:// URL [moun
     defer r.deinit();
     try std.testing.expectEqual(125, r.code);
     var want: [160]u8 = undefined;
-    const why = if (onWeb()) "connection failed" else "connection refused";
+    const why = if (onWeb()) "no WebSocket and no static tree" else "connection refused";
     try expectIn(r.err, try std.fmt.bufPrint(&want, "root ws://{s}: {s}", .{ arg, why }));
 }
 
@@ -9586,8 +9612,19 @@ fn runNoRoot(e: Env, h9: []const u8, args: []const []const u8) !Result {
 /// A copy of h9 in `s`, which has no .local/9front/root two levels up to
 /// default to.
 fn h9Copy(e: Env, s: *Scratch) ![]const u8 {
+    const io = std.testing.io;
     const name = std.fs.path.basename(e.h9);
-    try std.Io.Dir.copyFile(std.Io.Dir.cwd(), e.h9, s.tmp.dir, name, std.testing.io, .{});
+    if (onWeb()) {
+        // h9-node loads h9-web.js, h9.wasm, and the rest beside it, so
+        // they come too; the root archives (*.h9a) stay behind.
+        var dir = try std.Io.Dir.cwd().openDir(io, std.fs.path.dirname(e.h9) orelse ".", .{ .iterate = true });
+        defer dir.close(io);
+        var it = dir.iterate();
+        while (try it.next(io)) |ent| {
+            if (ent.kind != .file or std.mem.endsWith(u8, ent.name, ".h9a")) continue;
+            try std.Io.Dir.copyFile(dir, ent.name, s.tmp.dir, ent.name, io, .{});
+        }
+    } else try std.Io.Dir.copyFile(std.Io.Dir.cwd(), e.h9, s.tmp.dir, name, io, .{});
     return std.fs.path.join(gpa, &.{ s.path, name });
 }
 
