@@ -929,7 +929,14 @@ pub fn dispatch(p: *Process, u: *const engine.Ureg) Outcome {
                 },
             };
             if (p.trace != null) {
-                if (v == -E.NOSYS) p.traceLine("{t}(0x{x}, 0x{x}, 0x{x}) = -ENOSYS (absent)", .{ s, c.a[0], c.a[1], c.a[2] }) else if (v < 0 and v > -4096) p.traceLine("{t}(0x{x}, 0x{x}, 0x{x}) = -{d} '{s}'", .{ s, c.a[0], c.a[1], c.a[2], -v, kern.errstr() }) else p.traceLine("{t}(0x{x}, 0x{x}, 0x{x}) = 0x{x}", .{ s, c.a[0], c.a[1], c.a[2], r });
+                // Four arguments, so statx's mask and a call's buffer show.
+                // The error string only when it's the one the errno came
+                // from: a call that fails without the kernel (mmap's
+                // ENOMEM, mkdir's EEXIST) leaves an older call's there.
+                if (v == -E.NOSYS) p.traceLine("{t}(0x{x}, 0x{x}, 0x{x}, 0x{x}) = -ENOSYS (absent)", .{ s, c.a[0], c.a[1], c.a[2], c.a[3] }) else if (v < 0 and v > -4096) {
+                    const es = kern.errstr();
+                    if (attr.errno(es) == -v) p.traceLine("{t}(0x{x}, 0x{x}, 0x{x}, 0x{x}) = -{d} '{s}'", .{ s, c.a[0], c.a[1], c.a[2], c.a[3], -v, es }) else p.traceLine("{t}(0x{x}, 0x{x}, 0x{x}, 0x{x}) = -{d}", .{ s, c.a[0], c.a[1], c.a[2], c.a[3], -v });
+                } else p.traceLine("{t}(0x{x}, 0x{x}, 0x{x}, 0x{x}) = 0x{x}", .{ s, c.a[0], c.a[1], c.a[2], c.a[3], r });
             }
         },
         .exits => |m| p.traceLine("{t} \"{s}\"", .{ s, m }),
