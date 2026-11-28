@@ -3098,7 +3098,7 @@ test "#O finds, removes and lists the children of a large directory" {
     try std.testing.expectEqual(@as(usize, count / 2), t.listed);
 }
 
-test "#U!c resolves symlinks inside the tree it's bound from [34]" {
+test "#U!c resolves symlinks inside the tree it's bound from [symlinks-in-root]" {
     if (!available or @import("builtin").os.tag == .windows) return error.SkipZigTest;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

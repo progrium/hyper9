@@ -136,7 +136,7 @@ const web_skips = [_][]const u8{
     "9P-Uid and 9P-User name files without --user-map",
     "--user-map wins over 9P-Uid",
 };
-const web_skip_tags = [_][]const u8{ "5", "13", "22", "35" };
+const web_skip_tags = [_][]const u8{ "net-policy", "ninep-roots", "dotl", "serve" };
 
 /// Whether the cases run on the web host (-Dweb).
 fn onWeb() bool {
@@ -1149,31 +1149,12 @@ test "auto never selects sud; it stays an explicit opt-in [native-backend]" {
     const r = try runOn(e, "auto", &.{"--check"}, null);
     defer r.deinit();
     try std.testing.expect(std.mem.indexOf(u8, r.out, "engine auto: ok (uses sud)") == null);
-    // Explicit native still works. Its not-a-security-boundary warning is
+    // Explicit sud still works. Its not-a-security-boundary warning is
     // printed only on a terminal, so stderr is clean here (not a tty).
     const w = try runOn(e, "sud", &.{ "/bin/echo", "hi" }, null);
     defer w.deinit();
     try std.testing.expectEqualStrings("hi\n", w.out);
     try std.testing.expectEqualStrings("", w.err);
-}
-
-test "auto never selects sud, by either name [renames]" {
-    // `native` is an alias of `sud` for one release (design/epoch-0/renames.md), and
-    // the rule that `auto` never picks it holds under both names: --check
-    // says what auto uses, and only an explicit --engine runs on it.
-    const e = try env(@src());
-    try requireSud(e);
-    if (try kvmLimit(e) != null) return skip("KVM is usable here, so auto picks it", .{});
-    const r = try runOn(e, "auto", &.{"--check"}, null);
-    defer r.deinit();
-    try std.testing.expect(std.mem.indexOf(u8, r.out, "engine auto: ok (uses sud)") == null);
-    try std.testing.expect(std.mem.indexOf(u8, r.out, "(uses native)") == null);
-    for ([_][]const u8{ "sud", "native" }) |name| {
-        const w = try runOn(e, name, &.{ "/bin/echo", "hi" }, null);
-        defer w.deinit();
-        try std.testing.expectEqualStrings("hi\n", w.out);
-        try std.testing.expectEqualStrings("", w.err);
-    }
 }
 
 test "rfork with RFMEM shares data and bss but not the stack [native-backend]" {
@@ -9008,6 +8989,24 @@ fn goLinux(le: *const LinuxEnv) !void {
     std.Io.Dir.cwd().access(std.testing.io, try hostPath(le.fixtures, "go/goroutines"), .{}) catch return skip("no Linux Go fixtures (built when go is on PATH)", .{});
 }
 
+/// Skips unless sud is among the engines and runs here (as requireSud
+/// does for the 9front cases), and runs the Linux case on sud alone.
+fn linuxSud(le: *LinuxEnv) !void {
+    if (builtin.os.tag != .linux or builtin.cpu.arch != .x86_64) return skip("sud is Linux x86-64 only", .{});
+    if (!std.mem.eql(u8, le.arch, "amd64")) return skip("sud runs amd64 only (-Darch=amd64)", .{});
+    var it = std.mem.tokenizeScalar(u8, le.engines, ',');
+    while (it.next()) |engine| {
+        if (!std.mem.eql(u8, engine, "sud")) continue;
+        const p = try runProcessWith(&.{ le.h9, "--engine", "sud", "--check" }, null, null, 30_000);
+        defer gpa.free(p.stdout);
+        defer gpa.free(p.stderr);
+        if (std.mem.indexOf(u8, p.stdout, "engine sud: ok") == null) return skip("h9 --check says sud can't run here", .{});
+        le.engines = "sud";
+        return;
+    }
+    return skip("sud isn't among the engines (H9_TEST_ENGINES, -Dengines)", .{});
+}
+
 fn threadCase(le: *const LinuxEnv, name: []const u8) !void {
     var want_buf: [64]u8 = undefined;
     try netCase(le, &.{ "/mnt/term/cwd/threads", name }, try std.fmt.bufPrint(&want_buf, "ok {s}\n", .{name}));
@@ -9166,9 +9165,13 @@ test "a store or read(2) racing another thread's mprotect in the same chunk neit
 test "threads faulting pages in while others munmap don't fault twice on a mapped page [native-backend]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
-    // Its 20,000 mmaps and munmaps take 90 to 100 s alone on hcpu's
-    // arm64 and on WHP, and longer beside the other shards: five minutes.
-    const r = try runLinuxFor(&le, false, &.{ "/mnt/term/cwd/threads", "fault_race" }, null, 300_000);
+    // The race is in sud's stub, whose munmap flushes the mappings other
+    // threads' faults queued, so the case runs on sud alone, where its
+    // 8,000 mmaps and munmaps take about 11 s; two minutes leaves room
+    // beside the other shards. (At 20,000, it took 90 to 100 s on hcpu's
+    // arm64 and on WHP.)
+    try linuxSud(&le);
+    const r = try runLinuxFor(&le, false, &.{ "/mnt/term/cwd/threads", "fault_race" }, null, 120_000);
     defer r.deinit();
     errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
     try std.testing.expectEqualStrings("ok fault_race\n", r.out);

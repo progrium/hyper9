@@ -173,3 +173,5 @@ Each step is one PR that changes names and nothing else, so its diff can be revi
 - **Order.** `engine.Kind` keeps its order, `hcpu` before `sud`, so `--version` lists the engines as before.
 
 **2026-11-28, the aliases go.** `--backend`, and `native`, `emu`, and `v86` as `--engine` values, are removed: they're usage errors now. The web host's `createMachine` keeps its `backend` option, which passes `--engine`, so it takes `hcpu` alone.
+
+**2026-11-28, its alias case goes.** The `[renames]` integration case "auto never selects sud, by either name" ran `--engine native`, a usage error once the aliases went, so it failed on any host where sud runs. It's removed. The `[native-backend]` case "auto never selects sud; it stays an explicit opt-in" checks the rule under the one name left, and `src/cli.zig`'s "--backend and the old engine names are gone" checks that the old names are refused.

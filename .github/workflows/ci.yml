@@ -161,6 +161,60 @@ jobs:
       # transcript (design/kernel-port.md).
       - run: zig build conformance -Darch=amd64 -Dengines=kvm -Droot="$PWD/.local/9front/rootamd64"
 
+  # The integration cases on the sud engine, which the KVM job above
+  # skips: its [native-backend] cases, and every other case on a second
+  # engine. GitHub's x86-64 runners have Syscall User Dispatch, as the
+  # workloads job's sud runs need too.
+  integration-sud:
+    if: github.event_name == 'workflow_dispatch' || !startsWith(github.head_ref, 'claude/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+      - uses: actions/cache@v4
+        id: rootamd64
+        with:
+          path: .local/9front/rootamd64
+          key: ci-rootamd64-${{ hashFiles('scripts/pins.sh', 'tools/isoroot.zig') }}
+      - name: amd64 root from the ISO
+        if: steps.rootamd64.outputs.cache-hit != 'true'
+        run: |
+          scripts/fetch.sh isoamd64
+          . scripts/pins.sh
+          zig build isoroot -- ".local/9front/9front-$NINEFRONT_RELEASE.amd64.iso" .local/9front/rootamd64
+      - run: scripts/fetch.sh diod alpine-amd64
+      - run: zig build integration -Doptimize=ReleaseSafe -Darch=amd64 -Dengines=sud -Droot="$PWD/.local/9front/rootamd64"
+
+  # The integration cases on the web host, through h9-node on h86, over
+  # the 386 root (design/epoch-0/browser-host.md).
+  integration-web:
+    if: github.event_name == 'workflow_dispatch' || !startsWith(github.head_ref, 'claude/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/cache@v4
+        id: root386
+        with:
+          path: .local/9front/root386
+          key: ci-root386-${{ hashFiles('scripts/pins.sh', 'tools/isoroot.zig') }}
+      - name: 386 root from the ISO
+        if: steps.root386.outputs.cache-hit != 'true'
+        run: |
+          scripts/fetch.sh iso386
+          . scripts/pins.sh
+          zig build isoroot -- ".local/9front/9front-$NINEFRONT_RELEASE.386.iso" .local/9front/root386
+      # The pinned wasm-opt, for the web build's Asyncify pass.
+      - run: scripts/fetch.sh binaryen
+      - run: zig build integration -Dweb -Doptimize=ReleaseSafe -Droot="$PWD/.local/9front/root386"
+
   # The demo page and its canvas cases in Chromium, over the 386 root.
   web:
     if: github.event_name == 'workflow_dispatch' || !startsWith(github.head_ref, 'claude/')
