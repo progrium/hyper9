@@ -214,9 +214,23 @@ pub fn errno(msg: []const u8) u16 {
     if (std.mem.startsWith(u8, msg, "errno ")) {
         if (std.fmt.parseInt(u16, msg["errno ".len..], 10)) |e| return e else |_| {}
     }
+    // Match the message, not a quoted name in it: a file named
+    // handle_interrupted-i.ri isn't EINTR when it does not exist.
+    // Plan 9 quotes a name with ', doubling one inside it, so skipping
+    // between quotes skips the name.
     var lower: [128]u8 = undefined;
-    const n = @min(msg.len, lower.len);
-    const l = std.ascii.lowerString(lower[0..n], msg[0..n]);
+    var n: usize = 0;
+    var quoted = false;
+    for (msg) |ch| {
+        if (ch == '\'') {
+            quoted = !quoted;
+        } else if (!quoted) {
+            if (n == lower.len) break;
+            lower[n] = std.ascii.toLower(ch);
+            n += 1;
+        }
+    }
+    const l = lower[0..n];
     for (table) |e| if (std.mem.indexOf(u8, l, e[0]) != null) return e[1];
     return E.IO;
 }
@@ -795,6 +809,12 @@ test "errno from strings" {
     try std.testing.expectEqual(@as(u16, E.PIPE), errno("write on closed pipe"));
     try std.testing.expectEqual(@as(u16, E.NOTEMPTY), errno("directory not empty"));
     try std.testing.expectEqual(@as(u16, E.IO), errno("ken has left the building"));
+    // A quoted name is not the message.
+    try std.testing.expectEqual(@as(u16, E.NOENT), errno("file does not exist: '.../LineEditor/handle_interrupted-i.ri'"));
+    try std.testing.expectEqual(@as(u16, E.NOENT), errno("'/tmp/permission denied' file does not exist"));
+    try std.testing.expectEqual(@as(u16, E.EXIST), errno("file already exists: 'it''s not a directory'"));
+    // The message after a long name still counts.
+    try std.testing.expectEqual(@as(u16, E.NOENT), errno("'/" ++ @as([200]u8, @splat('x')) ++ "' file does not exist"));
 }
 
 test "stat from a Dir" {

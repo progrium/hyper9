@@ -7174,6 +7174,19 @@ test "a --dir of one file goes over its path on #L, made if it's missing, and rw
     try std.testing.expectEqualStrings("two\n", data);
 }
 
+test "an error naming a file that says interrupted is still the error, not EINTR [linux-personality]" {
+    // errno matched its strings anywhere in the message, quoted names
+    // too, so a missing handle_interrupted-i.ri was EINTR and busybox
+    // tar retried its unlink forever (Ruby's ri docs have that file).
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    const r = try runLinux(&le, false, &.{ "/bin/sh", "-c", "rm /tmp/handle_interrupted-i.ri 2>&1; mkdir /tmp/permission_denied && rmdir /tmp/permission_denied && echo ok" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "No such file or directory") != null);
+    try std.testing.expect(std.mem.endsWith(u8, r.out, "ok\n"));
+}
+
 test "an fstat through a --dir on #L matches the path's stat, to the nanosecond [mounts]" {
     // An open file's union chan has its member open, which overlay's
     // getattr didn't ask, so fstat had whole seconds and no change time.
