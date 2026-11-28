@@ -170,7 +170,7 @@ jobs:
           npx playwright install --with-deps chromium
       # The pinned wasm-opt, for the web build's Asyncify pass.
       - run: scripts/fetch.sh binaryen
-      - run: zig build web-test -Doptimize=ReleaseSafe
+      - run: zig build web-test
 
   # hcpu's Done criteria (design/epoch-0/hcpu.md) on every host GitHub has: the
   # roots once, then the unit and engine cases and the integration cases

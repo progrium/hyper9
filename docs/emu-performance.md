@@ -166,7 +166,7 @@ Build the roots and a ReleaseFast h9, as in
 
     tools/workloads/roots.sh
     zig build -Doptimize=ReleaseFast -p .local/workloads/h9-zig
-    zig build web -Doptimize=ReleaseFast
+    zig build web
 
 `tools/workloads/run.sh` runs the native tiers, with `TIERS="hvf t1 t0"` on
 an arm64 Mac. For a wasm tier, run the same command line through

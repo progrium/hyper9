@@ -1172,8 +1172,12 @@ pub fn build(b: *std.Build) void {
     const hcpu_debug = b.option(bool, "hcpu-debug", "Build src/engine/hcpu/interp and src/engine/hcpu/jit with -Doptimize too, not ReleaseFast, in Debug builds (for debugging the emulator's CPUs)") orelse false;
     const hcpu_optimize: std.lang.Optimize = if (optimize == .debug and !hcpu_debug) .fast else optimize;
     const jit_check = b.option(bool, "jit-check", "Check every region against T0 as it runs (slow; for zig build integration)") orelse false;
-    const jit_verify = b.option(bool, "jit-verify", "Verify every region after lifting and after opt, panicking on a bad one (default: on in Debug and ReleaseSafe builds)") orelse
-        (optimize == .debug or optimize == .safe);
+    const jit_verify_opt = b.option(bool, "jit-verify", "Verify every region after lifting and after opt, panicking on a bad one (default: on in Debug and ReleaseSafe builds)");
+    const jit_verify = jit_verify_opt orelse (optimize == .debug or optimize == .safe);
+    // The web host's own mode, whatever -Doptimize is: ReleaseFast unless
+    // asked, since the page and h9-node ship it and ReleaseSafe's checks
+    // cost the emulator's CPUs a quarter of their speed there.
+    const web_optimize = b.option(std.lang.Optimize, "web-optimize", "Optimize mode for the web host (zig build web, web-test, and integration -Dweb): default ReleaseFast, whatever -Doptimize is") orelse .fast;
     const no_jit = b.option(bool, "no-jit", "The emulator's interpreter tier only, as on hosts that forbid generated code") orelse false;
 
     const gfx_opt = b.option(Gfx, "gfx", "GUI backend for --gfx (design/epoch-0/gfx.md): cocoa, win32, x11, web, headless (only --gfx=headless) or none (default: cocoa on macOS, win32 on Windows, web for zig build web, headless elsewhere); the window backends also link the headless screen");
@@ -1273,7 +1277,10 @@ pub fn build(b: *std.Build) void {
     // The web host (design/epoch-0/browser-host.md): h9 for wasm32-wasi
     // with its JS host and a demo page, in zig-out/web.
     const web_step = b.step("web", "Build the web host into zig-out/web (design/epoch-0/browser-host.md)");
-    const web = addWeb(b, optimize, parts, web_gfx);
+    var web_parts = parts;
+    web_parts.hcpu_optimize = if (web_optimize == .debug and !hcpu_debug) .fast else web_optimize;
+    web_parts.jit_verify = jit_verify_opt orelse (web_optimize == .debug or web_optimize == .safe);
+    const web = addWeb(b, web_optimize, web_parts, web_gfx);
     web_step.dependOn(web.install);
     // The demo page's root archive, from a 386 root tree and the paths
     // src/web/root.list names; left out without one.

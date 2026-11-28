@@ -83,7 +83,7 @@ done
 name="h9-web-$version"
 web_root=()
 [ -f "$H9_LOCAL/9front/root386/386/bin/rc" ] && web_root=(-Dweb-root="$H9_LOCAL/9front/root386")
-(cd "$src" && zig build web -p "$work/build-web" -Doptimize=ReleaseSafe -Dversion="$version" "${web_root[@]}")
+(cd "$src" && zig build web -p "$work/build-web" -Dversion="$version" "${web_root[@]}")
 cp -R "$work/build-web/web" "$work/$name"
 cp "$src/LICENSE" "$work/$name/LICENSE"
 cp "$src/third_party/drawterm/LICENSE" "$work/$name/LICENSE.drawterm"
