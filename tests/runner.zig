@@ -13,7 +13,13 @@
 //!   integration -Dskips), each run prints its skipped cases at the end,
 //!   grouped by reason; without it, it prints nothing for them.
 //!
-//! It has no fuzzing, which the integration cases don't use.
+//! - Name selection at run time. H9_TEST_ONLY is a list of name
+//!   fragments split by `|`, and a run takes only the cases whose names
+//!   contain one, as a test binary's compile-time filters do. zig build
+//!   test runs hcpu's tests this way (hcpuTestParts in build.zig): one
+//!   binary, run once for each part, instead of one compile per part.
+//!
+//! It has no fuzzing, which the integration and hcpu cases don't use.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -47,6 +53,15 @@ pub fn noteSkip(comptime fmt: []const u8, args: anytype) void {
 const Skipped = struct { name: []const u8, reason: []const u8 };
 var skipped: std.ArrayList(Skipped) = .empty;
 
+/// Whether `name` contains one of `only`'s `|`-separated fragments.
+fn selected(only: []const u8, name: []const u8) bool {
+    var it = std.mem.tokenizeScalar(u8, only, '|');
+    while (it.next()) |frag| {
+        if (std.mem.indexOf(u8, name, frag) != null) return true;
+    }
+    return false;
+}
+
 /// The cases this run takes: indexes into builtin.test_functions.
 fn shardCases(environ: std.process.Environ) []const u32 {
     const fns = builtin.test_functions;
@@ -59,8 +74,10 @@ fn shardCases(environ: std.process.Environ) []const u32 {
             if (n >= 2) i_n = .{ i, n };
         }
     } else |_| {}
+    const only: ?[]const u8 = environ.getAlloc(pa, "H9_TEST_ONLY") catch null;
     var len: usize = 0;
     for (fns, 0..) |f, idx| {
+        if (only) |o| if (!selected(o, f.name)) continue;
         if (i_n) |s| if (std.hash.Wyhash.hash(0, f.name) % s[1] != s[0]) continue;
         out[len] = @intCast(idx);
         len += 1;

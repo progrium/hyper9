@@ -1,0 +1,33 @@
+# Zig 0.17.1, with the job's Zig cache from main's last run (ci.yml).
+#
+# setup-zig's own cache didn't survive: it saves one cache per run, under
+# a key with the run's ID, and clears a cache over 2 GiB before saving it.
+# A cold `zig build test` or integration job fills about 2.2 GiB, so each
+# saved an empty cache, and every PR's every run added those saves to the
+# repository's cache space. A PR also can't restore another PR's caches.
+# Here only pushes to main save (the job's last step), each job under a
+# name of its own, and PRs restore main's newest. A push to main builds
+# cold, so a saved cache holds only what one build made, and doesn't grow.
+name: zig
+description: Install Zig 0.17.1 and restore the job's Zig cache from main
+inputs:
+  cache:
+    description: The job's cache name, which its save step uses too
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: mlugg/setup-zig@v2
+      with:
+        version: 0.17.1
+        use-cache: false
+    - shell: bash
+      run: |
+        echo "ZIG_GLOBAL_CACHE_DIR=$GITHUB_WORKSPACE/.zig-cache" >>"$GITHUB_ENV"
+        echo "ZIG_LOCAL_CACHE_DIR=$GITHUB_WORKSPACE/.zig-cache" >>"$GITHUB_ENV"
+    - if: github.event_name != 'push'
+      uses: actions/cache/restore@v4
+      with:
+        path: .zig-cache
+        key: zig-${{ inputs.cache }}-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
+        restore-keys: zig-${{ inputs.cache }}-${{ runner.os }}-${{ runner.arch }}-

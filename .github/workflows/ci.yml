@@ -8,7 +8,8 @@
 # `test` alone, and its `test` runs on GitHub's runner, never a test
 # host's. A job skipped by its `if` never starts a runner.
 # "Run workflow" in the Actions tab (or `gh workflow run ci --ref BRANCH`)
-# runs everything on any branch.
+# runs everything on any branch. A push to main (a merge) runs every job
+# a proposal's PR does, which saves the caches the next PRs start from.
 #
 # Commits that design-sign pushes with GITHUB_TOKEN don't start this
 # workflow (GitHub doesn't run workflows for them), so a PR's head after a
@@ -18,15 +19,20 @@ name: ci
 
 on:
   pull_request:
+  # Each merge, so the Zig and root caches PRs restore are main's, which
+  # every PR can read (.github/actions/zig).
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# A new push to a PR cancels the run for the one before it.
+# A new push to a PR cancels the run for the one before it. Main's runs
+# all finish, since each saves caches.
 concurrency:
   group: ci-${{ github.head_ref || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   check:
@@ -81,10 +87,16 @@ jobs:
     runs-on: ${{ fromJSON(needs.runners.outputs.map)['ubuntu-latest'] }}
     steps:
       - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
+      - uses: ./.github/actions/zig
         with:
-          version: 0.17.1
+          cache: test
       - run: zig build test
+      # The cache the next PRs restore (.github/actions/zig).
+      - if: github.event_name == 'push'
+        uses: actions/cache/save@v4
+        with:
+          path: .zig-cache
+          key: zig-test-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
 
   # docs/embedding/package built against h9 as a fetched package: what
   # `zig fetch` of a URL would unpack (git archive, as GitHub's tarballs
@@ -95,15 +107,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
+      - uses: ./.github/actions/zig
         with:
-          version: 0.17.1
+          cache: package
       - run: git archive --format=tar.gz --prefix=hyper9/ HEAD >"$RUNNER_TEMP/h9.tar.gz"
       - working-directory: docs/embedding/package
         run: |
           cp ../embed.zig .
           zig fetch --save=h9 "$RUNNER_TEMP/h9.tar.gz"
           zig build
+      # The cache the next PRs restore (.github/actions/zig).
+      - if: github.event_name == 'push'
+        uses: actions/cache/save@v4
+        with:
+          path: .zig-cache
+          key: zig-package-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
 
   # h9 built for musl, static, as the Linux releases are (scripts/release.sh):
   # a glibc build doesn't show what musl's headers and flags change (issue
@@ -114,13 +132,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
+      - uses: ./.github/actions/zig
         with:
-          version: 0.17.1
+          cache: musl
       - run: zig build -Dtarget=aarch64-linux-musl --prefix "$RUNNER_TEMP/arm64"
       - run: zig build test -Dtarget=x86_64-linux-musl
       - run: scripts/fetch.sh alpine-amd64
       - run: zig build integration -Dtarget=x86_64-linux-musl -Darch=amd64 -Dengines=sud -Dfilter=linux
+      # The cache the next PRs restore (.github/actions/zig).
+      - if: github.event_name == 'push'
+        uses: actions/cache/save@v4
+        with:
+          path: .zig-cache
+          key: zig-musl-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
 
   # The integration cases on KVM, with the amd64 root unpacked from the
   # release's ISO (tools/isoroot.zig), as pages does for 386, instead of
@@ -131,9 +155,9 @@ jobs:
     runs-on: ${{ fromJSON(needs.runners.outputs.map)['ubuntu-latest'] }}
     steps:
       - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
+      - uses: ./.github/actions/zig
         with:
-          version: 0.17.1
+          cache: integration
       # Hosted runners have /dev/kvm, but only root can open it. The test
       # hosts' runner user is in the kvm group.
       - name: Let the runner open /dev/kvm
@@ -156,10 +180,18 @@ jobs:
       # diod, the 9P2000.L server the [dotl] cases run against, and the
       # amd64 Alpine root the Linux cases run in.
       - run: scripts/fetch.sh diod alpine-amd64
-      - run: zig build integration -Darch=amd64 -Dengines=kvm -Droot="$PWD/.local/9front/rootamd64"
+      # Four runs, as before -Dshards defaulted to half the CPUs: that
+      # default was measured on sud, and hasn't been on KVM.
+      - run: zig build integration -Dshards=4 -Darch=amd64 -Dengines=kvm -Droot="$PWD/.local/9front/rootamd64"
       # The namespace conformance script, against 9front's recorded
       # transcript (design/kernel-port.md).
       - run: zig build conformance -Darch=amd64 -Dengines=kvm -Droot="$PWD/.local/9front/rootamd64"
+      # The cache the next PRs restore (.github/actions/zig).
+      - if: github.event_name == 'push'
+        uses: actions/cache/save@v4
+        with:
+          path: .zig-cache
+          key: zig-integration-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
 
   # The integration cases on the sud engine, which the KVM job above
   # skips: its [native-backend] cases, and every other case on a second
@@ -170,9 +202,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
+      - uses: ./.github/actions/zig
         with:
-          version: 0.17.1
+          cache: integration-sud
       - uses: actions/cache@v4
         id: rootamd64
         with:
@@ -186,6 +218,12 @@ jobs:
           zig build isoroot -- ".local/9front/9front-$NINEFRONT_RELEASE.amd64.iso" .local/9front/rootamd64
       - run: scripts/fetch.sh diod alpine-amd64
       - run: zig build integration -Doptimize=ReleaseSafe -Darch=amd64 -Dengines=sud -Droot="$PWD/.local/9front/rootamd64"
+      # The cache the next PRs restore (.github/actions/zig).
+      - if: github.event_name == 'push'
+        uses: actions/cache/save@v4
+        with:
+          path: .zig-cache
+          key: zig-integration-sud-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
 
   # The integration cases on the web host, through h9-node on h86, over
   # the 386 root (design/epoch-0/browser-host.md).
@@ -194,9 +232,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
+      - uses: ./.github/actions/zig
         with:
-          version: 0.17.1
+          cache: integration-web
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -214,6 +252,12 @@ jobs:
       # The pinned wasm-opt, for the web build's Asyncify pass.
       - run: scripts/fetch.sh binaryen
       - run: zig build integration -Dweb -Doptimize=ReleaseSafe -Droot="$PWD/.local/9front/root386"
+      # The cache the next PRs restore (.github/actions/zig).
+      - if: github.event_name == 'push'
+        uses: actions/cache/save@v4
+        with:
+          path: .zig-cache
+          key: zig-integration-web-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
 
   # The demo page and its canvas cases in Chromium, over the 386 root.
   web:
@@ -221,9 +265,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
+      - uses: ./.github/actions/zig
         with:
-          version: 0.17.1
+          cache: web
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -244,6 +288,12 @@ jobs:
       # The pinned wasm-opt, for the web build's Asyncify pass.
       - run: scripts/fetch.sh binaryen
       - run: zig build web-test
+      # The cache the next PRs restore (.github/actions/zig).
+      - if: github.event_name == 'push'
+        uses: actions/cache/save@v4
+        with:
+          path: .zig-cache
+          key: zig-web-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
 
   # hcpu's Done criteria (design/epoch-0/hcpu.md) on every host GitHub has: the
   # roots once, then the unit and engine cases and the integration cases
@@ -257,6 +307,9 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.1
+          # Runs only by hand, cold: its saves would crowd out main's
+          # caches (.github/actions/zig).
+          use-cache: false
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq qemu-system-arm qemu-utils libarchive-tools zstd
       # The arm64 image, the 386 and amd64 ISOs, and the Alpine roots.
       - run: scripts/fetch.sh image iso386 isoamd64 alpine
@@ -289,6 +342,9 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.1
+          # Runs only by hand, cold: its saves would crowd out main's
+          # caches (.github/actions/zig).
+          use-cache: false
       - uses: actions/download-artifact@v4
         with:
           name: hcpu-roots
@@ -340,6 +396,9 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.1
+          # Runs only by hand, cold: its saves would crowd out main's
+          # caches (.github/actions/zig).
+          use-cache: false
       - run: zig build fuzz-long -Doptimize=ReleaseSafe
       - if: always()
         run: zig build litmus -Doptimize=ReleaseSafe
@@ -364,6 +423,9 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.1
+          # Runs only by hand, cold: its saves would crowd out main's
+          # caches (.github/actions/zig).
+          use-cache: false
       - uses: actions/download-artifact@v4
         with:
           name: hcpu-roots

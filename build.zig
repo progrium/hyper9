@@ -190,7 +190,7 @@ const Integration = struct {
 /// run of the same binary for each, which the build runner runs side by
 /// side: the cases mostly wait on h9, terminals, and sockets, so one run
 /// leaves most cores idle. `step` depends on every run.
-fn addIntegration(b: *std.Build, step: *std.Build.Step, shards: u32, optimize: std.lang.Optimize, filters: []const []const u8, it: Integration, root: []const u8, engines: []const u8, pending: bool, guest_test: bool, src: ?[]const u8) []*std.Build.Step.Run {
+fn addIntegration(b: *std.Build, step: *std.Build.Step, shards: u32, filters: []const []const u8, it: Integration, root: []const u8, engines: []const u8, pending: bool, guest_test: bool, src: ?[]const u8) []*std.Build.Step.Run {
     // The paths the cases find by default: the install prefix isn't known
     // until the build runs, so they're build options, not environment
     // variables (tests/integration.zig's getenv).
@@ -198,7 +198,10 @@ fn addIntegration(b: *std.Build, step: *std.Build.Step, shards: u32, optimize: s
     paths.addOptionPathUntracked("H9_TEST_BIN", it.bin);
     paths.addOptionPathUntracked("H9_TEST_LINUX", b.graph.path(.install_prefix, "fixtures/linux"));
     if (it.server) |sv| paths.addOptionPathUntracked("H9_TEST_SERVER", sv);
-    const tests = integrationTests(b, b.graph.host, optimize, filters, paths);
+    // The harness is built Debug whatever -Doptimize says: -Doptimize is
+    // for h9, which the cases run. The harness mostly waits on h9, and a
+    // ReleaseSafe build of it took about a minute to compile.
+    const tests = integrationTests(b, b.graph.host, .debug, filters, paths);
     const n = @max(shards, 1);
     const runs = b.allocator.alloc(*std.Build.Step.Run, n) catch @panic("OOM");
     for (runs, 0..) |*r, i| {
@@ -1685,10 +1688,15 @@ pub fn build(b: *std.Build) void {
         go_stdtest.dependOn(&run_stdtest.step);
     }
     const it_filters = b.option([]const []const u8, "filter", "Run only the integration cases whose names contain one of these") orelse &.{};
-    const it_shards = b.option(u32, "shards", "Split the integration cases across this many runs at once (default 4; 1 runs them in one)") orelse 4;
+    // Half the host's CPUs, from 2 to 8: each case's h9 has threads of its
+    // own, so a run per CPU oversubscribes the host. On a 4-CPU host, 2,
+    // 4, and 8 runs took 121, 125, and 142 s (sud), and at 8 one case took
+    // ten times as long.
+    const default_shards: u32 = @intCast(std.math.clamp((std.Thread.getCpuCount() catch 4) / 2, 2, 8));
+    const it_shards = b.option(u32, "shards", "Split the integration cases across this many runs at once (default half the CPUs, 2 to 8; 1 runs them in one)") orelse default_shards;
     const it_skips = b.option(bool, "skips", "List the integration cases that skipped, by reason") orelse false;
     const integration_step = b.step("integration", "Run real 9front binaries from the root tree through h9");
-    for (addIntegration(b, integration_step, it_shards, optimize, it_filters, it, root, engine_list, run_pending, guest_test, src_dir)) |run_integration| {
+    for (addIntegration(b, integration_step, it_shards, it_filters, it, root, engine_list, run_pending, guest_test, src_dir)) |run_integration| {
         if (!test_web) run_integration.step.dependOn(linux_fixtures);
         if (it_skips) run_integration.setEnvironmentVariable("H9_TEST_SKIPS", "1");
         // -Djit-check checks every region against T0, one region at a time
@@ -1867,7 +1875,7 @@ pub fn build(b: *std.Build) void {
     if (b.option([]const u8, "p", "With zig build proposal: the proposal, by slug")) |ref| {
         const ps = proposals(b);
         if (frontmatter.resolve(ps, ref)) |i| {
-            for (addIntegration(b, proposal_step, 1, optimize, tagFilters(b, ps[i]), it, root, engine_list, true, guest_test, src_dir)) |run_cases| {
+            for (addIntegration(b, proposal_step, 1, tagFilters(b, ps[i]), it, root, engine_list, true, guest_test, src_dir)) |run_cases| {
                 if (!test_web) run_cases.step.dependOn(linux_fixtures);
             }
             if (demos.get(ps[i].slug)) |steps| for (steps.items) |s| proposal_step.dependOn(s);
@@ -2433,16 +2441,23 @@ fn hcpuTestParts(b: *std.Build) []const []const []const u8 {
 fn addHcpuTests(b: *std.Build, test_step: *std.Build.Step, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) void {
     const step = b.step("hcpu", "Run the emulator CPU and JIT tests (src/engine/hcpu/hcpu.zig), natively and under Node");
     // A test binary runs its tests one at a time, and these take about a
-    // minute, so they're split by name into a few binaries the build
-    // runner runs side by side (hcpuTestParts).
+    // minute, so they're split by name into a few runs the build runner
+    // runs side by side (hcpuTestParts).
     const hcpu_mod = b.createModule(.{
         .root_source_file = b.path("src/engine/hcpu/hcpu.zig"),
         .target = target,
         .optimize = optimize,
     });
+    // One binary, run once for each part with tests/runner.zig picking the
+    // part's cases (H9_TEST_ONLY): compile-time filters made each part a
+    // compile of hcpu of its own.
+    const tests = b.addTest(.{
+        .root_module = hcpu_mod,
+        .test_runner = .{ .path = b.path("tests/runner.zig"), .mode = .server },
+    });
     for (hcpuTestParts(b)) |filters| {
-        const tests = b.addTest(.{ .root_module = hcpu_mod, .filters = filters });
         const run = b.addRunArtifact(tests);
+        run.setEnvironmentVariable("H9_TEST_ONLY", std.mem.join(b.allocator, "|", filters) catch @panic("OOM"));
         step.dependOn(&run.step);
         test_step.dependOn(&run.step);
     }
