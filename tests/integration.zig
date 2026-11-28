@@ -9339,6 +9339,9 @@ fn hostChildren(parent: i32, out: []HostChild) !usize {
 }
 
 test "a sud stub killed from outside kills its process, even one blocked in a syscall [native-backend]" {
+    // Linux only, and at compile time: a child's id isn't a pid elsewhere,
+    // so the rest doesn't compile on Windows.
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try linuxSud(&le);
