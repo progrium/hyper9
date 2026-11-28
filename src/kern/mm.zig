@@ -1863,6 +1863,7 @@ pub const Mm = struct {
                 };
             }
         }
+        var made_cow = false;
         var it = m.chunks.iterator();
         while (it.next()) |e| {
             const ci = e.key_ptr.*;
@@ -1880,6 +1881,7 @@ pub const Mm = struct {
                 _ = try n.addChunk(ci, c.pages, true);
                 if (!c.cow) {
                     c.cow = true;
+                    made_cow = true;
                     try m.remap(ci, c);
                 }
                 continue;
@@ -1903,6 +1905,14 @@ pub const Mm = struct {
             n.dropRuns(ci, nc, 0, chunk_size);
             try n.remap(ci, nc);
         }
+        // The pages made copy-on-write are read-only now, but another
+        // thread's vCPU may still write them through its TLB until it's
+        // shot down. That's done before the lock goes: otherwise a third
+        // thread's write fault could copy a chunk (`own`) while the
+        // second still writes the old pages, and those writes would be
+        // lost: a program whose threads write shared pages while one
+        // forks read back older values.
+        if (made_cow and m.refs.load(.acquire) > 1) m.shootdownAll();
         return n;
     }
 

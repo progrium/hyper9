@@ -653,6 +653,25 @@ static void bound_name(void) {
 	n = sizeof a;
 	CHECK("bound_name", getsockname(s, (void *)&a, &n) == 0 && a.sin_family == AF_INET && ntohs(a.sin_port) == port);
 	close(s);
+	/* A bind to port 0 has its port at once, which listen keeps and a
+	 * client reaches. */
+	s = socket(AF_INET, SOCK_STREAM, 0);
+	struct sockaddr_in z = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+	CHECK("bound_name", bind(s, (void *)&z, sizeof z) == 0);
+	n = sizeof a;
+	CHECK("bound_name", getsockname(s, (void *)&a, &n) == 0 && a.sin_family == AF_INET && a.sin_port != 0);
+	int eph = ntohs(a.sin_port);
+	CHECK("bound_name", listen(s, 8) == 0);
+	n = sizeof a;
+	CHECK("bound_name", getsockname(s, (void *)&a, &n) == 0 && ntohs(a.sin_port) == eph);
+	int c = socket(AF_INET, SOCK_STREAM, 0);
+	struct sockaddr_in to = {.sin_family = AF_INET, .sin_port = htons(eph), .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+	CHECK("bound_name", connect(c, (void *)&to, sizeof to) == 0);
+	int acc = accept(s, 0, 0);
+	CHECK("bound_name", acc >= 0);
+	close(acc);
+	close(c);
+	close(s);
 	printf("ok bound_name\n");
 }
 

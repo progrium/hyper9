@@ -7241,6 +7241,10 @@ test "a fork of a process with 600 MB of written heap runs under --memory 1g, an
     try cowFork(@src(), &.{ "--memory", "1g", "/mnt/term/cwd/cowfork", "big" }, "ok big\n");
 }
 
+test "threads writing shared pages while another thread forks lose none of their writes [cow-fork]" {
+    try cowFork(@src(), &.{ "/mnt/term/cwd/cowfork", "racewrite" }, "ok racewrite\n");
+}
+
 test "after fork, a read() into a buffer, a write from another thread, and a futex word change stay in the process that made them [cow-fork]" {
     try cowFork(@src(), &.{ "/mnt/term/cwd/cowfork", "isolate" }, "ok isolate\n");
 }
@@ -8969,7 +8973,7 @@ test "edge-triggered epoll in another thread reports a TCP socket's next data af
     try netCase(&le, &.{ "--net=enable", "--env", port_env, "/mnt/term/cwd/net", "tcp_et_drain" }, "ok tcp_et_drain\n");
 }
 
-test "getsockname on an IPv4 TCP socket between bind and listen gives AF_INET and the bound port [linux-net]" {
+test "getsockname on an IPv4 TCP socket between bind and listen gives AF_INET and the bound port, one bind to port 0 picked [linux-net]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "--net=enable", "/mnt/term/cwd/net", "bound_name" }, "ok bound_name\n");

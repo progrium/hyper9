@@ -5806,8 +5806,24 @@ fn bindCall(p: *Process, fd: i32, va: u64, len: u64) Err!i64 {
         addrText(&tb, a);
     @memcpy(so.s.bound[0..t.len], t);
     so.s.bound_len = @intCast(t.len);
-    // A datagram socket receives once bound; a stream one announces at listen.
-    if (so.s.stype != SOCK_DGRAM) return 0;
+    // A datagram socket receives once bound; a stream one announces at
+    // listen. A stream bind to port 0 takes its port now, as Linux's
+    // does, so getsockname between bind and listen names it (servers
+    // and test harnesses that bind to port 0 read it back before
+    // listening): an announce on a conversation of its own, closed again,
+    // leaves the port free for listen's. Where the policy refuses one,
+    // the port stays 0 until listen.
+    if (so.s.stype != SOCK_DGRAM) {
+        if (a.port == 0) {
+            if (ephemeralPort(p, t)) |port| {
+                var nb: [96]u8 = undefined;
+                const nt = boundText(&nb, t, port);
+                @memcpy(so.s.bound[0..nt.len], nt);
+                so.s.bound_len = @intCast(nt.len);
+            }
+        }
+        return 0;
+    }
     const r = ctlMsg(fd, "announce {s}", .{t});
     // A client's bind to any address and port 0, as busybox nslookup's
     // before its connect, needs no announce: where the policy refuses
@@ -5818,6 +5834,27 @@ fn bindCall(p: *Process, fd: i32, va: u64, len: u64) Err!i64 {
         return 0;
     }
     return r;
+}
+
+/// A free TCP port for a bind to `t` (announce's form, with port 0): what
+/// a conversation announced there is given, before it's closed.
+fn ephemeralPort(p: *Process, t: []const u8) ?u16 {
+    const fd = switch (openConv(p, "/net/tcp/clone", ip_tcp, true) catch return null) {
+        .fd => |f| f,
+        .err => return null,
+    };
+    defer kern.close(fd) catch {};
+    if (ctlMsg(fd, "announce {s}", .{t}) < 0) return null;
+    const conv = convOf(fd) orelse return null;
+    var rb: [128]u8 = undefined;
+    const port = parseAddrText(convRead(conv, "local", &rb) orelse return null).port;
+    return if (port == 0) null else port;
+}
+
+/// `t` (ADDR!0, or a bare 0 for the wildcard) with `port` for its port.
+fn boundText(buf: []u8, t: []const u8, port: u16) []const u8 {
+    const host = if (std.mem.lastIndexOfScalar(u8, t, '!')) |i| t[0 .. i + 1] else "";
+    return std.fmt.bufPrint(buf, "{s}{d}", .{ host, port }) catch t;
 }
 
 fn listenCall(p: *Process, fd: i32) Err!i64 {
