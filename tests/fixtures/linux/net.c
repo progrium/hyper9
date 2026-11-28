@@ -723,6 +723,78 @@ static void udp(void) {
 	printf("ok udp\n");
 }
 
+/* Erlang's poll thread waits in epoll_wait on oneshot entries that its
+ * schedulers rearm with EPOLL_CTL_MOD after each read. A rearm that came
+ * while the wait was copying the entries, before it slept, was missed,
+ * and the wait slept with the socket ready: Mix's downloads stalled. A
+ * thread here sends bursts on loopback connections; the waiter thread
+ * reports the reader's socket, and the reader takes one segment and
+ * rearms it, as Erlang's TLS does, to the end of each connection. */
+static int er_ep, er_pipe[2];
+static void *er_waiter(void *arg) {
+	(void)arg;
+	for (;;) {
+		struct epoll_event ev;
+		if (epoll_wait(er_ep, &ev, 1, -1) == 1 && write(er_pipe[1], "x", 1) != 1)
+			return 0;
+	}
+}
+static void *er_sender(void *arg) {
+	int l = (int)(long)arg;
+	static char big[16000];
+	unsigned x = 1;
+	for (;;) {
+		int c = accept(l, 0, 0);
+		if (c < 0)
+			return 0;
+		for (int i = 0; i < 40; i++) {
+			x = x * 1103515245 + 12345;
+			static const int size[] = {100, 1460, 3000, 16000}, gap[] = {0, 0, 0, 200, 1000};
+			if (write(c, big, size[(x >> 8) % 4]) < 0)
+				break;
+			if (gap[(x >> 12) % 5])
+				usleep(gap[(x >> 12) % 5]);
+		}
+		close(c);
+	}
+}
+static void epoll_rearm(void) {
+	int l = socket(AF_INET, SOCK_STREAM, 0);
+	struct sockaddr_in a = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+	socklen_t al = sizeof a;
+	CHECK("epoll_rearm", l >= 0 && bind(l, (void *)&a, sizeof a) == 0 && listen(l, 4) == 0 && getsockname(l, (void *)&a, &al) == 0);
+	er_ep = epoll_create1(0);
+	CHECK("epoll_rearm", er_ep >= 0 && pipe(er_pipe) == 0);
+	pthread_t t;
+	CHECK("epoll_rearm", pthread_create(&t, 0, er_sender, (void *)(long)l) == 0);
+	CHECK("epoll_rearm", pthread_create(&t, 0, er_waiter, 0) == 0);
+	for (int r = 0; r < 400; r++) {
+		int s = socket(AF_INET, SOCK_STREAM, 0);
+		CHECK("epoll_rearm", s >= 0 && connect(s, (void *)&a, sizeof a) == 0);
+		fcntl(s, F_SETFL, O_NONBLOCK);
+		struct epoll_event e = {.events = EPOLLIN | EPOLLONESHOT, .data.fd = s};
+		CHECK("epoll_rearm", epoll_ctl(er_ep, EPOLL_CTL_ADD, s, &e) == 0);
+		for (;;) {
+			struct pollfd pf = {er_pipe[0], POLLIN, 0};
+			if (poll(&pf, 1, 2000) != 1) {
+				char c;
+				printf("FAIL epoll_rearm: connection %d readable (%d), and no event\n", r, (int)recv(s, &c, 1, MSG_PEEK));
+				failed = 1;
+				return;
+			}
+			char b[1460];
+			CHECK("epoll_rearm", read(er_pipe[0], b, 1) == 1);
+			ssize_t n = recv(s, b, sizeof b, 0);
+			if (n == 0)
+				break;
+			CHECK("epoll_rearm", epoll_ctl(er_ep, EPOLL_CTL_MOD, s, &e) == 0);
+		}
+		CHECK("epoll_rearm", epoll_ctl(er_ep, EPOLL_CTL_DEL, s, 0) == 0);
+		close(s);
+	}
+	printf("ok epoll_rearm\n");
+}
+
 /* Erlang's resolver: a fresh UDP socket, before it sends, has nothing to
  * read. poll says it's writable only, a nonblocking recv is EAGAIN (not
  * ENOTCONN), and a recv blocked on it wakes for the reply to its first
@@ -1194,6 +1266,7 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "dupfd_threads")) dupfd_threads();
 		if (all || !strcmp(n, "pipe_drain")) pipe_drain();
 		if (all || !strcmp(n, "eventfd_waker")) eventfd_waker();
+
 		if (all || !strcmp(n, "unix_sock")) unix_sock();
 		if (all || !strcmp(n, "scm_rights")) scm_rights();
 		if (all || !strcmp(n, "seqpacket")) seqpacket();
@@ -1206,6 +1279,7 @@ int main(int argc, char **argv) {
 		if (!strcmp(n, "exit_eof") || !strcmp(n, "net")) exit_eof();
 		if (!strcmp(n, "dual_bind") || !strcmp(n, "net")) dual_bind();
 		if (!strcmp(n, "udp") || !strcmp(n, "net")) udp();
+		if (!strcmp(n, "epoll_rearm") || !strcmp(n, "net")) epoll_rearm();
 		if (!strcmp(n, "udp_fresh") || !strcmp(n, "net")) udp_fresh();
 		if (!strcmp(n, "udp_mmsg") || !strcmp(n, "net")) udp_mmsg();
 		if (!strcmp(n, "udp_fionread") || !strcmp(n, "net")) udp_fionread();
