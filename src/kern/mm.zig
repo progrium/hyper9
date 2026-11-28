@@ -1583,6 +1583,7 @@ pub const Mm = struct {
         try m.cow_old.ensureUnusedCapacity(m.gpa, 1);
         const p = try m.newPages();
         copySparse(p.mem, old.mem);
+        cowCheck(ci, old.mem, p.mem);
         p.refs.store(1, .release);
         c.pages = p;
         c.mem = p.mem;
@@ -2085,6 +2086,28 @@ pub const Mm = struct {
             b.offset == a.offset + (a.end - a.start) and std.mem.eql(u8, a.name.slice(), b.name.slice());
     }
 };
+
+/// DEBUG (not for main): after `own` copies a chunk, nothing may write
+/// the old pages, which every vCPU of this Mm sees read-only and the other
+/// side copies before it writes. Waits a little, then reports any byte of
+/// them that changed: a write through a stale TLB entry.
+fn cowCheck(ci: u64, old: []const u8, new: []const u8) void {
+    var spin: u32 = 0;
+    while (spin < 20000) : (spin += 1) std.atomic.spinLoopHint();
+    var off: usize = 0;
+    while (off < old.len) : (off += page) {
+        const o = old[off..][0..page];
+        const n = new[off..][0..page];
+        if (std.mem.allEqual(u8, n, 0)) continue;
+        if (std.mem.indexOfDiff(u8, o, n)) |d| {
+            var last = d;
+            for (d..page) |i| if (o[i] != n[i]) {
+                last = i;
+            };
+            std.debug.print("h9 cowcheck: chunk 0x{x} page {d}: old pages changed after the copy at 0x{x}..0x{x} (va 0x{x})\n", .{ ci, off / page, d, last + 1, ci * chunk_size + off + d });
+        }
+    }
+}
 
 /// As segment.zig's: copies the non-zero pages of `src` into fresh `dst`.
 fn copySparse(dst: []u8, src: []const u8) void {
