@@ -27,6 +27,7 @@
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/timerfd.h>
 #include <sys/uio.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -262,6 +263,67 @@ static void eventfd_epoll(void) {
 	CHECK("eventfd", read(s, &v, 8) == 8 && v == 1);
 	CHECK("eventfd", read(s, &v, 8) == 8 && v == 1);
 	printf("ok eventfd\n");
+}
+
+/* timerfd (Bun's event loop makes one per thread, and took a failed
+ * timerfd_create for a timer it could use): a one-shot that a blocking
+ * read waits out, an interval that epoll reports and whose read counts
+ * the expirations missed, gettime's countdown, an absolute time already
+ * past, disarming, and what Linux refuses. */
+static void timerfd_case(void) {
+	int t = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC);
+	CHECK("timerfd", t >= 0);
+	struct itimerspec its = {0}, old;
+	CHECK("timerfd", timerfd_gettime(t, &old) == 0 && old.it_value.tv_sec == 0 && old.it_value.tv_nsec == 0);
+	its.it_value.tv_nsec = 100000000;
+	struct timespec t0;
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	CHECK("timerfd", timerfd_settime(t, 0, &its, 0) == 0);
+	CHECK("timerfd", timerfd_gettime(t, &old) == 0 && old.it_value.tv_sec == 0 && old.it_value.tv_nsec > 0 && old.it_value.tv_nsec <= 100000000);
+	uint64_t n = 0;
+	CHECK("timerfd", read(t, &n, 8) == 8 && n == 1);
+	long ms = ms_since(&t0);
+	CHECK("timerfd", ms >= 95 && ms < 3000);
+	/* Fired and read: disarmed. */
+	CHECK("timerfd", timerfd_gettime(t, &old) == 0 && old.it_value.tv_sec == 0 && old.it_value.tv_nsec == 0);
+	CHECK("timerfd", read(t, &n, 4) < 0 && errno == EINVAL);
+	CHECK("timerfd", write(t, &n, 8) < 0 && errno == EINVAL);
+	close(t);
+
+	t = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK);
+	CHECK("timerfd", t >= 0);
+	CHECK("timerfd", read(t, &n, 8) < 0 && errno == EAGAIN);
+	int ep = epoll_create1(0);
+	struct epoll_event ev = {.events = EPOLLIN, .data.fd = t}, out;
+	CHECK("timerfd", epoll_ctl(ep, EPOLL_CTL_ADD, t, &ev) == 0);
+	its.it_value.tv_nsec = 20000000;
+	its.it_interval.tv_nsec = 20000000;
+	CHECK("timerfd", timerfd_settime(t, 0, &its, &old) == 0 && old.it_value.tv_nsec == 0);
+	CHECK("timerfd", epoll_wait(ep, &out, 1, 5000) == 1 && out.data.fd == t);
+	usleep(100000);
+	CHECK("timerfd", read(t, &n, 8) == 8 && n >= 3);
+	CHECK("timerfd", timerfd_gettime(t, &old) == 0 && old.it_interval.tv_nsec == 20000000 && old.it_value.tv_nsec > 0);
+	/* Disarmed: nothing more comes. */
+	struct itimerspec zero = {0};
+	CHECK("timerfd", timerfd_settime(t, 0, &zero, &old) == 0 && old.it_interval.tv_nsec == 20000000);
+	CHECK("timerfd", epoll_wait(ep, &out, 1, 100) == 0);
+	CHECK("timerfd", read(t, &n, 8) < 0 && errno == EAGAIN);
+	/* An absolute time on CLOCK_REALTIME that's past expires at once. */
+	close(t);
+	t = timerfd_create(CLOCK_REALTIME, TFD_NONBLOCK);
+	CHECK("timerfd", t >= 0);
+	struct itimerspec past = {0};
+	clock_gettime(CLOCK_REALTIME, &past.it_value);
+	past.it_value.tv_sec -= 10;
+	CHECK("timerfd", timerfd_settime(t, TFD_TIMER_ABSTIME, &past, 0) == 0);
+	struct pollfd pf = {t, POLLIN, 0};
+	CHECK("timerfd", poll(&pf, 1, 2000) == 1 && read(t, &n, 8) == 8 && n == 1);
+	close(t);
+	close(ep);
+	CHECK("timerfd", timerfd_create(CLOCK_PROCESS_CPUTIME_ID, 0) < 0 && errno == EINVAL);
+	CHECK("timerfd", timerfd_create(CLOCK_MONOTONIC, 0x40) < 0 && errno == EINVAL);
+	CHECK("timerfd", timerfd_gettime(0, &old) < 0 && errno == EINVAL);
+	printf("ok timerfd\n");
 }
 
 /* tokio's I/O driver (mio's waker): an eventfd under EPOLLET that's never
@@ -1263,6 +1325,7 @@ int main(int argc, char **argv) {
 		if (!strcmp(n, "poll_ready")) poll_ready();
 		if (all || !strcmp(n, "epoll_et")) epoll_et();
 		if (all || !strcmp(n, "eventfd")) eventfd_epoll();
+		if (all || !strcmp(n, "timerfd")) timerfd_case();
 		if (all || !strcmp(n, "dupfd_threads")) dupfd_threads();
 		if (all || !strcmp(n, "pipe_drain")) pipe_drain();
 		if (all || !strcmp(n, "eventfd_waker")) eventfd_waker();

@@ -156,7 +156,7 @@ Serves `/fd/N`.
 
 #### The Linux view `#L` (`src/kern/dev/linux.zig`, `#λ` before [mounts](../design/epoch-0/mounts.md)), eventfds `#ε` (`src/kern/dev/eventfd.zig`), and ptys `#τ` (`src/kern/dev/pty.zig`)
 
-A Linux process's `/`, its eventfd, epoll, and signalfd instances, and its pseudoterminals (see Linux ABI).
+A Linux process's `/`, its eventfd, epoll, signalfd, and timerfd instances, and its pseudoterminals (see Linux ABI).
 
 #### Ported to Zig (`src/kern/port.zig`)
 

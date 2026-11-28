@@ -8854,6 +8854,12 @@ test "eventfd counts and wakes epoll [linux-net]" {
     try netCase(&le, &.{ "/mnt/term/cwd/net", "eventfd" }, "ok eventfd\n");
 }
 
+test "a timerfd expires on time, counts an interval's expirations, and wakes epoll and poll [linux-net]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/net", "timerfd" }, "ok timerfd\n");
+}
+
 test "an edge-triggered eventfd that stays readable wakes epoll_wait in another thread on every write [linux-net]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);

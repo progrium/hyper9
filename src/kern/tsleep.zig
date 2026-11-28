@@ -37,7 +37,56 @@ const Timer = struct {
     arg: ?*anyopaque,
     fired: std.atomic.Value(c_int) = .init(0), // set by the timer kproc, under the host lock
     queued: bool = false, // in the list; under the host lock
+    /// An Alarm's: called at the deadline instead of the wakeup.
+    alarm: ?*Alarm = null,
 };
+
+/// A deadline that calls a function rather than waking a sleeper, every
+/// `interval` ns after the first if that isn't 0: a timerfd's
+/// (dev/eventfd.zig). The timer kproc calls `f` under the host lock, so
+/// `f` mustn't block, and may take only locks that are never held while
+/// the host lock is taken (a Watchers', which notify takes; a Rendez's).
+pub const Alarm = struct {
+    t: Timer = .{ .r = undefined, .@"fn" = undefined, .arg = null },
+    interval: u64 = 0,
+    f: *const fn (*Alarm) void,
+
+    /// Sets the alarm to go off `ns` from now and then every `interval`
+    /// ns, or with `ns` 0, clears it.
+    pub fn set(a: *Alarm, ns: u64, interval: u64) void {
+        tdel(&a.t);
+        if (ns == 0) return;
+        c.h9_tlock();
+        a.interval = interval;
+        a.t.alarm = a;
+        a.t.when = c.h9_tnow() + ns;
+        c.h9_tunlock();
+        tadd(&a.t);
+    }
+
+    /// Clears it; once this returns, `f` isn't running and won't be
+    /// called again.
+    pub fn clear(a: *Alarm) void {
+        tdel(&a.t);
+    }
+};
+
+/// The host monotonic clock that deadlines are in, in ns.
+pub fn clock() u64 {
+    return c.h9_tnow();
+}
+
+/// tadd's insertion, under the host lock.
+fn tinsert(t: *Timer) void {
+    var l: *?*Timer = &timers;
+    while (l.*) |n| : (l = &n.next) {
+        if (n.when > t.when) break;
+    }
+    t.next = l.*;
+    l.* = t;
+    t.queued = true;
+    ntimers += 1;
+}
 
 var timers: ?*Timer = null; // sorted by when; under the host lock
 var ntimers: c_int = 0; // for the unit test
@@ -50,14 +99,7 @@ fn tfn(v: ?*anyopaque) callconv(.c) c_int {
 
 fn tadd(t: *Timer) void {
     c.h9_tlock();
-    var l: *?*Timer = &timers;
-    while (l.*) |n| : (l = &n.next) {
-        if (n.when > t.when) break;
-    }
-    t.next = l.*;
-    l.* = t;
-    t.queued = true;
-    ntimers += 1;
+    tinsert(t);
     // A new earliest deadline: the kproc waits for a later one.
     if (timers == t)
         c.h9_tsignal();
@@ -91,6 +133,15 @@ fn timerproc(v: ?*anyopaque) callconv(.c) void {
             timers = t.next;
             t.queued = false;
             ntimers -= 1;
+            if (t.alarm) |a| {
+                a.f(a);
+                if (a.interval > 0) {
+                    // The next deadline after now, however many passed.
+                    t.when += a.interval * ((now - t.when) / a.interval + 1);
+                    tinsert(t);
+                }
+                continue;
+            }
             t.fired.store(1, .seq_cst);
             _ = sync.wakeup(t.r);
         }

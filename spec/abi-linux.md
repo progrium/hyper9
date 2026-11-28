@@ -151,6 +151,8 @@ System V shared memory (`src/abi/linux/sysvshm.zig`): `shmget`, `shmat`, `shmdt`
 
 `signalfd` is an `#ε` eventfd the process model writes when a signal the fd's mask names is left pending, and a read takes the signals as `signalfd_siginfo`.
 
+`timerfd_create`, `timerfd_settime`, and `timerfd_gettime` make and set an `#ε` timerfd instance, on `CLOCK_REALTIME`, `CLOCK_MONOTONIC`, `CLOCK_BOOTTIME`, or their `_ALARM`s. It keeps its timer in the host's monotonic clock, ns from when it was set, so `TFD_TIMER_ABSTIME` is converted to that by the clock's reading when it's set, and a past time expires at once; `TFD_TIMER_CANCEL_ON_SET` is accepted and never cancels, since a machine's wall clock isn't set. A read waits for an expiration and returns the number since the last read, and the kernel's timer kproc notifies the instance's watchers at each one (a tsleep `Alarm`), so `poll` and `epoll` see it.
+
 `setitimer`'s `ITIMER_REAL` and `alarm` are served by one kernel process (`src/abi/linux/itimer.zig`) that posts `alarm` to a due process through a reference to its kernel record (`h9_kern_selfref`), waking at least every 5 ms while any timer is set and ending two seconds after the last is cleared; the CPU-time timers are accepted and never fire. `sync_file_range` is a no-op, since `fsync` does the writing.
 ### Named pipes
 

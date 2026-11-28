@@ -1579,6 +1579,9 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const engine.Ureg) Err!Outcome {
         .signalfd4 => return ret(try signalfd(p, c.int(0), c.a[1], c.a[2], c.uint(3))),
         .eventfd => return ret(try eventfd(p, c.uint(0), 0)),
         .eventfd2 => return ret(try eventfd(p, c.uint(0), c.uint(1))),
+        .timerfd_create => return ret(try timerfdCreate(p, c.uint(0), c.uint(1))),
+        .timerfd_settime => return ret(try timerfdSettime(p, c.int(0), c.uint(1), c.a[2], c.a[3])),
+        .timerfd_gettime => return ret(try timerfdGettime(p, c.int(0), c.a[1])),
         .memfd_create => return ret(try memfdCreate(p, c.uint(1))),
         .epoll_create => return ret(if (c.int(0) <= 0) -E.INVAL else try epollCreate(p, 0)),
         .epoll_create1 => return ret(try epollCreate(p, c.uint(0))),
@@ -7274,6 +7277,78 @@ fn eventfd(p: *Process, initval: u32, flags: u32) Err!i64 {
     }
     if (flags & O_NONBLOCK != 0) setFlags(p, fd, .{ .nonblock = true });
     return fd;
+}
+
+// timerfd: a #ε timerfd instance, which keeps the timer in its host's
+// monotonic clock, ns from now (src/kern/dev/eventfd.zig); a time on a
+// clock here is made ns from now by that clock's reading.
+
+const TFD_TIMER_ABSTIME = 1;
+/// The offset a timerfd's read gives its timer at (eventfd.zig's
+/// timer_state).
+const timerfd_state: i64 = 1 << 62;
+const TFD_TIMER_CANCEL_ON_SET = 2;
+
+fn timerfdCreate(p: *Process, clock: u32, flags: u32) Err!i64 {
+    switch (clock) {
+        0, 1, 7, 8, 9 => {}, // REALTIME, MONOTONIC, BOOTTIME, and their _ALARMs
+        else => return -E.INVAL,
+    }
+    if (flags & ~@as(u32, O_CLOEXEC | O_NONBLOCK) != 0) return -E.INVAL;
+    const fd = kern.open("#\u{3b5}/timerfd", kern.ORDWR | if (flags & O_CLOEXEC != 0) @as(c_int, OCEXEC) else 0) catch return kerr();
+    var b: [24]u8 = @splat(0);
+    std.mem.writeInt(u64, b[16..24], clock, .little);
+    _ = kern.pwrite(fd, &b, -1) catch {
+        kern.close(fd) catch {};
+        return kerr();
+    };
+    if (flags & O_NONBLOCK != 0) setFlags(p, fd, .{ .nonblock = true });
+    return fd;
+}
+
+/// The timer of timerfd fd: ns left (0: disarmed), interval, and clock.
+fn timerfdState(fd: i32) ?[3]u64 {
+    const info = kc.fdInfo(fd) catch return null;
+    if (info.dc != ev_dc) return null;
+    var b: [24]u8 = undefined;
+    const n = kern.pread(@intCast(fd), &b, timerfd_state) catch return null;
+    if (n != 24) return null;
+    return .{ std.mem.readInt(u64, b[0..8], .little), std.mem.readInt(u64, b[8..16], .little), std.mem.readInt(u64, b[16..24], .little) };
+}
+
+/// An itimerspec: the interval, then the value.
+fn writeItimerspec(p: *Process, va: u64, left: u64, interval: u64) Err!void {
+    const ts: u64 = if (p.is32() and p.time32) 8 else 16;
+    try writeTimespec(p, va, @intCast(interval));
+    try writeTimespec(p, va + ts, @intCast(left));
+}
+
+fn timerfdGettime(p: *Process, fd: i32, va: u64) Err!i64 {
+    if (fd < 0) return -E.BADF;
+    const st = timerfdState(fd) orelse return if (kc.fdInfo(fd)) |_| -E.INVAL else |_| -E.BADF;
+    try writeItimerspec(p, va, st[0], st[1]);
+    return 0;
+}
+
+fn timerfdSettime(p: *Process, fd: i32, flags: u32, new_va: u64, old_va: u64) Err!i64 {
+    if (fd < 0) return -E.BADF;
+    if (flags & ~@as(u32, TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET) != 0) return -E.INVAL;
+    const st = timerfdState(fd) orelse return if (kc.fdInfo(fd)) |_| -E.INVAL else |_| -E.BADF;
+    const ts: u64 = if (p.is32() and p.time32) 8 else 16;
+    const interval = try readTimespec(p, new_va);
+    var value = try readTimespec(p, new_va + ts);
+    if (interval < 0 or value < 0) return -E.INVAL;
+    if (value != 0 and flags & TFD_TIMER_ABSTIME != 0) {
+        // A time already past expires at once, as Linux's does.
+        value = @max(value - (clockNs(@intCast(st[2])) orelse 0), 1);
+    }
+    if (old_va != 0) try writeItimerspec(p, old_va, st[0], st[1]);
+    var b: [24]u8 = undefined;
+    std.mem.writeInt(u64, b[0..8], @intCast(value), .little);
+    std.mem.writeInt(u64, b[8..16], @intCast(interval), .little);
+    std.mem.writeInt(u64, b[16..24], st[2], .little);
+    _ = kern.pwrite(@intCast(fd), &b, -1) catch return kerr();
+    return 0;
 }
 
 // signalfd: an eventfd counter, nonzero while a signal the fd's mask
