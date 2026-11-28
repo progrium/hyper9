@@ -3058,11 +3058,49 @@ fn unmove(ch: *Chan, dch: *Chan, name: [*c]const u8) Error!c_int {
     const np = try pathjoin(ud.path, name);
     defer c.free(np);
     const id = upid(in, u.path);
-    if (id < 0 or upid(in, np) < 0)
+    const nid = upid(in, np);
+    if (id < 0 and nid < 0)
+        return unmoveplain(u, ud, name, np);
+    if (id < 0 or nid < 0)
         return 1;
     sync.qlock(&in.upql);
     defer sync.qunlock(&in.upql);
     return unmovelocked(ch, u, ud, name, np, id);
+}
+
+/// A rename in a union without an up member: the member that holds the
+/// old name renames it into its own copy of the new directory, where it
+/// has one, as a bind of host directories would on Linux. Otherwise it's
+/// 1, "cross-device link", for mv to copy. Without this, every rename
+/// across directories under a `--dir HOST:#L/PATH:rw` was EXDEV: rustc
+/// writes each .rmeta in a directory of its own and renames it out.
+fn unmoveplain(u: *Unc, ud: *Unc, name: [*c]const u8, np: [*c]const u8) Error!c_int {
+    const in = u.inst;
+    if (iswhname(name))
+        return kerror(&port.Eperm);
+    if (u.path[0] == 0)
+        return kerror(&port.Eperm);
+    if (eq(np, u.path))
+        return 0;
+    if (ud.path[0] == 0) try untop(ud) else try unfresh(ud);
+    if (u.n == 0)
+        return kerror(&port.Enonexist);
+    // A name more than one member has would show the next one's
+    // after the move.
+    if (u.n > 1)
+        return 1;
+    const m = u.mid[0];
+    var k: usize = 0;
+    while (k < @as(usize, @intCast(ud.n)) and ud.mid[k] != m) k += 1;
+    if (k == @as(usize, @intCast(ud.n)))
+        return 1;
+    const pd = ud.mc[k] orelse return 1;
+    if (!try dev.rename(u.n0(), pd, z(name)))
+        return 1;
+    wcdrop(in, null, true);
+    changed(in, u.path);
+    changed(in, np);
+    return 0;
 }
 
 fn unmovelocked(ch: *Chan, u: *Unc, ud: *Unc, name: [*c]const u8, np: [*c]const u8, id: c_int) Error!c_int {
@@ -4810,9 +4848,16 @@ fn ovgetattr(ch: *Chan, mask: u64, a: *Attr) Error!void {
     a.size = @bitCast(d.length);
     a.atime = d.atime;
     a.mtime = d.mtime;
-    const l = try lowerof(ch) orelse return;
     var la: Attr = undefined;
-    {
+    if (isunion(ch) and uncof(ch).lopen != 0) {
+        // An open file's member chan is open too, and lowerof can't clone
+        // it, so it's asked as it is. Without this, an fstat had no
+        // nanoseconds or change time where a stat of the path had them,
+        // and git, which records a file's fstat and later checks its
+        // stat, died "shallow file has changed since we read it".
+        try dev.getattr(uncof(ch).n0(), mask, &la);
+    } else {
+        const l = try lowerof(ch) orelse return;
         defer chan.cclose(l);
         try dev.getattr(l, mask, &la);
     }

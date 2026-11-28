@@ -50,17 +50,19 @@ fn growfd(f: *Fgrp, fd: c_int) c_int {
     const nfd = f.nfd;
     if (fd < nfd)
         return 0;
-    if (fd >= nfd + c.DELTAFD)
-        return -1; // out of range
     // Unbounded allocation is unwise; besides, there are only 16 bits of
     // fid in 9P
-    if (nfd >= 5000) {
+    if (fd >= 5000) {
         port.print("no free file descriptors\n", .{});
         return -1;
     }
+    // h9: grown to hold fd, in steps of DELTAFD, not by one step only,
+    // which made a dup to an fd more than a step past the table "fd out
+    // of range": a Linux program's dup2(fd, 60) in a new process, or
+    // fcntl F_DUPFD from 100, is any number under its fd limit.
     const oldfd = f.fd;
     const oldflag = f.flag;
-    const n: usize = @intCast(nfd + c.DELTAFD);
+    const n: usize = @intCast(@divTrunc(fd, c.DELTAFD) * c.DELTAFD + c.DELTAFD);
     const newfd_: ?[*][*c]Chan = @ptrCast(@alignCast(port.malloc(@intCast(n * @sizeOf(?*Chan)))));
     const newflag: ?[*]u8 = @ptrCast(port.malloc(@intCast(n)));
     if (newfd_ == null or newflag == null) {
@@ -72,9 +74,11 @@ fn growfd(f: *Fgrp, fd: c_int) c_int {
     const old: usize = @intCast(nfd);
     @memcpy(newfd_.?[0..old], oldfd[0..old]);
     @memcpy(newflag.?[0..old], oldflag[0..old]);
+    @memset(newfd_.?[old..n], null);
+    @memset(newflag.?[old..n], 0);
     f.fd = newfd_.?;
     f.flag = newflag.?;
-    f.nfd = nfd + c.DELTAFD;
+    f.nfd = @intCast(n);
     if (fd > f.maxfd) {
         if (@divTrunc(fd, 100) > @divTrunc(f.maxfd, 100))
             f.exceed = @divTrunc(fd, 100) * 100;
