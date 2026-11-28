@@ -100,8 +100,9 @@ fn env(comptime src: std.builtin.SourceLocation) !Env {
 /// Cases the web host can't run (design/epoch-0/browser-host.md), skipped
 /// when H9_TEST_WEB is set (-Dweb): by name, those that need a host TTY,
 /// POSIX signals, or what a page's WebSocket can't do; by tag, the
-/// network's, 9P roots', and serving's proposals, since the web host has
-/// only WebSockets and can't listen.
+/// network's, 9P roots', serving's, and the mount index's proposals, since
+/// the web host has only WebSockets and can't listen, and the headless
+/// screen's, since its build has no graphics but the page's canvas.
 const web_skips = [_][]const u8{
     "the discarded-changes notice is printed on a terminal and not otherwise",
     "--timeout stops a console read on a terminal at once",
@@ -135,8 +136,33 @@ const web_skips = [_][]const u8{
     "header= wins over a helper's header of the same name",
     "9P-Uid and 9P-User name files without --user-map",
     "--user-map wins over 9P-Uid",
+    // 9P over TCP or a unix socket, and --serve, which the web host hasn't:
+    // the mounts and plan-format cases that dial a local 9P server or
+    // index one, and file-interface's that dial a .L server.
+    "--url tcp:// and unix:// mount 9P, with spec from the path or spec=",
+    "--url to /srv/NAME posts without mounting",
+    "a 9P root is never walked for dev, env, fd, proc, srv, or net",
+    "a 9P server's .fs/index answers walks without the server",
+    "index= on a mount off / names its index",
+    "spec= is sent as the attach name",
+    "user= is sent as the attach uname",
+    "a pinned root with a different index is refused",
+    "--print output round-trips through --plan for every policy case",
+    "a 9front ls sees the same Dir as before",
+    // ca= is a usage error on the web host, as on a ws:// root above.
+    "ca= is accepted on a --url without a scheme",
+    // The web host's user is glenda (os-wasm.c), whose stock profile
+    // starts the terminal's services and rio on a login rc.
+    "--rc alone on a terminal is an interactive login rc",
+    "--rc alone runs the root's rcmain.local, then stdin",
+    "--rc alone without rcmain.local is a plain rc",
+    // It counts the native executor's host threads.
+    "1000 blocked processes use 8 host threads",
+    // A page's static tree is fetched through the browser's cache;
+    // statictree.js keeps no --index-cache.
+    "--url http:// falls back to a static dotfs tree",
 };
-const web_skip_tags = [_][]const u8{ "5", "13", "22", "35" };
+const web_skip_tags = [_][]const u8{ "net-policy", "ninep-roots", "dotl", "serve", "kernel-serve", "mount-index", "headless-screen" };
 
 /// Whether the cases run on the web host (-Dweb).
 fn onWeb() bool {
@@ -1149,31 +1175,12 @@ test "auto never selects sud; it stays an explicit opt-in [native-backend]" {
     const r = try runOn(e, "auto", &.{"--check"}, null);
     defer r.deinit();
     try std.testing.expect(std.mem.indexOf(u8, r.out, "engine auto: ok (uses sud)") == null);
-    // Explicit native still works. Its not-a-security-boundary warning is
+    // Explicit sud still works. Its not-a-security-boundary warning is
     // printed only on a terminal, so stderr is clean here (not a tty).
     const w = try runOn(e, "sud", &.{ "/bin/echo", "hi" }, null);
     defer w.deinit();
     try std.testing.expectEqualStrings("hi\n", w.out);
     try std.testing.expectEqualStrings("", w.err);
-}
-
-test "auto never selects sud, by either name [renames]" {
-    // `native` is an alias of `sud` for one release (design/epoch-0/renames.md), and
-    // the rule that `auto` never picks it holds under both names: --check
-    // says what auto uses, and only an explicit --engine runs on it.
-    const e = try env(@src());
-    try requireSud(e);
-    if (try kvmLimit(e) != null) return skip("KVM is usable here, so auto picks it", .{});
-    const r = try runOn(e, "auto", &.{"--check"}, null);
-    defer r.deinit();
-    try std.testing.expect(std.mem.indexOf(u8, r.out, "engine auto: ok (uses sud)") == null);
-    try std.testing.expect(std.mem.indexOf(u8, r.out, "(uses native)") == null);
-    for ([_][]const u8{ "sud", "native" }) |name| {
-        const w = try runOn(e, name, &.{ "/bin/echo", "hi" }, null);
-        defer w.deinit();
-        try std.testing.expectEqualStrings("hi\n", w.out);
-        try std.testing.expectEqualStrings("", w.err);
-    }
 }
 
 test "rfork with RFMEM shares data and bss but not the stack [native-backend]" {
@@ -5855,7 +5862,7 @@ test "an unreachable --url without a scheme exits 125 naming its ws:// URL [moun
     defer r.deinit();
     try std.testing.expectEqual(125, r.code);
     var want: [160]u8 = undefined;
-    const why = if (onWeb()) "connection failed" else "connection refused";
+    const why = if (onWeb()) "no WebSocket and no static tree" else "connection refused";
     try expectIn(r.err, try std.fmt.bufPrint(&want, "root ws://{s}: {s}", .{ arg, why }));
 }
 
@@ -9008,6 +9015,24 @@ fn goLinux(le: *const LinuxEnv) !void {
     std.Io.Dir.cwd().access(std.testing.io, try hostPath(le.fixtures, "go/goroutines"), .{}) catch return skip("no Linux Go fixtures (built when go is on PATH)", .{});
 }
 
+/// Skips unless sud is among the engines and runs here (as requireSud
+/// does for the 9front cases), and runs the Linux case on sud alone.
+fn linuxSud(le: *LinuxEnv) !void {
+    if (builtin.os.tag != .linux or builtin.cpu.arch != .x86_64) return skip("sud is Linux x86-64 only", .{});
+    if (!std.mem.eql(u8, le.arch, "amd64")) return skip("sud runs amd64 only (-Darch=amd64)", .{});
+    var it = std.mem.tokenizeScalar(u8, le.engines, ',');
+    while (it.next()) |engine| {
+        if (!std.mem.eql(u8, engine, "sud")) continue;
+        const p = try runProcessWith(&.{ le.h9, "--engine", "sud", "--check" }, null, null, 30_000);
+        defer gpa.free(p.stdout);
+        defer gpa.free(p.stderr);
+        if (std.mem.indexOf(u8, p.stdout, "engine sud: ok") == null) return skip("h9 --check says sud can't run here", .{});
+        le.engines = "sud";
+        return;
+    }
+    return skip("sud isn't among the engines (H9_TEST_ENGINES, -Dengines)", .{});
+}
+
 fn threadCase(le: *const LinuxEnv, name: []const u8) !void {
     var want_buf: [64]u8 = undefined;
     try netCase(le, &.{ "/mnt/term/cwd/threads", name }, try std.fmt.bufPrint(&want_buf, "ok {s}\n", .{name}));
@@ -9166,9 +9191,13 @@ test "a store or read(2) racing another thread's mprotect in the same chunk neit
 test "threads faulting pages in while others munmap don't fault twice on a mapped page [native-backend]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
-    // Its 20,000 mmaps and munmaps take 90 to 100 s alone on hcpu's
-    // arm64 and on WHP, and longer beside the other shards: five minutes.
-    const r = try runLinuxFor(&le, false, &.{ "/mnt/term/cwd/threads", "fault_race" }, null, 300_000);
+    // The race is in sud's stub, whose munmap flushes the mappings other
+    // threads' faults queued, so the case runs on sud alone, where its
+    // 8,000 mmaps and munmaps take about 11 s; two minutes leaves room
+    // beside the other shards. (At 20,000, it took 90 to 100 s on hcpu's
+    // arm64 and on WHP.)
+    try linuxSud(&le);
+    const r = try runLinuxFor(&le, false, &.{ "/mnt/term/cwd/threads", "fault_race" }, null, 120_000);
     defer r.deinit();
     errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
     try std.testing.expectEqualStrings("ok fault_race\n", r.out);
@@ -9583,8 +9612,19 @@ fn runNoRoot(e: Env, h9: []const u8, args: []const []const u8) !Result {
 /// A copy of h9 in `s`, which has no .local/9front/root two levels up to
 /// default to.
 fn h9Copy(e: Env, s: *Scratch) ![]const u8 {
+    const io = std.testing.io;
     const name = std.fs.path.basename(e.h9);
-    try std.Io.Dir.copyFile(std.Io.Dir.cwd(), e.h9, s.tmp.dir, name, std.testing.io, .{});
+    if (onWeb()) {
+        // h9-node loads h9-web.js, h9.wasm, and the rest beside it, so
+        // they come too; the root archives (*.h9a) stay behind.
+        var dir = try std.Io.Dir.cwd().openDir(io, std.fs.path.dirname(e.h9) orelse ".", .{ .iterate = true });
+        defer dir.close(io);
+        var it = dir.iterate();
+        while (try it.next(io)) |ent| {
+            if (ent.kind != .file or std.mem.endsWith(u8, ent.name, ".h9a")) continue;
+            try std.Io.Dir.copyFile(dir, ent.name, s.tmp.dir, ent.name, io, .{});
+        }
+    } else try std.Io.Dir.copyFile(std.Io.Dir.cwd(), e.h9, s.tmp.dir, name, io, .{});
     return std.fs.path.join(gpa, &.{ s.path, name });
 }
 

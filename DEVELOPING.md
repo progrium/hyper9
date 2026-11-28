@@ -246,7 +246,8 @@ to GitHub Pages. It runs on pushes to main that change `site/`, `src/web/`,
 or `tests/web/`, and by hand (`gh workflow run pages`) for anything else.
 `scripts/fetch.sh isoamd64` fetches the amd64 ISO the same way, which is how
 the [ci workflow](.github/workflows/ci.yml) gets the amd64 root for the
-integration cases on KVM.
+integration cases on KVM and on sud. It also runs them on the web host,
+over the 386 root, as `zig build integration -Dweb` does.
 
 The demo page runs over a WebSocket 9P server with `?root=ws://…/9p`. The
 integration run's WebSocket cases serve their roots from a native h9 on

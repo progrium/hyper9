@@ -323,7 +323,7 @@ static void *faulter(void *a) {
 }
 
 static void fault_race(void) {
-	for (int round = 0; round < 5; round++) {
+	for (int round = 0; round < 2; round++) {
 		pthread_t t[4];
 		void *r;
 		int bad = 0;

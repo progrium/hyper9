@@ -419,7 +419,11 @@ h9_fs_resolvein(char *top, char *dir, char *rel, char *buf, int nbuf)
  * devfs checks by its fd is noted, so a reused fd number gets its new path
  * before it's checked again. The web host runs one task at a time and
  * no host call parks between an open and its check, so the path can't
- * change under it either.
+ * change under it either. A path is noted resolved, as /proc/self/fd and
+ * F_GETPATH give it on the other hosts: the fd is the file its links lead
+ * to, so a create through a link to a directory outside the policy is
+ * judged by that directory, not by the link's own spelling. One that
+ * can't be resolved is noted as nothing, which its checks refuse.
  */
 enum { Nwasifd = 4096 };
 static char *wasifds[Nwasifd];
@@ -427,18 +431,23 @@ static char *wasifds[Nwasifd];
 void
 h9_fs_notefd(int fd, char *path)
 {
-	char cwd[PATH_MAX], *p;
+	char cwd[PATH_MAX], res[PATH_MAX], *p;
 
 	if(fd < 0 || fd >= Nwasifd)
 		return;
+	free(wasifds[fd]);
+	wasifds[fd] = nil;
 	if(path[0] != '/'){
 		if(getcwd(cwd, sizeof cwd) == nil)
 			return;
 		p = smprint("%s/%s", cwd, path);
 	}else
 		p = strdup(path);
-	free(wasifds[fd]);
-	wasifds[fd] = p;
+	if(p == nil)
+		return;
+	if(follow(p, res) == 0)
+		wasifds[fd] = strdup(res);
+	free(p);
 }
 
 void
