@@ -328,13 +328,18 @@ fn poll(fds: []Lpollfd, ms: c_int, gen: ?*c_uint, once: bool) Error!c_int {
         if (ready == 0) {
             if (ms > 0) {
                 const now = c.h9_tnow();
+                // Only the deadline ends the poll: a wait can end early
+                // with nothing fired (Sleeper.wait), and the loop asks
+                // again and waits out the rest. Taken as the timeout, it
+                // ended a poll for 2 s on a pipe after a millisecond,
+                // with nothing ready, on the emulator under load.
                 if (now >= deadline)
                     timedout = true
-                else
-                    timedout = !(pl.s.wait(@intCast((deadline - now + 999999) / 1000000)) catch |e| {
-                        unwatchall(pf);
-                        return e;
-                    });
+                else if (!(pl.s.wait(@intCast((deadline - now + 999999) / 1000000)) catch |e| {
+                    unwatchall(pf);
+                    return e;
+                }))
+                    timedout = c.h9_tnow() >= deadline;
             } else _ = pl.s.wait(0) catch |e| {
                 unwatchall(pf);
                 return e;
