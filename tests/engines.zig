@@ -225,6 +225,86 @@ test "a guest that jumps into the stub can't open a host file [native-backend]" 
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, path, .{}));
 }
 
+test "a stub killed from outside is noticed with no run waiting on it [native-backend]" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    const linux = std.os.linux;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var b = engine.create(gpa, io, .sud, .{ .arch = .amd64 }) catch |e| switch (e) {
+        error.HypervisorUnavailable, error.EngineNotBuilt, error.WrongArch => return error.SkipZigTest,
+        else => return e,
+    };
+    defer b.destroy();
+    const code = [_]u8{
+        0x0f, 0x05, // 1: syscall
+        0xeb, 0xfc, // jmp   1b
+    };
+    const page = try b.allocPages(1);
+    defer b.freePages(page);
+    @memcpy(page[0..code.len], &code);
+    const as = try b.newAddressSpace();
+    defer as.destroy();
+    try as.map(0x200000, page, .{ .exec = true });
+    defer as.unmap(0x200000);
+    const Seen = struct {
+        calls: std.atomic.Value(u32) = .init(0),
+        as: ?engine.AddressSpace = null,
+        fn call(ctx: *anyopaque, lost: engine.AddressSpace) void {
+            const s: *@This() = @ptrCast(@alignCast(ctx));
+            s.as = lost;
+            _ = s.calls.fetchAdd(1, .release);
+            _ = linux.futex_3arg(&s.calls.raw, .{ .cmd = .WAKE, .private = true }, 1);
+        }
+    };
+    var seen: Seen = .{};
+    as.setLostHook(.{ .ctx = &seen, .call = Seen.call });
+    var v = try b.createVcpu();
+    defer v.destroy();
+    try v.setAddressSpace(as);
+    const u: engine.Ureg = .{ .amd64 = .{ .pc = 0x200000, .flags = 0x202 } };
+    v.setUreg(&u);
+    // The stub starts on the first run; then nothing waits on it.
+    try std.testing.expect(try v.run() == .syscall);
+    try std.testing.expect(!as.lost());
+    // The stub is this process's only child now: the probe's has gone.
+    const stub = try onlyChild();
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.kill(stub, .KILL)));
+    const ts: linux.timespec = .{ .sec = 10, .nsec = 0 };
+    while (seen.calls.load(.acquire) == 0) {
+        const rc = linux.futex_4arg(&seen.calls.raw, .{ .cmd = .WAIT, .private = true }, 0, &ts);
+        if (linux.errno(rc) == .TIMEDOUT) return error.Timeout;
+    }
+    try std.testing.expectEqual(1, seen.calls.load(.acquire));
+    try std.testing.expect(std.meta.eql(seen.as.?, as));
+    try std.testing.expect(as.lost());
+    try std.testing.expectError(error.HypervisorFailed, v.run());
+}
+
+/// The pid of this process's one child, from /proc's stat files.
+fn onlyChild() !i32 {
+    const io = std.testing.io;
+    const me = std.os.linux.getpid();
+    var proc = try std.Io.Dir.openDirAbsolute(io, "/proc", .{ .iterate = true });
+    defer proc.close(io);
+    var found: ?i32 = null;
+    var it = proc.iterate();
+    while (try it.next(io)) |ent| {
+        const pid = std.fmt.parseInt(i32, ent.name, 10) catch continue;
+        var pb: [64]u8 = undefined;
+        var buf: [1024]u8 = undefined;
+        const stat = proc.readFile(io, try std.fmt.bufPrint(&pb, "{d}/stat", .{pid}), &buf) catch continue;
+        // State, then the parent's pid, after the command's parenthesis.
+        const rest = stat[(std.mem.lastIndexOfScalar(u8, stat, ')') orelse continue) + 1 ..];
+        var f = std.mem.tokenizeScalar(u8, rest, ' ');
+        _ = f.next();
+        const ppid = std.fmt.parseInt(i32, f.next() orelse continue, 10) catch continue;
+        if (ppid != me) continue;
+        if (found != null) return error.TooManyChildren;
+        found = pid;
+    }
+    return found orelse error.NoChild;
+}
+
 test "a stopped stub's threads leave the spin budget [native-backend]" {
     if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
     const gpa = std.testing.allocator;

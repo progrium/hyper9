@@ -40,6 +40,8 @@ const AddressSpace = union(Kind) {             // Kind: hvf, kvm, whp, hcpu, sud
     pub fn shootdown(self) void;               // returns once no other vCPU can reach what unmap removed
     pub fn copy(self, va: u64, buf: []u8, dir: enum { read, write }) bool;  // /proc/n/mem, from any thread
     pub fn codeChanged(self, va: u64, len: u64) void;     // a write to executable pages: drop cached code
+    pub fn setLostHook(self, h: LostHook) void;           // told if the space's backing dies (sud only)
+    pub fn lost(self) bool;                    // whether it has
 };
 const Engine = union(Kind) {
     pub fn kind(self) Kind;
@@ -163,6 +165,10 @@ Each side spins briefly for the other before it sleeps on the futex, which saves
 `kick` sets the page's kick flag and sends SIGURG with `tgkill`; the stub reports `interrupted` only while the flag is set, so a signal that arrives after the run it was meant for has ended just resumes the guest.
 
 `AddressSpace.shootdown` has the control thread carry out the queued unmaps, whose host `munmap` shoots down the other threads' TLBs. Unlike KVM's shim, the engine can't hide CPUID, so guests see the host's AVX.
+
+### A stub killed from outside
+
+A stub can die from outside h9: the OOM killer, or a `kill -9` on the host. (One its own filter kills is handled the same way.) The engine watches each stub with a pidfd in an epoll set, on a thread of its own started with the first stub. When one becomes readable, it marks the stub lost, wakes every h9 thread waiting on one of the stub's threads, whose run then fails, and calls the space's `LostHook`. The machine sets that hook on each space a process runs in; it posts `kill` to every process in the space, so one blocked in a system call, which no exit from the stub would wake, is interrupted and dies too. A run that fails on a lost space ends its process as killed by SIGKILL (`linux: signal 9`, or `kill` for a 9front process), not with `HypervisorFailed`, so a Linux parent gets SIGCHLD and a wait status that says the child was signaled. The stub is reaped when its space is destroyed, as the processes exit. Without the watch (no `pidfd_open`), a run still finds a dead stub within 100 ms of waiting on it.
 
 ### Speed
 

@@ -132,6 +132,9 @@ const c_stub = struct {
     fn h9_kern_postmach(_: ?*anyopaque, _: c_int, _: [*:0]const u8, _: c_int) c_int {
         return 0;
     }
+    fn h9_kern_postmachpid(_: ?*anyopaque, _: c_uint, _: [*:0]const u8, _: c_int) c_int {
+        return 0;
+    }
     fn syspipe(_: *[2]c_int) c_int {
         return -1;
     }
@@ -372,6 +375,7 @@ const c_real = struct {
     extern fn h9_kern_mach() ?*anyopaque;
     extern fn h9_kern_putmach(m: ?*anyopaque) void;
     extern fn h9_kern_postmach(m: ?*anyopaque, all: c_int, msg: [*:0]const u8, flag: c_int) c_int;
+    extern fn h9_kern_postmachpid(m: ?*anyopaque, pid: c_uint, msg: [*:0]const u8, flag: c_int) c_int;
     extern fn syspipe(fd: *[2]c_int) c_int;
     extern fn h9_kern_user() [*:0]const u8;
     extern fn h9_kern_devmask(devs: [*:0]const u8) void;
@@ -931,6 +935,13 @@ pub const Mach = opaque {
     /// Returns how many processes it reached.
     pub fn post(m: *Mach, to: To, msg: [*:0]const u8) u32 {
         return @intCast(c.h9_kern_postmach(m, @backingInt(to), msg, @backingInt(NoteFlag.user)));
+    }
+
+    /// Posts a note from the host side to the process with machine-local
+    /// pid `to`, as `post` does: safe from any thread. Returns whether
+    /// it was queued.
+    pub fn postPid(m: *Mach, to: u32, msg: [*:0]const u8) bool {
+        return c.h9_kern_postmachpid(m, to, msg, @backingInt(NoteFlag.user)) > 0;
     }
 };
 

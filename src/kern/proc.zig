@@ -473,6 +473,27 @@ fn h9_kern_postmach(m: *Hmach, all: c_int, msg: [*:0]const u8, flag: c_int) call
     return count;
 }
 
+/// Posts a note from the host side to the process with machine-local
+/// pid in machine m, as h9_kern_postmach does: from any thread, taking
+/// only locks. Returns 1 if it was queued, 0 if not (no such process, a
+/// full queue, or one that has exited).
+fn h9_kern_postmachpid(m: *Hmach, pid: c_uint, msg: [*:0]const u8, flag: c_int) callconv(.c) c_int {
+    const n = mknote(msg, flag) orelse return 0;
+    var r: c_int = 0;
+    lock(&m.lk);
+    var h_: ?*Hproc = m.procs;
+    while (h_) |h| : (h_ = h.mnext) {
+        if (h.p.pid != pid)
+            continue;
+        _ = incref(&n.ref);
+        r = @intFromBool(pushnote(h, n));
+        break;
+    }
+    unlock(&m.lk);
+    freenote(n);
+    return r;
+}
+
 // For devproc (hproc.h).
 
 var h9_procstatus: ?*const fn (?*anyopaque, [*c]u8, c_int, [*c]c_uint) callconv(.c) void = null;
@@ -1707,6 +1728,7 @@ pub fn exportC() void {
     @export(&h9_kern_mach, .{ .name = "h9_kern_mach" });
     @export(&h9_kern_putmach, .{ .name = "h9_kern_putmach" });
     @export(&h9_kern_postmach, .{ .name = "h9_kern_postmach" });
+    @export(&h9_kern_postmachpid, .{ .name = "h9_kern_postmachpid" });
     @export(&h9_procstatus, .{ .name = "h9_procstatus" });
     @export(&h9_procthreads, .{ .name = "h9_procthreads" });
     @export(&h9_wantchld, .{ .name = "h9_wantchld" });
@@ -1848,6 +1870,20 @@ test "a note queues, popnote takes it with the pc on a sys: note, and a system n
     for (0..c.NNOTE) |_|
         try testing.expectEqual(1, h9_kern_postnote(1, "x", c.NUser));
     try testing.expectEqual(0, h9_kern_postnote(1, "x", c.NUser));
+}
+
+test "a host-side note reaches one process by pid, and no other [kernel-port]" {
+    const p = hproc(try kt.begin());
+    const g = try Guest.begin(p);
+    defer g.end(p);
+
+    try testing.expectEqual(0, h9_kern_postmachpid(g.m, 2, "kill", c.NUser));
+    try testing.expectEqual(0, p.p.notepending);
+    try testing.expectEqual(1, h9_kern_postmachpid(g.m, 1, "kill", c.NUser));
+    try testing.expectEqual(1, p.p.notepending);
+    var msg: [port.ERRMAX]u8 = undefined;
+    try testing.expectEqual(c.Nkill, h9_kern_popnote(&msg, 0));
+    try testing.expectEqualStrings("kill", std.mem.sliceTo(&msg, 0));
 }
 
 test "pids are listed in order, and a note group must exist to be joined [kernel-port]" {

@@ -566,6 +566,17 @@ pub const Engine = struct {
     }
 };
 
+/// Told when an address space's host backing is lost from outside h9: a
+/// sud stub process killed by the OOM killer or a `kill -9`. Every
+/// process using the space should die then, as killed by SIGKILL, even
+/// one blocked in a system call, which no exit from the space will wake.
+/// `call` runs on an engine thread, while the space is still alive, and
+/// may post notes but not wait for the processes.
+pub const LostHook = struct {
+    ctx: *anyopaque,
+    call: *const fn (ctx: *anyopaque, as: AddressSpace) void,
+};
+
 /// One address space per Plan 9 process.
 pub const AddressSpace = union(enum) {
     hvf: *hvf.AddressSpace,
@@ -659,6 +670,25 @@ pub const AddressSpace = union(enum) {
             .fake => {},
             inline else => |p| p.codeChanged(va, len),
         }
+    }
+
+    /// Sets the hook told if the space's backing is lost (`LostHook`).
+    /// The first hook set stays: every process using a space is in one
+    /// run. Cheap once set. Engines whose spaces can't be lost so ignore it.
+    pub fn setLostHook(as: AddressSpace, h: LostHook) void {
+        switch (as) {
+            .fake => {},
+            inline else => |p| if (@hasDecl(@TypeOf(p.*), "setLostHook")) p.setLostHook(h),
+        }
+    }
+
+    /// Whether the space's backing has been lost (`LostHook`): a run that
+    /// failed then failed for that, and the process was killed.
+    pub fn lost(as: AddressSpace) bool {
+        return switch (as) {
+            .fake => false,
+            inline else => |p| if (@hasDecl(@TypeOf(p.*), "lost")) p.lost() else false,
+        };
     }
 
     /// Says the host wrote `mem`, guest memory it got from this space's
