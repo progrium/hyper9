@@ -8710,6 +8710,15 @@ test "an edge-triggered eventfd that stays readable wakes epoll_wait in another 
     try netCase(&le, &.{ "/mnt/term/cwd/net", "eventfd_waker" }, "ok eventfd_waker\n");
 }
 
+// The writer waits for the waiter in a sched_yield loop. With one CPU,
+// the waiter its write wakes waits to run on the writer's executor, and
+// only a sched_yield that gives the executor up lets it (design/scheduler.md).
+test "a thread spinning on sched_yield lets the epoll_wait its write woke return, with one CPU [linux-net]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "--cpus", "1", "/mnt/term/cwd/net", "eventfd_waker" }, "ok eventfd_waker\n");
+}
+
 test "F_DUPFD in several threads takes a free fd without replacing one another thread just opened [linux-net]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);

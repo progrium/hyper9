@@ -722,6 +722,24 @@ fn currentTask() ?*Task {
     return @ptrCast(@alignCast(c.h9_sched_task_current()));
 }
 
+/// Gives the executor up if a task waits to run on it, for a process's
+/// sched_yield (sleep(0)): the caller goes on the machine's queue and
+/// returns once an executor resumes it. True if it yielded. A task that
+/// a process wakes is put next on its executor (`putNext`), where no
+/// other executor takes it, so a process that spins on sched_yield
+/// waiting for it to run would otherwise keep it waiting for the
+/// monitor (`spillNext`, and then the slice): on one host core, for good.
+/// Only the lock-free queues are looked at, since a spinning yield comes
+/// here often.
+pub fn yieldToWaiting() bool {
+    if (comptime !enabled) return false;
+    const e = current() orelse return false;
+    if (currentTask() == null) return false;
+    if (e.next.load(.acquire) == null and e.q.isEmpty() and e.s.global.isEmpty()) return false;
+    c.h9_sched_yield();
+    return true;
+}
+
 /// The calling task's host CPU time so far, if it's a task: what
 /// cputime.thread() reads for a process on an executor.
 pub fn taskCpu() ?cputime.Times {
