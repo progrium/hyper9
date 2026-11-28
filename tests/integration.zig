@@ -8499,6 +8499,12 @@ test "a path through /proc/self/fd/N walks on from the directory the fd names [l
     try netCase(&le, &.{ "/mnt/term/cwd/files", "proc_fd_dir" }, "ok proc_fd_dir\n");
 }
 
+test "an O_PATH fd's access mode is musl's O_SEARCH, and it names its file but reads nothing [linux-personality]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "o_path" }, "ok o_path\n");
+}
+
 test "/proc/self/exe opens and stats as the program's file, as rustup-init.sh reads it [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);

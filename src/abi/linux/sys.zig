@@ -1852,6 +1852,17 @@ fn setFlags(p: *Process, fd: i32, f: FdFlags) void {
     p.g.fdflags.put(p.gpa, fd, f) catch {};
 }
 
+/// Whether any program has opened an O_PATH fd, so reads and writes look
+/// for one (pathOnly) only once there's been one.
+var path_opened: std.atomic.Value(bool) = .init(false);
+
+/// Whether fd was opened O_PATH: it names its file for fstat, fchdir, and
+/// the *at calls, and reads, writes, and lists nothing (EBADF), as on
+/// Linux. It's open OREAD underneath (openAt).
+fn pathOnly(p: *Process, fd: i32) bool {
+    return fd >= 0 and path_opened.load(.monotonic) and flagsOf(p, fd).path;
+}
+
 fn flagsOf(p: *Process, fd: i32) FdFlags {
     p.g.lockSpin();
     defer p.g.lock.unlock();
@@ -1964,6 +1975,7 @@ fn openAt(p: *Process, dirfd: i32, path_va: u64, flags: u32, mode: u32) Err!i64 
     p.fdClosed(fd);
     const dsync = flags & O_PATH == 0 and flags & O_DSYNC != 0;
     if (dsync) sync_opened.store(true, .monotonic);
+    if (flags & O_PATH != 0) path_opened.store(true, .monotonic);
     if (flags & (O_APPEND | O_NONBLOCK | O_PATH) != 0 or dsync) setFlags(p, fd, .{
         .append = flags & O_APPEND != 0,
         .nonblock = flags & O_NONBLOCK != 0,
@@ -2013,6 +2025,7 @@ fn isDir(p: *Process, dirfd: i32, path: [:0]const u8) bool {
 const Dir = enum { read, write };
 
 fn rw(p: *Process, fd: i32, buf: u64, len_in: u64, off: i64, comptime dir: Dir) Err!i64 {
+    if (pathOnly(p, fd)) return -E.BADF;
     // A read of a stream socket stops at a message that passes fds, and
     // the read that starts at it takes them (SCM_RIGHTS).
     // A read that was already waiting when the fds were sent still takes
@@ -2337,6 +2350,7 @@ fn pipeReadNow(p: *Process, fd: i32, buf: []u8) i64 {
 }
 
 fn rwv(p: *Process, fd: i32, iov: u64, cnt: u64, off_in: i64, comptime dir: Dir) Err!i64 {
+    if (pathOnly(p, fd)) return -E.BADF;
     if (cnt > 1024) return -E.INVAL;
     if (off_in == -1 and cnt > 1) if (try msgSockRwv(p, fd, iov, cnt, dir)) |r| return r;
     var total: i64 = 0;
@@ -2908,7 +2922,7 @@ pub fn releaseAllLocks(p: *Process) void {
 }
 
 fn getdents(p: *Process, fd: i32, buf: u64, count: u32) Err!i64 {
-    if (fd < 0) return -E.BADF;
+    if (fd < 0 or pathOnly(p, fd)) return -E.BADF;
     const info = kc.fdInfo(fd) catch return -E.BADF;
     if (!info.dir) return -E.NOTDIR;
     p.g.lockSpin();
