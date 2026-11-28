@@ -973,6 +973,7 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const engine.Ureg) Err!Outcome {
         .preadv => return ret(try rwv(p, c.int(0), c.a[1], c.a[2], @bitCast(c.a[3]), .read)),
         .pwritev => return ret(synced(p, c.int(0), try rwv(p, c.int(0), c.a[1], c.a[2], @bitCast(c.a[3]), .write))),
         .sendfile => return ret(synced(p, c.int(0), try sendfile(p, c.int(0), c.int(1), c.a[2], c.a[3], p.is32()))),
+        .splice => return ret(synced(p, c.int(2), try splice(p, c.int(0), c.a[1], c.int(2), c.a[3], c.a[4], @truncate(c.a[5])))),
         .lseek => return ret(lseek(p, c.int(0), @bitCast(c.a[1]), c.int(2))),
         .dup => {
             const fd = c.int(0);
@@ -1004,6 +1005,9 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const engine.Ureg) Err!Outcome {
             // Check the array before making the pipe, so a bad one leaks nothing.
             try p.writeMem(c.a[0], &b);
             const fds = kern.pipe() catch return ret(kerr());
+            // Linux's capacity, not a 9front pipe's: Go's
+            // TestClosedPipeRaceWrite overfills one with 128 KiB.
+            _ = kc.pipeSize(fds[0], pipe_size);
             for (fds) |fd| {
                 if (flags & O_CLOEXEC != 0) kc.setCloexec(fd, true) catch {};
                 if (flags & O_NONBLOCK != 0) setFlags(p, fd, .{ .nonblock = true });
@@ -2158,6 +2162,16 @@ fn rwOne(p: *Process, fd: i32, buf: u64, len_in: u64, off: i64, comptime dir: Di
 fn pipeWrite(p: *Process, fd: i32, s: []const u8) i64 {
     const atomic = 64 << 10;
     const msg = if (unixOf(p, fd)) |u| u.stype != SOCK_STREAM else false;
+    // O_NONBLOCK: what fits now. The ordinary write below queues a whole
+    // chunk and then waits for the reader to take it down to the limit,
+    // where nothing wakes it if the reader never comes, not even another
+    // thread's close of the fd: Go's poller parks on EAGAIN and counts on
+    // that close to wake it (TestClosedPipeRaceWrite).
+    if (!msg and flagsOf(p, fd).nonblock) switch (kc.pipeTryWrite(fd, s) catch return kerr()) {
+        .n => |n| return @intCast(n),
+        .again => return -E.AGAIN,
+        .not_pipe => {},
+    };
     var done: usize = 0;
     while (done < s.len) {
         const chunk = s[done..if (msg) s.len else @min(s.len, done + atomic)];
@@ -2402,21 +2416,199 @@ fn sendfile(p: *Process, out: i32, in: i32, offp: u64, count: u64, off32: bool) 
     if (out < 0 or in < 0) return -E.BADF;
     var off: i64 = -1;
     if (offp != 0) off = if (off32) @as(i32, @bitCast(try p.readU32(offp))) else @bitCast(try p.readU64(offp));
-    var buf: [65536]u8 = undefined;
-    var total: u64 = 0;
-    while (total < count) {
-        const want = @min(buf.len, count - total);
-        const n = kern.pread(@intCast(in), buf[0..want], off) catch return if (total > 0) @intCast(total) else kerr();
-        if (n == 0) break;
-        const w = kern.pwrite(@intCast(out), buf[0..n], -1) catch return if (total > 0) @intCast(total) else kerr();
-        total += w;
-        if (off != -1) off += @intCast(n);
-        if (w < n) break;
-    }
+    if (off < -1 or (offp != 0 and off < 0)) return -E.INVAL;
+    const r = xfer(p, .{ .fd = in, .off = if (offp != 0) &off else null }, .{ .fd = out, .nonblock = flagsOf(p, out).nonblock }, count);
     if (offp != 0) {
         if (off32) try p.writeU32(offp, @truncate(@as(u64, @bitCast(off)))) else try p.writeU64(offp, @bitCast(off));
     }
+    return r;
+}
+
+/// A Linux pipe's capacity, and the most F_SETPIPE_SZ gives
+/// (/proc/sys/fs/pipe-max-size's default).
+const pipe_size = 64 << 10;
+const pipe_max_size = 1 << 20;
+
+const SPLICE_F_NONBLOCK = 2;
+
+/// splice: one end a pipe, the other a pipe, a socket, or a file, which
+/// an offset pointer may name a position in. The bytes go through a
+/// buffer in h9 (xfer); SPLICE_F_NONBLOCK makes the pipe and a socket
+/// not wait, as Linux's socket splice reads with MSG_DONTWAIT, and
+/// either side's O_NONBLOCK does too. Go's os.File.ReadFrom
+/// and net's copies splice a socket into a pipe and the pipe on into a
+/// file or a socket.
+fn splice(p: *Process, in: i32, offin_p: u64, out: i32, offout_p: u64, count: u64, flags: u32) Err!i64 {
+    if (in < 0 or out < 0) return -E.BADF;
+    if (flags & ~@as(u32, 0xf) != 0) return -E.INVAL;
+    const in_pipe = isPipe(p, in) orelse return -E.BADF;
+    const out_pipe = isPipe(p, out) orelse return -E.BADF;
+    if (!in_pipe and !out_pipe) return -E.INVAL;
+    if ((in_pipe and offin_p != 0) or (out_pipe and offout_p != 0)) return -E.SPIPE;
+    if (in_pipe and out_pipe and samePipe(in, out)) return -E.INVAL;
+    if (count == 0) return 0;
+    const nb = flags & SPLICE_F_NONBLOCK != 0;
+    var offin: i64 = -1;
+    var offout: i64 = -1;
+    if (offin_p != 0) offin = @bitCast(try p.readU64(offin_p));
+    if (offout_p != 0) offout = @bitCast(try p.readU64(offout_p));
+    if ((offin_p != 0 and offin < 0) or (offout_p != 0 and offout < 0)) return -E.INVAL;
+    const r = xfer(p, .{
+        .fd = in,
+        .off = if (offin_p != 0) &offin else null,
+        .nonblock = (nb and spliceStream(in)) or flagsOf(p, in).nonblock,
+    }, .{
+        .fd = out,
+        .off = if (offout_p != 0) &offout else null,
+        .nonblock = (nb and spliceStream(out)) or flagsOf(p, out).nonblock,
+    }, count);
+    if (offin_p != 0) try p.writeU64(offin_p, @bitCast(offin));
+    if (offout_p != 0) try p.writeU64(offout_p, @bitCast(offout));
+    return r;
+}
+
+/// Whether fd is a pipe end (a Unix socket is a pipe end in h9, but not
+/// a pipe to splice), or null if it isn't open.
+fn isPipe(p: *Process, fd: i32) ?bool {
+    const info = kc.fdInfo(fd) catch return null;
+    return info.dc == '|' and !info.dir and unixOf(p, fd) == null;
+}
+
+/// Whether fd is a pipe or a socket, which SPLICE_F_NONBLOCK covers,
+/// rather than a file.
+fn spliceStream(fd: i32) bool {
+    const info = kc.fdInfo(fd) catch return false;
+    return switch (info.dc) {
+        'U', 'M', 'O' => kc.rconvId(fd) != null,
+        else => true,
+    };
+}
+
+/// Whether pipe ends a and b are ends of one pipe.
+fn samePipe(a: i32, b: i32) bool {
+    const ia = kc.fdInfo(a) catch return false;
+    const ib = kc.fdInfo(b) catch return false;
+    return ia.qpath >> 5 == ib.qpath >> 5 and ia.dc == ib.dc;
+}
+
+const XferEnd = struct {
+    fd: i32,
+    /// A position to read or write at, which moves with the bytes; null
+    /// for the fd's own offset.
+    off: ?*i64 = null,
+    nonblock: bool = false,
+};
+
+/// Copies up to `count` bytes from `in` to `out` through a buffer, for
+/// sendfile and splice: the bytes copied, or -errno if none were. It
+/// stops short instead of waiting once some are copied, as Linux's do,
+/// when `in` is a stream with nothing more queued or `out` a pipe with
+/// no room. Into a pipe, it reads only what the pipe has room for when
+/// it mustn't wait, so nothing read is left unwritten.
+fn xfer(p: *Process, in: XferEnd, out: XferEnd, count: u64) i64 {
+    const in_info = kc.fdInfo(in.fd) catch return -E.BADF;
+    const out_info = kc.fdInfo(out.fd) catch return -E.BADF;
+    if (in_info.dir or out_info.dir) return -E.ISDIR;
+    if (in_info.mode & 3 == 1) return -E.BADF;
+    if (out_info.mode & 3 == 0) return -E.BADF;
+    // A pipe, a Unix socket, a TCP or UDP socket, or a device: a stream
+    // whose read takes what's there.
+    const in_stream = in.off == null and switch (in_info.dc) {
+        'U', 'M', 'O' => false,
+        else => true,
+    };
+    const out_pipe = out_info.dc == '|';
+    var buf: [65536]u8 = undefined;
+    var total: u64 = 0;
+    // Stopped where a side mustn't wait, rather than at an end of file.
+    var blocked = false;
+    while (total < count) {
+        var want: usize = @intCast(@min(buf.len, count - total));
+        // Waiting is allowed only for the first bytes.
+        const out_nb = out.nonblock or total > 0;
+        if (out_pipe) if (kc.pipeRoom(out.fd)) |room| {
+            if (room == 0 and out_nb) {
+                // A pipe whose reader has gone fails the write, below.
+                const r = kc.fdReady(out.fd, kc.POLLOUT) orelse return -E.BADF;
+                if (r & (kc.POLLERR | kc.POLLHUP) == 0) {
+                    blocked = true;
+                    break;
+                }
+            } else if (out_nb) want = @min(want, room);
+        };
+        if (!out_pipe and out_nb) {
+            const r = kc.fdReady(out.fd, kc.POLLOUT) orelse return -E.BADF;
+            if (r & (kc.POLLOUT | kc.POLLERR | kc.POLLHUP) == 0) {
+                blocked = true;
+                break;
+            }
+        }
+        const s = buf[0..@max(want, 1)];
+        const n: usize = if (in_stream and in_info.dc == '|' and (in.nonblock or total > 0)) switch (kc.pipeTryRead(in.fd, s) catch return xferDone(total, kerr())) {
+            .n => |m| m,
+            .again => {
+                blocked = true;
+                break;
+            },
+            .not_pipe => kern.pread(@intCast(in.fd), s, -1) catch return xferDone(total, kerr()),
+        } else blk: {
+            if (in_stream and (in.nonblock or total > 0)) {
+                const r = kc.fdReady(in.fd, kc.POLLIN) orelse return -E.BADF;
+                if (r & (kc.POLLIN | kc.POLLERR | kc.POLLHUP) == 0) {
+                    blocked = true;
+                    break;
+                }
+            }
+            break :blk kern.pread(@intCast(in.fd), s, if (in.off) |o| o.* else -1) catch return xferDone(total, kerr());
+        };
+        if (n == 0) break;
+        if (in.off) |o| o.* += @intCast(n);
+        if (in_stream and scm_live.load(.monotonic) + nlq_live.load(.monotonic) > 0) if (scmReadKey(in.fd)) |key| {
+            if (scm_live.load(.monotonic) > 0) scmConsumed(p, key, n);
+            if (nlq_live.load(.monotonic) > 0) nlqConsumed(key, n);
+        };
+        // What was read is written in full: a pipe has room for it, and
+        // anything else may wait for its reader.
+        var w: usize = 0;
+        const out_at: i64 = if (out.off) |o| o.* else -1;
+        if (out_pipe and out.off == null) {
+            const r = pipeWriteAll(p, out.fd, s[0..n]);
+            if (r < 0) return xferDone(total, r);
+            w = @intCast(r);
+        } else while (w < n) {
+            const m = kern.pwrite(@intCast(out.fd), s[w..n], if (out.off) |o| o.* else -1) catch return xferDone(total + w, kerr());
+            if (m == 0) break;
+            w += m;
+            if (out.off) |o| o.* += @intCast(m);
+        }
+        if (!out_pipe) if (fileKey(out.fd)) |k| fileIo(out.fd, k, out_at, s[0..w], .write);
+        total += w;
+        if (w < n) break;
+        if (in_stream and n < want) break;
+    }
+    // Nothing moved: a side that mustn't wait wasn't ready.
+    if (total == 0 and blocked) return -E.AGAIN;
     return @intCast(total);
+}
+
+fn xferDone(total: u64, err: i64) i64 {
+    return if (total > 0) @intCast(total) else err;
+}
+
+/// Writes all of s to pipe end fd, waiting for the reader if it has to:
+/// splice and sendfile write only what they read.
+fn pipeWriteAll(p: *Process, fd: i32, s: []const u8) i64 {
+    var w: usize = 0;
+    if (unixOf(p, fd) == null) if (kc.pipeTryWrite(fd, s) catch null) |r| switch (r) {
+        .n => |m| w = m,
+        else => {},
+    };
+    while (w < s.len) {
+        const m = kern.pwrite(@intCast(fd), s[w..], -1) catch return if (w > 0) @intCast(w) else kerr();
+        if (m == 0) break;
+        w += m;
+    }
+    return @intCast(w);
 }
 
 fn fcntl(p: *Process, fd: i32, cmd: i32, arg: u64) Err!i64 {
@@ -2487,6 +2679,20 @@ fn fcntl(p: *Process, fd: i32, cmd: i32, arg: u64) Err!i64 {
         12, 13, 14 => {
             if (!p.is32()) return -E.INVAL;
             return recordLock(p, fd, arg, false, cmd == 12, cmd == 14, .i386_64);
+        },
+        // F_SETPIPE_SZ, rounded up to a power-of-two count of pages as
+        // Linux's is, up to /proc/sys/fs/pipe-max-size's default, and
+        // F_GETPIPE_SZ. Go's splice sizes its pipes so.
+        1031 => {
+            if (isPipe(p, fd) != true) return -E.BADF;
+            const want = arg & 0xffffffff;
+            if (want > pipe_max_size) return -E.PERM;
+            const n = std.math.ceilPowerOfTwo(u32, @max(@as(u32, @intCast(want)), 4096)) catch unreachable;
+            return kc.pipeSize(fd, n) orelse -E.BADF;
+        },
+        1032 => {
+            if (isPipe(p, fd) != true) return -E.BADF;
+            return kc.pipeSize(fd, null) orelse -E.BADF;
         },
         // F_ADD_SEALS and F_GET_SEALS, for memfd_create's files: seals
         // are accepted and not enforced.

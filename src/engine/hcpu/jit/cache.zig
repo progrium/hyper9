@@ -481,29 +481,69 @@ pub fn clearRequest(cx: *Ctx, bits: u32) u32 {
 /// A vCPU's JIT state around its Ctx, which the engine layer (engine/hcpu/engine.zig)
 /// embeds and a Guest's run loop finds from the Ctx it's given.
 /// Entries counted per block before T1 compiles it (dispatch.zig's
-/// `.cold`), direct-mapped by PC: a collision restarts the count, which
-/// only delays a compile.
+/// `.cold`), in sets of two by a hash of the PC: an entry to a block
+/// that isn't counted takes the way with the lower count, which restarts
+/// it, so a collision only delays a compile. The hash keeps every bit of
+/// the PC: x86 blocks start at any byte, and with arm64's alignment
+/// dropped, as the jump cache's index drops it, two blocks two bytes
+/// apart restarted each other's count on every entry, and never ran
+/// compiled (Go's scheduler, casgstatus, on hx64; TestLongAdjustTimers).
 pub const HotCounts = struct {
     pub const n = 4096;
     pc: [n]u64 = @splat(std.math.maxInt(u64)),
     page: [n]u64 = @splat(no_page),
     count: [n]u32 = @splat(0),
 
+    fn set(pc: u64) usize {
+        // The top 12 bits of a Fibonacci hash: n is 2^12.
+        comptime std.debug.assert(n == 1 << 12);
+        return @intCast((pc *% 0x9e3779b97f4a7c15) >> 52 & ~@as(u64, 1));
+    }
+
     /// Counts an entry to (pc, page): true once it's been entered `hot`
     /// times, when the count starts over.
     pub fn bump(h: *HotCounts, pc: u64, page: u64, hot: u32) bool {
-        const i: usize = @intCast((pc ^ (pc >> 12)) >> 2 & (n - 1));
-        if (h.pc[i] != pc or h.page[i] != page) {
-            h.pc[i] = pc;
-            h.page[i] = page;
-            h.count[i] = 0;
-        }
+        const s = set(pc);
+        const i = for (s..s + 2) |w| {
+            if (h.pc[w] == pc and h.page[w] == page) break w;
+        } else blk: {
+            const w = if (h.count[s] <= h.count[s + 1]) s else s + 1;
+            h.pc[w] = pc;
+            h.page[w] = page;
+            h.count[w] = 0;
+            break :blk w;
+        };
         h.count[i] += 1;
         if (h.count[i] < hot) return false;
         h.count[i] = 0;
         return true;
     }
 };
+
+test "HotCounts: blocks a byte apart, or in one set, each reach hot" {
+    var h: HotCounts = .{};
+    // casgstatus's heads on hx64, two bytes apart.
+    const a: u64 = 0x449d94;
+    const b: u64 = 0x449d96;
+    var hot_a = false;
+    var hot_b = false;
+    for (0..32) |_| {
+        hot_a = hot_a or h.bump(a, 1, 32);
+        hot_b = hot_b or h.bump(b, 1, 32);
+    }
+    try std.testing.expect(hot_a and hot_b);
+    // Two that share a set, whichever they are.
+    const s = HotCounts.set(a);
+    var c: u64 = a + 1;
+    while (HotCounts.set(c) != s) c += 1;
+    hot_a = false;
+    var hot_c = false;
+    for (0..32) |_| {
+        hot_a = hot_a or h.bump(a, 1, 32);
+        hot_c = hot_c or h.bump(c, 1, 32);
+    }
+    try std.testing.expect(hot_a and hot_c);
+}
 
 pub const Runtime = struct {
     ctx: Ctx = .{},

@@ -71,12 +71,14 @@ fn pipeof(ch: *Chan) *Pipe {
 }
 
 fn pipeinit() void {
-    if (c.conf.pipeqsize == 0) {
-        if (c.conf.nmach > 1)
-            c.conf.pipeqsize = 256 * 1024
-        else
-            c.conf.pipeqsize = 32 * 1024;
-    }
+    // h9: nothing sets conf.nmach, and h9's machines have as many
+    // processors as the host, so a pipe holds what a multiprocessor's
+    // does. That's about a Linux Unix socket's buffer, which is a pipe
+    // here: an O_NONBLOCK write stops at the limit (src/kern/linuxnet.zig),
+    // and Go's tests write 32 KiB into a Unix socket that's read only
+    // half way. A Linux pipe2 sets Linux's 64 KiB (src/abi/linux/sys.zig).
+    if (c.conf.pipeqsize == 0)
+        c.conf.pipeqsize = 256 * 1024;
 }
 
 /// create a pipe, no streams are created until an open

@@ -8450,6 +8450,12 @@ test "CPUID shows no AVX feature in any leaf where it hides AVX, as Zig reads it
     try netCase(&le, &.{ "/mnt/term/cwd/files", "cpuid_avx" }, "ok cpuid_avx\n");
 }
 
+test "INT3 or BRK raises SIGTRAP, and the handler returns past it [linux-personality]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "sigtrap" }, "ok sigtrap\n");
+}
+
 test "an arm64 Linux program can read the ID registers, as HWCAP_CPUID says [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
@@ -8684,6 +8690,18 @@ test "O_NONBLOCK read on an empty pipe is EAGAIN, and select agrees [linux-net]"
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/net", "nonblock_pipe" }, "ok nonblock_pipe\n");
+}
+
+test "an O_NONBLOCK write to a full pipe takes what fits, then is EAGAIN, and EPIPE once the reader closes [linux-net]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/net", "pipe_full" }, "ok pipe_full\n");
+}
+
+test "splice moves a file, a socket, and a pipe's bytes through a pipe, with Linux's errors [linux-net]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/net", "splice_pipe" }, "ok splice_pipe\n");
 }
 
 test "readv from a pipe returns what's there once a buffer fills [linux-net]" {

@@ -294,8 +294,11 @@ pass, skip, and fail counts for each
 ([scripts/go-stdtest.sh](scripts/go-stdtest.sh), with the tests it skips
 in `scripts/go-stdtest.skip`; `zig build go-stdtest -- os` runs one
 package). `H9_STDTEST_ARCH` picks the architecture, the host's by default,
-and `H9_STDTEST_ENGINE` the engine. It's for finding gaps, not a gate, and
-nothing depends on it.
+and `H9_STDTEST_ENGINE` the engine. The tests run with `--net enable`, since
+`os`'s splice and sendfile tests listen on loopback TCP. Run it on an
+optimized build (`zig build go-stdtest -Doptimize=ReleaseSafe`), as CI runs
+the hcpu cases: on a debug build, `time`'s TestLongAdjustTimers runs past its
+60 s. It's for finding gaps, not a gate, and nothing depends on it.
 
 The [dotl](design/epoch-0/dotl.md) cases run against three 9P2000.L servers:
 the one in [src/dotl/testserver.zig](src/dotl/testserver.zig), in

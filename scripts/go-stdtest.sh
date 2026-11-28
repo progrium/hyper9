@@ -71,7 +71,8 @@ for p in "${pkgs[@]}"; do
 	rc=0
 	# The binary is bound at /opt/go-stdtest, since the cwd is the
 	# package's source directory.
-	"$h9" --engine "$engine" --arch "$arch" --dir "$root:#L" --dir "$gobind:#L$gobind" --dir "$out:#L/opt/go-stdtest" \
+	# --net enable: os's splice and sendfile tests listen on loopback TCP.
+	"$h9" --engine "$engine" --arch "$arch" --net enable --dir "$root:#L" --dir "$gobind:#L$gobind" --dir "$out:#L/opt/go-stdtest" \
 		--timeout 30m --cwd "$goroot/src/$p" "/opt/go-stdtest/$p.test" "${args[@]}" >"$out/$p.out" 2>&1 || rc=$?
 	pass=$(grep -c -- '--- PASS' "$out/$p.out" || true)
 	skipped=$(grep -c -- '--- SKIP' "$out/$p.out" || true)

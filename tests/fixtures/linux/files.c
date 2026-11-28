@@ -27,6 +27,7 @@
 #include <sys/uio.h>
 #include <sys/wait.h>
 #include <time.h>
+#include <ucontext.h>
 #include <unistd.h>
 
 static int failed;
@@ -570,6 +571,35 @@ static void id_regs(void) {
  * AVX: KVM and the emulator hide AVX, and Zig takes AVX10 (leaf 0x24)
  * on its own. The sud engine runs on the host's CPU, which has it or
  * hasn't. */
+/* An INT3, or a BRK on arm64, is SIGTRAP to a handler, which returns
+ * past it: x86 leaves the PC after INT3, and arm64 at the BRK (Go's
+ * runtime injects debugger calls this way: TestDebugCall). */
+static volatile int trapped;
+
+static void ontrap(int sig, siginfo_t *si, void *p) {
+	(void)si;
+#if defined(__aarch64__)
+	((ucontext_t *)p)->uc_mcontext.pc += 4;
+#else
+	(void)p;
+#endif
+	trapped = sig;
+}
+
+static void sigtrap(void) {
+	struct sigaction sa = {0};
+	sa.sa_sigaction = ontrap;
+	sa.sa_flags = SA_SIGINFO;
+	CHECK("sigtrap", sigaction(SIGTRAP, &sa, 0) == 0);
+#if defined(__aarch64__)
+	__asm__ volatile("brk #0");
+#else
+	__asm__ volatile("int3");
+#endif
+	CHECK("sigtrap", trapped == SIGTRAP);
+	printf("ok sigtrap\n");
+}
+
 static void cpuid_avx(void) {
 #if defined(__x86_64__)
 	unsigned a, b, c, d, max;
@@ -1134,6 +1164,7 @@ int main(int argc, char **argv) {
 		if (!strcmp(n, "dirfd_copyup")) dirfd_copyup();
 		if (all || !strcmp(n, "proc_exe")) proc_exe();
 		if (all || !strcmp(n, "cpuid_avx")) cpuid_avx();
+		if (all || !strcmp(n, "sigtrap")) sigtrap();
 	}
 	return failed;
 }

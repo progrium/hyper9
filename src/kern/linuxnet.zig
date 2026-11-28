@@ -709,6 +709,53 @@ fn h9_linux_pipetryread(fd: c_int, va: [*]u8, n: c_int) callconv(.c) c_int {
     return r;
 }
 
+/// The bytes a write on pipe end fd could add now without waiting, for
+/// splice and sendfile (src/abi/linux/sys.zig); -1 if fd isn't a pipe's
+/// data file.
+fn h9_linux_piperoom(fd: c_int) callconv(.c) c_int {
+    const ch = sysfile.fdtochan(fd, -1, false, true) catch return -1;
+    defer chan.cclose(ch);
+    if (dev.of(ch).dc != '|' or (ch.qid.type & c.QTDIR) != 0)
+        return -1;
+    const q = devpipe.h9_pipeq(ch, 1) orelse return -1;
+    return qio.qroom(q);
+}
+
+/// F_GETPIPE_SZ and F_SETPIPE_SZ (src/abi/linux/sys.zig): with n < 0,
+/// the limit of the queue a write on pipe end fd goes into; otherwise
+/// sets both of the pipe's queues to n and gives n. -1 if fd isn't a
+/// pipe's data file.
+fn h9_linux_pipesize(fd: c_int, n: c_int) callconv(.c) c_int {
+    const ch = sysfile.fdtochan(fd, -1, false, true) catch return -1;
+    defer chan.cclose(ch);
+    if (dev.of(ch).dc != '|' or (ch.qid.type & c.QTDIR) != 0)
+        return -1;
+    const wq = devpipe.h9_pipeq(ch, 1) orelse return -1;
+    if (n < 0) return wq.limit;
+    qio.qsetlimit(wq, n);
+    const rq = devpipe.h9_pipeq(ch, 0) orelse return n;
+    qio.qsetlimit(rq, n);
+    return n;
+}
+
+/// An O_NONBLOCK write to pipe end fd (src/abi/linux/sys.zig): queues
+/// what fits now, as qtrywrite does, and never waits for the reader.
+/// The bytes written, -2 when none fit, or -3 if fd isn't a pipe's data
+/// file or its read end is closed, for the caller's ordinary write to
+/// fail as it does there (EPIPE, and SIGPIPE). A write blocked behind a
+/// full pipe can't be woken by another thread's close of the fd, which
+/// Go's poller counts on (TestClosedPipeRaceWrite).
+fn h9_linux_pipetrywrite(fd: c_int, va: [*]const u8, n: c_int) callconv(.c) c_int {
+    const ch = sysfile.fdtochan(fd, c.OWRITE, false, true) catch return syserr();
+    defer chan.cclose(ch);
+    if (dev.of(ch).dc != '|' or (ch.qid.type & c.QTDIR) != 0)
+        return -3;
+    const q = devpipe.h9_pipeq(ch, 1) orelse return -3;
+    // PIPE_BUF: a write of at most this much goes in whole or not at all.
+    const r = qio.qtrywrite(q, va, n, 4096);
+    return if (r < 0) -3 else if (r == 0 and n > 0) -2 else r;
+}
+
 /// FIONREAD on a socket fd: what a recv would take now, a datagram
 /// socket's next message's length. glibc's resolver sizes the buffer for
 /// its second answer by it, and with 0 it receives into none, and fails
@@ -790,6 +837,9 @@ pub fn exportC() void {
     @export(&h9_linux_socksend, .{ .name = "h9_linux_socksend" });
     @export(&h9_linux_pipequeued, .{ .name = "h9_linux_pipequeued" });
     @export(&h9_linux_pipetryread, .{ .name = "h9_linux_pipetryread" });
+    @export(&h9_linux_pipetrywrite, .{ .name = "h9_linux_pipetrywrite" });
+    @export(&h9_linux_piperoom, .{ .name = "h9_linux_piperoom" });
+    @export(&h9_linux_pipesize, .{ .name = "h9_linux_pipesize" });
     @export(&h9_linux_socknread, .{ .name = "h9_linux_socknread" });
     @export(&h9_linux_soerror, .{ .name = "h9_linux_soerror" });
     @export(&h9_linux_sockctl, .{ .name = "h9_linux_sockctl" });

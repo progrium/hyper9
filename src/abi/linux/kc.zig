@@ -44,6 +44,9 @@ const real = struct {
     // drawterm's long is 32 bits (include/lib.h): a c_long here would read
     // the top half of the return register as garbage.
     extern fn h9_linux_pipetryread(fd: c_int, buf: [*]u8, n: c_int) c_int;
+    extern fn h9_linux_pipetrywrite(fd: c_int, buf: [*]const u8, n: c_int) c_int;
+    extern fn h9_linux_piperoom(fd: c_int) c_int;
+    extern fn h9_linux_pipesize(fd: c_int, n: c_int) c_int;
     extern fn h9_linux_socknread(fd: c_int) c_int;
     extern fn h9so_hasv6() c_int;
     extern fn h9so_ifaddrs(a: [*]IfAddr, max: c_int) c_int;
@@ -168,6 +171,15 @@ const stub = struct {
     }
     fn h9_linux_pipetryread(_: c_int, _: [*]u8, _: c_int) c_int {
         return -3;
+    }
+    fn h9_linux_pipetrywrite(_: c_int, _: [*]const u8, _: c_int) c_int {
+        return -3;
+    }
+    fn h9_linux_piperoom(_: c_int) c_int {
+        return -1;
+    }
+    fn h9_linux_pipesize(_: c_int, _: c_int) c_int {
+        return -1;
     }
     fn h9_linux_socknread(_: c_int) c_int {
         return -9;
@@ -400,6 +412,36 @@ pub const PipeRead = union(enum) { n: usize, again, not_pipe };
 /// then reading would race another thread reading the same pipe.
 pub fn pipeTryRead(fd: i32, buf: []u8) Error!PipeRead {
     const r = c.h9_linux_pipetryread(fd, buf.ptr, @intCast(@min(buf.len, std.math.maxInt(c_int))));
+    return switch (r) {
+        -2 => .again,
+        -3 => .not_pipe,
+        else => if (r < 0) error.Kern else .{ .n = @intCast(r) },
+    };
+}
+
+/// The bytes a write on pipe end `fd` could add now without waiting
+/// for the reader, or null if fd isn't a pipe end.
+pub fn pipeRoom(fd: i32) ?usize {
+    const r = c.h9_linux_piperoom(fd);
+    return if (r < 0) null else @intCast(r);
+}
+
+/// Pipe end `fd`'s capacity, after setting it (both directions) to
+/// `set` if that isn't null; null if fd isn't a pipe end.
+pub fn pipeSize(fd: i32, set: ?u32) ?u32 {
+    const r = c.h9_linux_pipesize(fd, if (set) |n| @intCast(n) else -1);
+    return if (r < 0) null else @intCast(r);
+}
+
+pub const PipeWrite = union(enum) { n: usize, again, not_pipe };
+
+/// Queues what fits on pipe end `fd` now without waiting, for an
+/// O_NONBLOCK write: the bytes written, `again` when none fit (or not
+/// all of a write of PIPE_BUF bytes or fewer), or `not_pipe` for any
+/// other fd and for a pipe whose reader is gone, which the ordinary
+/// write fails.
+pub fn pipeTryWrite(fd: i32, buf: []const u8) Error!PipeWrite {
+    const r = c.h9_linux_pipetrywrite(fd, buf.ptr, @intCast(@min(buf.len, std.math.maxInt(c_int))));
     return switch (r) {
         -2 => .again,
         -3 => .not_pipe,

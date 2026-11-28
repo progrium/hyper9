@@ -107,6 +107,71 @@ static void poll_ready(void) {
 	printf("ok poll_ready\n");
 }
 
+/* An O_NONBLOCK write to a pipe nobody reads takes what fits and comes
+ * back, then is EAGAIN, and EPIPE once the read end is closed: it never
+ * waits for the reader (Go's TestClosedPipeRaceWrite). */
+static void pipe_full(void) {
+	static char big[4 << 20];
+	int p[2];
+	CHECK("pipe_full", pipe2(p, O_NONBLOCK | O_CLOEXEC) == 0);
+	ssize_t n = write(p[1], big, sizeof big);
+	CHECK("pipe_full", n > 0 && n < (ssize_t)sizeof big);
+	CHECK("pipe_full", write(p[1], big, 1) == -1 && errno == EAGAIN);
+	struct pollfd pf = {.fd = p[1], .events = POLLOUT};
+	CHECK("pipe_full", poll(&pf, 1, 0) == 0);
+	char b[4096];
+	ssize_t got = 0, r;
+	while ((r = read(p[0], b, sizeof b)) > 0) got += r;
+	CHECK("pipe_full", r == -1 && errno == EAGAIN && got == n);
+	CHECK("pipe_full", write(p[1], big, 100) == 100);
+	close(p[0]);
+	CHECK("pipe_full", write(p[1], big, 1) == -1 && errno == EPIPE);
+	close(p[1]);
+	printf("ok pipe_full\n");
+}
+
+/* splice: a file at an offset into a pipe, a socket into a pipe without
+ * waiting, and the pipe on into a file; and the errors Linux gives. */
+static void splice_pipe(void) {
+	char fpath[] = "/tmp/splice.XXXXXX", gpath[] = "/tmp/splice.XXXXXX";
+	int f = mkstemp(fpath), g = mkstemp(gpath);
+	CHECK("splice_pipe", f >= 0 && g >= 0);
+	unlink(fpath);
+	unlink(gpath);
+	CHECK("splice_pipe", write(f, "hello splice", 12) == 12);
+	int p[2], s[2];
+	CHECK("splice_pipe", pipe(p) == 0 && socketpair(AF_UNIX, SOCK_STREAM, 0, s) == 0);
+	loff_t off = 6;
+	CHECK("splice_pipe", splice(f, &off, p[1], 0, 100, 0) == 6 && off == 12);
+	char b[64] = {0};
+	CHECK("splice_pipe", read(p[0], b, sizeof b) == 6 && memcmp(b, "splice", 6) == 0);
+	/* The file's own offset didn't move: it's still past the write. */
+	CHECK("splice_pipe", lseek(f, 0, SEEK_CUR) == 12);
+	loff_t o2 = 0;
+	CHECK("splice_pipe", splice(p[0], 0, g, &o2, 10, SPLICE_F_NONBLOCK) == -1 && errno == EAGAIN);
+	CHECK("splice_pipe", splice(s[0], 0, p[1], 0, 64, SPLICE_F_NONBLOCK) == -1 && errno == EAGAIN);
+	CHECK("splice_pipe", write(s[1], "abc", 3) == 3);
+	CHECK("splice_pipe", splice(s[0], 0, p[1], 0, 64, SPLICE_F_NONBLOCK) == 3);
+	CHECK("splice_pipe", splice(p[0], 0, g, &o2, 64, 0) == 3 && o2 == 3);
+	memset(b, 0, sizeof b);
+	CHECK("splice_pipe", pread(g, b, sizeof b, 0) == 3 && memcmp(b, "abc", 3) == 0);
+	/* Into the file at its own offset. */
+	CHECK("splice_pipe", write(p[1], "de", 2) == 2);
+	CHECK("splice_pipe", lseek(g, 3, SEEK_SET) == 3 && splice(p[0], 0, g, 0, 64, 0) == 2 && lseek(g, 0, SEEK_CUR) == 5);
+	CHECK("splice_pipe", splice(f, 0, g, 0, 1, 0) == -1 && errno == EINVAL);
+	CHECK("splice_pipe", splice(f, &off, p[1], 0, 1, 0) == 0 /* at the end of f */);
+	off = 0;
+	CHECK("splice_pipe", splice(p[0], &off, g, 0, 1, 0) == -1 && errno == ESPIPE);
+	close(s[1]);
+	CHECK("splice_pipe", splice(s[0], 0, p[1], 0, 64, SPLICE_F_NONBLOCK) == 0);
+	close(s[0]);
+	close(p[0]);
+	close(p[1]);
+	close(f);
+	close(g);
+	printf("ok splice_pipe\n");
+}
+
 /* readv from a pipe returns what's there, not waiting to fill the
  * second buffer once the first is full (Zig's test runner). */
 static void readv_pipe(void) {
@@ -1082,6 +1147,8 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "poll_pipe")) poll_pipe();
 		if (all || !strcmp(n, "nonblock_pipe")) nonblock_pipe();
 		if (all || !strcmp(n, "readv_pipe")) readv_pipe();
+		if (all || !strcmp(n, "pipe_full")) pipe_full();
+		if (all || !strcmp(n, "splice_pipe")) splice_pipe();
 		if (!strcmp(n, "poll_ready")) poll_ready();
 		if (all || !strcmp(n, "epoll_et")) epoll_et();
 		if (all || !strcmp(n, "eventfd")) eventfd_epoll();
