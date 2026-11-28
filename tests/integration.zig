@@ -7159,17 +7159,32 @@ test "a --dir of one file goes over its path on #L, made if it's missing, and rw
     try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "log", .data = "one\n" });
     var a: [std.Io.Dir.max_path_bytes + 32]u8 = undefined;
     var b: [std.Io.Dir.max_path_bytes + 32]u8 = undefined;
-    const script = "cat /new/dir/app.conf && echo two >> /log && cat /log && ! echo x >> /new/dir/app.conf 2>/dev/null";
+    // runLinux runs the script once per engine, so the write replaces the
+    // host file rather than appending, and every engine's output matches.
+    const script = "cat /new/dir/app.conf && echo two > /log && cat /log && ! echo x >> /new/dir/app.conf 2>/dev/null";
     const conf = try std.fmt.bufPrint(&a, "{s}/app.conf:#L/new/dir/app.conf:ro", .{s.path});
     const log = try std.fmt.bufPrint(&b, "{s}/log:#L/log:rw", .{s.path});
     const r = try runLinux(&le, false, &.{ "--dir", conf, "--dir", log, "/bin/sh", "-c", script });
     defer r.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{r.err});
-    try std.testing.expectEqualStrings("port=80\none\ntwo\n", r.out);
+    try std.testing.expectEqualStrings("port=80\ntwo\n", r.out);
     try std.testing.expectEqual(0, r.code);
     const data = try s.tmp.dir.readFileAlloc(std.testing.io, "log", std.testing.allocator, .unlimited);
     defer std.testing.allocator.free(data);
-    try std.testing.expectEqualStrings("one\ntwo\n", data);
+    try std.testing.expectEqualStrings("two\n", data);
+}
+
+test "an error naming a file that says interrupted is still the error, not EINTR [linux-personality]" {
+    // errno matched its strings anywhere in the message, quoted names
+    // too, so a missing handle_interrupted-i.ri was EINTR and busybox
+    // tar retried its unlink forever (Ruby's ri docs have that file).
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    const r = try runLinux(&le, false, &.{ "/bin/sh", "-c", "rm /tmp/handle_interrupted-i.ri 2>&1; mkdir /tmp/permission_denied && rmdir /tmp/permission_denied && echo ok" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "No such file or directory") != null);
+    try std.testing.expect(std.mem.endsWith(u8, r.out, "ok\n"));
 }
 
 test "an fstat through a --dir on #L matches the path's stat, to the nanosecond [mounts]" {
@@ -8837,6 +8852,12 @@ test "eventfd counts and wakes epoll [linux-net]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/net", "eventfd" }, "ok eventfd\n");
+}
+
+test "a timerfd expires on time, counts an interval's expirations, and wakes epoll and poll [linux-net]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/net", "timerfd" }, "ok timerfd\n");
 }
 
 test "an edge-triggered eventfd that stays readable wakes epoll_wait in another thread on every write [linux-net]" {
