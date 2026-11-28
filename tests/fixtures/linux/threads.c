@@ -631,6 +631,25 @@ static void sched_params(void) {
 	printf("ok sched_params\n");
 }
 
+/* A SIGKILL sent to a child at once after fork, before it may have run
+ * at all, kills it: on h9's executors the child waits for its first turn
+ * while the parent goes on, and a kill then was dropped, leaving waitpid
+ * waiting on a child that spun forever. */
+static void kill_unstarted(void) {
+	for (int i = 0; i < 50; i++) {
+		pid_t c = fork();
+		CHECK("kill_unstarted", c >= 0);
+		if (c == 0)
+			for (;;)
+				;
+		CHECK("kill_unstarted", kill(c, SIGKILL) == 0);
+		int st = 0;
+		CHECK("kill_unstarted", waitpid(c, &st, 0) == c);
+		CHECK("kill_unstarted", WIFSIGNALED(st) && WTERMSIG(st) == SIGKILL);
+	}
+	printf("ok kill_unstarted\n");
+}
+
 int main(int argc, char **argv) {
 	setvbuf(stdout, 0, _IONBF, 0);
 	for (int i = 1; i < argc; i++) {
@@ -649,6 +668,7 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "proc_threads")) proc_threads();
 		if (all || !strcmp(n, "meminfo_threads")) meminfo_threads();
 		if (all || !strcmp(n, "sched_params")) sched_params();
+		if (all || !strcmp(n, "kill_unstarted")) kill_unstarted();
 		if (all || !strcmp(n, "pipe_intr")) pipe_intr();
 		if (all || !strcmp(n, "getdents_threads")) getdents_threads();
 		if (!strcmp(n, "exit_main")) exit_main();
