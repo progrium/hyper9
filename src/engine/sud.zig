@@ -1008,12 +1008,26 @@ pub const Vcpu = struct {
     }
 };
 
+comptime {
+    std.debug.assert(abi.xs_max == engine.xs_max);
+}
+
 fn writeRegs(ctl: *abi.Ctl, u: *const amd64.Ureg, x: *const engine.X86Extra) void {
     const r = &ctl.regs;
     inline for (.{ "ax", "bx", "cx", "dx", "si", "di", "bp", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15", "pc", "sp", "flags" }) |f| {
         @field(r, f) = @field(u, f);
     }
     @memcpy(&ctl.fx, std.mem.asBytes(&x.fx)[0..abi.fx_len]);
+    const n = x.xlen;
+    ctl.xlen = n;
+    ctl.xfeatures = x.xfeatures;
+    if (n > 0) {
+        // Components in their initial state needn't be copied (see the
+        // stub's loadRegs).
+        const bv = std.mem.readInt(u64, x.xs[0..8], .little);
+        const m: usize = if (bv & ~@as(u64, 3) != 0) n else 64;
+        @memcpy(ctl.xs[0..m], x.xs[0..m]);
+    }
     ctl.fs_base = x.tls;
     ctl.gs_base = x.gs;
 }
@@ -1037,6 +1051,14 @@ fn readRegs(ctl: *const abi.Ctl, u: *amd64.Ureg, x: *engine.X86Extra) void {
     if (bv & 2 == 0) fx.xmm = @splat(0);
     fx.mxcsr_mask = 0xffff;
     fx._r2 = @splat(0);
+    const n = @min(ctl.xlen, abi.xs_max);
+    x.xlen = n;
+    x.xfeatures = ctl.xfeatures;
+    if (n > 0) {
+        const xbv = std.mem.readInt(u64, ctl.xs[0..8], .little);
+        const m: usize = if (xbv & ~@as(u64, 3) != 0) n else 64;
+        @memcpy(x.xs[0..m], ctl.xs[0..m]);
+    }
     x.tls = ctl.fs_base;
     x.gs = ctl.gs_base;
 }

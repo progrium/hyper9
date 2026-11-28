@@ -122,10 +122,21 @@ pub const Ctl = extern struct {
     /// The FXSAVE image's first 416 bytes (through XMM15). The rest of
     /// the 512 is software's, where the kernel keeps its XSAVE marker.
     fx: [fx_len]u8 align(16) = @splat(0),
+    /// The signal frame's XSAVE features and how many bytes of its state
+    /// past the FXSAVE image are in `xs` (0 if the frame had none).
+    xfeatures: u64 = 0,
+    xlen: u32 = 0,
+    _pad2: u32 = 0,
+    /// The XSAVE header and components after the FXSAVE image (AVX's
+    /// upper halves, AVX-512's registers), so they go with the vCPU, not
+    /// the stub thread, and a signal handler's frame can hold them.
+    xs: [xs_max]u8 align(64) = @splat(0),
     ops: [max_ops]Op = undefined,
 };
 
 pub const fx_len = 416;
+/// As engine.zig's: XSAVE's state past FXSAVE's, up to AVX-512, PKRU and AMX's tile configuration.
+pub const xs_max = 2816 - 512;
 
 pub const Regs = extern struct {
     ax: u64 = 0,
@@ -148,7 +159,7 @@ pub const Regs = extern struct {
     flags: u64 = 0,
 };
 
-const ctl_head = 72 + @sizeOf(Regs) + 24 + fx_len;
+const ctl_head = (72 + @sizeOf(Regs) + 24 + fx_len + 16 + 63) / 64 * 64 + xs_max;
 pub const max_ops = (ctl_size - ctl_head) / @sizeOf(Op);
 
 comptime {

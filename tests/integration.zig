@@ -7392,6 +7392,16 @@ test "rt_sigreturn can't raise a Linux program's privilege [linux-personality]" 
     try std.testing.expectEqual(0, r.code);
 }
 
+test "a signal handler's AVX doesn't change the vector registers of the code it interrupted [linux-personality]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    const r = try runLinux(&le, false, &.{"/mnt/term/cwd/vecsig"});
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("ok\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
 test "busybox sh runs a pipeline from the Linux root, and /proc describes it (demo) [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);

@@ -161,7 +161,7 @@ const badptr_fixtures = [_][]const u8{ "read", "write", "stat" };
 const net_fixtures = [_][]const u8{ "ctl", "cs", "dns" };
 /// C programs in tests/fixtures/linux, built static for Linux on arm64 and
 /// amd64, for the linux-personality cases in tests/integration.zig.
-const linux_fixture_names = [_][]const u8{ "hello", "probe", "die", "sigreturn", "net", "threads", "files", "tls386", "bigexe", "pty", "fifo", "cowfork", "symlink", "chroot" };
+const linux_fixture_names = [_][]const u8{ "hello", "probe", "die", "sigreturn", "net", "threads", "files", "tls386", "bigexe", "pty", "fifo", "cowfork", "symlink", "chroot", "vecsig" };
 
 /// Programs in tests/fixtures/gfx, for tests/engines.zig's [gfx] cases on
 /// the headless backend, with the same lib.S.

@@ -65,7 +65,8 @@ const Vcpu = union(Kind) {
 const Ureg = union(Arch) { arm64: arm64.Ureg, amd64: amd64.Ureg, i386: ia32.Ureg };
 // arm64: Q0-Q31, FPCR, FPSR, TPIDR_EL0. x86: the 512-byte FXSAVE image
 // (x87, MXCSR, XMM), the thread pointer (the FS base on amd64, the TLS
-// segment's base on 386), and on amd64 the GS base (ARCH_SET_GS).
+// segment's base on 386), on amd64 the GS base (ARCH_SET_GS), and XSAVE's
+// state past the FXSAVE image (AVX, AVX-512) where the engine leaves AVX on.
 const Extra = union(Arch) { arm64: Arm64Extra, amd64: X86Extra, i386: X86Extra };
 const Exit = union(enum) { syscall, fault: Fault, breakpoint, interrupted, halted, other: u64 };
 ```
@@ -154,9 +155,9 @@ Engine creation runs a probe once per h9: a guest that makes syscalls with unusu
 
 ### Threads and runs
 
-A stub's first thread is its control thread, which never runs guest code; it starts another thread for each vCPU that runs the space, so a Linux program's threads run in parallel. A vCPU goes back to the stub thread it last ran on while that one is free, which keeps the AVX state `Extra` doesn't carry with it.
+A stub's first thread is its control thread, which never runs guest code; it starts another thread for each vCPU that runs the space, so a Linux program's threads run in parallel. A vCPU goes back to the stub thread it last ran on while that one is free. `Extra` carries the AVX and AVX-512 state too (the signal frame's XSAVE state past the FXSAVE image, up to `xs_max` bytes), so it goes with the vCPU to another thread and into a guest signal frame.
 
-One signal handler, on a per-thread alternate stack, is the only way in or out of guest code: SIGSYS, a CPU exception (SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP), or a kick's SIGURG writes the registers, the first 416 bytes of the FXSAVE image, and the FS and GS bases to the thread's control page, tells h9 through a futex (spinning first), and waits.
+One signal handler, on a per-thread alternate stack, is the only way in or out of guest code: SIGSYS, a CPU exception (SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP), or a kick's SIGURG writes the registers, the first 416 bytes of the FXSAVE image, the XSAVE state past it (only its header when those components are in their initial state), and the FS and GS bases to the thread's control page, tells h9 through a futex (spinning first), and waits.
 
 `run` writes the Ureg back, hands the thread `run`, and waits for the next exit; a page fault's access comes from the error code.
 

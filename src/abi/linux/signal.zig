@@ -420,12 +420,32 @@ fn setupAmd64(p: anytype, s: *State, r: *engine.amd64.Ureg, x: *const engine.X86
     const where = frameTop(s, f.act, r.sp);
     // The red zone isn't the handler's.
     const top = if (where.alt) where.top else where.top -% 128;
-    const fp = (top -% 512) & ~@as(u64, 63);
+    // The FP state: the FXSAVE image and, when the engine carries it,
+    // XSAVE's state past it with Linux's markers, so a handler that uses
+    // AVX gives the interrupted code its registers back (`restore`).
+    const xlen: u64 = x.xlen;
+    const fp_size: u64 = if (xlen > 0) 512 + xlen + 4 else 512;
+    const fp = (top -% fp_size) & ~@as(u64, 63);
     const sp = ((fp -% x64_size) & ~@as(u64, 15)) -% 8;
-    p.writeMem(fp, std.mem.asBytes(&x.fx)) catch return error.Fault;
+    var fx = x.fx;
+    if (xlen > 0) {
+        const sw = std.mem.asBytes(&fx)[464..512];
+        @memset(sw, 0);
+        std.mem.writeInt(u32, sw[0..4], FP_XSTATE_MAGIC1, .little);
+        std.mem.writeInt(u32, sw[4..8], @intCast(fp_size), .little);
+        std.mem.writeInt(u64, sw[8..16], x.xfeatures, .little);
+        std.mem.writeInt(u32, sw[16..20], @intCast(512 + xlen), .little);
+        p.writeMem(fp + 512, x.xs[0..x.xlen]) catch return error.Fault;
+        var m2: [4]u8 = undefined;
+        std.mem.writeInt(u32, &m2, FP_XSTATE_MAGIC2, .little);
+        p.writeMem(fp + 512 + xlen, &m2) catch return error.Fault;
+    }
+    p.writeMem(fp, std.mem.asBytes(&fx)) catch return error.Fault;
 
     var b: [x64_size]u8 = @splat(0);
     put64(&b, 0, f.act.restorer);
+    // uc_flags: UC_FP_XSTATE when the FP state has XSAVE's.
+    put64(&b, x64_uc, if (xlen > 0) 1 else 0);
     writeStack(&b, x64_uc + 16, s, r.sp);
     const regs = [_]u64{ r.r8, r.r9, r.r10, r.r11, r.r12, r.r13, r.r14, r.r15, r.di, r.si, r.bp, r.bx, r.dx, r.ax, r.cx, r.sp, r.pc, r.flags };
     for (regs, 0..) |v, i| put64(&b, x64_mc + 8 * i, v);
@@ -629,16 +649,51 @@ pub fn restore(p: anytype, s: *State, u: *engine.Ureg, x: *engine.Extra) FrameEr
             if (fp != 0) {
                 var fx: engine.Fxsave = undefined;
                 p.readMem(fp, std.mem.asBytes(&fx)) catch return error.Fault;
+                try restoreXstate(p, &x.amd64, fp, std.mem.asBytes(&fx)[464..512]);
                 // MXCSR's reserved bits would fault FXRSTOR.
                 fx.mxcsr &= 0xffff;
+                fx._r2 = @splat(0);
                 x.amd64.fx = fx;
-            } else x.amd64.fx = engine.X86Extra.init.fx;
+            } else {
+                x.amd64.fx = engine.X86Extra.init.fx;
+                initXstate(&x.amd64);
+            }
             r.* = n;
         },
         .i386 => |*r| mask = try restoreI386(p, r, x),
     }
     s.mask = mask & ~unblockable;
     s.on_altstack = onStack(s, u.stackPointer());
+}
+
+/// The markers of Linux's XSAVE frame: in the FXSAVE image's software
+/// bytes (struct _fpx_sw_bytes, at 464), and just past the XSAVE state.
+const FP_XSTATE_MAGIC1: u32 = 0x46505853;
+const FP_XSTATE_MAGIC2: u32 = 0x46505845;
+
+/// rt_sigreturn's XSAVE state past the FXSAVE image: from the frame if
+/// it has Linux's markers and the size `setupAmd64` wrote, with a header
+/// XRSTOR takes (only the host's features, the rest zero); otherwise the
+/// components go to their initial state, as Linux's FXSAVE-only restore.
+fn restoreXstate(p: anytype, x: *engine.X86Extra, fp: u64, sw: []const u8) FrameError!void {
+    if (x.xlen == 0) return;
+    const magic1 = std.mem.readInt(u32, sw[0..4], .little);
+    const size = std.mem.readInt(u32, sw[16..20], .little);
+    if (magic1 != FP_XSTATE_MAGIC1 or size != 512 + x.xlen) return initXstate(x);
+    var m2: [4]u8 = undefined;
+    p.readMem(fp + size, &m2) catch return error.Fault;
+    if (std.mem.readInt(u32, &m2, .little) != FP_XSTATE_MAGIC2) return initXstate(x);
+    p.readMem(fp + 512, x.xs[0..x.xlen]) catch return error.Fault;
+    const bv = std.mem.readInt(u64, x.xs[0..8], .little);
+    @memset(x.xs[8..64], 0);
+    std.mem.writeInt(u64, x.xs[0..8], bv & x.xfeatures, .little);
+}
+
+/// Puts XSAVE's components past x87 and SSE in their initial state.
+fn initXstate(x: *engine.X86Extra) void {
+    if (x.xlen == 0) return;
+    const bv = std.mem.readInt(u64, x.xs[0..8], .little);
+    std.mem.writeInt(u64, x.xs[0..8], bv & 3, .little);
 }
 
 test "x86 exceptions map to Linux's signals" {
