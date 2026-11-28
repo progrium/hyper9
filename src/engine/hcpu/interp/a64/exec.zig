@@ -345,36 +345,43 @@ fn runLoop(m: *Machine, max_steps: u64, comptime counted: bool, branches: u32) E
     var page = m.cache.get(m, cpu.pc) orelse return m.exit;
     var base = cpu.pc & ~@as(u64, page_size - 1);
     var i: usize = @intCast((cpu.pc & (page_size - 1)) >> 2);
-    // cpu.retired counts as it goes, so CNTVCT_EL0 in deterministic mode
-    // sees every instruction before it.
+    // Instructions retired in this run, kept in a local: cpu.retired is
+    // brought up to date before every exit and before any op that isn't
+    // hot runs, so CNTVCT_EL0 in deterministic mode sees every
+    // instruction before it.
     const start = cpu.retired;
+    var n: u64 = 0;
     while (true) {
         const o = &page.ops[i];
-        if (cpu.retired -% start == max_steps) {
+        if (n == max_steps) {
+            cpu.retired = start +% n;
             cpu.pc = base + i * 4;
             return .interrupted;
         }
-        switch (dispatch(m, o, base + i * 4)) {
+        switch (dispatchHot(m, o, base + i * 4, start +% n)) {
             .next => {
                 i += 1;
-                cpu.retired +%= 1;
+                n += 1;
             },
             .jump => {
                 const t = m.target;
-                if (o.k != .next_page) cpu.retired +%= 1;
+                if (o.k != .next_page) n += 1;
                 // Every guest loop has a taken branch or crosses a page, so
                 // checking here bounds how long a kick waits.
                 if (m.requested()) {
+                    cpu.retired = start +% n;
                     cpu.pc = t;
                     return .interrupted;
                 }
                 if (t & 3 != 0) {
+                    cpu.retired = start +% n;
                     cpu.pc = t;
                     return .{ .fault = .{ .addr = t, .access = .exec, .kind = .alignment, .esr = (EC_PC_ALIGN << 26) | ESR_IL } };
                 }
                 if (counted and o.k != .next_page) {
                     taken += 1;
                     if (taken == branches) {
+                        cpu.retired = start +% n;
                         cpu.pc = t;
                         return .interrupted;
                     }
@@ -384,6 +391,7 @@ fn runLoop(m: *Machine, max_steps: u64, comptime counted: bool, branches: u32) E
                 const epoch = m.cache.epoch;
                 m.cache.check(m);
                 if (t >> mem.page_shift != base >> mem.page_shift or epoch != m.cache.epoch) {
+                    cpu.retired = start +% n;
                     cpu.pc = t;
                     page = m.cache.get(m, t) orelse return m.exit;
                     base = t & ~@as(u64, page_size - 1);
@@ -391,7 +399,8 @@ fn runLoop(m: *Machine, max_steps: u64, comptime counted: bool, branches: u32) E
                 i = @intCast((t & (page_size - 1)) >> 2);
             },
             .exit => {
-                if (m.exit == .syscall) cpu.retired +%= 1;
+                if (m.exit == .syscall) n += 1;
+                cpu.retired = start +% n;
                 return m.exit;
             },
         }
@@ -406,6 +415,29 @@ pub fn step(m: *Machine, o: *const Op, pc: u64) Next {
         .jump => .{ .jump = m.target },
         .exit => .exit,
     };
+}
+
+/// The kinds most of a program's instructions are (busybox, sort, gzip,
+/// jq, and sqlite3): `run` executes these in its own body, through a
+/// switch, instead of an indirect call through the handler table. Kept
+/// short, so the loop stays a function wasm engines compile quickly.
+inline fn dispatchHot(m: *Machine, o: *const Op, pc: u64, retired: u64) Flow {
+    switch (o.k) {
+        inline .movi, .movk_x, .add_imm_x, .add_imm_w, .adds_imm_x, .adds_imm_w, .subs_imm_x,
+        .subs_imm_w, .and_imm_x, .and_imm_w, .orr_imm_x, .ubfx_x, .ubfx_w, .ubfiz_x,
+        .sbfx_x, .mov_x, .mov_w, .and_sreg_x, .orr_sreg_x, .orr_sreg_w, .eor_sreg_x,
+        .ands_sreg_x, .add_sreg_x, .add_sreg_w, .sub_sreg_x, .subs_sreg_x, .subs_sreg_w,
+        .add_reg_x, .sub_reg_x, .add_ereg_x, .csel_x, .csel_w, .ccmp_x, .ccmp_w, .madd_x,
+        .b, .bl, .bcond, .cbz_x, .cbz_w, .cbnz_x, .cbnz_w, .tbz, .tbnz, .br, .blr, .ret,
+        .ldr_x_o, .ldr_w_o, .ldrb_o, .ldrh_o, .ldrsw_o, .str_x_o, .str_w_o, .strb_o,
+        .ldr_x_m, .ldr_w_m, .ldrb_m, .str_x_m, .ldp_x, .stp_x, .ldp_w, .stp_w,
+        .ldrh_m, .strh_o, .eor_sreg_w, .add_reg_w, .ldrsb_w_o, .strb_m, .smaddl, .and_sreg_w,
+        .sub_reg_w, .extr_w, .strh_m, .ubfiz_w, .umaddl, .str_w_m => |k| return exec(k, m, o, pc),
+        else => {
+            m.cpu.retired = retired;
+            return dispatch(m, o, pc);
+        },
+    }
 }
 
 inline fn dispatch(m: *Machine, o: *const Op, pc: u64) Flow {
