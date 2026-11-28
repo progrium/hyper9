@@ -192,6 +192,10 @@ const Node = extern struct {
     mode: c_uint,
     atime: c_uint,
     mtime: c_uint,
+    // The times' nanoseconds: a setattr's (utimensat's), and 0 once
+    // anything else sets the time.
+    atimens: u32,
+    mtimens: u32,
     length: i64,
     direct: [Ndirect]?[*]u8,
     ind: ?[*]?[*]?[*]u8, // Perpage pointers to pages of Perpage block pointers
@@ -721,6 +725,8 @@ fn setdir(in: *Inst, n: *Node, d: *const Dir) Error!void {
     n.mode = d.mode;
     n.atime = d.atime;
     n.mtime = d.mtime;
+    n.atimens = 0;
+    n.mtimens = 0;
     n.length = d.length;
 }
 
@@ -3334,7 +3340,7 @@ fn upwstat(ch: *Chan, db: [*]u8, n: c_int) Error!c_int {
     chan.kstrcpy(&name, z(namep), Maxname);
     const isdir = (u.n0().qid.type & QTDIR) != 0;
     const chname = dd.name[0] != 0 and !eq(dd.name, &name);
-    const change = chname or dd.mode != nulldir or dd.mtime != nulldir or dd.length != -1 or
+    const change = chname or dd.mode != nulldir or dd.mtime != nulldir or dd.atime != nulldir or dd.length != -1 or
         dd.uid[0] != 0 or dd.gid[0] != 0;
     if (chname and iswhname(dd.name))
         return kerror(&port.Eperm);
@@ -4321,6 +4327,7 @@ fn ovopen(ch: *Chan, omode: c_int) Error!*Chan {
         if (omode & OTRUNC != 0) {
             n.qid.vers +%= 1;
             n.mtime = now();
+            n.mtimens = 0;
         }
         ch.qid = n.qid;
     }
@@ -4529,6 +4536,7 @@ fn ovread(ch: *Chan, a: ?*anyopaque, n: c_int, off: i64) Error!c_int {
     }
     const m = blkread(in, o.node.?, @ptrCast(a.?), n, off);
     o.node.?.atime = now();
+    o.node.?.atimens = 0;
     return m;
 }
 
@@ -4557,6 +4565,7 @@ fn ovwrite(ch: *Chan, a: ?*const anyopaque, n: c_int, off_: i64) Error!c_int {
     try blkwrite(in, nd, @ptrCast(a.?), n, off);
     nd.qid.vers +%= 1;
     nd.mtime = now();
+    nd.mtimens = 0;
     return n;
 }
 
@@ -4737,7 +4746,9 @@ fn move(ch: *Chan, dch: *Chan, name: [*c]const u8) Error!c_int {
     n.inlower = @intFromBool(lowerex);
     ovlink(dn, n);
     dn.mtime = now();
+    dn.mtimens = 0;
     odir.mtime = dn.mtime;
+    odir.mtimens = 0;
     changed(in, oldpath);
     changed(in, o.path);
     c.free(oldpath);
@@ -4772,6 +4783,7 @@ fn ovwstat(ch: *Chan, db: [*]u8, n: c_int) Error!c_int {
     const chname = d.name[0] != 0 and !eq(d.name, cur);
     const chmode = d.mode != nulldir;
     const chmtime = d.mtime != nulldir;
+    const chatime = d.atime != nulldir;
     const chlen = d.length != -1;
     if (chlen and isdir and d.length != 0)
         return kerror(&port.Eisdir);
@@ -4783,7 +4795,7 @@ fn ovwstat(ch: *Chan, db: [*]u8, n: c_int) Error!c_int {
         return kerror(&port.Eperm);
     if (gone and chname)
         return kerror(&port.Enonexist);
-    if (chname or chmode or chmtime or chlen) {
+    if (chname or chmode or chmtime or chatime or chlen) {
         if (nd == null) {
             if (isdir) {
                 const x = try markpath(in, o.path, npathelem(o.path));
@@ -4809,8 +4821,14 @@ fn ovwstat(ch: *Chan, db: [*]u8, n: c_int) Error!c_int {
         }
         if (chmode)
             x.mode = (x.mode & DMDIR) | (d.mode & ~DMDIR);
-        if (chmtime)
+        if (chmtime) {
             x.mtime = d.mtime;
+            x.mtimens = 0;
+        }
+        if (chatime) {
+            x.atime = d.atime;
+            x.atimens = 0;
+        }
         if ((ch.flag & COPEN) == 0 or o.lopen == 0)
             ch.qid = x.qid;
     }
@@ -4848,6 +4866,10 @@ fn ovgetattr(ch: *Chan, mask: u64, a: *Attr) Error!void {
     a.size = @bitCast(d.length);
     a.atime = d.atime;
     a.mtime = d.mtime;
+    if (!isunion(ch) and !isctl(ch)) if (ovcof(ch).node) |nd| {
+        a.atimens = nd.atimens;
+        a.mtimens = nd.mtimens;
+    };
     var la: Attr = undefined;
     if (isunion(ch) and uncof(ch).lopen != 0) {
         // An open file's member chan is open too, and lowerof can't clone
@@ -4878,6 +4900,23 @@ fn ovgetattr(ch: *Chan, mask: u64, a: *Attr) Error!void {
     }
 }
 
+/// A wstat in seconds, then the nanoseconds: a node's own, or for a
+/// union, its member's setattr, on the copy the wstat made if it made one.
+fn ovsetattr(ch: *Chan, mask: u64, a: *const Attr) Error!void {
+    try dev.setattrdefault(ch, mask, a);
+    const times = mask & (c.Aatime | c.Amtime);
+    if (times == 0) return;
+    if (isunion(ch)) {
+        const u = uncof(ch);
+        if (u.n == 0) return;
+        return dev.setattr(u.n0(), times, a);
+    }
+    if (isctl(ch)) return;
+    const nd = ovcof(ch).node orelse return;
+    if (times & c.Aatime != 0) nd.atimens = if (a.atimens == c.Anow) 0 else @intCast(std.math.clamp(a.atimens, 0, 999_999_999));
+    if (times & c.Amtime != 0) nd.mtimens = if (a.mtimens == c.Anow) 0 else @intCast(std.math.clamp(a.mtimens, 0, 999_999_999));
+}
+
 fn ovrename1(ch: *Chan, dch: *Chan, name: [*:0]const u8) Error!bool {
     if (isctl(ch) or isctl(dch))
         return kerror(&port.Eperm);
@@ -4904,6 +4943,7 @@ pub const Device = dev.Native('O', "overlay", .{
     .readlink = ovreadlink,
     .symlink = ovsymlink,
     .getattr = ovgetattr,
+    .setattr = ovsetattr,
     .rename = ovrename1,
 });
 

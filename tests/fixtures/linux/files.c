@@ -1209,6 +1209,117 @@ static void mremap_span(void) {
 	printf("ok mremap_span\n");
 }
 
+/* Resource limits are kept per process: setrlimit and prlimit set them,
+ * prlimit on another process too, and a fork inherits them (Go raises
+ * its open-file limit at start and puts it back for its children).
+ * mincore's errors are Linux's. */
+static void rlimits(void) {
+	struct rlimit l, got;
+	CHECK("rlimits", getrlimit(RLIMIT_NOFILE, &l) == 0);
+	struct rlimit set = {.rlim_cur = 43, .rlim_max = l.rlim_max};
+	CHECK("rlimits", setrlimit(RLIMIT_NOFILE, &set) == 0);
+	CHECK("rlimits", getrlimit(RLIMIT_NOFILE, &got) == 0 && got.rlim_cur == 43);
+	struct rlimit bad = {.rlim_cur = 2, .rlim_max = 1};
+	CHECK("rlimits", setrlimit(RLIMIT_NOFILE, &bad) == -1 && errno == EINVAL);
+	int go[2], back[2];
+	CHECK("rlimits", pipe(go) == 0 && pipe(back) == 0);
+	pid_t c = fork();
+	if (c == 0) {
+		char b;
+		struct rlimit r;
+		getrlimit(RLIMIT_NOFILE, &r);
+		if (r.rlim_cur != 43) _exit(4);
+		write(back[1], "x", 1);
+		read(go[0], &b, 1);
+		getrlimit(RLIMIT_NOFILE, &r);
+		_exit(r.rlim_cur == 42 ? 0 : 5);
+	}
+	char b;
+	CHECK("rlimits", read(back[0], &b, 1) == 1);
+	struct rlimit child = {.rlim_cur = 42, .rlim_max = l.rlim_max}, old;
+	CHECK("rlimits", prlimit(c, RLIMIT_NOFILE, &child, &old) == 0 && old.rlim_cur == 43);
+	CHECK("rlimits", write(go[1], "x", 1) == 1);
+	int st;
+	CHECK("rlimits", waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0);
+	CHECK("rlimits", setrlimit(RLIMIT_NOFILE, &l) == 0);
+	unsigned char vec[4];
+	char *m = mmap(0, 4 * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	CHECK("rlimits", m != MAP_FAILED);
+	CHECK("rlimits", mincore(m, 4 * 4096, vec) == 0 && vec[0] == 1 && vec[3] == 1);
+	CHECK("rlimits", mincore(m + 1, 4096, vec) == -1 && errno == EINVAL);
+	munmap(m, 4 * 4096);
+	CHECK("rlimits", mincore(m, 4096, vec) == -1 && errno == ENOMEM);
+	printf("ok rlimits\n");
+}
+
+/* Linux's answers at the edges of a path: a trailing slash follows a
+ * link even for lstat and has to name a directory, a link to "file/"
+ * is ENOTDIR, a name over NAME_MAX is ENAMETOOLONG, rename of a . is
+ * EBUSY, an O_CREAT open of a dangling link makes its target, a read of
+ * a directory is EISDIR, a link of a symbolic link is a link, a file
+ * isn't epoll's, and an overlay keeps utimensat's nanoseconds. Go's os
+ * tests check each. */
+static void path_edges(void) {
+	char base[200], a[300], b[300];
+	const char *d = getenv("DIR");
+	snprintf(base, sizeof base, "%s/edges.%d", d ? d : "/tmp", getpid());
+	CHECK("path_edges", mkdir(base, 0755) == 0);
+	snprintf(a, sizeof a, "%s/dir", base);
+	CHECK("path_edges", mkdir(a, 0755) == 0);
+	snprintf(a, sizeof a, "%s/file", base);
+	int fd = open(a, O_RDWR | O_CREAT, 0644);
+	CHECK("path_edges", fd >= 0);
+	close(fd);
+	struct stat st;
+	snprintf(a, sizeof a, "%s/dlink", base);
+	CHECK("path_edges", symlink("dir", a) == 0);
+	snprintf(a, sizeof a, "%s/dlink/", base);
+	CHECK("path_edges", lstat(a, &st) == 0 && S_ISDIR(st.st_mode));
+	snprintf(a, sizeof a, "%s/dlink/.", base);
+	CHECK("path_edges", lstat(a, &st) == 0 && S_ISDIR(st.st_mode));
+	snprintf(a, sizeof a, "%s/flink", base);
+	CHECK("path_edges", symlink("file/", a) == 0);
+	CHECK("path_edges", stat(a, &st) == -1 && errno == ENOTDIR);
+	snprintf(a, sizeof a, "%s/file/", base);
+	CHECK("path_edges", lstat(a, &st) == -1 && errno == ENOTDIR);
+	char longname[300];
+	memset(longname, 'a', 256);
+	longname[256] = 0;
+	snprintf(a, sizeof a, "%s/%s", base, longname);
+	CHECK("path_edges", open(a, O_RDWR | O_CREAT, 0644) == -1 && errno == ENAMETOOLONG);
+	snprintf(a, sizeof a, "%s/dir/.", base);
+	snprintf(b, sizeof b, "%s/other", base);
+	CHECK("path_edges", rename(a, b) == -1 && errno == EBUSY);
+	CHECK("path_edges", rmdir(a) == -1 && errno == EINVAL);
+	snprintf(a, sizeof a, "%s/dangling", base);
+	CHECK("path_edges", symlink("made", a) == 0);
+	fd = open(a, O_RDWR | O_CREAT, 0644);
+	CHECK("path_edges", fd >= 0);
+	close(fd);
+	snprintf(b, sizeof b, "%s/made", base);
+	CHECK("path_edges", lstat(b, &st) == 0 && S_ISREG(st.st_mode));
+	snprintf(a, sizeof a, "%s/dir", base);
+	fd = open(a, O_RDONLY);
+	char buf[64];
+	CHECK("path_edges", fd >= 0 && read(fd, buf, sizeof buf) == -1 && errno == EISDIR);
+	close(fd);
+	snprintf(a, sizeof a, "%s/dlink", base);
+	snprintf(b, sizeof b, "%s/dlink2", base);
+	CHECK("path_edges", link(a, b) == 0 && readlink(b, buf, sizeof buf) == 3);
+	snprintf(a, sizeof a, "%s/file", base);
+	fd = open(a, O_RDONLY);
+	int ep = epoll_create1(0);
+	struct epoll_event ev = {.events = EPOLLIN};
+	CHECK("path_edges", fd >= 0 && ep >= 0 && epoll_ctl(ep, EPOLL_CTL_ADD, fd, &ev) == -1 && errno == EPERM);
+	close(ep);
+	close(fd);
+	struct timespec ts[2] = {{.tv_sec = 1000000000, .tv_nsec = 123456789}, {.tv_sec = 1000000001, .tv_nsec = 987654321}};
+	CHECK("path_edges", utimensat(AT_FDCWD, a, ts, 0) == 0 && stat(a, &st) == 0);
+	CHECK("path_edges", st.st_atim.tv_sec == 1000000000 && st.st_mtim.tv_sec == 1000000001);
+	CHECK("path_edges", st.st_atim.tv_nsec == 123456789 && st.st_mtim.tv_nsec == 987654321);
+	printf("ok path_edges\n");
+}
+
 int main(int argc, char **argv) {
 	setvbuf(stdout, 0, _IONBF, 0);
 	for (int i = 1; i < argc; i++) {
@@ -1259,6 +1370,8 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "proc_exe")) proc_exe();
 		if (all || !strcmp(n, "cpuid_avx")) cpuid_avx();
 		if (all || !strcmp(n, "sigtrap")) sigtrap();
+		if (all || !strcmp(n, "rlimits")) rlimits();
+		if (!strcmp(n, "path_edges")) path_edges();
 	}
 	return failed;
 }

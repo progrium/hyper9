@@ -93,6 +93,8 @@ pub const Host = struct {
     kill: *const fn (ctx: *anyopaque, from: *Process, pid: i64, signo: u8, thread: ?ThreadKill) i64,
     /// The process group of pid, or null if there's no such process.
     pgidOf: *const fn (ctx: *anyopaque, pid: u32) ?u32,
+    /// prlimit on another process: `Process.limit` on pid's, or -ESRCH.
+    prlimitOf: *const fn (ctx: *anyopaque, pid: u32, res: u32, new: ?[2]u64, old: *[2]u64) i64,
 };
 
 /// A process's user and group ids. h9 has no users: they change what the
@@ -160,7 +162,9 @@ pub const FdFlags = packed struct(u8) {
     dsync: bool = false,
     /// Opened with O_SYNC, which Linux spells O_DSYNC plus __O_SYNC.
     sync: bool = false,
-    _: u3 = 0,
+    /// A directory opened without O_DIRECTORY: read is EISDIR.
+    dir: bool = false,
+    _: u2 = 0,
 };
 
 /// Directory entries read but not yet returned by getdents64.
@@ -247,6 +251,9 @@ pub const Group = struct {
     /// and Mix compiles relative paths in another.
     dot: ?*anyopaque = null,
     dot_gen: std.atomic.Value(u32) = .init(0),
+    /// Resource limits setrlimit or prlimit set, by resource; the rest
+    /// are `rlimit`'s defaults. Inherited by fork and kept by execve.
+    rlims: [nrlim]?[2]u64 = @splat(null),
 
     pub const End = struct { msg: []const u8, killed: bool };
 
@@ -400,6 +407,9 @@ pub const Process = struct {
     robust_list: u64 = 0,
     /// Set by exit (not exit_group): only this thread ends.
     thread_exit: bool = false,
+    /// prctl's PR_SET_KEEPCAPS, the thread's own; execve clears it.
+    keepcaps: bool = false,
+
     /// Exits reaped by await that a wait4 for another pid passed over.
     waits: std.ArrayList(WaitRec) = .empty,
     /// The host thread's CPU time when this thread started running on it.
@@ -492,6 +502,20 @@ pub const Process = struct {
         kc.setDot(x) catch {};
     }
 
+    /// getrlimit and setrlimit in one: puts resource res's limits in
+    /// `old`, then sets them to `new` if it isn't null. Returns 0 or
+    /// -errno. Every process is root, so a hard limit may go up.
+    pub fn limit(p: *Process, res: u32, new: ?[2]u64, old: *[2]u64) i64 {
+        old.* = rlimit(p, res) orelse return -E.INVAL;
+        if (new) |l| {
+            if (res >= nrlim or l[0] > l[1]) return -E.INVAL;
+            p.g.lockSpin();
+            p.g.rlims[res] = l;
+            p.g.lock.unlock();
+        }
+        return 0;
+    }
+
     pub fn isLeader(p: *const Process) bool {
         return p.pid == p.g.tgid;
     }
@@ -524,6 +548,7 @@ pub const Process = struct {
             .sid = p.sid,
             .umask = p.umask,
             .cred = p.cred,
+            .keepcaps = p.keepcaps,
             .hwcap = p.hwcap,
             .hwcap2 = p.hwcap2,
             .vdso = p.vdso,
@@ -563,6 +588,7 @@ pub const Process = struct {
         const pg = p.g;
         pg.lockSpin();
         defer pg.lock.unlock();
+        g.rlims = pg.rlims;
         var it = pg.fdflags.iterator();
         while (it.next()) |e| try g.fdflags.put(c.gpa, e.key_ptr.*, e.value_ptr.*);
         var si = pg.socks.iterator();
@@ -948,6 +974,27 @@ fn memCall(p: *Process, s: Sys, c: Call) Err!Outcome {
             return ret(0);
         },
         .mremap => return ret(try mremap(p, c.a[0], c.a[1], c.a[2], c.uint(3), c.a[4])),
+        .mincore => {
+            // Every mapped page counts as resident: h9 doesn't page out.
+            const a = c.a[0];
+            if (a % page != 0) return ret(-E.INVAL);
+            const len = std.mem.alignForward(u64, c.a[1], page);
+            if (a >= mm.layout(p.mm).user_top or len > mm.layout(p.mm).user_top - a) return ret(-E.NOMEM);
+            var va = a;
+            while (va < a + len) {
+                const v = p.mm.find(va) orelse return ret(-E.NOMEM);
+                va = @min(v.end, a + len);
+            }
+            const ones: [256]u8 = @splat(1);
+            var i: u64 = 0;
+            const n = len / page;
+            while (i < n) {
+                const k = @min(n - i, ones.len);
+                try p.writeMem(c.a[2] + i, ones[0..k]);
+                i += k;
+            }
+            return ret(0);
+        },
         .shmat => return ret(shmat(p, @truncate(c.int(0)), c.a[1], c.uint(2))),
         .shmdt => {
             const v = p.mm.find(c.a[0]) orelse return ret(-E.INVAL);
@@ -1093,7 +1140,12 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const engine.Ureg) Err!Outcome {
         .stat => return ret(try statAt(p, AT_FDCWD, c.a[0], c.a[1], 0, .native)),
         .lstat => return ret(try statAt(p, AT_FDCWD, c.a[0], c.a[1], AT_SYMLINK_NOFOLLOW, .native)),
         .statx => return ret(try statAt(p, c.int(0), c.a[1], c.a[4], c.uint(2), .statx)),
-        .faccessat, .faccessat2 => return ret(try access(p, c.int(0), c.a[1], c.uint(2))),
+        .faccessat => return ret(try access(p, c.int(0), c.a[1], c.uint(2))),
+        .faccessat2 => {
+            const AT_EACCESS = 0x200;
+            if (c.uint(3) & ~@as(u32, AT_SYMLINK_NOFOLLOW | AT_EACCESS | AT_EMPTY_PATH) != 0) return ret(-E.INVAL);
+            return ret(try access(p, c.int(0), c.a[1], c.uint(2)));
+        },
         .access => return ret(try access(p, AT_FDCWD, c.a[0], c.uint(1))),
         .mkdirat => return ret(try mkdir(p, c.int(0), c.a[1], c.uint(2))),
         .mkdir => return ret(try mkdir(p, AT_FDCWD, c.a[0], c.uint(1))),
@@ -1105,10 +1157,14 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const engine.Ureg) Err!Outcome {
         .rename => return ret(try rename(p, AT_FDCWD, c.a[0], AT_FDCWD, c.a[1], 0)),
         .fchmod => return ret(try chmodFd(p, c.int(0), c.uint(1))),
         .fchmodat => return ret(try chmodAt(p, c.int(0), c.a[1], c.uint(2))),
+        .fchmodat2 => return ret(try fchmodat2(p, c.int(0), c.a[1], c.uint(2), c.uint(3))),
         .chmod => return ret(try chmodAt(p, AT_FDCWD, c.a[0], c.uint(1))),
         // Linux ids mean nothing to h9's access checks, so changing the
-        // owner is accepted and has no effect.
-        .fchownat, .fchown, .chown, .lchown => return ret(0),
+        // owner of something that's there is accepted and has no effect.
+        .fchown => return ret(if (kc.fdInfo(c.int(0))) |_| 0 else |_| -E.BADF),
+        .chown => return ret(try chownAt(p, AT_FDCWD, c.a[0], 0)),
+        .lchown => return ret(try chownAt(p, AT_FDCWD, c.a[0], AT_SYMLINK_NOFOLLOW)),
+        .fchownat => return ret(try chownAt(p, c.int(0), c.a[1], c.uint(4))),
         .utimensat => return ret(try utimens(p, c.int(0), c.a[1], c.a[2])),
         .ftruncate => return ret(try truncateFd(p, c.int(0), c.a[1])),
         .fallocate => return ret(try fallocate(p, c.int(0), c.uint(1), c.a[2], c.a[3])),
@@ -1125,6 +1181,10 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const engine.Ureg) Err!Outcome {
         },
         .getcwd => {
             const cwd = kc.getcwd(&p.name_buf) catch return ret(kerr());
+            // A path that filled the buffer was cut short: longer than
+            // Linux's PATH_MAX, which getcwd fails on, and callers like
+            // Go's Getwd then walk up with .. instead.
+            if (cwd.len + 1 >= p.name_buf.len) return ret(-E.NAMETOOLONG);
             if (cwd.len + 1 > c.a[1]) return ret(-E.RANGE);
             p.name_buf[cwd.len] = 0;
             try p.writeMem(c.a[0], p.name_buf[0 .. cwd.len + 1]);
@@ -1218,6 +1278,8 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const engine.Ureg) Err!Outcome {
                     return std.mem.readInt(u64, bs[i * 8 ..][0..8], .little);
                 }
             }.at;
+            const CLONE_NEWTIME = 0x80;
+            if (w(&b, 0) & CLONE_NEWTIME != 0) return ret(-E.PERM);
             const flags = w(&b, 0) | (w(&b, 4) & 0xff);
             if (cloneCheck(flags)) |e| return ret(e);
             const stack = w(&b, 5);
@@ -1265,7 +1327,7 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const engine.Ureg) Err!Outcome {
         // Memory. Other threads' layout changes wait (mm.Mm.op).
         .shmget => return ret(shmget(p, @truncate(c.int(0)), c.a[1], c.uint(2))),
         .shmctl => return ret(try shmctl(p, @truncate(c.int(0)), c.uint(1), c.a[2])),
-        .brk, .mmap, .munmap, .mprotect, .madvise, .mremap, .shmat, .shmdt => {
+        .brk, .mmap, .munmap, .mprotect, .madvise, .mremap, .mincore, .shmat, .shmdt => {
             p.mm.opLock(p.io);
             defer p.mm.opUnlock(p.io);
             return memCall(p, s, c);
@@ -1402,10 +1464,22 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const engine.Ureg) Err!Outcome {
             return ret(0);
         },
         .prctl => return ret(try prctl(p, c.int(0), c.a[1])),
+        .capget => return ret(try capget(p, c.a[0], c.a[1])),
+        // Every process holds what it asks for, as root does.
+        .capset => {
+            _ = try p.readU32(c.a[0]);
+            return ret(0);
+        },
         .arch_prctl => return ret(-E.INVAL), // ARCH_SET_FS is served by the process model
         .prlimit64 => return ret(try prlimit(p, c.int(0), c.uint(1), c.a[2], c.a[3])),
         .getrlimit => return ret(try prlimit(p, 0, c.uint(0), 0, c.a[1])),
-        .setrlimit => return ret(0),
+        .setrlimit => {
+            var b: [16]u8 = undefined;
+            try p.readMem(c.a[1], &b);
+            const new: [2]u64 = .{ std.mem.readInt(u64, b[0..8], .little), std.mem.readInt(u64, b[8..16], .little) };
+            var old: [2]u64 = undefined;
+            return ret(p.limit(c.uint(0), new, &old));
+        },
         .sched_getaffinity => {
             if (c.a[1] < 8) return ret(-E.INVAL);
             const n = @min(p.ncpu, 64);
@@ -1621,13 +1695,23 @@ const ia32 = struct {
                 try p.writeU32(a[1] + 4, @intCast(@min(lim[1], max)));
                 return ret(0);
             },
+            .setrlimit => {
+                // Two unsigned longs; RLIM_INFINITY is all ones.
+                const w = [2]u32{ try p.readU32(a[1]), try p.readU32(a[1] + 4) };
+                var new: [2]u64 = undefined;
+                for (w, 0..) |v, i| new[i] = if (v == 0xffffffff) std.math.maxInt(u64) else v;
+                var old: [2]u64 = undefined;
+                return ret(p.limit(c.uint(0), new, &old));
+            },
             .getuid16 => s.* = .getuid,
             .geteuid16 => s.* = .geteuid,
             .getgid16 => s.* = .getgid,
             .getegid16 => s.* = .getegid,
             .setuid16 => s.* = .setuid,
             .setgid16 => s.* = .setgid,
-            .chown16, .lchown16, .fchown16 => return ret(0),
+            .chown16 => s.* = .chown,
+            .lchown16 => s.* = .lchown,
+            .fchown16 => s.* = .fchown,
             .nice => return ret(0),
             .sigreturn => return .sigreturn,
             .socketcall => return try socketcall(p, s, c),
@@ -1860,6 +1944,9 @@ const ia32 = struct {
 
 fn pathArg(p: *Process, va: u64, buf: []u8) Err![:0]u8 {
     const path = try p.string(va, buf);
+    // Linux's NAME_MAX: a longer name is ENAMETOOLONG wherever it is.
+    var it = std.mem.splitScalar(u8, path, '/');
+    while (it.next()) |name| if (name.len > 255) return error.NameTooLong;
     return throughProcLink(p, path, buf) orelse path;
 }
 
@@ -1923,6 +2010,15 @@ var path_opened: std.atomic.Value(bool) = .init(false);
 /// Whether fd was opened O_PATH: it names its file for fstat, fchdir, and
 /// the *at calls, and reads, writes, and lists nothing (EBADF), as on
 /// Linux. It's open OREAD underneath (openAt).
+/// Whether any program has opened a directory without O_DIRECTORY, so
+/// reads look for one (`dirRead`).
+var dir_opened: std.atomic.Value(bool) = .init(false);
+
+/// Whether fd is a directory a read of is EISDIR (FdFlags.dir).
+fn dirRead(p: *Process, fd: i32) bool {
+    return fd >= 0 and dir_opened.load(.monotonic) and flagsOf(p, fd).dir;
+}
+
 fn pathOnly(p: *Process, fd: i32) bool {
     return fd >= 0 and path_opened.load(.monotonic) and flagsOf(p, fd).path;
 }
@@ -1945,9 +2041,14 @@ fn openAt(p: *Process, dirfd: i32, path_va: u64, flags: u32, mode: u32) Err!i64 
     // /dev/tty is the session's pty when it has one, and the console
     // otherwise (design/epoch-0/linux-pty.md).
     var tty_buf: [32]u8 = undefined;
-    if (std.mem.eql(u8, path, "/dev/tty")) if (kc.ptyBySid(p.sid)) |n| {
-        path = std.fmt.bufPrintSentinel(&tty_buf, pty_dev ++ "/{d}", .{n}, 0) catch unreachable;
-    };
+    if (std.mem.eql(u8, path, "/dev/tty")) {
+        if (kc.ptyBySid(p.sid)) |n| {
+            path = std.fmt.bufPrintSentinel(&tty_buf, pty_dev ++ "/{d}", .{n}, 0) catch unreachable;
+        } else if (!p.console_tty) {
+            // No controlling terminal: the console isn't one either.
+            return -E.NXIO;
+        }
+    }
     // /proc/self/fd/N is the file fd N has, which may be gone from its
     // directory or a pipe: it opens as fd N's dup (#d), as /dev/fd/N
     // does, not by walking its target's name (design/epoch-0/linux-symlinks.md).
@@ -2009,14 +2110,36 @@ fn openAt(p: *Process, dirfd: i32, path_va: u64, flags: u32, mode: u32) Err!i64 
                 return e;
             }
             const perm = mode & 0o777 & ~p.umask;
-            break :blk at(dirfd, path, u31, kern.create, .{ path, omode & ~@as(c_int, OTRUNC), perm }) catch return kerr();
+            // A dangling link is followed: the create makes its target,
+            // as on Linux, unless O_EXCL or O_NOFOLLOW asks for the name
+            // itself (which is EEXIST).
+            var cpath = path;
+            var lbufs: [2][4096]u8 = undefined;
+            var hops: usize = 0;
+            if (flags & O_EXCL == 0 and !nofollow) while (hops < 8) : (hops += 1) {
+                var tb: [4096]u8 = undefined;
+                const t = at(dirfd, cpath, []u8, kern.readlink, .{ cpath, &tb }) catch break;
+                const out = &lbufs[hops % 2];
+                cpath = if (t.len > 0 and t[0] == '/')
+                    std.fmt.bufPrintSentinel(out, "{s}", .{t}, 0) catch return -E.NAMETOOLONG
+                else if (std.mem.lastIndexOfScalar(u8, cpath, '/')) |i|
+                    std.fmt.bufPrintSentinel(out, "{s}/{s}", .{ cpath[0..i], t }, 0) catch return -E.NAMETOOLONG
+                else
+                    std.fmt.bufPrintSentinel(out, "{s}", .{t}, 0) catch return -E.NAMETOOLONG;
+            };
+            if (hops == 8) return -E.LOOP;
+            break :blk at(dirfd, cpath, u31, kern.create, .{ cpath, omode & ~@as(c_int, OTRUNC), perm }) catch return kerr();
         }
     };
-    if (want_dir or flags & O_ACCMODE != 0) {
+    // A directory opened to read, as os.ReadFile opens anything, reads
+    // as EISDIR (`dirRead`); opendir's O_DIRECTORY ones list with getdents.
+    var read_dir = false;
+    if (want_dir or flags & (O_ACCMODE | O_PATH) == 0 or flags & O_ACCMODE != 0) {
         const info = kc.fdInfo(fd) catch {
             kern.close(fd) catch {};
             return -E.BADF;
         };
+        read_dir = info.dir and !want_dir and flags & (O_ACCMODE | O_PATH) == 0;
         if (want_dir and !info.dir) {
             kern.close(fd) catch {};
             return -E.NOTDIR;
@@ -2040,7 +2163,9 @@ fn openAt(p: *Process, dirfd: i32, path_va: u64, flags: u32, mode: u32) Err!i64 
     const dsync = flags & O_PATH == 0 and flags & O_DSYNC != 0;
     if (dsync) sync_opened.store(true, .monotonic);
     if (flags & O_PATH != 0) path_opened.store(true, .monotonic);
-    if (flags & (O_APPEND | O_NONBLOCK | O_PATH) != 0 or dsync) setFlags(p, fd, .{
+    if (read_dir) dir_opened.store(true, .monotonic);
+    if (flags & (O_APPEND | O_NONBLOCK | O_PATH) != 0 or dsync or read_dir) setFlags(p, fd, .{
+        .dir = read_dir,
         .append = flags & O_APPEND != 0,
         .nonblock = flags & O_NONBLOCK != 0,
         .path = flags & O_PATH != 0,
@@ -2090,6 +2215,7 @@ const Dir = enum { read, write };
 
 fn rw(p: *Process, fd: i32, buf: u64, len_in: u64, off: i64, comptime dir: Dir) Err!i64 {
     if (pathOnly(p, fd)) return -E.BADF;
+    if (dir == .read and dirRead(p, fd)) return -E.ISDIR;
     // A read of a stream socket stops at a message that passes fds, and
     // the read that starts at it takes them (SCM_RIGHTS).
     // A read that was already waiting when the fds were sent still takes
@@ -3176,11 +3302,15 @@ fn statAt(p: *Process, dirfd: i32, path_va: u64, buf: u64, flags: u32, fmt: Stat
     };
     var exe_buf: [256 + 1]u8 = undefined;
     const fpath = if (flags & AT_SYMLINK_NOFOLLOW == 0 and path[0] == '/') procExe(p, path, &exe_buf) orelse path else path;
-    const n = (if (flags & AT_SYMLINK_NOFOLLOW != 0)
+    // A trailing slash follows a link even for lstat, as on Linux, and
+    // the name has to be a directory then.
+    const slash = wantsDir(path);
+    const n = (if (flags & AT_SYMLINK_NOFOLLOW != 0 and !slash)
         getattrAt(dirfd, path, true, &a, &b)
     else
         getattrAt(dirfd, fpath, false, &a, &b)) catch return kerr();
     const d, _ = attr.Dir.parse(b[0..n]) orelse return -E.IO;
+    if (slash and d.mode & DMDIR == 0) return -E.NOTDIR;
     var st = attr.Stat.fromDir(&d, kindOfDir(&d), 0, 0);
     withAttr(&st, &a);
     if (d.type == pty_dc and d.qid_type & 0x80 == 0) st.rdev = ptyRdev(d.qid_path);
@@ -3189,6 +3319,7 @@ fn statAt(p: *Process, dirfd: i32, path_va: u64, buf: u64, flags: u32, fmt: Stat
 }
 
 fn access(p: *Process, dirfd: i32, path_va: u64, mode: u32) Err!i64 {
+    if (mode & ~@as(u32, 7) != 0) return -E.INVAL;
     const path = try pathArg(p, path_va, &p.name_buf);
     if (path.len == 0) return -E.NOENT;
     var b: [1024]u8 = undefined;
@@ -3228,11 +3359,16 @@ fn mkdir(p: *Process, dirfd: i32, path_va: u64, mode: u32) Err!i64 {
 fn unlink(p: *Process, dirfd: i32, path_va: u64, flags: u32) Err!i64 {
     const path = try pathArg(p, path_va, &p.name_buf);
     if (path.len == 0) return -E.NOENT;
+    // As Linux's: rmdir of a . is EINVAL and of a .. ENOTEMPTY, and
+    // unlink of either EISDIR.
+    if (dotName(path)) |dd| return if (flags & AT_REMOVEDIR == 0) -E.ISDIR else if (dd) -E.NOTEMPTY else -E.INVAL;
     // A link is removed itself, whatever it points at: one walk that
     // stops at a link says what's there, or that nothing is.
     var b: [512]u8 = undefined;
-    const n = lstatAt(dirfd, path, &b) catch
-        return if (flags & AT_REMOVEDIR != 0) -E.NOENT else kerr();
+    const n = lstatAt(dirfd, path, &b) catch {
+        const e = kerr();
+        return if (flags & AT_REMOVEDIR != 0 and e != -E.NOTDIR) -E.NOENT else e;
+    };
     const d, _ = attr.Dir.parse(b[0..n]) orelse return -E.IO;
     const is_link = d.mode & DMSYMLINK != 0 and d.mode & DMDIR == 0;
     const dir = !is_link and d.mode & DMDIR != 0;
@@ -3240,6 +3376,24 @@ fn unlink(p: *Process, dirfd: i32, path_va: u64, flags: u32) Err!i64 {
     if (flags & AT_REMOVEDIR == 0 and dir) return -E.ISDIR;
     at(dirfd, path, void, kern.remove, .{path}) catch return kerr();
     return 0;
+}
+
+/// Whether path ends in a slash or a ., so that it names a directory and
+/// a link at its end is followed, even by the calls that otherwise don't
+/// (lstat, lchown), as on Linux.
+fn wantsDir(path: []const u8) bool {
+    return path[path.len - 1] == '/' or std.mem.endsWith(u8, path, "/.") or std.mem.eql(u8, path, ".");
+}
+
+/// Whether path's last name is . (false) or .. (true), or null if it's
+/// neither: a name rename and unlink can't take.
+fn dotName(path: []const u8) ?bool {
+    const t = std.mem.trimEnd(u8, path, "/");
+    const i = if (std.mem.lastIndexOfScalar(u8, t, '/')) |k| k + 1 else 0;
+    const last = t[i..];
+    if (std.mem.eql(u8, last, ".")) return false;
+    if (std.mem.eql(u8, last, "..")) return true;
+    return null;
 }
 
 fn statExists(dirfd: i32, path: [:0]const u8) bool {
@@ -3310,6 +3464,7 @@ fn rename(p: *Process, olddir: i32, old_va: u64, newdir: i32, new_va: u64, flags
     const old = try pathArg(p, old_va, &p.name_buf);
     const new = try pathArg(p, new_va, &p.name2_buf);
     if (old.len == 0 or new.len == 0) return -E.NOENT;
+    if (dotName(old) != null or dotName(new) != null) return -E.BUSY;
     // The kernel's rename (design/file-interface.md): the device's own,
     // which replaces the target at once, as Linux's does (a host tree's
     // rename(2), a .L server's Trenameat, or an overlay's move in
@@ -3363,6 +3518,18 @@ fn link(p: *Process, olddir: i32, old_va: u64, newdir: i32, new_va: u64, flags: 
     if (!lexists(olddir, old)) return -E.NOENT;
     if (isLdir(olddir, old)) return -E.PERM;
     if (lexists(newdir, new)) return -E.EXIST;
+    // A link to a symbolic link without AT_SYMLINK_FOLLOW names the link
+    // itself: a new link with its target, which a device that copies
+    // instead of linking would otherwise copy the link's target for.
+    if (flags & AT_SYMLINK_FOLLOW == 0) {
+        var tb: [4096]u8 = undefined;
+        if (at(olddir, old, []u8, kern.readlink, .{ old, &tb })) |t| {
+            if (t.len >= tb.len) return -E.NAMETOOLONG;
+            tb[t.len] = 0;
+            at(newdir, new, void, kern.symlink, .{ new, tb[0..t.len :0] }) catch return kerr();
+            return 0;
+        } else |_| {}
+    }
     // Both names from one place, as rename's.
     var newbuf: [4096]u8 = undefined;
     var new_full = new;
@@ -3412,7 +3579,7 @@ fn mknod(p: *Process, dirfd: i32, path_va: u64, mode: u32) Err!i64 {
 /// in a host tree, the new name checked like a create, and a Tsymlink on
 /// a 9P2000.L server.
 fn symlink(p: *Process, target_va: u64, newdir: i32, new_va: u64) Err!i64 {
-    const target = try pathArg(p, target_va, &p.name2_buf);
+    const target = try p.string(target_va, &p.name2_buf);
     if (target.len == 0) return -E.NOENT;
     var nb: [4096]u8 = undefined;
     const new = try pathArg(p, new_va, &nb);
@@ -3440,9 +3607,51 @@ fn chmodFd(p: *Process, fd: i32, mode: u32) Err!i64 {
     return 0;
 }
 
+/// chown, lchown and fchownat: the name has to be there, and nothing
+/// changes (Cred).
+fn chownAt(p: *Process, dirfd: i32, path_va: u64, flags: u32) Err!i64 {
+    if (flags & ~@as(u32, AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0) return -E.INVAL;
+    const path = try pathArg(p, path_va, &p.name_buf);
+    if (path.len == 0) {
+        if (flags & AT_EMPTY_PATH == 0) return -E.NOENT;
+        if (dirfd == AT_FDCWD) return 0;
+        return if (kc.fdInfo(dirfd)) |_| 0 else |_| -E.BADF;
+    }
+    var b: [1024]u8 = undefined;
+    const slash = wantsDir(path);
+    const n = (if (flags & AT_SYMLINK_NOFOLLOW != 0 and !slash)
+        lstatAt(dirfd, path, &b)
+    else
+        at(dirfd, path, usize, kern.stat, .{ path, &b })) catch return kerr();
+    const d, _ = attr.Dir.parse(b[0..n]) orelse return -E.IO;
+    if (slash and d.mode & DMDIR == 0) return -E.NOTDIR;
+    return 0;
+}
+
+/// fchmodat2: fchmodat with flags. A link's own mode can't change, as
+/// on Linux, where AT_SYMLINK_NOFOLLOW on one is EOPNOTSUPP.
+fn fchmodat2(p: *Process, dirfd: i32, path_va: u64, mode: u32, flags: u32) Err!i64 {
+    if (flags & ~@as(u32, AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0) return -E.INVAL;
+    if (flags & AT_EMPTY_PATH != 0) {
+        var b: [1]u8 = undefined;
+        try p.readMem(path_va, &b);
+        if (b[0] == 0) return if (dirfd == AT_FDCWD) chmodPath(dirfd, ".", mode) else chmodFd(p, dirfd, mode);
+    }
+    if (flags & AT_SYMLINK_NOFOLLOW != 0) {
+        const path = try pathArg(p, path_va, &p.name_buf);
+        var lb: [16]u8 = undefined;
+        if (path.len > 0) if (at(dirfd, path, []u8, kern.readlink, .{ path, &lb })) |_| return -E.OPNOTSUPP else |_| {};
+    }
+    return chmodAt(p, dirfd, path_va, mode);
+}
+
 fn chmodAt(p: *Process, dirfd: i32, path_va: u64, mode: u32) Err!i64 {
     const path = try pathArg(p, path_va, &p.name_buf);
     if (path.len == 0) return -E.NOENT;
+    return chmodPath(dirfd, path, mode);
+}
+
+fn chmodPath(dirfd: i32, path: [:0]const u8, mode: u32) Err!i64 {
     var b: [1024]u8 = undefined;
     const n = at(dirfd, path, usize, kern.stat, .{ path, &b }) catch return kerr();
     const d, _ = attr.Dir.parse(b[0..n]) orelse return -E.IO;
@@ -5072,6 +5281,32 @@ fn machineName(a: engine.Arch) []const u8 {
     };
 }
 
+/// capget: root's capabilities, every one, and none for another uid;
+/// h9 checks none of them (`Cred`).
+fn capget(p: *Process, hdr: u64, data: u64) Err!i64 {
+    const v3 = 0x20080522;
+    const v1 = 0x19980330;
+    const v2 = 0x20071026;
+    const version = try p.readU32(hdr);
+    if (version != v1 and version != v2 and version != v3) {
+        try p.writeU32(hdr, v3);
+        return if (data == 0) 0 else -E.INVAL;
+    }
+    if (data == 0) return 0;
+    // CAP_LAST_CAP is 40: bits 0 to 40, effective, permitted and
+    // inheritable (none) in each 32-bit half.
+    const all: u64 = if (p.cred.root()) (1 << 41) - 1 else 0;
+    var b: [24]u8 = @splat(0);
+    const words: usize = if (version == v1) 1 else 2;
+    for (0..words) |i| {
+        const half: u32 = @truncate(all >> @intCast(32 * i));
+        std.mem.writeInt(u32, b[i * 12 ..][0..4], half, .little);
+        std.mem.writeInt(u32, b[i * 12 + 4 ..][0..4], half, .little);
+    }
+    try p.writeMem(data, b[0 .. words * 12]);
+    return 0;
+}
+
 fn prctl(p: *Process, op: i32, arg: u64) Err!i64 {
     const PR_SET_PDEATHSIG = 1;
     const PR_GET_PDEATHSIG = 2;
@@ -5082,7 +5317,15 @@ fn prctl(p: *Process, op: i32, arg: u64) Err!i64 {
     const PR_SET_SECCOMP = 22;
     const PR_SET_NO_NEW_PRIVS = 38;
     const PR_GET_NO_NEW_PRIVS = 39;
+    const PR_GET_KEEPCAPS = 7;
+    const PR_SET_KEEPCAPS = 8;
     switch (op) {
+        PR_GET_KEEPCAPS => return @intFromBool(p.keepcaps),
+        PR_SET_KEEPCAPS => {
+            if (arg > 1) return -E.INVAL;
+            p.keepcaps = arg == 1;
+            return 0;
+        },
         PR_SET_PDEATHSIG, PR_SET_DUMPABLE => return 0,
         PR_GET_PDEATHSIG => {
             try p.writeU32(arg, 0);
@@ -5119,9 +5362,17 @@ fn prctl(p: *Process, op: i32, arg: u64) Err!i64 {
     }
 }
 
+const nrlim = 16;
+
 /// A resource's soft and hard limits, or null if there's no such one.
 fn rlimit(p: *Process, res: u32) ?[2]u64 {
     const inf = std.math.maxInt(u64);
+    if (res < nrlim) {
+        p.g.lockSpin();
+        const set = p.g.rlims[res];
+        p.g.lock.unlock();
+        if (set) |l| return l;
+    }
     const RLIMIT_STACK = 3;
     const RLIMIT_NOFILE = 7;
     const RLIMIT_AS = 9;
@@ -5133,10 +5384,20 @@ fn rlimit(p: *Process, res: u32) ?[2]u64 {
     };
 }
 
-fn prlimit(p: *Process, pid: i32, res: u32, new: u64, old: u64) Err!i64 {
-    _ = new;
-    if (pid != 0 and pid != p.pid) return -E.PERM;
-    const lim = rlimit(p, res) orelse return -E.INVAL;
+fn prlimit(p: *Process, pid: i32, res: u32, new_va: u64, old: u64) Err!i64 {
+    if (pid < 0) return -E.INVAL;
+    var new: ?[2]u64 = null;
+    if (new_va != 0) {
+        var b: [16]u8 = undefined;
+        try p.readMem(new_va, &b);
+        new = .{ std.mem.readInt(u64, b[0..8], .little), std.mem.readInt(u64, b[8..16], .little) };
+    }
+    var lim: [2]u64 = undefined;
+    const r = if (pid == 0 or @as(u32, @intCast(pid)) == p.tgid() or @as(u32, @intCast(pid)) == p.pid)
+        p.limit(res, new, &lim)
+    else
+        p.host.prlimitOf(p.host.ctx, @intCast(pid), res, new, &lim);
+    if (r != 0) return r;
     if (old != 0) {
         var b: [16]u8 = undefined;
         std.mem.writeInt(u64, b[0..8], lim[0], .little);
@@ -5964,7 +6225,7 @@ fn recvmsg(p: *Process, fd: i32, msg_va: u64, flags: u32) Err!i64 {
                 for (iv[0..k], 0..) |*v, i| v.* = try p.iovec(m.iov, i);
                 if (try nlPeekCall(p, fd, iv[0..k], flags)) |r| {
                     try p.writePtr(m.controllen_va, 0);
-                    try p.writeU32(m.flags_va, 0);
+                    try p.writeU32(m.flags_va, flags & MSG_CMSG_CLOEXEC);
                     if (r >= 0 and m.name != 0) try writeNlAddr(p, m.name, m.namelen_va, 0);
                     return r;
                 }
@@ -6015,7 +6276,7 @@ fn recvmsg(p: *Process, fd: i32, msg_va: u64, flags: u32) Err!i64 {
         try writeSockaddr(p, m.name, m.namelen_va, so.s.family, from);
     }
     try p.writePtr(m.controllen_va, 0); // msg_controllen: no control data
-    try p.writeU32(m.flags_va, 0);
+    try p.writeU32(m.flags_va, flags & MSG_CMSG_CLOEXEC);
     return r;
 }
 
@@ -6252,7 +6513,7 @@ fn scmSend(p: *Process, fd: i32, qpath: u64, ctl: u64, ctllen: u64, msg_len: u64
 /// opened from their posts, as many as fit (MSG_CTRUNC and closed
 /// otherwise).
 fn scmRecv(p: *Process, m: MsgHdr, flags: u32, got: ?ScmBatch) Err!void {
-    try p.writeU32(m.flags_va, 0);
+    try p.writeU32(m.flags_va, flags & MSG_CMSG_CLOEXEC);
     const b = got orelse {
         try p.writePtr(m.controllen_va, 0);
         return;
@@ -6290,7 +6551,7 @@ fn scmRecv(p: *Process, m: MsgHdr, flags: u32, got: ?ScmBatch) Err!void {
         putCmsgHdr(buf[@intCast(used)..][0..hdr], is32, len, SCM_RIGHTS);
         used += len;
     }
-    if (truncated) try p.writeU32(m.flags_va, MSG_CTRUNC);
+    if (truncated) try p.writeU32(m.flags_va, (flags & MSG_CMSG_CLOEXEC) | MSG_CTRUNC);
     if (used == 0) {
         try p.writePtr(m.controllen_va, 0);
         return;
@@ -7167,8 +7428,12 @@ fn epollCreate(p: *Process, flags: u32) Err!i64 {
 
 fn epollCtl(p: *Process, epfd: i32, op: u32, fd: i32, ev_va: u64) Err!i64 {
     const ep = epollOf(p, epfd) orelse return if (kc.fdInfo(epfd)) |_| -E.INVAL else |_| -E.BADF;
-    _ = kc.fdInfo(fd) catch return -E.BADF;
+    const info = kc.fdInfo(fd) catch return -E.BADF;
     if (fd == epfd) return -E.INVAL;
+    // A file or directory in a host tree or an overlay is always ready,
+    // and Linux won't watch one: EPERM, which tells Go's poller (and
+    // libuv's) to do blocking I/O on it instead.
+    if (op == 1 and (info.dc == 'U' or info.dc == 'O') and kc.rconvId(fd) == null) return -E.PERM;
     var events: u32 = 0;
     var data: u64 = 0;
     if (op != 2) {
