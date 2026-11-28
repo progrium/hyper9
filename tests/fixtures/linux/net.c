@@ -723,6 +723,45 @@ static void udp(void) {
 	printf("ok udp\n");
 }
 
+/* Erlang's resolver: a fresh UDP socket, before it sends, has nothing to
+ * read. poll says it's writable only, a nonblocking recv is EAGAIN (not
+ * ENOTCONN), and a recv blocked on it wakes for the reply to its first
+ * sendto, which another thread makes. */
+static int uf_sock;
+static char uf_buf[16];
+static void *uf_waiter(void *arg) {
+	(void)arg;
+	return (void *)(long)recv(uf_sock, uf_buf, sizeof uf_buf, 0);
+}
+static void udp_fresh(void) {
+	int s = socket(AF_INET, SOCK_DGRAM, 0);
+	struct pollfd pf = {s, POLLIN | POLLOUT, 0};
+	CHECK("udp_fresh", s >= 0 && poll(&pf, 1, 0) == 1 && pf.revents == POLLOUT);
+	char b[16];
+	errno = 0;
+	CHECK("udp_fresh", recv(s, b, sizeof b, MSG_DONTWAIT) < 0 && errno == EAGAIN);
+	int r = socket(AF_INET, SOCK_DGRAM, 0);
+	struct sockaddr_in a = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+	socklen_t n = sizeof a;
+	CHECK("udp_fresh", r >= 0 && bind(r, (void *)&a, sizeof a) == 0 && getsockname(r, (void *)&a, &n) == 0);
+	uf_sock = s;
+	pthread_t t;
+	CHECK("udp_fresh", pthread_create(&t, 0, uf_waiter, 0) == 0);
+	usleep(100000);
+	CHECK("udp_fresh", sendto(s, "ping", 4, 0, (void *)&a, sizeof a) == 4);
+	struct sockaddr_in from;
+	socklen_t fl = sizeof from;
+	CHECK("udp_fresh", recvfrom(r, b, sizeof b, 0, (void *)&from, &fl) == 4);
+	CHECK("udp_fresh", sendto(r, "pong", 4, 0, (void *)&from, fl) == 4);
+	alarm(10);
+	void *got;
+	CHECK("udp_fresh", pthread_join(t, &got) == 0 && (long)got == 4 && memcmp(uf_buf, "pong", 4) == 0);
+	alarm(0);
+	close(s);
+	close(r);
+	printf("ok udp_fresh\n");
+}
+
 /* QUIC stacks (quinn, quic-go): probe UDP_SEGMENT and UDP_GRO, which h9
  * refuses so they send a datagram per call, then batch with sendmmsg and
  * recvmmsg. recvmmsg returns what's queued without waiting for the rest. */
@@ -1167,6 +1206,7 @@ int main(int argc, char **argv) {
 		if (!strcmp(n, "exit_eof") || !strcmp(n, "net")) exit_eof();
 		if (!strcmp(n, "dual_bind") || !strcmp(n, "net")) dual_bind();
 		if (!strcmp(n, "udp") || !strcmp(n, "net")) udp();
+		if (!strcmp(n, "udp_fresh") || !strcmp(n, "net")) udp_fresh();
 		if (!strcmp(n, "udp_mmsg") || !strcmp(n, "net")) udp_mmsg();
 		if (!strcmp(n, "udp_fionread") || !strcmp(n, "net")) udp_fionread();
 		if (!strcmp(n, "many") || !strcmp(n, "net")) many();

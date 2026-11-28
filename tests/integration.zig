@@ -8936,6 +8936,12 @@ test "UDP sendto and recvfrom on an unconnected socket [linux-net]" {
     try netCase(&le, &.{ "--net=enable", "/mnt/term/cwd/net", "udp" }, "ok udp\n");
 }
 
+test "a fresh UDP socket has nothing to read until it sends, and a recv blocked on it wakes for the reply [linux-net]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "--net=enable", "/mnt/term/cwd/net", "udp_fresh" }, "ok udp_fresh\n");
+}
+
 test "sendmmsg and recvmmsg batch datagrams, and UDP_SEGMENT and UDP_GRO are refused, as QUIC stacks need [linux-net]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
