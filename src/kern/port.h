@@ -4,6 +4,7 @@
  * drawterm's kern and h9's additions, so structure layouts are the C
  * compiler's on every target.
  */
+#include "musl_timespec.h"	/* src/host's, before any system header */
 #include "u.h"
 #include "lib.h"
 #include "dat.h"

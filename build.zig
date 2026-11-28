@@ -676,6 +676,7 @@ fn kernPort(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.
     tc.addIncludePath(b.path("src/kern"));
     tc.addIncludePath(b.path("src/host"));
     for (flags) |f| if (std.mem.startsWith(u8, f, "-D")) tc.defineCMacroRaw(f[2..]);
+    if (target.result.isMuslLibC()) tc.defineCMacroRaw("H9_MUSL=1"); // src/host/musl_timespec.h
     if (target.result.os.tag == .macos) if (b.graph.environ_map.get("SDKROOT")) |sdk|
         tc.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr/include" }) });
     // Which kernel the Zig is built into, for the files only one of them
@@ -707,6 +708,7 @@ fn kernPort(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.
     // the kernel's Zig names and which calls back into it, with the host
     // C library through translate-c (src/host/libc.h).
     const libc = b.addTranslateC(.{ .root_source_file = b.path("src/host/libc.h"), .target = target, .optimize = optimize });
+    if (target.result.isMuslLibC()) libc.defineCMacroRaw("H9_MUSL=1"); // src/host/musl_timespec.h
     const devices = b.createModule(.{
         .root_source_file = b.path("src/host/devices.zig"),
         .target = target,

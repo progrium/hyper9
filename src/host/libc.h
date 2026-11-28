@@ -6,6 +6,7 @@
  */
 #ifndef _WIN32
 #define _FILE_OFFSET_BITS 64
+#include "musl_timespec.h"
 #ifndef __APPLE__
 #define _GNU_SOURCE 1
 #endif
