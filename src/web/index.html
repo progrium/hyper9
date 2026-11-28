@@ -62,8 +62,7 @@ if (!haveJSPI) {
   // (design/epoch-0/linux-personality.md), on ha64, h9's own arm64 CPU, with
   // nine-arm64.h9a's 9front commands at /9 when the build has them, so
   // /9/bin/wsmount can mount a host's /net.
-  // ?backend= picks the engine (hcpu, h9's own CPUs, is the only one; emu and v86
-  // are its old names).
+  // ?backend= picks the engine (hcpu, h9's own CPUs, is the only one).
   const params = new URLSearchParams(location.search);
   const linux = params.has('linux');
   // ?rio runs rio with acme in a canvas (design/epoch-0/browser-gfx.md).

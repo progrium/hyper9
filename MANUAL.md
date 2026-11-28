@@ -1454,8 +1454,8 @@ connect to other machines, and `9fs` mounts remote file servers.
 
   | Mode | Clients (`connect`) | Servers (`announce`) |
   | --- | --- | --- |
-  | `outbound` (the default) | Allowed, except to link-local addresses (169.254.0.0/16, fe80::/10) | Refused, "permission denied" |
-  | `enable` | Allowed, except link-local | Allowed |
+  | `outbound` (the default) | Allowed, except to link-local addresses (169.254.0.0/16, fe80::/10) and the cloud metadata endpoints `fd00:ec2::254` and `100.100.100.200` | Refused, "permission denied" |
+  | `enable` | Allowed, except link-local and those endpoints | Allowed |
   | `disable` (`--profile=tight`'s default) | `#I` is masked and `/net` is empty | — |
 
 - `--net-allow PATTERN` (repeatable) turns the network into an allowlist:
@@ -1463,7 +1463,8 @@ connect to other machines, and `9fs` mounts remote file servers.
   covers. A pattern is `proto!host!port`: `tcp`, `udp`, or `net` or `*` for
   both; an address, a CIDR range, a host name, `*.example.com` (one or more
   labels in front), or `*`; and a port, a range `8000-8999`, or `*`. With any
-  pattern, link-local addresses are reachable only if a pattern names them.
+  pattern, link-local addresses and the metadata endpoints are reachable only
+  if a pattern names them.
   A connect to an address that a name resolved to is allowed if the name's
   pattern allows it, so connect by name, through `cs`, rather than by
   address.
@@ -1719,7 +1720,8 @@ devices in Plan 9.
   tcp!127.0.0.1!53122`) before the program starts; the program finds every
   bound address in `$serve`. A unix socket is created mode 0600 next to a
   `PATH.lock` file, a stale socket from a run that crashed is replaced, and
-  both are removed at exit. A WebSocket listener accepts a request without
+  both are removed at exit. A WebSocket handshake over 4 KiB is refused
+  with 400. A WebSocket listener accepts a request without
   an `Origin` header, or with one listed by `--serve-origin`, and with
   `--serve-token @FILE` it also needs the token, as `Authorization: Bearer
   TOKEN` or `?token=TOKEN` (a browser can only use the query). Unix and TCP

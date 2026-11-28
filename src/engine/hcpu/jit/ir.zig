@@ -664,11 +664,6 @@ pub const Region = struct {
         r.blocks.deinit(gpa);
         r.handles.deinit(gpa);
     }
-
-    pub fn blockInsts(r: *const Region, b: BlockId) []const Inst {
-        const blk = r.blocks.items[b];
-        return r.insts.items[blk.start..][0..blk.len];
-    }
 };
 
 /// Builds a region a block at a time: reserve block ids with `block`,

@@ -105,9 +105,8 @@ try {
   };
   const test = step;
 
-  // rc on h9's own 386 CPU (h86): the default, and ?backend=v86, an old
-  // name for hcpu, which runs the same.
-  for (const backend of ['hcpu', 'v86']) {
+  // rc on h9's own 386 CPU (h86), the default engine, named.
+  for (const backend of ['hcpu']) {
     await page.goto(`${url}?backend=${backend}`);
     const on = (name, f) => step(`${backend}: ${name}`, f);
     await on('rc prompts', () => expect(/% $/, 0, 60_000));

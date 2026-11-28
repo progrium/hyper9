@@ -87,7 +87,7 @@ The machine's compiled plan is set per host thread, because each guest process r
 
 Under `--net=outbound` (the default profile's setting) `announce` is refused; `--net=enable` allows it.
 
-Without `--net-allow`, a `connect` to link-local addresses (169.254.0.0/16, fe80::/10) is refused in both modes, which keeps the common cloud metadata endpoint out of reach, and everything else is allowed.
+Without `--net-allow`, a `connect` to link-local addresses (169.254.0.0/16, fe80::/10) or to the cloud metadata endpoints outside link-local (AWS's IPv6 `fd00:ec2::254` and Alibaba Cloud's `100.100.100.200`) is refused in both modes (`refusedByDefault` in `src/policy.zig`), which keeps the metadata services out of reach, and everything else is allowed.
 
 With patterns, the patterns are the whole policy: a `connect` must match one, by protocol (`tcp`, `udp`, or `net`/`*`), address (an address, a CIDR range, or `*`) and port (a number, a range, or `*`). IPv4 is matched as IPv4, however devip spelled it.
 
@@ -184,7 +184,7 @@ With no sandbox flags the guest can work in the host cwd and nothing else:
 | Host cwd (`/mnt/term/cwd`) | Read-write |
 | Rest of the host filesystem | Not visible |
 | `/tmp` | Private and writable, in memory (an overlay over the root tree's empty `/tmp`); read-only under `--write=none` |
-| Network | Outbound: clients can connect anywhere except link-local, servers can't announce |
+| Network | Outbound: clients can connect anywhere except link-local and the cloud metadata endpoints, servers can't announce |
 | Host commands (`#C`) | Masked |
 | Environment | Only the default guest variables plus `--env` |
 | Memory | The guest-physical region size (1 GiB; `--memory` sets it, up to 32 GiB) |

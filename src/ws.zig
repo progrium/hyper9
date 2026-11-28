@@ -388,9 +388,14 @@ pub const Request = struct {
     version13: bool = false,
     buf: [4096]u8 = undefined,
     used: usize = 0,
+    /// Whether something didn't fit in `buf`: `readRequest` then fails,
+    /// since a header that was cut off (an `Origin`, say) would go
+    /// unchecked.
+    full: bool = false,
 
     fn keep(q: *Request, s: []const u8) []const u8 {
         const n = @min(s.len, q.buf.len - q.used);
+        if (n < s.len) q.full = true;
         @memcpy(q.buf[q.used..][0..n], s[0..n]);
         defer q.used += n;
         return q.buf[q.used..][0..n];
@@ -415,7 +420,9 @@ pub const Request = struct {
 };
 
 /// Reads a client's opening handshake (the server side). Any method is
-/// read, so the caller can answer one that isn't `GET` with 405.
+/// read, so the caller can answer one that isn't `GET` with 405. A
+/// request whose line and headers don't fit in `Request.buf` (4 KiB) is
+/// refused whole, so no header is checked by part of it, or missed.
 pub fn readRequest(r: *Reader, q: *Request) HandshakeError!void {
     const first = try readLine(r);
     // GET /path HTTP/1.1
@@ -444,6 +451,7 @@ pub fn readRequest(r: *Reader, q: *Request) HandshakeError!void {
         if (std.ascii.eqlIgnoreCase(name, "sec-websocket-protocol")) proto_at = .{ vat, q.used };
         _ = q.keep("\n");
     }
+    if (q.full) return error.BadResponse;
     q.headers = q.buf[start..q.used];
     if (key_at) |k| q.key = q.buf[k[0]..k[1]];
     if (proto_at) |p| q.protocols = q.buf[p[0]..p[1]];
@@ -1285,4 +1293,8 @@ test "a listener's checks: path, method, upgrade, Origin, token, and subprotocol
     q = .{};
     try req.of("GET / HTTP/1.1\r\n" ++ up ++ "Origin: http://localhost:8000\r\n\r\n", &q);
     try t.expectEqual(@as(u16, 403), checkUpgrade(&q, .{}).refuse);
+    // Headers past the buffer refuse the request, rather than leave the
+    // Origin after them unchecked.
+    q = .{};
+    try t.expectError(error.BadResponse, req.of("GET / HTTP/1.1\r\n" ++ up ++ "X-Pad: " ++ @as([4100]u8, @splat('a')) ++ "\r\nOrigin: http://evil.example\r\n\r\n", &q));
 }

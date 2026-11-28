@@ -337,7 +337,7 @@ pub const Plan = struct {
             .announce => return p.net == .enable,
             .connect => {},
         }
-        if (p.net_allow.len == 0) return !isLinkLocal(addr) or (port == 53 and p.isNameserver(addr));
+        if (p.net_allow.len == 0) return !refusedByDefault(addr) or (port == 53 and p.isNameserver(addr));
         const pr = proto orelse return false;
         for (p.net_allow) |pat| if (pat.matchAddr(pr, addr, port)) return true;
         const names = p.names orelse return false;
@@ -1028,9 +1028,8 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         if (net_allow.len > 0) try caveats.append(arena, "the browser resolves names itself, so --net-allow checks a name, not the addresses it resolves to, and link-local names aren't refused");
     } else if (net != .disable) {
         if (net_allow.len == 0) {
-            try caveats.append(arena, "outbound connections can reach any address the host can except link-local, including its loopback and local network");
+            try caveats.append(arena, "outbound connections can reach any address the host can except link-local and known cloud metadata endpoints, including its loopback and local network");
             if (ll_dns) try caveats.append(arena, "a Linux program can reach the host's link-local DNS server on port 53");
-            try caveats.append(arena, "refusing link-local doesn't cover every cloud metadata endpoint: some, such as fd00:ec2::254 and 100.100.100.200, use other ranges");
             try caveats.append(arena, "the guest can make the host resolve any name");
         }
         if (name_patterns) try caveats.append(arena, "name patterns trust the host's resolver: a name is allowed to reach whatever address it resolves to");
@@ -1564,10 +1563,26 @@ fn prefixMatch(p: *const [16]u8, a: *const [16]u8, bits: u8) bool {
     return (p[whole] & mask) == (a[whole] & mask);
 }
 
-/// 169.254.0.0/16 and fe80::/10, refused without --net-allow.
+/// 169.254.0.0/16 and fe80::/10.
 pub fn isLinkLocal(a: *const [16]u8) bool {
     if (isV4(a)) return a[12] == 169 and a[13] == 254;
     return a[0] == 0xfe and (a[1] & 0xc0) == 0x80;
+}
+
+/// Cloud metadata endpoints outside link-local: AWS's IPv6 IMDS,
+/// fd00:ec2::254 (a unique local address), and Alibaba Cloud's
+/// 100.100.100.200 (in the shared address space, 100.64.0.0/10).
+const metadata_addrs = [_][16]u8{
+    .{ 0xfd, 0x00, 0x0e, 0xc2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02, 0x54 },
+    v4_prefix ++ .{ 100, 100, 100, 200 },
+};
+
+/// What a connect without --net-allow is refused: link-local, where most
+/// clouds' metadata service is, and the metadata endpoints elsewhere.
+pub fn refusedByDefault(a: *const [16]u8) bool {
+    if (isLinkLocal(a)) return true;
+    for (&metadata_addrs) |*m| if (std.mem.eql(u8, m, a)) return true;
+    return false;
 }
 
 /// Parses an IPv4 or IPv6 address into devip's 16-byte form, IPv4 as
@@ -2873,6 +2888,15 @@ test "net: CIDR edges and IPv4-mapped matching" {
     try t.expect(!isLinkLocal(&tip("fec0::1")));
     try t.expect(!isLinkLocal(&tip("::a9fe:a9fe")));
     try t.expect(!isLinkLocal(&tip("127.0.0.1")));
+    // And the metadata endpoints outside it.
+    try t.expect(refusedByDefault(&tip("169.254.169.254")));
+    try t.expect(refusedByDefault(&tip("fd00:ec2::254")));
+    try t.expect(refusedByDefault(&tip("fd00:0ec2:0:0:0:0:0:254")));
+    try t.expect(refusedByDefault(&tip("100.100.100.200")));
+    try t.expect(refusedByDefault(&tip("::ffff:100.100.100.200")));
+    try t.expect(!refusedByDefault(&tip("100.100.100.201")));
+    try t.expect(!refusedByDefault(&tip("fd00:ec2::253")));
+    try t.expect(!refusedByDefault(&tip("127.0.0.1")));
 }
 
 test "net: port ranges and name wildcards" {

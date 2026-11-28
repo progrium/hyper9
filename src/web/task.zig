@@ -14,7 +14,6 @@ extern fn h9_task_unpark(t: *Task) void;
 extern fn h9_task_yield() void;
 extern fn h9_task_sleep(ms: c_long) void;
 extern fn h9_task_await(id: i32) i32;
-extern fn h9_task_maxdepth() usize;
 
 /// Runs f() as the executor's first task, and the executor until f
 /// returns: main's body on the web host.
@@ -56,11 +55,6 @@ pub fn sleep(ms: i64) void {
 pub inline fn blocking(comptime f: anytype, args: anytype) i32 {
     const id: i32 = @call(.auto, f, args);
     return h9_task_await(id);
-}
-
-/// The deepest stack use of any task so far, seen at a park or a yield.
-pub fn maxDepth() usize {
-    return h9_task_maxdepth();
 }
 
 /// A task in place of a host thread, with std.Thread's spawn, join and

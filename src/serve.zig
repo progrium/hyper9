@@ -430,7 +430,9 @@ fn listenIp(io: Io, addr: net.IpAddress) BindError!net.Server {
 }
 
 /// A unix socket listener, made mode 0600, after taking `PATH.lock` and
-/// clearing a stale socket left by an earlier run.
+/// clearing a stale socket left by an earlier run. The lock file is opened
+/// without following a link, so one planted in a shared directory can't
+/// make h9 create a file where it points.
 fn bindUnix(s: *Server, l: *Listener, p: []const u8) BindError!void {
     if (!posix) return error.Unsupported;
     const c = std.c;
@@ -438,12 +440,13 @@ fn bindUnix(s: *Server, l: *Listener, p: []const u8) BindError!void {
     const pz = try gpa.dupeSentinel(u8, p, 0);
     errdefer gpa.free(pz);
     const lz = try std.fmt.allocPrintSentinel(gpa, "{s}.lock", .{p}, 0);
-    const lfd = c.open(lz, .{ .ACCMODE = .RDWR, .CREAT = true, .CLOEXEC = true }, @as(c.mode_t, 0o600));
+    const lfd = c.open(lz, .{ .ACCMODE = .RDWR, .CREAT = true, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0o600));
     if (lfd < 0) {
         gpa.free(lz);
         return switch (std.posix.errno(-1)) {
             .ACCES, .PERM => error.AccessDenied,
             .NAMETOOLONG => error.NameTooLong,
+            .LOOP => error.NotSocket,
             else => error.Failed,
         };
     }
@@ -461,18 +464,56 @@ fn bindUnix(s: *Server, l: *Listener, p: []const u8) BindError!void {
         if (unixAnswers(p)) return error.AddressInUse;
         _ = c.unlink(pz);
     } else |_| {}
-    const ua = net.UnixAddress.init(p) catch return error.NameTooLong;
-    const old = c.umask(0o177);
-    const srv = ua.listen(s.io, .{});
-    _ = c.umask(old);
-    l.server = srv catch |e| return switch (e) {
+    _ = net.UnixAddress.init(p) catch return error.NameTooLong;
+    try listenPrivate(s, l, pz);
+    l.sock_path = pz;
+}
+
+extern "c" fn mkdtemp(template: [*:0]u8) ?[*:0]u8;
+
+/// Listens on a unix socket at `pz` that only the user can connect to.
+/// The socket is bound in a new 0700 directory beside `pz`, made 0600,
+/// and renamed into place, so it's never reachable with the umask's
+/// looser mode, without changing the process's umask, which other
+/// threads (an embedder's other machines) share. A path too long for
+/// that is bound in place, then made 0600.
+fn listenPrivate(s: *Server, l: *Listener, pz: [:0]const u8) BindError!void {
+    const c = std.c;
+    const gpa = s.gpa;
+    const dir = std.fs.path.dirname(pz) orelse ".";
+    const tmpl = try std.fmt.allocPrintSentinel(gpa, "{s}/.h9sock-XXXXXX", .{dir}, 0);
+    defer gpa.free(tmpl);
+    const tmp_sock = try std.fmt.allocPrintSentinel(gpa, "{s}/s", .{tmpl}, 0);
+    defer gpa.free(tmp_sock);
+    const staged = net.UnixAddress.init(tmp_sock) catch null;
+    if (staged != null and mkdtemp(tmpl.ptr) != null) {
+        // mkdtemp filled in tmpl's X's; tmp_sock was formatted before, so
+        // copy them over.
+        @memcpy(tmp_sock[0..tmpl.len], tmpl);
+        defer _ = c.rmdir(tmpl);
+        const ua = net.UnixAddress.init(tmp_sock) catch unreachable;
+        try listenAt(s, l, ua);
+        _ = c.chmod(tmp_sock, 0o600);
+        if (c.rename(tmp_sock, pz) != 0) {
+            _ = c.unlink(tmp_sock);
+            l.server.deinit(s.io);
+            l.open = false;
+            return error.Failed;
+        }
+        return;
+    }
+    const ua = net.UnixAddress.init(pz) catch return error.NameTooLong;
+    try listenAt(s, l, ua);
+    _ = c.chmod(pz, 0o600);
+}
+
+fn listenAt(s: *Server, l: *Listener, ua: net.UnixAddress) BindError!void {
+    l.server = ua.listen(s.io, .{}) catch |e| return switch (e) {
         error.AddressInUse => error.AddressInUse,
         error.AccessDenied, error.PermissionDenied => error.AccessDenied,
         else => error.Failed,
     };
     l.open = true;
-    _ = c.chmod(pz, 0o600);
-    l.sock_path = pz;
 }
 
 /// Whether something accepts a connection on the unix socket at `p`.

@@ -1562,14 +1562,6 @@ fn unadd(u: *Unc, ch: *Chan, m: *const Member) void {
     u.n += 1;
 }
 
-/// The index of member id in the instance, or null once it's gone. Under in.ql.
-fn unmemidx(in: *Inst, id: c_int) ?usize {
-    for (in.members(), 0..) |m, i|
-        if (m.id == id)
-            return i;
-    return null;
-}
-
 /// Puts u at the union's top: each member rooted there.
 fn untop(u: *Unc) Error!void {
     const in = u.inst;

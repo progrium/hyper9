@@ -118,10 +118,6 @@ fn errno() c_int {
     return std.c._errno().*;
 }
 
-fn setErrno(e: c_int) void {
-    std.c._errno().* = e;
-}
-
 /// The host's error, as the process's error string.
 fn oserr() error{Kernel} {
     return oserrOf(errno());
