@@ -7122,6 +7122,36 @@ test "--dir on #L/etc adds a member under the Linux tree's /etc [mounts]" {
     try std.testing.expectEqualStrings("nameserver 192.0.2.1\nhi\npasswd\n", r.out);
 }
 
+test "a rename across directories in a --dir on #L moves the file, as on Linux [mounts]" {
+    // A union with no up member renamed only within one directory, and
+    // every other rename was EXDEV, which rustc's .rmeta writes fail on.
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    var p: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+    const r = try runLinux(&le, false, &.{ "--dir", try std.fmt.bufPrint(&p, "{s}:#L/w:rw", .{s.path}), "env", "DIR=/w", "/mnt/term/cwd/files", "rename_across" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("ok rename_across\n", r.out);
+}
+
+test "an fstat through a --dir on #L matches the path's stat, to the nanosecond [mounts]" {
+    // An open file's union chan has its member open, which overlay's
+    // getattr didn't ask, so fstat had whole seconds and no change time.
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    var p: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+    const r = try runLinux(&le, false, &.{ "--dir", try std.fmt.bufPrint(&p, "{s}:#L/w:rw", .{s.path}), "env", "DIR=/w", "/mnt/term/cwd/files", "fstat_stat" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("ok fstat_stat\n", r.out);
+}
+
 test "#λ is an alias for #L in namespace files [mounts]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
@@ -8245,6 +8275,18 @@ test "exec closing a child's last close-on-exec fd of a file releases its flock 
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/files", "flock_exec" }, "ok flock_exec\n");
+}
+
+test "dup2 and F_DUPFD reach an fd far past the table [linux-personality]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "dup_high" }, "ok dup_high\n");
+}
+
+test "a close-on-exec fd's O_NONBLOCK doesn't outlive exec onto the next fd of its number [linux-personality]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "exec_flags" }, "ok exec_flags\n");
 }
 
 /// Runs the files fixture's case `name` in $DIR on a .L mount of the

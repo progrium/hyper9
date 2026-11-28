@@ -594,12 +594,16 @@ pub const Process = struct {
     /// otherwise never see go).
     pub fn execFds(p: *Process) void {
         var fdbuf: [1024]c_int = undefined;
-        for (fdbuf[0..@min(fdbuf.len, kc.fds(&fdbuf))]) |fd| {
+        const fds = fdbuf[0..@min(fdbuf.len, kc.fds(&fdbuf))];
+        var ncexec: usize = 0;
+        for (fds) |fd| {
             const info = kc.fdInfo(fd) catch continue;
             if (!info.cexec) continue;
             releaseLocks(p, fd);
             unixClosed(p, fd);
             kc.rclose(fd);
+            fds[ncexec] = fd;
+            ncexec += 1;
         }
         const g = p.g;
         g.lockSpin();
@@ -607,6 +611,13 @@ pub const Process = struct {
         var it = g.dirbufs.iterator();
         while (it.next()) |e| unrefDirBuf(p.gpa, e.value_ptr.*);
         g.dirbufs.clearRetainingCapacity();
+        // The close-on-exec fds' flags go with them. They're still open
+        // here, so the sweep below keeps them, and pipe2, socketpair, and
+        // the rest set a new fd's flags only when they're asked to: a
+        // parent's O_NONBLOCK on a close-on-exec fd (cargo's) became the
+        // child's next fd of that number, and Rust's spawn read EAGAIN
+        // from its blocking CLOEXEC socket ("the CLOEXEC pipe failed").
+        for (fds[0..ncexec]) |fd| _ = g.fdflags.remove(fd);
         // Flags of fds that survive stay; closed ones are dropped as
         // their numbers are reused (see `fdClosed`).
         var dead: std.ArrayList(i32) = .empty;

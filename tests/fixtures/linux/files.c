@@ -170,6 +170,44 @@ static void flock_exec(void) {
 	printf("ok flock_exec\n");
 }
 
+/* A close-on-exec fd's O_NONBLOCK goes with it at exec: the new
+ * program's next pipe or socket on that number is blocking. Cargo's
+ * nonblocking close-on-exec fd became rustc's, and Rust's spawn read
+ * EAGAIN from its blocking CLOEXEC socket. */
+static void exec_flags_child(void) {
+	int p[2];
+	while (pipe2(p, 0) == 0 && p[0] != 60 && p[1] != 60 && p[1] < 60)
+		;
+	int fl = fcntl(60, F_GETFL);
+	CHECK("exec_flags", fl >= 0 && (fl & O_NONBLOCK) == 0);
+	printf("ok exec_flags\n");
+}
+
+static void exec_flags(void) {
+	int sv[2];
+	CHECK("exec_flags", socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, sv) == 0);
+	CHECK("exec_flags", dup3(sv[0], 60, O_CLOEXEC) == 60 && fcntl(60, F_SETFL, O_NONBLOCK) == 0);
+	CHECK("exec_flags", (fcntl(60, F_GETFL) & O_NONBLOCK) != 0);
+	pid_t c = fork();
+	if (c == 0) {
+		execl("/proc/self/exe", "files", "exec_flags_child", (char *)0);
+		_exit(3);
+	}
+	int st;
+	CHECK("exec_flags", waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0);
+	close(60);
+	close(sv[0]);
+	close(sv[1]);
+}
+
+/* dup2 and F_DUPFD reach any fd under the limit, not only the next
+ * few past the table, in a process that has opened nothing. */
+static void dup_high(void) {
+	CHECK("dup_high", dup2(1, 200) == 200 && fcntl(1, F_DUPFD, 300) == 300);
+	CHECK("dup_high", fcntl(200, F_GETFD) == 0 && close(200) == 0 && close(300) == 0);
+	printf("ok dup_high\n");
+}
+
 static void shared_map(void) {
 	int fd = fresh("shm");
 	/* SQLite's -shm: grown by writing its last byte, then mapped at an offset. */
@@ -339,6 +377,23 @@ static void setattr_ns(void) {
 	CHECK("setattr_ns", (st.st_mode & 0777) == 0640 && st.st_size == 1 && st.st_mtim.tv_nsec == 5);
 	close(fd);
 	printf("ok setattr_ns\n");
+}
+
+/* An open file's fstat is its path's stat: the same inode, size, and
+ * times to the nanosecond, change time too. git records a file's fstat
+ * and checks its stat later, and died "shallow file has changed since we
+ * read it" when an fstat through a union had whole seconds. */
+static void fstat_stat(void) {
+	int fd = fresh("fstatf");
+	CHECK("fstat_stat", fd >= 0 && write(fd, "hello", 5) == 5);
+	struct stat a, b;
+	CHECK("fstat_stat", fstat(fd, &a) == 0 && stat(path, &b) == 0);
+	CHECK("fstat_stat", a.st_dev == b.st_dev && a.st_ino == b.st_ino && a.st_size == b.st_size);
+	CHECK("fstat_stat", a.st_mtim.tv_sec == b.st_mtim.tv_sec && a.st_mtim.tv_nsec == b.st_mtim.tv_nsec);
+	CHECK("fstat_stat", a.st_ctim.tv_sec == b.st_ctim.tv_sec && a.st_ctim.tv_nsec == b.st_ctim.tv_nsec);
+	close(fd);
+	unlink(path);
+	printf("ok fstat_stat\n");
 }
 
 static void fsync_rusage(void) {
@@ -1162,6 +1217,9 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "posix_locks")) posix_locks();
 		if (all || !strcmp(n, "ofd_flock")) ofd_flock();
 		if (all || !strcmp(n, "flock_exec")) flock_exec();
+		if (!strcmp(n, "exec_flags")) exec_flags();
+		if (all || !strcmp(n, "dup_high")) dup_high();
+		if (!strcmp(n, "exec_flags_child")) exec_flags_child();
 		if (!strcmp(n, "lock_wake")) lock_wake();
 		if (all || !strcmp(n, "shared_map")) shared_map();
 		if (all || !strcmp(n, "fixed_shared")) fixed_shared();
@@ -1171,6 +1229,7 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "fsync_rusage")) fsync_rusage();
 		if (!strcmp(n, "fsync_file")) fsync_file();
 		if (!strcmp(n, "setattr_ns")) setattr_ns();
+		if (all || !strcmp(n, "fstat_stat")) fstat_stat();
 		if (all || !strcmp(n, "dir_sync")) dir_sync();
 		if (all || !strcmp(n, "sync_open")) sync_open();
 		if (all || !strcmp(n, "read_cache")) read_cache();
