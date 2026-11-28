@@ -1911,8 +1911,7 @@ pub const Mm = struct {
         // thread's write fault could copy a chunk (`own`) while the
         // second still writes the old pages, and those writes would be
         // lost: a program whose threads write shared pages while one
-        // forks (pnpm's PATH string came out with a stale entry) read
-        // back older values.
+        // forks read back older values.
         if (made_cow and m.refs.load(.acquire) > 1) m.shootdownAll();
         return n;
     }
