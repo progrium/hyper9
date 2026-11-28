@@ -7010,6 +7010,13 @@ const LinuxEnv = struct {
 
 fn linuxEnv(comptime src: std.builtin.SourceLocation, le: *LinuxEnv) !void {
     try skipPending(src.fn_name);
+    // -Dweb builds no Linux fixtures (build.zig), so these cases ran on
+    // the web host only when a native 386 run had left its fixtures and
+    // Alpine root behind, and then many failed on what the web host
+    // can't do: TCP and UDP (ipsock-wasm.c), 9P and .L servers over TCP,
+    // the FIFOs, links, modes, and times WASI's host trees lack, and a
+    // host terminal. The web host's Linux runs are web-test's ?linux.
+    if (onWeb()) return skip("the web host's Linux runs are zig build web-test's (-Dweb builds no Linux fixtures)", .{});
     const h9 = getenv(0, "H9_TEST_BIN") orelse return skip("no h9 (H9_TEST_BIN)", .{});
     const arch = getenv(4, "H9_TEST_ARCH") orelse switch (builtin.cpu.arch) {
         .aarch64 => "arm64",
