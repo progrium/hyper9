@@ -1085,7 +1085,15 @@ const E = struct {
                 try w.byte(if (i.op == .neg) (if (is64(t)) @as(u8, 0x7D) else 0x6B) else (if (is64(t)) @as(u8, 0x85) else 0x73));
                 try e.mask(t);
             },
+            .rbit, .bswap => try e.bitRev(i.op == .rbit, t, i.a),
             .clz, .ctz, .popcnt => {
+                // clz(rbit x) is ctz x, the arm64 idiom for ctz.
+                const ai = e.r.insts.items[i.a];
+                if (i.op == .clz and ai.op == .rbit and ai.ty == t and (t == .i32 or is64(t)) and e.plan.kind[i.a] == .inl) {
+                    try e.val(ai.a);
+                    try w.byte(if (is64(t)) @as(u8, 0x7A) else 0x68);
+                    return;
+                }
                 try e.val(i.a);
                 if (is64(t)) {
                     try w.byte(switch (i.op) {
@@ -1125,7 +1133,7 @@ const E = struct {
                 try w.byte(0x0B);
             },
             .mulhu, .mulhs => {
-                if (is64(t)) return e.fallback(i);
+                if (is64(t)) return e.mulh64(i);
                 const s = i.op == .mulhs;
                 if (t == .i32) {
                     try e.val(i.a);
@@ -1295,27 +1303,7 @@ const E = struct {
             },
             .load, .store => try e.memOp(i),
             .@"v.load", .@"v.store" => try e.vmemOp(i),
-            .cas => {
-                // Always the runtime's, as on arm64.
-                const f: ir.MemFlags = @bitCast(i.aux);
-                try w.get(0);
-                try e.val64(i.a);
-                try w.i32c(f.size);
-                try e.val64(i.b);
-                try e.val64(i.c);
-                try w.call(F_SLOW_CAS);
-                try w.tee(e.l32(.code));
-                try e.open(0x04, .other);
-                try e.retireOn(i.retired);
-                try w.get(0);
-                try w.i64c(i.aux2);
-                try w.memop(0x37, ctx.off.exit_pc);
-                try e.br(.exit);
-                try e.end();
-                try w.get(0);
-                try w.memop(0x29, ctx.off.scratch);
-                if (wt(t).? == I32) try w.byte(0xA7);
-            },
+            .cas => try e.casOp(i),
             .fence => {}, // one thread per memory in the browser
             .@"call.interp" => {
                 try e.flushDirty();
@@ -1951,6 +1939,205 @@ const E = struct {
             try w.i32c(1);
             try w.byte(0x73);
         }
+    }
+
+    /// rbit or bswap of the value at ref, of type t, by mask-and-shift
+    /// swaps in a scratch local.
+    fn bitRev(e: *E, rbit: bool, t: Type, ref: Ref) !void {
+        const w = &e.w;
+        const wide = is64(t);
+        const wty: u8 = if (wide) I64 else I32;
+        const d: u8 = if (wide) 0 else 0x12;
+        const x = e.scratch(wty, 2);
+        if (!rbit and t == .i8) return e.val(ref);
+        try e.val(ref);
+        try w.set(x);
+        const Step = struct { u6, u64 };
+        const steps64 = [_]Step{ .{ 1, 0x5555_5555_5555_5555 }, .{ 2, 0x3333_3333_3333_3333 }, .{ 4, 0x0f0f_0f0f_0f0f_0f0f }, .{ 8, 0x00ff_00ff_00ff_00ff }, .{ 16, 0x0000_ffff_0000_ffff } };
+        const first: usize = if (rbit) 0 else 3;
+        const last: usize = if (wide) 5 else 4;
+        for (steps64[first..last]) |st| {
+            // x = ((x >> s) & m) | ((x & m) << s)
+            for (0..2) |k| {
+                try w.get(x);
+                if (k == 0) {
+                    if (wide) try w.i64c(st[0]) else try w.i32c(st[0]);
+                    try w.byte(0x88 - d); // shr_u
+                }
+                if (wide) try w.i64c(st[1]) else try w.i32c(@truncate(st[1]));
+                try w.byte(0x83 - d); // and
+                if (k == 1) {
+                    if (wide) try w.i64c(st[0]) else try w.i32c(st[0]);
+                    try w.byte(0x86 - d); // shl
+                }
+            }
+            try w.byte(0x84 - d); // or
+            try w.set(x);
+        }
+        // The last swap is a rotate by half the word.
+        try w.get(x);
+        if (wide) try w.i64c(32) else try w.i32c(16);
+        try w.byte(0x89 - d); // rotl
+        if (!wide and t != .i32) {
+            try w.i32c(32 - t.bits());
+            try w.byte(0x76); // i32.shr_u
+        }
+    }
+
+    /// The high word of a 64-bit multiply, from 32-bit halves.
+    fn mulh64(e: *E, i: ir.Inst) !void {
+        const w = &e.w;
+        _ = try e.stash2(i.a, i.b);
+        const A = e.scratch(I64, 0);
+        const B = e.scratch(I64, 1);
+        const T = e.scratch(I64, 2);
+        const HL = e.l64(.sv);
+        const lo = struct {
+            fn f(ww: *W, l: u32) !void {
+                try ww.get(l);
+                try ww.i64c(0xffff_ffff);
+                try ww.byte(0x83);
+            }
+        }.f;
+        const hi = struct {
+            fn f(ww: *W, l: u32) !void {
+                try ww.get(l);
+                try ww.i64c(32);
+                try ww.byte(0x88);
+            }
+        }.f;
+        // T = lo(A) * hi(B)
+        try lo(w, A);
+        try hi(w, B);
+        try w.byte(0x7E);
+        try w.set(T);
+        // H = hi(A) * hi(B) + hi(T)
+        try hi(w, A);
+        try hi(w, B);
+        try w.byte(0x7E);
+        try hi(w, T);
+        try w.byte(0x7C);
+        // T = hi(lo(A) * lo(B)) + lo(T)
+        try lo(w, A);
+        try lo(w, B);
+        try w.byte(0x7E);
+        try w.i64c(32);
+        try w.byte(0x88);
+        try lo(w, T);
+        try w.byte(0x7C);
+        try w.set(T);
+        // HL = hi(A) * lo(B); H += hi(HL) + hi(T + lo(HL))
+        try hi(w, A);
+        try lo(w, B);
+        try w.byte(0x7E);
+        try w.set(HL);
+        try hi(w, HL);
+        try w.byte(0x7C);
+        try w.get(T);
+        try lo(w, HL);
+        try w.byte(0x7C);
+        try w.i64c(32);
+        try w.byte(0x88);
+        try w.byte(0x7C);
+        if (i.op == .mulhs) {
+            // H -= (A < 0 ? B : 0) + (B < 0 ? A : 0)
+            for ([_][2]u32{ .{ A, B }, .{ B, A } }) |p| {
+                try w.get(p[0]);
+                try w.i64c(63);
+                try w.byte(0x87); // shr_s
+                try w.get(p[1]);
+                try w.byte(0x83);
+                try w.byte(0x7D);
+            }
+        }
+    }
+
+    /// cas: the write TLB's fast path when the address hits and is aligned
+    /// (one thread per memory in the browser, so a plain load and store),
+    /// else the runtime's slow_cas, which faults on misalignment.
+    fn casOp(e: *E, i: ir.Inst) !void {
+        const w = &e.w;
+        const f: ir.MemFlags = @bitCast(i.aux);
+        const n: u32 = f.bytes();
+        const va = e.l64(.va);
+        const ent = e.l32(.ent);
+        const exp = e.l64(.s0);
+        const new = e.l64(.sv);
+        const old = e.l64(.s1);
+        const host = e.l32(.sv);
+        // All three on the stack first: an inlined operand may use the
+        // scratch locals.
+        try e.val64(i.a);
+        try e.val64(i.b);
+        try e.val64(i.c);
+        try w.set(new);
+        try w.set(exp);
+        try w.set(va);
+        // ent = tlb + write table + ((va >> 12) & 255) * 16
+        try w.get(e.l32(.tlb));
+        try w.get(va);
+        try w.i64c(mem.page_shift);
+        try w.byte(0x88);
+        try w.byte(0xA7);
+        try w.i32c(mem.entries - 1);
+        try w.byte(0x71);
+        try w.i32c(4);
+        try w.byte(0x74);
+        try w.byte(0x6A);
+        try w.tee(ent);
+        // hit = tag == va >> 12 && va % n == 0 (so it's in the page)
+        try w.memop(0x29, mem.tlb_write_off);
+        try w.get(va);
+        try w.i64c(mem.page_shift);
+        try w.byte(0x88);
+        try w.byte(0x51);
+        try w.get(va);
+        try w.i64c(n - 1);
+        try w.byte(0x83);
+        try w.byte(0x50); // i64.eqz
+        try w.byte(0x71);
+        try w.bytes(&[_]u8{ 0x04, I64 });
+        try e.push(.other);
+        try w.get(va);
+        try w.get(ent);
+        try w.memop(0x29, mem.tlb_write_off + 8);
+        try w.byte(0x7C);
+        try w.byte(0xA7);
+        try w.tee(host);
+        try w.memop(memLoadOp(I64, f.size, false), 0);
+        try w.tee(old);
+        try w.get(exp);
+        try w.byte(0x51); // i64.eq
+        try w.bytes(&[_]u8{ 0x04, VOID });
+        try w.get(host);
+        try w.get(new);
+        try w.memop(switch (f.size) {
+            0 => @as(u8, 0x3C),
+            1 => 0x3D,
+            2 => 0x3E,
+            else => 0x37,
+        }, 0);
+        try w.byte(0x0B);
+        try w.get(old);
+        try w.byte(0x05); // else: the slow path
+        try w.get(0);
+        try w.get(va);
+        try w.i32c(f.size);
+        try w.get(exp);
+        try w.get(new);
+        try w.call(F_SLOW_CAS);
+        try w.tee(e.l32(.code));
+        try e.open(0x04, .other);
+        try e.retireOn(i.retired);
+        try w.get(0);
+        try w.i64c(i.aux2);
+        try w.memop(0x37, ctx.off.exit_pc);
+        try e.br(.exit);
+        try e.end();
+        try w.get(0);
+        try w.memop(0x29, ctx.off.scratch);
+        try e.end();
+        if (wt(i.ty).? == I32) try w.byte(0xA7);
     }
 
     fn memOp(e: *E, i: ir.Inst) !void {

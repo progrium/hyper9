@@ -185,6 +185,18 @@ pub fn generate(gpa: std.mem.Allocator) ![]Case {
             \\  exit.chain #0x0
         , .{ op, ty }) });
     };
+    // clz of rbit, arm64's ctz, which an emitter may fuse.
+    for ([_]u64{ 0, 1, 0x0000_00f0_0000_0080, 0x8000_0000_0000_0000 }) |v| for ([_][]const u8{ "i64", "i32" }) |ty| {
+        try list.append(gpa, .{ .regs = .{ v, 0, 0, 0, 0, 0, 0, 0 }, .text = try std.fmt.allocPrint(gpa,
+            \\b0:
+            \\  %0 = getreg:{0s} #0x0
+            \\  %1 = rbit:{0s} %0
+            \\  %2 = clz:{0s} %1
+            \\  %3 = zext:i64 %2
+            \\  setreg %3 #0x8
+            \\  exit.chain #0x0
+        , .{ty}) });
+    };
     // Flags and conditions, both groups.
     const fvals = [_][2]u64{ .{ 0, 1 }, .{ 5, 5 }, .{ 0x7fff_ffff, 1 }, .{ 0xffff_ffff_ffff_ffff, 1 }, .{ 0x8000_0000_0000_0000, 1 } };
     for ([_][]const u8{ "i64", "i32" }) |ty| for (fvals) |v| for (0..16) |cc| {
