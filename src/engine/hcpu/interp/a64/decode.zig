@@ -51,6 +51,9 @@ pub const Kind = enum(u16) {
     undef,
     /// The sentinel after a decoded page's last op: imm is the next page.
     next_page,
+    /// Not decoded yet: T0 decodes it in place on its first run
+    /// (exec.decodePage). decode never returns it.
+    lazy,
 
     // ---- data processing, immediate
     /// Rd = imm: MOVZ, MOVN, ADR, ADRP, and ORR (immediate) from ZR.
@@ -462,6 +465,7 @@ pub fn info(k: Kind) Info {
     return switch (k) {
         .undef => .{ .ctrl = .undef },
         .next_page => .{ .ctrl = .page_end },
+        .lazy => .{},
         .movi => .{ .d = .w },
         .movk_x, .movk_w, .bfxil_x, .bfxil_w, .bfi_x, .bfi_w => .{ .d = .rw, .n = if (k == .movk_x or k == .movk_w) .none else .r },
         .add_imm_x, .add_imm_w, .and_imm_x, .and_imm_w, .orr_imm_x, .orr_imm_w, .eor_imm_x, .eor_imm_w => .{ .d = .w, .n = .r },

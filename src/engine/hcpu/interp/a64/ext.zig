@@ -16,7 +16,7 @@ const exec = @import("exec.zig");
 
 const Op = dec.Op;
 const Machine = exec.Machine;
-const Next = exec.Next;
+const Next = exec.Flow;
 
 pub const Kind = enum(u16) {
     /// CRC32B, H, W, and X, and CRC32CB, CH, CW, and CX: d = the CRC of

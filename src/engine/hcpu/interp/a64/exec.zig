@@ -121,6 +121,8 @@ pub const Machine = struct {
     exit: Exit = .interrupted,
     /// If set, memory goes through it instead of mem.probe over ctx.space.
     space: ?Space = null,
+    /// A `.jump`'s target (Flow).
+    target: u64 = 0,
 
     pub fn init(cpu: *Cpu, ctx: *Ctx, cache: *Cache, clock: ?Clock) Machine {
         return .{ .cpu = cpu, .ctx = ctx, .cache = cache, .clock = clock };
@@ -149,7 +151,18 @@ pub const Next = union(enum) {
     exit,
 };
 
-pub const Handler = *const fn (m: *Machine, o: *const Op, pc: u64) Next;
+/// What a handler returns: Next without its payload, so it's a plain
+/// integer. A union with a u64 comes back through a stack slot on wasm32,
+/// a frame and a store and a load for every instruction; `.jump`'s target
+/// is in Machine.target instead.
+pub const Flow = enum(u32) { next, jump, exit };
+
+inline fn jumpTo(m: *Machine, t: u64) Flow {
+    m.target = t;
+    return .jump;
+}
+
+pub const Handler = *const fn (m: *Machine, o: *const Op, pc: u64) Flow;
 
 // ---------------------------------------------------------------- the decode cache
 
@@ -159,6 +172,8 @@ pub const Page = struct {
     host: usize = 0,
     /// Its arena page's CodePages generation when it was decoded.
     gen: u32 = 0,
+    /// Its virtual page number.
+    vp: u64 = 0,
 };
 
 /// Decoded pages by virtual page number, each with the host page it was
@@ -172,7 +187,13 @@ pub const Cache = struct {
     pages: std.AutoHashMapUnmanaged(u64, *Page) = .empty,
     last_vp: u64 = std.math.maxInt(u64),
     last: ?*Page = null,
+    /// Pages looked up lately, direct-mapped by virtual page: a branch to
+    /// another page (a call into libc and back) finds its page here
+    /// without the hash map. Trusted as `last` is, so emptied with it.
+    recent: [recent_n]?*Page = @splat(null),
     epoch: u64 = 0,
+
+    const recent_n = 64;
 
     pub fn init(gpa: std.mem.Allocator) Cache {
         return .{ .gpa = gpa };
@@ -189,6 +210,7 @@ pub const Cache = struct {
         c.pages.clearRetainingCapacity();
         c.last_vp = std.math.maxInt(u64);
         c.last = null;
+        c.recent = @splat(null);
     }
 
     /// Notes that code was invalidated since it last looked: the next
@@ -200,6 +222,7 @@ pub const Cache = struct {
         if (e != c.epoch) {
             c.last_vp = std.math.maxInt(u64);
             c.last = null;
+            c.recent = @splat(null);
             c.epoch = e;
         }
     }
@@ -225,6 +248,12 @@ pub const Cache = struct {
         };
         const vp = va >> mem.page_shift;
         if (vp == c.last_vp and c.last.?.host == h) return c.last;
+        const slot = &c.recent[@intCast(vp % recent_n)];
+        if (slot.*) |p| if (p.vp == vp and p.host == h) {
+            c.last_vp = vp;
+            c.last = p;
+            return p;
+        };
         const gop = c.pages.getOrPut(c.gpa, vp) catch {
             m.exit = .{ .fault = fault(va, .exec, .unmapped) };
             return null;
@@ -262,20 +291,34 @@ pub const Cache = struct {
                 }
             } else decodePage(p, base, @ptrFromInt(h));
         }
+        gop.value_ptr.*.vp = vp;
+        slot.* = gop.value_ptr.*;
         c.last_vp = vp;
         c.last = gop.value_ptr.*;
         return c.last;
     }
 };
 
-/// Decodes the text page at `va`. Data in text (literal pools, jump
-/// tables) decodes to whatever it decodes to, and faults only if it runs.
+/// Readies the text page at `va` for decoding: each op is `.lazy` until
+/// it first runs, when it's decoded from the page's current text in
+/// place. A new process runs a few instructions on most of the pages it
+/// touches, and decoding all 1024 words of each was a tenth of a fork
+/// and exec. Data in text (literal pools, jump tables) is never decoded.
 pub fn decodePage(p: *Page, va: u64, text: *const [page_size]u8) void {
-    for (0..ops_per_page) |i| {
-        const word = std.mem.readInt(u32, text[i * 4 ..][0..4], .little);
-        p.ops[i] = dec.decode(word, va + i * 4);
-    }
+    _ = text;
+    @memset(p.ops[0..ops_per_page], .{ .k = .lazy });
     p.ops[ops_per_page] = .{ .k = .next_page, .imm = va +% page_size };
+}
+
+/// Decodes a `.lazy` op from its page's text, and runs it.
+fn decodeLazy(m: *Machine, o: *const Op, pc: u64) Flow {
+    const i: usize = @intCast((pc & (page_size - 1)) >> 2);
+    const ops: *[ops_per_page + 1]Op = @ptrCast(@as([*]Op, @constCast(@ptrCast(o))) - i);
+    const page: *Page = @fieldParentPtr("ops", ops);
+    const word = std.mem.readInt(u32, @as(*const [4]u8, @ptrFromInt(page.host + i * 4)), .little);
+    const op = &ops[i];
+    op.* = dec.decode(word, pc);
+    return dispatch(m, op, pc);
 }
 
 // ---------------------------------------------------------------- the loop
@@ -302,35 +345,43 @@ fn runLoop(m: *Machine, max_steps: u64, comptime counted: bool, branches: u32) E
     var page = m.cache.get(m, cpu.pc) orelse return m.exit;
     var base = cpu.pc & ~@as(u64, page_size - 1);
     var i: usize = @intCast((cpu.pc & (page_size - 1)) >> 2);
-    // cpu.retired counts as it goes, so CNTVCT_EL0 in deterministic mode
-    // sees every instruction before it.
+    // Instructions retired in this run, kept in a local: cpu.retired is
+    // brought up to date before every exit and before any op that isn't
+    // hot runs, so CNTVCT_EL0 in deterministic mode sees every
+    // instruction before it.
     const start = cpu.retired;
+    var n: u64 = 0;
     while (true) {
         const o = &page.ops[i];
-        if (cpu.retired -% start == max_steps) {
+        if (n == max_steps) {
+            cpu.retired = start +% n;
             cpu.pc = base + i * 4;
             return .interrupted;
         }
-        switch (dispatch(m, o, base + i * 4)) {
+        switch (dispatchHot(m, o, base + i * 4, start +% n)) {
             .next => {
                 i += 1;
-                cpu.retired +%= 1;
+                n += 1;
             },
-            .jump => |t| {
-                if (o.k != .next_page) cpu.retired +%= 1;
+            .jump => {
+                const t = m.target;
+                if (o.k != .next_page) n += 1;
                 // Every guest loop has a taken branch or crosses a page, so
                 // checking here bounds how long a kick waits.
                 if (m.requested()) {
+                    cpu.retired = start +% n;
                     cpu.pc = t;
                     return .interrupted;
                 }
                 if (t & 3 != 0) {
+                    cpu.retired = start +% n;
                     cpu.pc = t;
                     return .{ .fault = .{ .addr = t, .access = .exec, .kind = .alignment, .esr = (EC_PC_ALIGN << 26) | ESR_IL } };
                 }
                 if (counted and o.k != .next_page) {
                     taken += 1;
                     if (taken == branches) {
+                        cpu.retired = start +% n;
                         cpu.pc = t;
                         return .interrupted;
                     }
@@ -340,6 +391,7 @@ fn runLoop(m: *Machine, max_steps: u64, comptime counted: bool, branches: u32) E
                 const epoch = m.cache.epoch;
                 m.cache.check(m);
                 if (t >> mem.page_shift != base >> mem.page_shift or epoch != m.cache.epoch) {
+                    cpu.retired = start +% n;
                     cpu.pc = t;
                     page = m.cache.get(m, t) orelse return m.exit;
                     base = t & ~@as(u64, page_size - 1);
@@ -347,7 +399,8 @@ fn runLoop(m: *Machine, max_steps: u64, comptime counted: bool, branches: u32) E
                 i = @intCast((t & (page_size - 1)) >> 2);
             },
             .exit => {
-                if (m.exit == .syscall) cpu.retired +%= 1;
+                if (m.exit == .syscall) n += 1;
+                cpu.retired = start +% n;
                 return m.exit;
             },
         }
@@ -357,10 +410,37 @@ fn runLoop(m: *Machine, max_steps: u64, comptime counted: bool, branches: u32) E
 /// Runs one decoded op at `pc`, for the JIT's call.interp. The caller
 /// handles the result as `run` does, except that it moves the PC itself.
 pub fn step(m: *Machine, o: *const Op, pc: u64) Next {
-    return dispatch(m, o, pc);
+    return switch (dispatch(m, o, pc)) {
+        .next => .next,
+        .jump => .{ .jump = m.target },
+        .exit => .exit,
+    };
 }
 
-inline fn dispatch(m: *Machine, o: *const Op, pc: u64) Next {
+/// The kinds most of a program's instructions are (busybox, sort, gzip,
+/// jq, and sqlite3): `run` executes these in its own body, through a
+/// switch, instead of an indirect call through the handler table. Kept
+/// short, so the loop stays a function wasm engines compile quickly.
+inline fn dispatchHot(m: *Machine, o: *const Op, pc: u64, retired: u64) Flow {
+    switch (o.k) {
+        inline .movi, .movk_x, .add_imm_x, .add_imm_w, .adds_imm_x, .adds_imm_w, .subs_imm_x,
+        .subs_imm_w, .and_imm_x, .and_imm_w, .orr_imm_x, .ubfx_x, .ubfx_w, .ubfiz_x,
+        .sbfx_x, .mov_x, .mov_w, .and_sreg_x, .orr_sreg_x, .orr_sreg_w, .eor_sreg_x,
+        .ands_sreg_x, .add_sreg_x, .add_sreg_w, .sub_sreg_x, .subs_sreg_x, .subs_sreg_w,
+        .add_reg_x, .sub_reg_x, .add_ereg_x, .csel_x, .csel_w, .ccmp_x, .ccmp_w, .madd_x,
+        .b, .bl, .bcond, .cbz_x, .cbz_w, .cbnz_x, .cbnz_w, .tbz, .tbnz, .br, .blr, .ret,
+        .ldr_x_o, .ldr_w_o, .ldrb_o, .ldrh_o, .ldrsw_o, .str_x_o, .str_w_o, .strb_o,
+        .ldr_x_m, .ldr_w_m, .ldrb_m, .str_x_m, .ldp_x, .stp_x, .ldp_w, .stp_w,
+        .ldrh_m, .strh_o, .eor_sreg_w, .add_reg_w, .ldrsb_w_o, .strb_m, .smaddl, .and_sreg_w,
+        .sub_reg_w, .extr_w, .strh_m, .ubfiz_w, .umaddl, .str_w_m => |k| return exec(k, m, o, pc),
+        else => {
+            m.cpu.retired = retired;
+            return dispatch(m, o, pc);
+        },
+    }
+}
+
+inline fn dispatch(m: *Machine, o: *const Op, pc: u64) Flow {
     const k = @intFromEnum(o.k);
     if (k < dec.simd_base) return handlers[k](m, o, pc);
     if (k >= dec.ext_base) {
@@ -381,7 +461,7 @@ const handlers: [dec.nkinds]Handler = blk: {
 
 fn handlerFor(comptime k: Kind) Handler {
     return &struct {
-        fn f(m: *Machine, o: *const Op, pc: u64) Next {
+        fn f(m: *Machine, o: *const Op, pc: u64) Flow {
             return exec(k, m, o, pc);
         }
     }.f;
@@ -401,13 +481,13 @@ fn fault(addr: u64, acc: mem.Access, kind: mem.FaultKind) Fault {
     return .{ .addr = addr, .access = acc, .kind = kind, .esr = (ec << 26) | ESR_IL | wnr | fsc };
 }
 
-pub fn dataFault(m: *Machine, pc: u64, addr: u64, acc: mem.Access, kind: mem.FaultKind) Next {
+pub fn dataFault(m: *Machine, pc: u64, addr: u64, acc: mem.Access, kind: mem.FaultKind) Flow {
     m.cpu.pc = pc;
     m.exit = .{ .fault = fault(addr, acc, kind) };
     return .exit;
 }
 
-pub fn undef(m: *Machine, pc: u64) Next {
+pub fn undef(m: *Machine, pc: u64) Flow {
     m.cpu.pc = pc;
     m.exit = .{ .fault = .{ .addr = pc, .access = .exec, .kind = .permission, .esr = (EC_UNKNOWN << 26) | ESR_IL } };
     return .exit;
@@ -460,7 +540,15 @@ inline fn rawStore(comptime T: type, h: usize, va: u64, v: T) void {
 
 /// Loads a T of up to 8 bytes; a page-crossing access goes a byte at a
 /// time, faulting at the first byte it can't read.
-pub fn load(m: *Machine, comptime T: type, va: u64, f: *MemFault) ?T {
+pub inline fn load(m: *Machine, comptime T: type, va: u64, f: *MemFault) ?T {
+    // The TLB hit inline, in the handler: a call per access, with its
+    // optional result through a stack slot on wasm32, was a tenth of T0.
+    const n = @sizeOf(T);
+    if ((va & (page_size - 1)) + n <= page_size) if (mem.fast(m.tlb(), va, n, false)) |h| return rawLoad(T, h, va);
+    return loadSlow(m, T, va, f);
+}
+
+fn loadSlow(m: *Machine, comptime T: type, va: u64, f: *MemFault) ?T {
     const n = @sizeOf(T);
     if ((va & (page_size - 1)) + n <= page_size) {
         const h = host(m, va, n, .read, f) orelse return null;
@@ -477,13 +565,18 @@ pub fn load(m: *Machine, comptime T: type, va: u64, f: *MemFault) ?T {
 
 /// Stores a T of up to 8 bytes. A page-crossing store checks both pages
 /// before it writes anything.
-pub fn store(m: *Machine, comptime T: type, va: u64, v: T, f: *MemFault) bool {
+pub inline fn store(m: *Machine, comptime T: type, va: u64, v: T, f: *MemFault) bool {
+    const n = @sizeOf(T);
+    if ((va & (page_size - 1)) + n <= page_size) if (mem.fast(m.tlb(), va, n, true)) |h| {
+        rawStore(T, h, va, v);
+        return true;
+    };
+    return storeSlow(m, T, va, v, f);
+}
+
+fn storeSlow(m: *Machine, comptime T: type, va: u64, v: T, f: *MemFault) bool {
     const n = @sizeOf(T);
     if ((va & (page_size - 1)) + n <= page_size) {
-        if (mem.fast(m.tlb(), va, n, true)) |h| {
-            rawStore(T, h, va, v);
-            return true;
-        }
         const h = host(m, va, n, .write, f) orelse return false;
         rawStore(T, h, va, v);
         // A slow path's store: the page may have been marked meanwhile.
@@ -662,7 +755,7 @@ inline fn address(comptime modes: bool, o: *const Op, r: *[dec.nslots]u64) struc
     };
 }
 
-inline fn single(comptime k: Kind, m: *Machine, o: *const Op, pc: u64) Next {
+inline fn single(comptime k: Kind, m: *Machine, o: *const Op, pc: u64) Flow {
     const s = comptime ldSpec(k);
     const modes = comptime std.mem.endsWith(u8, @tagName(k), "_m");
     const cpu = m.cpu;
@@ -705,7 +798,7 @@ fn pairSpec(comptime k: Kind) PairSpec {
     };
 }
 
-inline fn pair(comptime k: Kind, m: *Machine, o: *const Op, pc: u64) Next {
+inline fn pair(comptime k: Kind, m: *Machine, o: *const Op, pc: u64) Flow {
     const s = comptime pairSpec(k);
     const n = @sizeOf(s.T);
     const cpu = m.cpu;
@@ -761,7 +854,7 @@ inline fn sizeOfX(x: u8) u8 {
     return @as(u8, 1) << @intCast(x);
 }
 
-fn alignmentFault(m: *Machine, pc: u64, addr: u64, acc: mem.Access) Next {
+fn alignmentFault(m: *Machine, pc: u64, addr: u64, acc: mem.Access) Flow {
     return dataFault(m, pc, addr, acc, .alignment);
 }
 
@@ -774,7 +867,7 @@ fn loadSized(m: *Machine, x: u8, va: u64, f: *MemFault) ?u64 {
     };
 }
 
-fn ldxr(m: *Machine, o: *const Op, pc: u64, comptime is_pair: bool) Next {
+fn ldxr(m: *Machine, o: *const Op, pc: u64, comptime is_pair: bool) Flow {
     const cpu = m.cpu;
     const addr = cpu.r[o.n];
     const size: u8 = if (is_pair) 2 * sizeOfX(o.x) else sizeOfX(o.x);
@@ -815,7 +908,7 @@ fn cas(comptime T: type, h: usize, old: T, new: T) bool {
     return @cmpxchgStrong(T, @as(*T, @ptrFromInt(h)), old, new, .seq_cst, .monotonic) == null;
 }
 
-fn stxr(m: *Machine, o: *const Op, pc: u64, comptime is_pair: bool) Next {
+fn stxr(m: *Machine, o: *const Op, pc: u64, comptime is_pair: bool) Flow {
     const cpu = m.cpu;
     const addr = cpu.r[o.n];
     const size: u8 = if (is_pair) 2 * sizeOfX(o.x) else sizeOfX(o.x);
@@ -859,7 +952,7 @@ fn stxr(m: *Machine, o: *const Op, pc: u64, comptime is_pair: bool) Next {
     return .next;
 }
 
-fn ldar(m: *Machine, o: *const Op, pc: u64) Next {
+fn ldar(m: *Machine, o: *const Op, pc: u64) Flow {
     const addr = m.cpu.r[o.n];
     if (addr % sizeOfX(o.x) != 0) return alignmentFault(m, pc, addr, .read);
     var f: MemFault = undefined;
@@ -868,7 +961,7 @@ fn ldar(m: *Machine, o: *const Op, pc: u64) Next {
     return .next;
 }
 
-fn stlr(m: *Machine, o: *const Op, pc: u64) Next {
+fn stlr(m: *Machine, o: *const Op, pc: u64) Flow {
     const addr = m.cpu.r[o.n];
     if (addr % sizeOfX(o.x) != 0) return alignmentFault(m, pc, addr, .write);
     fence();
@@ -906,7 +999,7 @@ fn atomicHost(m: *Machine, comptime T: type, addr: u64, pc: u64, f: *MemFault) ?
     };
 }
 
-fn ldop(comptime T: type, m: *Machine, o: *const Op, pc: u64) Next {
+fn ldop(comptime T: type, m: *Machine, o: *const Op, pc: u64) Flow {
     const r = &m.cpu.r;
     var f: MemFault = undefined;
     const h = atomicHost(m, T, r[o.n], pc, &f) orelse return .exit;
@@ -948,7 +1041,7 @@ fn ldop(comptime T: type, m: *Machine, o: *const Op, pc: u64) Next {
 }
 
 /// CAS, and CASP of two words as one 8-byte compare-and-swap.
-fn casOp(comptime T: type, m: *Machine, o: *const Op, pc: u64) Next {
+fn casOp(comptime T: type, m: *Machine, o: *const Op, pc: u64) Flow {
     const r = &m.cpu.r;
     var f: MemFault = undefined;
     const h = atomicHost(m, T, r[o.n], pc, &f) orelse return .exit;
@@ -969,7 +1062,7 @@ fn casOp(comptime T: type, m: *Machine, o: *const Op, pc: u64) Next {
 }
 
 /// CASP of two doublewords: a 16-byte compare-and-swap, or the pair lock.
-fn caspX(m: *Machine, o: *const Op, pc: u64) Next {
+fn caspX(m: *Machine, o: *const Op, pc: u64) Flow {
     const r = &m.cpu.r;
     var f: MemFault = undefined;
     const h = atomicHost(m, u128, r[o.n], pc, &f) orelse return .exit;
@@ -992,7 +1085,7 @@ fn caspX(m: *Machine, o: *const Op, pc: u64) Next {
 
 // ---------------------------------------------------------------- system
 
-fn mrs(m: *Machine, o: *const Op) Next {
+fn mrs(m: *Machine, o: *const Op) Flow {
     const cpu = m.cpu;
     const sr = dec.sr;
     cpu.r[o.d] = switch (o.imm) {
@@ -1016,7 +1109,7 @@ pub const fpcr_mask: u32 = 0x07c00000;
 /// FPSR: NZCV (AArch32's), QC, and the cumulative exception flags.
 pub const fpsr_mask: u32 = 0xf800009f;
 
-fn msr(m: *Machine, o: *const Op) Next {
+fn msr(m: *Machine, o: *const Op) Flow {
     const cpu = m.cpu;
     const sr = dec.sr;
     const v = cpu.r[o.n];
@@ -1030,7 +1123,7 @@ fn msr(m: *Machine, o: *const Op) Next {
     return .next;
 }
 
-fn dcZva(m: *Machine, o: *const Op, pc: u64) Next {
+fn dcZva(m: *Machine, o: *const Op, pc: u64) Flow {
     const addr = m.cpu.r[o.n] & ~@as(u64, 63);
     var f: MemFault = undefined;
     const h = host(m, addr, 64, .write, &f) orelse return dataFault(m, pc, f.addr, .write, f.kind);
@@ -1043,7 +1136,7 @@ fn dcZva(m: *Machine, o: *const Op, pc: u64) Next {
 /// for another to run says so after its stores, so this is what makes
 /// sure no vCPU keeps what it decoded or compiled from the page before
 /// the last of them. An address that doesn't translate does nothing.
-fn icIvau(m: *Machine, o: *const Op) Next {
+fn icIvau(m: *Machine, o: *const Op) Flow {
     if (m.space != null) return .next;
     const code = m.view().code orelse return .next;
     var f: MemFault = undefined;
@@ -1054,13 +1147,14 @@ fn icIvau(m: *Machine, o: *const Op) Next {
 
 // ---------------------------------------------------------------- the handlers
 
-inline fn exec(comptime k: Kind, m: *Machine, o: *const Op, pc: u64) Next {
+inline fn exec(comptime k: Kind, m: *Machine, o: *const Op, pc: u64) Flow {
     if (comptime isSingle(k)) return single(k, m, o, pc);
     const cpu = m.cpu;
     const r = &cpu.r;
     switch (k) {
         .undef => return undef(m, pc),
-        .next_page => return .{ .jump = o.imm },
+        .next_page => return jumpTo(m, o.imm),
+        .lazy => return decodeLazy(m, o, pc),
 
         .movi => r[o.d] = o.imm,
         .movk_x => r[o.d] = (r[o.d] & ~(@as(u64, 0xffff) << @intCast(o.sh))) | (o.imm << @intCast(o.sh)),
@@ -1225,23 +1319,23 @@ inline fn exec(comptime k: Kind, m: *Machine, o: *const Op, pc: u64) Next {
         },
         .umulh => r[o.d] = @truncate((@as(u128, r[o.n]) * r[o.m]) >> 64),
 
-        .b => return .{ .jump = o.imm },
+        .b => return jumpTo(m, o.imm),
         .bl => {
             r[30] = pc + 4;
-            return .{ .jump = o.imm };
+            return jumpTo(m, o.imm);
         },
-        .bcond => if (cond(cpu.nzcv, o.x)) return .{ .jump = o.imm },
-        .cbz_x => if (r[o.n] == 0) return .{ .jump = o.imm },
-        .cbz_w => if (w32(r[o.n]) == 0) return .{ .jump = o.imm },
-        .cbnz_x => if (r[o.n] != 0) return .{ .jump = o.imm },
-        .cbnz_w => if (w32(r[o.n]) != 0) return .{ .jump = o.imm },
-        .tbz => if (r[o.n] >> @intCast(o.sh) & 1 == 0) return .{ .jump = o.imm },
-        .tbnz => if (r[o.n] >> @intCast(o.sh) & 1 == 1) return .{ .jump = o.imm },
-        .br, .ret => return .{ .jump = r[o.n] },
+        .bcond => if (cond(cpu.nzcv, o.x)) return jumpTo(m, o.imm),
+        .cbz_x => if (r[o.n] == 0) return jumpTo(m, o.imm),
+        .cbz_w => if (w32(r[o.n]) == 0) return jumpTo(m, o.imm),
+        .cbnz_x => if (r[o.n] != 0) return jumpTo(m, o.imm),
+        .cbnz_w => if (w32(r[o.n]) != 0) return jumpTo(m, o.imm),
+        .tbz => if (r[o.n] >> @intCast(o.sh) & 1 == 0) return jumpTo(m, o.imm),
+        .tbnz => if (r[o.n] >> @intCast(o.sh) & 1 == 1) return jumpTo(m, o.imm),
+        .br, .ret => return jumpTo(m, r[o.n]),
         .blr => {
             const t = r[o.n];
             r[30] = pc + 4;
-            return .{ .jump = t };
+            return jumpTo(m, t);
         },
         .svc => {
             cpu.pc = pc + 4;
@@ -1259,7 +1353,7 @@ inline fn exec(comptime k: Kind, m: *Machine, o: *const Op, pc: u64) Next {
         // A context synchronization: what follows is fetched again, so a
         // store to this page before it is seen. `run` re-checks the decode
         // cache at every jump.
-        .isb => return .{ .jump = pc + 4 },
+        .isb => return jumpTo(m, pc + 4),
         .clrex => cpu.monitor = .{},
         .fence => fence(),
         .mrs => return mrs(m, o),

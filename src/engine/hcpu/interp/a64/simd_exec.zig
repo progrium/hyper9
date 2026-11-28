@@ -21,7 +21,7 @@ const mem = @import("../mem.zig");
 const K = sd.Kind;
 const Op = dec.Op;
 const Machine = exec.Machine;
-const Next = exec.Next;
+const Next = exec.Flow;
 const Cpu = exec.Cpu;
 
 comptime {
